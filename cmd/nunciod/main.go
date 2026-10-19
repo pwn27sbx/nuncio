@@ -4,8 +4,9 @@
 // activation, single instance and the unread count only: messages and media
 // never travel over D-Bus.
 //
-// M0 has no WhatsApp account: the daemon answers with an unlinked session and
-// the shared fixture chat list, and never touches a pairing path.
+// The daemon, not `nuncio link`, owns the session: if the store holds a linked
+// device it connects; if not it stays unlinked and never starts a link. Until
+// the chat list comes from the store, it answers with the shared fixture list.
 package main
 
 import (
@@ -26,6 +27,7 @@ import (
 	"github.com/godbus/dbus/v5/prop"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
+	"github.com/pwn27sbx/nuncio/internal/wa"
 )
 
 // daemonVersion is the value of the `daemon` field in every frame.
@@ -43,10 +45,6 @@ func main() {
 
 func run() error {
 	socket, err := ipc.DefaultSocketPath()
-	if err != nil {
-		return err
-	}
-	d, err := newDaemon()
 	if err != nil {
 		return err
 	}
@@ -75,6 +73,23 @@ func run() error {
 		_ = os.Remove(socket)
 	}()
 
+	dbPath, err := wa.DBPath()
+	if err != nil {
+		return err
+	}
+	// Opened only once the socket is ours, so a daemon that loses the race
+	// never touches the store. A missing nuncio.db means unlinked; nothing is
+	// created to find that out.
+	session, err := wa.OpenSession(context.Background(), dbPath)
+	if err != nil {
+		return err
+	}
+	defer session.Close()
+	d, err := newDaemon(session)
+	if err != nil {
+		return err
+	}
+
 	if bus != nil {
 		if err := exportDBus(bus, d); err != nil {
 			return err
@@ -87,6 +102,12 @@ func run() error {
 			log.Printf("another nunciod already owns %s; exiting", ipc.DaemonName)
 			return nil
 		}
+	}
+
+	// Connect only once this process is the one instance, so a second daemon
+	// never opens a competing session. A failed connect leaves it offline.
+	if err := session.Start(); err != nil {
+		log.Print(err)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -164,9 +185,9 @@ func exportDBus(bus *dbus.Conn, d *daemon) error {
 	if err := bus.Export(&dbusFace{d}, dbus.ObjectPath(ipc.ObjectPath), ipc.Interface); err != nil {
 		return fmt.Errorf("export %s on the session bus: %w", ipc.ObjectPath, err)
 	}
-	// UnreadCount is the daemon's only property. Nothing changes it while no
-	// device is paired, so the UnreadChanged signal the contract names lands
-	// with the real session in M1.
+	// UnreadCount is the daemon's only property. The daemon owns the session
+	// now, but it does not store messages yet, so the count stays 0 and the
+	// UnreadChanged signal the contract names is not emitted yet.
 	if _, err := prop.Export(bus, dbus.ObjectPath(ipc.ObjectPath), map[string]map[string]*prop.Prop{
 		ipc.Interface: {
 			"UnreadCount": {Value: int32(d.Status().Unread), Writable: false, Emit: prop.EmitTrue},
@@ -213,27 +234,36 @@ func serve(ctx context.Context, ln net.Listener, h ipc.Handler) error {
 // face.
 type daemon struct {
 	version string
+	session sessionState
 	chats   []ipc.Chat
 }
 
-func newDaemon() (*daemon, error) {
+// sessionState is what the daemon reads from its WhatsApp session.
+type sessionState interface {
+	State() wa.State
+}
+
+func newDaemon(session sessionState) (*daemon, error) {
 	chats, err := fixtureChats()
 	if err != nil {
 		return nil, err
 	}
-	return &daemon{version: daemonVersion, chats: chats}, nil
+	return &daemon{version: daemonVersion, session: session, chats: chats}, nil
 }
 
-// Hello records the handshake. With no paired device the reported state never
-// changes; M1 replaces this with the real session.
+// Hello records the handshake and answers with the session's current state.
 func (d *daemon) Hello(client string) ipc.Status {
 	log.Printf("hello from %s", client)
 	return d.Status()
 }
 
-// Status is also the D-Bus method of the same name.
+// Status is also the D-Bus method of the same name. Linked means paired, so an
+// offline session is still linked.
 func (d *daemon) Status() ipc.Status {
-	return ipc.Status{Daemon: d.version, Linked: false, Session: ipc.SessionUnlinked, Unread: 0}
+	st := d.session.State()
+	return ipc.Status{Daemon: d.version, Linked: st != wa.StateUnlinked, Session: string(st), Unread: 0}
 }
 
+// Chats is the fixture list until the chat list comes from the store; it is
+// the answer while unlinked.
 func (d *daemon) Chats() []ipc.Chat { return d.chats }

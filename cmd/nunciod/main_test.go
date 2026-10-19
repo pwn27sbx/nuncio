@@ -21,6 +21,7 @@ import (
 	"github.com/godbus/dbus/v5"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
+	"github.com/pwn27sbx/nuncio/internal/wa"
 )
 
 var (
@@ -77,13 +78,21 @@ func repoRoot(t *testing.T) string {
 }
 
 // daemonEnv is deliberately minimal: a test daemon must never see the user's
-// real session bus or runtime directory.
+// real session bus, runtime directory or data directory (where a linked device
+// would make it connect to WhatsApp).
 func daemonEnv(runtimeDir, busAddress string) []string {
 	return []string{
 		"PATH=" + os.Getenv("PATH"),
+		"XDG_DATA_HOME=" + dataHome(runtimeDir),
 		"XDG_RUNTIME_DIR=" + runtimeDir,
 		"DBUS_SESSION_BUS_ADDRESS=" + busAddress,
 	}
+}
+
+// dataHome is the empty XDG_DATA_HOME a test daemon gets: it holds no
+// nuncio.db, so the daemon is unlinked and connects to nothing.
+func dataHome(runtimeDir string) string {
+	return filepath.Join(runtimeDir, "data")
 }
 
 // noBus is an address nothing listens on, so the daemon runs without the
@@ -235,6 +244,49 @@ func TestDaemonServesProtocolOnSocket(t *testing.T) {
 	}
 	if len(limited.Chats) != 1 || limited.Chats[0].JID != "15551230001@s.whatsapp.net" {
 		t.Fatalf("Chats(1) = %+v, want only the first chat", limited.Chats)
+	}
+}
+
+func TestDaemonWithoutDatabaseIsUnlinkedAndCreatesNoDataDir(t *testing.T) {
+	rt := t.TempDir()
+	startDaemon(t, rt, noBus(t))
+	st, err := waitForDaemon(t, socketPath(rt)).Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.Linked || st.Session != ipc.SessionUnlinked {
+		t.Errorf("Status() = %+v, want unlinked", st)
+	}
+	dir := filepath.Join(dataHome(rt), "nuncio")
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat %s = %v, want it not to exist: starting the daemon must not create the data dir", dir, err)
+	}
+}
+
+type fixedSession wa.State
+
+func (s fixedSession) State() wa.State { return wa.State(s) }
+
+func TestStatusReportsTheSessionState(t *testing.T) {
+	for _, tc := range []struct {
+		state  wa.State
+		linked bool
+	}{
+		{wa.StateUnlinked, false},
+		{wa.StateLinked, true},
+		{wa.StateOffline, true},
+	} {
+		d, err := newDaemon(fixedSession(tc.state))
+		if err != nil {
+			t.Fatalf("newDaemon: %v", err)
+		}
+		want := ipc.Status{Daemon: daemonVersion, Linked: tc.linked, Session: string(tc.state)}
+		if got := d.Status(); got != want {
+			t.Errorf("Status() with a %s session = %+v, want %+v", tc.state, got, want)
+		}
+		if got := d.Hello("test/0.1.0"); got != want {
+			t.Errorf("Hello() with a %s session = %+v, want %+v", tc.state, got, want)
+		}
 	}
 }
 

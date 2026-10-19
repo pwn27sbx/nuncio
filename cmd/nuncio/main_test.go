@@ -142,3 +142,15 @@ func TestLinkWithoutConsentChangesNothing(t *testing.T) {
 	}
 	assertEmptyDir(t, root)
 }
+
+func TestMaskPhoneKeepsOnlyTheLastFourDigits(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"15551230001", "…0001"}, // a normal number
+		{"123", "…"},             // short: revealing the tail would reveal it all
+		{"", "…"},                // empty
+	} {
+		if got := maskPhone(tc.in); got != tc.want {
+			t.Errorf("maskPhone(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

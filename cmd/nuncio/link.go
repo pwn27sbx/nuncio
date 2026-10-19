@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/store/sqlstore"
 	waevents "go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
@@ -48,36 +46,31 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 
 	ctx := context.Background()
 
-	dataDir, err := nuncioDataDir()
+	path, err := wa.DBPath()
 	if err != nil {
 		fmt.Fprintln(stderr, "nuncio link:", err)
 		return 1
 	}
-	db, err := store.Open(filepath.Join(dataDir, "nuncio.db"))
+	// store.Open creates the data directory 0700 and the database 0600.
+	db, err := store.Open(path)
 	if err != nil {
 		fmt.Fprintln(stderr, "nuncio link:", err)
 		return 1
 	}
 	defer func() { _ = db.Close() }()
 
-	// M0 spike: whatsmeow's own sqlstore keeps the full Signal state (sessions, pre-keys, sender
-	// keys, app state) that a linked device needs. The keyring-backed store proved in S4 replaces it
-	// in M1; until then the keys live in nuncio.db inside the 0700 data directory.
-	container := sqlstore.NewWithDB(db, "sqlite3", nil)
-	if err := container.Upgrade(ctx); err != nil {
-		fmt.Fprintln(stderr, "nuncio link: cannot prepare the device store:", err)
-		return 1
-	}
-	device, err := container.GetFirstDevice(ctx)
+	device, err := wa.OpenDevice(ctx, db)
 	if err != nil {
 		fmt.Fprintln(stderr, "nuncio link:", err)
 		return 1
 	}
 	client := whatsmeow.NewClient(device, nil)
+	// whatsmeow's own retry has no cap, no jitter and no stop on a ban, so it stays off.
+	client.EnableAutoReconnect = false
 	events := watch(client)
 
 	if device.ID != nil {
-		fmt.Fprintln(stdout, "nuncio: this machine already holds a linked device:", device.ID.User)
+		fmt.Fprintln(stdout, "nuncio: this machine already holds a linked device:", maskPhone(device.ID.User))
 		if err := client.Connect(); err != nil {
 			fmt.Fprintln(stderr, "nuncio link:", err)
 			return 1
@@ -106,7 +99,7 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "\nOn your phone: Settings → Linked devices → Link a device → Link with phone number instead, then enter:\n\n    %s\n\nWaiting up to 5 minutes...\n", code)
 		select {
 		case id := <-events.paired:
-			fmt.Fprintln(stdout, "nuncio: linked as", id)
+			fmt.Fprintln(stdout, "nuncio: linked as", maskPhone(id))
 		case <-time.After(5 * time.Minute):
 			fmt.Fprintln(stderr, "nuncio: the code was not entered in time; nothing was linked")
 			return 1
@@ -121,30 +114,32 @@ type linkEvents struct {
 	messages  chan *waevents.Message
 }
 
-// watch subscribes before Connect, so no pairing or message event can be missed.
+// watch subscribes before Connect, so no pairing or message event can be missed. The event switch
+// itself is wa.Events, shared with the daemon's session.
 func watch(client *whatsmeow.Client) linkEvents {
 	ev := linkEvents{make(chan string, 1), make(chan struct{}, 1), make(chan *waevents.Message, 8)}
-	client.AddEventHandler(func(e interface{}) {
-		switch v := e.(type) {
-		case *waevents.PairSuccess:
+	client.AddEventHandler(wa.Events{
+		Paired: func(user string) {
 			select {
-			case ev.paired <- v.ID.User:
+			case ev.paired <- user:
 			default:
 			}
-		case *waevents.Connected:
+		},
+		Connected: func() {
 			select {
 			case ev.connected <- struct{}{}:
 			default:
 			}
-		case *waevents.Message:
-			if !v.Info.IsFromMe {
+		},
+		Message: func(m *waevents.Message) {
+			if !m.Info.IsFromMe {
 				select {
-				case ev.messages <- v:
+				case ev.messages <- m:
 				default:
 				}
 			}
-		}
-	})
+		},
+	}.Handle)
 	return ev
 }
 
@@ -165,7 +160,7 @@ func listen(ctx context.Context, client *whatsmeow.Client, ev linkEvents) int {
 		if text == "" {
 			text = m.Message.GetExtendedTextMessage().GetText()
 		}
-		fmt.Printf("nuncio: received from %s: %q\n", m.Info.Sender.User, text)
+		fmt.Printf("nuncio: received a message (%d bytes) from %s\n", len(text), maskPhone(m.Info.Sender.User))
 		reply := &waE2E.Message{Conversation: proto.String("nuncio: mensaje recibido ✓")}
 		if _, err := client.SendMessage(ctx, m.Info.Chat, reply); err != nil {
 			fmt.Fprintln(os.Stderr, "nuncio: reply failed:", err)
@@ -207,20 +202,11 @@ func runQRLink(ctx context.Context, linker wa.Linker) int {
 	return 1
 }
 
-// nuncioDataDir is `$XDG_DATA_HOME/nuncio`, created 0700 so the store never sits in a
-// world-readable directory.
-func nuncioDataDir() (string, error) {
-	base := os.Getenv("XDG_DATA_HOME")
-	if base == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("cannot find a data directory: %w", err)
-		}
-		base = filepath.Join(home, ".local", "share")
+// maskPhone keeps only the last four digits of a phone number, so nothing this command prints can
+// put a full number into a log. A number of four digits or fewer is hidden entirely.
+func maskPhone(number string) string {
+	if len(number) <= 4 {
+		return "…"
 	}
-	dir := filepath.Join(base, "nuncio")
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", fmt.Errorf("cannot create %s: %w", dir, err)
-	}
-	return dir, nil
+	return "…" + number[len(number)-4:]
 }

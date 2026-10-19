@@ -1,8 +1,13 @@
 [package]
 name = "nuncio-desktop"
+description = "GTK 4 + libadwaita desktop client for nuncio"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+nuncio-client = { path = "../nuncio-client" }
+glib = "0.22"
+gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
+adw = { package = "libadwaita", version = "0.9" }

@@ -1,9 +1,12 @@
 package ipc
 
 import (
+	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDefaultSocketPathUsesXDGRuntimeDir(t *testing.T) {
@@ -86,5 +89,86 @@ func TestDialReportsVersionMismatch(t *testing.T) {
 
 	if _, err := Dial(sock, "nuncio/0.1.0"); err == nil {
 		t.Fatal("Dial against a version-refusing daemon: got nil error")
+	}
+}
+
+// startSilentServer accepts connections and answers the hello, if answerHello is set, and then
+// never answers anything again: a wedged daemon.
+func startSilentServer(t *testing.T, answerHello bool) string {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "core.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+			if answerHello {
+				go func() {
+					rd := NewReader(conn)
+					if _, err := rd.Next(); err != nil {
+						return
+					}
+					_ = WriteFrame(conn, HelloOK{V: Version, Op: OpHelloOK, Daemon: "nunciod/0.1.0"})
+				}()
+			}
+		}
+	}()
+	return sock
+}
+
+const testReadTimeout = 100 * time.Millisecond
+
+func TestStatusTimesOutOnAWedgedDaemon(t *testing.T) {
+	sock := startSilentServer(t, true)
+	c, err := DialTimeout(sock, "nuncio/0.1.0", testReadTimeout)
+	if err != nil {
+		t.Fatalf("DialTimeout: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+
+	started := time.Now()
+	_, err = c.Status()
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("Status() error = %v, want a deadline-exceeded timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > 10*testReadTimeout {
+		t.Fatalf("Status() took %v, want about %v", elapsed, testReadTimeout)
+	}
+}
+
+func TestDialTimesOutWhenTheHandshakeNeverAnswers(t *testing.T) {
+	sock := startSilentServer(t, false)
+	started := time.Now()
+	_, err := DialTimeout(sock, "nuncio/0.1.0", testReadTimeout)
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("DialTimeout() error = %v, want a deadline-exceeded timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > 10*testReadTimeout {
+		t.Fatalf("DialTimeout() took %v, want about %v", elapsed, testReadTimeout)
+	}
+}
+
+// TestShortTimeoutDoesNotBreakANormalExchange proves the bound only cuts a silent daemon: each
+// read gets its own deadline, so a slow sequence of prompt replies is fine.
+func TestShortTimeoutDoesNotBreakANormalExchange(t *testing.T) {
+	h := newFakeHandler(t)
+	sock := startServer(t, h)
+	c, err := DialTimeout(sock, "nuncio/0.1.0", testReadTimeout)
+	if err != nil {
+		t.Fatalf("DialTimeout: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	for i := 0; i < 3; i++ {
+		time.Sleep(testReadTimeout) // idle time between requests must not count against a read
+		if _, err := c.Status(); err != nil {
+			t.Fatalf("Status #%d: %v", i, err)
+		}
 	}
 }

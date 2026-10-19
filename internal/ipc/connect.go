@@ -44,20 +44,31 @@ func (e *ProtocolError) Error() string {
 	return fmt.Sprintf("ipc: daemon error %s: %s", e.Code, e.Message)
 }
 
+// DefaultReadTimeout bounds every read a Client makes, so a wedged daemon cannot wedge the CLI.
+const DefaultReadTimeout = 5 * time.Second
+
 // Client is a decoded connection to the daemon, past the hello handshake.
 type Client struct {
-	conn net.Conn
-	rd   *Reader
+	conn    net.Conn
+	rd      *Reader
+	timeout time.Duration
 }
 
 // Dial connects to the daemon's socket at path, sends hello and returns a
-// ready client.
+// ready client whose reads are bounded by DefaultReadTimeout.
 func Dial(path, clientName string) (*Client, error) {
+	return DialTimeout(path, clientName, DefaultReadTimeout)
+}
+
+// DialTimeout is Dial with an explicit bound on every read, the handshake included. A read that
+// hits the bound fails with an error matching os.ErrDeadlineExceeded, and the client is then
+// unusable: close it.
+func DialTimeout(path, clientName string, timeout time.Duration) (*Client, error) {
 	conn, err := net.Dial("unix", path)
 	if err != nil {
 		return nil, fmt.Errorf("ipc: dial %s: %w", path, err)
 	}
-	c := &Client{conn: conn, rd: NewReader(conn)}
+	c := &Client{conn: conn, rd: NewReader(conn), timeout: timeout}
 	if err := WriteFrame(conn, Hello{V: Version, Op: OpHello, Client: clientName}); err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -194,8 +205,14 @@ func (c *Client) Close() error { return c.conn.Close() }
 // readReply decodes the next frame into v, turning an error frame into a
 // *ProtocolError.
 func (c *Client) readReply(v any) error {
+	if err := c.conn.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
+		return fmt.Errorf("ipc: set read deadline: %w", err)
+	}
 	line, err := c.rd.Next()
 	if err != nil {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return fmt.Errorf("ipc: the daemon did not answer within %v: %w", c.timeout, err)
+		}
 		return err
 	}
 	var head struct {

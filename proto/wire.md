@@ -12,6 +12,9 @@ tests until both agree.
   BOM. A frame longer than 1 MiB is a protocol error.
 - A client that cannot connect may fall back to the D-Bus face (see below),
   which activates the daemon; it must not start a second daemon itself.
+- Clients bound every read with a timeout (5 s by default in both the Go and the Rust client),
+  the handshake included, so a wedged daemon cannot wedge a client. A read that hits the bound
+  is an error and the client drops the connection.
 
 ## Versioning
 

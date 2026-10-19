@@ -28,8 +28,8 @@ Source of record: the office handoff README (2026-10-19, kept outside the repo b
 | ID | Spec | Route | Status | Evidence |
 |---|---|---|---|---|
 | T0 | S16 | inline | done | baseline below (L3) |
-| T1 | S1 | inline | pending | |
-| T2 | S2 | inline | pending | |
+| T1 | S1 | inline | done | `ae22593`; RED: modes 0755/0644 with the old open logic; GREEN 3 tests; mutants: no-chmod-existing, no-chmod-dir, no-WAL killed; create-0644 survives (the chmod pass covers it; the 0600 create only closes a window no test observes); assess medium, under_budget |
+| T2 | S2 | inline | done | see commit; RED: Go test hung until `-timeout 5s`, Rust request hung 8 s; GREEN Go 3 tests + Rust 2 tests; mutants killed: no Go deadline, no Rust `set_read_timeout`, `WouldBlock` not mapped |
 | T3 | S3 | inline | pending | |
 | T4 | S4 | inline | pending | |
 | T5 | S5 | inline | pending | |
@@ -49,3 +49,5 @@ Source of record: the office handoff README (2026-10-19, kept outside the repo b
 - **L2** Setup: rustup via Homebrew (keg-only, PATH added to `~/.zshrc`, backup `~/.zshrc.bak-rustup-20261019`), stable rustc 1.99.1 + rustfmt + clippy; go 1.27.1 darwin/arm64 already present. Repo cloned from GitHub at `ae35fea`. Work on branch `feat/m1-core` (ODD: branch first off the default branch).
 - **L3** Baseline on `ae35fea` (macOS 27.0.1 arm64): `gofmt -l .` empty; `go vet ./...` ok (first run hit a transient proxy stream error, retried clean); `TMPDIR=/tmp go test -count=1 ./...` 48 top-level passed / 5 skipped (4 D-Bus: no dbus-daemon; 1 real Secret Service) / 0 failed, `cmd/nuncio` has no test files; `CGO_ENABLED=0 go build ./...` ok; `cargo fmt --all --check` ok; `cargo clippy --workspace --exclude nuncio-desktop --all-targets -- -D warnings` ok; `cargo test --workspace --exclude nuncio-desktop` 44 passed / 0 failed.
 - **L4** Receipt-driven review is on (global). Candidate consent for native review is asked per candidate (no pre-granted consent outside Misoku).
+- **L5** Known environmental failure (macOS only, pre-existing): `theme::watch_tests::a_theme_switch_is_noticed_within_500ms` (`left: Dark, right: Light`, theme.rs:498) and `theme::watch_tests::the_same_palette_is_not_emitted_twice` ("an unchanged palette must not be re-emitted", theme.rs:541) fail 6/6 runs after the baseline passed once; reproduced 3/3 on a clean `ae35fea` checkout, so not caused by M1 work. Likely cause (assumption, not proven): FSEvents delivers the creation events of the fixture files late, after the 250 ms settle, so the watcher re-reads and emits the initial dark palette. Not loosened (handoff 4: report, do not loosen). Rust count with it: 42 passed / 2 failed. Flaky, not deterministic: the full run after T2 passed 46/46.
+- **L6** Native assess needs `--untracked-scope=exclude` because of the untracked `.atl/` cache. Reviewed boundary stays `8b424bc` while commits are `under_budget`.

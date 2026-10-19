@@ -8,11 +8,15 @@ use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::wire::{Chat, ClientFrame, DaemonFrame, MAX_FRAME_BYTES, Session};
 
 /// The socket path, relative to `$XDG_RUNTIME_DIR`.
 const SOCKET_RELATIVE: &str = "nuncio/core.sock";
+
+/// The bound on every read from the daemon, so a wedged daemon cannot wedge the client.
+pub const DEFAULT_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Everything that can go wrong while talking to the daemon.
 #[derive(Debug, thiserror::Error)]
@@ -31,6 +35,8 @@ pub enum ClientError {
     Json(#[from] serde_json::Error),
     #[error("frame of {bytes} bytes is over the {MAX_FRAME_BYTES} byte limit")]
     FrameTooLarge { bytes: usize },
+    #[error("the daemon did not answer within {0:?}")]
+    Timeout(Duration),
     #[error("the daemon closed the connection")]
     Closed,
     #[error("the daemon replied with error `{code}`: {message}")]
@@ -80,16 +86,26 @@ impl Snapshot {
 #[derive(Debug)]
 pub struct Connection {
     stream: BufReader<UnixStream>,
+    timeout: Duration,
 }
 
 impl Connection {
+    /// Connect with every read bounded by [`DEFAULT_READ_TIMEOUT`].
     pub fn connect(path: &Path) -> Result<Self, ClientError> {
+        Self::connect_with_timeout(path, DEFAULT_READ_TIMEOUT)
+    }
+
+    /// Connect with an explicit bound on every read. A read that hits the bound fails with
+    /// [`ClientError::Timeout`], and the connection is then unusable: drop it.
+    pub fn connect_with_timeout(path: &Path, timeout: Duration) -> Result<Self, ClientError> {
         let stream = UnixStream::connect(path).map_err(|source| ClientError::Connect {
             path: path.to_owned(),
             source,
         })?;
+        stream.set_read_timeout(Some(timeout))?;
         Ok(Self {
             stream: BufReader::new(stream),
+            timeout,
         })
     }
 
@@ -115,7 +131,14 @@ impl Connection {
         // client allocate without limit.
         let read = (&mut self.stream)
             .take((MAX_FRAME_BYTES + 1) as u64)
-            .read_until(b'\n', &mut line)?;
+            .read_until(b'\n', &mut line)
+            .map_err(|err| match err.kind() {
+                // A socket read timeout surfaces as WouldBlock on Unix and TimedOut elsewhere.
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                    ClientError::Timeout(self.timeout)
+                }
+                _ => ClientError::Io(err),
+            })?;
         if read == 0 {
             return Err(ClientError::Closed);
         }

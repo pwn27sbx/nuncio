@@ -11,7 +11,9 @@ pub mod conn;
 pub mod theme;
 pub mod wire;
 
-pub use conn::{ClientError, Connection, Snapshot, fetch, socket_path, socket_path_from};
+pub use conn::{
+    ClientError, Connection, DEFAULT_READ_TIMEOUT, Snapshot, fetch, socket_path, socket_path_from,
+};
 pub use theme::{Mode, Palette, Rgb, ThemeError, ThemeWatcher, default_path_from};
 pub use wire::{
     Chat, ClientFrame, DaemonFrame, ErrorCode, MAX_FRAME_BYTES, Message, PROTOCOL_VERSION, Session,

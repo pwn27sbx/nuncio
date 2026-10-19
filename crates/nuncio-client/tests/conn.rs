@@ -9,6 +9,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use nuncio_client::{
     ClientError, ClientFrame, Connection, MAX_FRAME_BYTES, Session, fetch, socket_path_from,
@@ -202,4 +203,62 @@ fn socket_path_follows_xdg_runtime_dir() {
         socket_path_from(None),
         Err(ClientError::NoRuntimeDir)
     ));
+}
+
+/// A wedged daemon: it accepts, reads requests and never answers.
+fn silent_daemon() -> (TempDir, PathBuf, thread::JoinHandle<()>) {
+    let dir = TempDir::new("silent");
+    let path = dir.0.join("core.sock");
+    let listener = UnixListener::bind(&path).expect("socket binds");
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("one client connects");
+        let mut reader = BufReader::new(stream);
+        let mut line = String::new();
+        // Hold the connection open until the client gives up and closes it.
+        while reader.read_line(&mut line).unwrap_or(0) > 0 {
+            line.clear();
+        }
+    });
+    (dir, path, server)
+}
+
+const TEST_READ_TIMEOUT: Duration = Duration::from_millis(100);
+
+#[test]
+fn a_wedged_daemon_makes_request_time_out() {
+    let (_dir, path, server) = silent_daemon();
+
+    let mut connection =
+        Connection::connect_with_timeout(&path, TEST_READ_TIMEOUT).expect("connects");
+    let started = Instant::now();
+    let err = connection.request(&ClientFrame::status()).unwrap_err();
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(err, ClientError::Timeout(bound) if bound == TEST_READ_TIMEOUT),
+        "expected a timeout, got {err:?}"
+    );
+    assert!(
+        elapsed < 10 * TEST_READ_TIMEOUT,
+        "gave up after {elapsed:?}"
+    );
+    drop(connection);
+    let _ = server.join();
+}
+
+#[test]
+fn a_short_timeout_does_not_break_a_normal_exchange() {
+    let (_dir, path, server) = fake_daemon(lines(&[HELLO_OK, STATUS, STATUS]));
+
+    let mut connection =
+        Connection::connect_with_timeout(&path, TEST_READ_TIMEOUT).expect("connects");
+    connection.handshake("nuncio-tui/0.1.0").expect("handshake");
+    for _ in 0..2 {
+        // Idle time between requests must not count against a read.
+        thread::sleep(TEST_READ_TIMEOUT);
+        connection
+            .request(&ClientFrame::status())
+            .expect("status answers");
+    }
+    let _ = server.join();
 }

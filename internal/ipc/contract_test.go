@@ -238,12 +238,30 @@ func fixtureCases() []fixtureCase {
 			},
 		},
 		{
+			file: "download_media_request.json",
+			into: func() any { return &DownloadMediaRequest{} },
+			build: func() any {
+				return DownloadMediaRequest{V: 1, Op: OpDownloadMedia, JID: "15551230001@s.whatsapp.net", ID: "3EB0AAA0"}
+			},
+		},
+		{
+			file: "media_ready_response.json",
+			into: func() any { return &MediaReady{} },
+			build: func() any {
+				return MediaReady{V: 1, Op: OpMediaReady, JID: "15551230001@s.whatsapp.net", ID: "3EB0AAA0",
+					Path: fixtureMediaPath, Mime: "image/jpeg"}
+			},
+		},
+		{
 			file:  "event_focus.json",
 			into:  func() any { return &EventFocus{} },
 			build: func() any { return EventFocus{V: 1, Op: OpEventFocus, JID: "15551230002@s.whatsapp.net"} },
 		},
 	}
 }
+
+// fixtureMediaPath is the path in media_ready_response.json.
+const fixtureMediaPath = "/home/ada/.local/share/nuncio/media/e9603b3a3952bcc1847052b2b73de4ac145b06a2c5a615735b7440e41d65ad12.jpeg"
 
 // fixtureChatList is the chat list of proto/fixtures/chats_response.json,
 // constructed by hand so a shape disagreement fails here and not in the Rust
@@ -334,6 +352,7 @@ func TestFixturesCarryVersionOne(t *testing.T) {
 		OpMessages: true, OpSend: true, OpSent: true, OpSendFailed: true, OpSubscribe: true,
 		OpSubscribed: true, OpFocus: true, OpFocused: true, OpEventMessage: true,
 		OpEventConnection: true, OpEventUnread: true, OpEventFocus: true, OpWipe: true, OpWiped: true,
+		OpDownloadMedia: true, OpMediaReady: true,
 	}
 	for _, tc := range fixtureCases() {
 		t.Run(tc.file, func(t *testing.T) {

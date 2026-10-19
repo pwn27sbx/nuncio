@@ -295,6 +295,30 @@ func (c *Client) Wipe(unlink bool) (Wiped, error) {
 	return resp, nil
 }
 
+// MediaTimeout bounds the wait for a media_ready reply: the daemon downloads the attachment from
+// WhatsApp before it answers, which can take longer than an ordinary read.
+const MediaTimeout = 90 * time.Second
+
+// DownloadMedia asks the daemon for the attachment of message id in the chat jid. It returns the
+// media_ready reply, whose Path is the cached file, or a *ProtocolError such as not_linked.
+func (c *Client) DownloadMedia(jid, id string) (MediaReady, error) {
+	if err := WriteFrame(c.conn, DownloadMediaRequest{V: Version, Op: OpDownloadMedia, JID: jid, ID: id}); err != nil {
+		return MediaReady{}, err
+	}
+	var resp MediaReady
+	timeout := c.timeout
+	c.timeout = max(timeout, MediaTimeout)
+	err := c.readReply(&resp)
+	c.timeout = timeout
+	if err != nil {
+		return MediaReady{}, err
+	}
+	if resp.Op != OpMediaReady {
+		return MediaReady{}, fmt.Errorf("ipc: expected op %s, got %q", OpMediaReady, resp.Op)
+	}
+	return resp, nil
+}
+
 // Close closes the connection.
 func (c *Client) Close() error { return c.conn.Close() }
 

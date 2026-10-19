@@ -10,6 +10,11 @@ import (
 //
 // Timestamps are Unix nanoseconds in UTC, so ordering is numeric. messages_fts
 // shares rowids with messages and is written in the same transaction.
+//
+// media_refs holds, per media message, the serialised whatsmeow media sub-message (key, direct
+// path, hashes) a download on request needs. It is a side table, not a new messages column, so a
+// database created before it existed gains it with CREATE TABLE IF NOT EXISTS and keeps its rows:
+// the schema only ever adds, never drops or rewrites.
 const schema = `
 CREATE TABLE IF NOT EXISTS chats (
 	jid      TEXT PRIMARY KEY,
@@ -33,6 +38,12 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 CREATE INDEX IF NOT EXISTS messages_chat_ts ON messages (chat_jid, ts);
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(text);
+CREATE TABLE IF NOT EXISTS media_refs (
+	chat_jid TEXT NOT NULL,
+	id       TEXT NOT NULL,
+	ref      BLOB NOT NULL,
+	PRIMARY KEY (chat_jid, id)
+);
 `
 
 // EnsureSchema creates the chat and message tables if they do not exist yet.

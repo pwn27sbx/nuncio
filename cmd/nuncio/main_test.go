@@ -72,6 +72,11 @@ func (d *fakeDaemon) Send(jid, text, clientID string) (ipc.Sent, error) {
 	return d.sent, d.sendErr
 }
 
+// DownloadMedia is not used by the CLI; the fake daemon has no media.
+func (d *fakeDaemon) DownloadMedia(string, string) (string, string, error) {
+	return "", "", errors.New("the fake daemon has no media")
+}
+
 func (d *fakeDaemon) sendCalls() []ipc.SendRequest {
 	d.mu.Lock()
 	defer d.mu.Unlock()

@@ -85,12 +85,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_twenty_four_documented_files() {
+fn fixture_directory_holds_the_twenty_six_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 24, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 26, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -121,6 +121,10 @@ fn constructed_client_frames_match_their_fixtures() {
         &ClientFrame::focus("15551230002@s.whatsapp.net"),
     );
     assert_frame(&dir.join("wipe_request.json"), &ClientFrame::wipe(true));
+    assert_frame(
+        &dir.join("download_media_request.json"),
+        &ClientFrame::download_media("15551230001@s.whatsapp.net", "3EB0AAA0"),
+    );
 }
 
 /// The M1 daemon frames, constructed in Rust.
@@ -252,6 +256,18 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
         &DaemonFrame::Wiped {
             v: PROTOCOL_VERSION,
             unlinked: true,
+        },
+    );
+    assert_frame(
+        &dir.join("media_ready_response.json"),
+        &DaemonFrame::MediaReady {
+            v: PROTOCOL_VERSION,
+            jid: "15551230001@s.whatsapp.net".to_owned(),
+            id: "3EB0AAA0".to_owned(),
+            path: "/home/ada/.local/share/nuncio/media/\
+                   e9603b3a3952bcc1847052b2b73de4ac145b06a2c5a615735b7440e41d65ad12.jpeg"
+                .to_owned(),
+            mime: "image/jpeg".to_owned(),
         },
     );
 }

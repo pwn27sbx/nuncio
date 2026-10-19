@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	waevents "go.mau.fi/whatsmeow/types/events"
@@ -284,6 +286,13 @@ func (s fixedSession) Logout(context.Context) error {
 	return errors.New("a fixed session cannot log out")
 }
 func (s fixedSession) Close() {}
+
+func (s fixedSession) DownloadMedia(string, string) (string, string, error) {
+	if wa.State(s) == wa.StateUnlinked {
+		return "", "", ipc.ErrNotLinked
+	}
+	return "", "", errors.New("a fixed session has no media")
+}
 
 func TestStatusReportsTheSessionState(t *testing.T) {
 	for _, tc := range []struct {
@@ -1396,4 +1405,179 @@ func TestFailedLocalWipeDoesNotReportLinkedAndARetryFinishes(t *testing.T) {
 		t.Fatalf("retried Wipe(false): %v", err)
 	}
 	r.assertNothingLeft(t)
+}
+
+// fakeDownloader stands in for whatsmeow's Client.Download (network fetch plus decryption with
+// the media key, both delegated to whatsmeow), so it returns the known decrypted bytes and
+// counts its calls. It never touches the network.
+type fakeDownloader struct {
+	plain []byte
+	calls atomic.Int64
+}
+
+func (f *fakeDownloader) Download(context.Context, whatsmeow.DownloadableMessage) ([]byte, error) {
+	f.calls.Add(1)
+	return f.plain, nil
+}
+
+var photo = []byte("fake decrypted photo bytes")
+
+func sha(b []byte) []byte { s := sha256.Sum256(b); return s[:] }
+
+func imageEvent(chat types.JID, id string, ts time.Time, fileSHA []byte) *waevents.Message {
+	return &waevents.Message{
+		Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: chat}, ID: id, Timestamp: ts},
+		Message: &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+			Caption: proto.String("the venue"), Mimetype: proto.String("image/jpeg"),
+			FileLength: proto.Uint64(48213), DirectPath: proto.String("/v/t62.fake/0001"),
+			MediaKey: bytes.Repeat([]byte{7}, 32), FileSHA256: fileSHA, FileEncSHA256: bytes.Repeat([]byte{9}, 32),
+		}},
+	}
+}
+
+// mediaDaemon is linkedDaemon with a media cache in a temp dir served by a fake downloader.
+func mediaDaemon(t *testing.T) (*fakeWAClient, *fakeDownloader, string, string) {
+	t.Helper()
+	session, fake, sock := linkedDaemon(t)
+	dl := &fakeDownloader{plain: photo}
+	dir := filepath.Join(t.TempDir(), "media")
+	session.SetMedia(dir, dl)
+	return fake, dl, dir, sock
+}
+
+func permOf(t *testing.T, p string) os.FileMode {
+	t.Helper()
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Mode().Perm()
+}
+
+func TestDaemonStoresMediaWithoutFetchingAndDownloadsItOnRequestOnce(t *testing.T) {
+	fake, dl, dir, sock := mediaDaemon(t)
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	fake.emit(imageEvent(ada, "3EB0AAA0", time.Date(2026, 10, 18, 17, 50, 30, 0, time.UTC), sha(photo)))
+	c := dial(t, sock)
+
+	// messages and chats describe the attachment; nothing has been fetched.
+	want := ipc.Message{ID: "3EB0AAA0", Kind: ipc.KindImage, Text: "the venue", Timestamp: "2026-10-18T17:50:30Z",
+		Media: &ipc.Media{Mime: "image/jpeg", Size: 48213}}
+	msgs, err := c.Messages(ada.String(), 10)
+	if err != nil || len(msgs.Messages) != 1 || !reflect.DeepEqual(msgs.Messages[0], want) {
+		t.Fatalf("Messages = %s, %v; want only %s", jsonOf(t, msgs.Messages), err, jsonOf(t, want))
+	}
+	chats, err := c.Chats(40)
+	if err != nil || len(chats.Chats) != 1 || !reflect.DeepEqual(chats.Chats[0].LastMessage, &want) {
+		t.Fatalf("Chats = %s, %v; want the image as last_message", jsonOf(t, chats.Chats), err)
+	}
+	if n := dl.calls.Load(); n != 0 {
+		t.Fatalf("downloader called %d times before any request, want 0", n)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the media cache exists before any request: %v", err)
+	}
+
+	ready, err := c.DownloadMedia(ada.String(), "3EB0AAA0")
+	if err != nil {
+		t.Fatalf("DownloadMedia: %v", err)
+	}
+	if ready.Op != ipc.OpMediaReady || ready.JID != ada.String() || ready.ID != "3EB0AAA0" ||
+		ready.Mime != "image/jpeg" || filepath.Dir(ready.Path) != dir {
+		t.Errorf("DownloadMedia = %+v, want media_ready with a file in %s", ready, dir)
+	}
+	if got, err := os.ReadFile(ready.Path); err != nil || !bytes.Equal(got, photo) {
+		t.Errorf("cached bytes = %q, %v; want %q", got, err, photo)
+	}
+	if m := permOf(t, dir); m != 0o700 {
+		t.Errorf("cache dir mode %o, want 700", m)
+	}
+	if m := permOf(t, ready.Path); m != 0o600 {
+		t.Errorf("cached file mode %o, want 600", m)
+	}
+
+	again, err := c.DownloadMedia(ada.String(), "3EB0AAA0")
+	if err != nil || again != ready {
+		t.Errorf("second DownloadMedia = %+v, %v; want %+v", again, err, ready)
+	}
+	if n := dl.calls.Load(); n != 1 {
+		t.Errorf("downloader called %d times for two requests, want 1 (the second is a cache hit)", n)
+	}
+}
+
+func TestDaemonDownloadMediaRejectsASHA256MismatchAndCachesNothing(t *testing.T) {
+	fake, dl, dir, sock := mediaDaemon(t)
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	fake.emit(imageEvent(ada, "3EB0AAA0", time.Date(2026, 10, 18, 17, 50, 30, 0, time.UTC), sha([]byte("other"))))
+	c := dial(t, sock)
+
+	_, err := c.DownloadMedia(ada.String(), "3EB0AAA0")
+	var perr *ipc.ProtocolError
+	if !errors.As(err, &perr) || perr.Code != ipc.CodeInternal || perr.Message != wa.ErrMediaCorrupt.Error() {
+		t.Fatalf("DownloadMedia of a mismatch = %v, want an internal error saying %q", err, wa.ErrMediaCorrupt)
+	}
+	des, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if len(des) != 0 {
+		t.Errorf("cache dir holds %d entries after a mismatch, want none", len(des))
+	}
+	if n := dl.calls.Load(); n != 1 {
+		t.Errorf("downloader called %d times, want 1", n)
+	}
+}
+
+func TestDaemonDownloadMediaCorners(t *testing.T) {
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	codeOf := func(err error) (string, string) {
+		var perr *ipc.ProtocolError
+		if !errors.As(err, &perr) {
+			return "", fmt.Sprint(err)
+		}
+		return perr.Code, perr.Message
+	}
+	t.Run("unknown id, a text message and a bad jid", func(t *testing.T) {
+		fake, dl, _, sock := mediaDaemon(t)
+		fake.emit(textMessage(ada, "TXT1", false, time.Date(2026, 10, 18, 17, 0, 0, 0, time.UTC), "plain"))
+		c := dial(t, sock)
+		for _, id := range []string{"NOPE", "TXT1"} {
+			if code, msg := codeOf(downloadErr(c, ada.String(), id)); code != ipc.CodeInternal || msg != wa.ErrNoMedia.Error() {
+				t.Errorf("DownloadMedia(%s) = %s %q, want internal %q", id, code, msg, wa.ErrNoMedia)
+			}
+		}
+		if code, _ := codeOf(downloadErr(c, "status@broadcast", "TXT1")); code != ipc.CodeBadFrame {
+			t.Errorf("DownloadMedia with a bad jid = %s, want %s", code, ipc.CodeBadFrame)
+		}
+		if n := dl.calls.Load(); n != 0 {
+			t.Errorf("downloader called %d times, want 0", n)
+		}
+	})
+	t.Run("unlinked", func(t *testing.T) {
+		d, err := newDaemon(wa.NewSession(nil, nil, nil), nil)
+		if err != nil {
+			t.Fatalf("newDaemon: %v", err)
+		}
+		c := serveInProcess(t, d)
+		if code, _ := codeOf(downloadErr(c, ada.String(), "3EB0AAA0")); code != ipc.CodeNotLinked {
+			t.Errorf("DownloadMedia while unlinked = %s, want %s", code, ipc.CodeNotLinked)
+		}
+	})
+	t.Run("offline", func(t *testing.T) {
+		fake, dl, _, sock := mediaDaemon(t)
+		fake.emit(imageEvent(ada, "3EB0AAA0", time.Date(2026, 10, 18, 17, 50, 30, 0, time.UTC), sha(photo)))
+		fake.emit(&waevents.Disconnected{})
+		c := dial(t, sock)
+		if code, msg := codeOf(downloadErr(c, ada.String(), "3EB0AAA0")); code != ipc.CodeInternal || msg != wa.ErrMediaOffline.Error() {
+			t.Errorf("DownloadMedia while offline = %s %q, want internal %q", code, msg, wa.ErrMediaOffline)
+		}
+		if n := dl.calls.Load(); n != 0 {
+			t.Errorf("downloader called %d times while offline, want 0", n)
+		}
+	})
+}
+
+func downloadErr(c *ipc.Client, jid, id string) error {
+	_, err := c.DownloadMedia(jid, id)
+	return err
 }

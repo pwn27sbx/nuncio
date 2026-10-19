@@ -54,6 +54,9 @@ const (
 	OpWipe       = "wipe"
 	OpWiped      = "wiped"
 
+	OpDownloadMedia = "download_media"
+	OpMediaReady    = "media_ready"
+
 	OpEventMessage    = "event_message"
 	OpEventConnection = "event_connection"
 	OpEventUnread     = "event_unread"
@@ -175,6 +178,15 @@ type WipeRequest struct {
 	Unlink bool   `json:"unlink"`
 }
 
+// DownloadMediaRequest asks the daemon to download the attachment of message ID in chat JID
+// into its media cache, unless it is cached already. Nothing is downloaded without it.
+type DownloadMediaRequest struct {
+	V   int    `json:"v"`
+	Op  string `json:"op"`
+	JID string `json:"jid"`
+	ID  string `json:"id"`
+}
+
 // HelloOK answers a Hello.
 type HelloOK struct {
 	V       int    `json:"v"`
@@ -249,6 +261,17 @@ type Wiped struct {
 	V        int    `json:"v"`
 	Op       string `json:"op"`
 	Unlinked bool   `json:"unlinked"`
+}
+
+// MediaReady answers a DownloadMediaRequest: Path is the decrypted, verified file in the daemon's
+// private media cache (the bytes never travel over the socket) and Mime its type.
+type MediaReady struct {
+	V    int    `json:"v"`
+	Op   string `json:"op"`
+	JID  string `json:"jid"`
+	ID   string `json:"id"`
+	Path string `json:"path"`
+	Mime string `json:"mime"`
 }
 
 // EventMessage is pushed to subscribers when a message is stored.
@@ -354,6 +377,12 @@ type Handler interface {
 	// any other error is an internal error whose message is the error's text, so it must carry no
 	// number. After a nil return ServeConn answers wiped and returns ErrWiped.
 	Wipe(unlink bool) error
+	// DownloadMedia returns the cached path and mime type of the attachment of message id in the
+	// chat jid, downloading it first if it is not cached. ServeConn has already checked jid and
+	// that id is not empty. It returns ErrNotLinked when no device is paired, which ServeConn
+	// answers with not_linked; any other error is an internal error whose message is the error's
+	// text, so it must carry no number and no caption.
+	DownloadMedia(jid, id string) (path, mime string, err error)
 }
 
 // ValidJID reports whether jid names a WhatsApp chat the protocol carries: a user
@@ -649,6 +678,10 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
 			if err != nil {
 				return err
 			}
+		case OpDownloadMedia:
+			if err := WriteFrame(out, serveDownloadMedia(line, h)); err != nil {
+				return err
+			}
 		case OpHello:
 			if err := WriteFrame(out, badFrame("hello is only valid as the first frame")); err != nil {
 				return err
@@ -690,6 +723,29 @@ func serveSend(line []byte, h Handler) any {
 	}
 	sent.V, sent.Op, sent.ClientID = Version, OpSent, req.ClientID
 	return sent
+}
+
+// serveDownloadMedia checks a download_media frame and asks h for the attachment, returning the
+// reply frame. A refused frame never reaches h, so nothing is downloaded.
+func serveDownloadMedia(line []byte, h Handler) any {
+	var req DownloadMediaRequest
+	if err := json.Unmarshal(line, &req); err != nil {
+		return badFrame("malformed download_media frame")
+	}
+	switch {
+	case !ValidJID(req.JID):
+		return badFrame("jid is not a WhatsApp chat")
+	case req.ID == "":
+		return badFrame("download_media needs the id of a message")
+	}
+	path, mime, err := h.DownloadMedia(req.JID, req.ID)
+	if errors.Is(err, ErrNotLinked) {
+		return Error{V: Version, Op: OpError, Code: CodeNotLinked, Message: ErrNotLinked.Error()}
+	}
+	if err != nil {
+		return Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()}
+	}
+	return MediaReady{V: Version, Op: OpMediaReady, JID: req.JID, ID: req.ID, Path: path, Mime: mime}
 }
 
 // lockedWriter writes each frame whole, so replies and events never interleave mid-frame.

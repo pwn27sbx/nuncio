@@ -58,6 +58,13 @@ pub enum ClientFrame {
         v: u8,
         unlink: bool,
     },
+    /// Ask the daemon to download the attachment of message `id` in chat `jid` into its media
+    /// cache, unless it is cached already. Nothing is downloaded without this request.
+    DownloadMedia {
+        v: u8,
+        jid: String,
+        id: String,
+    },
 }
 
 impl ClientFrame {
@@ -120,6 +127,14 @@ impl ClientFrame {
         Self::Wipe {
             v: PROTOCOL_VERSION,
             unlink,
+        }
+    }
+
+    pub fn download_media(jid: impl Into<String>, id: impl Into<String>) -> Self {
+        Self::DownloadMedia {
+            v: PROTOCOL_VERSION,
+            jid: jid.into(),
+            id: id.into(),
         }
     }
 }
@@ -188,6 +203,15 @@ pub enum DaemonFrame {
         v: u8,
         unlinked: bool,
     },
+    /// The attachment of message `id` in chat `jid` is in the daemon's private media cache at
+    /// `path`; the bytes never travel over the socket.
+    MediaReady {
+        v: u8,
+        jid: String,
+        id: String,
+        path: String,
+        mime: String,
+    },
     EventMessage {
         v: u8,
         jid: String,
@@ -224,6 +248,7 @@ impl DaemonFrame {
             Self::Subscribed { .. } => "subscribed",
             Self::Focused { .. } => "focused",
             Self::Wiped { .. } => "wiped",
+            Self::MediaReady { .. } => "media_ready",
             Self::EventMessage { .. } => "event_message",
             Self::EventConnection { .. } => "event_connection",
             Self::EventUnread { .. } => "event_unread",

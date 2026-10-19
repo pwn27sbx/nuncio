@@ -106,7 +106,7 @@ func TestIncomingTextMessageIsStoredAsUnread(t *testing.T) {
 
 	got := onlyMessage(t, db, ada.String())
 	want := store.Message{ID: "MSG1", ChatJID: ada.String(), Kind: store.KindText, Text: "See you at 18:00", Timestamp: t0}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("stored %+v, want %+v", got, want)
 	}
 	if n := unread(t, db, ada.String()); n != 1 {
@@ -167,14 +167,18 @@ func TestDuplicateMessageEventIsStoredOnce(t *testing.T) {
 	}
 }
 
-// Media is a later task; until then a message with no text body is not stored at all.
+// A message that is neither text nor one of the media kinds (a reaction, here) is not stored.
 func TestMessageWithoutTextIsIgnored(t *testing.T) {
 	_, fake, db := startedSession(t)
-	fake.emit(messageEvent(ada, "IMG", false, t0, &waE2E.Message{ImageMessage: &waE2E.ImageMessage{}}))
+	fake.emit(messageEvent(ada, "R1", false, t0, reaction()))
 
 	if n := totalUnread(t, db); n != 0 {
-		t.Errorf("total unread = %d after an image, want 0 (media is not stored yet)", n)
+		t.Errorf("total unread = %d after a reaction, want 0 (reactions are not stored)", n)
 	}
+}
+
+func reaction() *waE2E.Message {
+	return &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{Text: proto.String("+1")}}
 }
 
 // Status updates and broadcasts are not chats of the wire protocol.
@@ -334,7 +338,7 @@ func TestADuplicateMessagePublishesNothing(t *testing.T) {
 
 func TestAMessageThatIsNotStoredPublishesNothing(t *testing.T) {
 	_, fake, events := subscribedSession(t)
-	fake.emit(messageEvent(ada, "IMG", false, t0, &waE2E.Message{ImageMessage: &waE2E.ImageMessage{}}))
+	fake.emit(messageEvent(ada, "R1", false, t0, reaction()))
 	fake.emit(textEvent(types.NewJID("status", types.BroadcastServer), "S1", false, t0, "story"))
 	assertEvents(t, events())
 }

@@ -32,6 +32,25 @@ type fakeHandler struct {
 	// wipes records every Wipe call's unlink; Wipe answers wipeErr.
 	wipes   []bool
 	wipeErr error
+	// downloads records every DownloadMedia call as "jid id"; it answers mediaPath and
+	// mediaMime, or mediaErr.
+	downloads []string
+	mediaPath string
+	mediaMime string
+	mediaErr  error
+}
+
+func (f *fakeHandler) DownloadMedia(jid, id string) (string, string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.downloads = append(f.downloads, jid+" "+id)
+	return f.mediaPath, f.mediaMime, f.mediaErr
+}
+
+func (f *fakeHandler) downloadCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.downloads...)
 }
 
 func (f *fakeHandler) Wipe(unlink bool) error {
@@ -674,5 +693,93 @@ func TestClientWipeReturnsWipedOrTheDaemonError(t *testing.T) {
 	var perr *ProtocolError
 	if !errors.As(err, &perr) || perr.Code != CodeNotLinked {
 		t.Errorf("Wipe(true) while unlinked = %v, want a %s error", err, CodeNotLinked)
+	}
+}
+
+func TestServeConnAnswersDownloadMediaWithMediaReady(t *testing.T) {
+	h := newFakeHandler(t)
+	h.mediaPath, h.mediaMime = fixtureMediaPath, "image/jpeg"
+	conn, br, _ := serveOne(t, h)
+	sendRaw(t, conn, string(readFixture(t, "download_media_request.json")))
+	assertSameJSON(t, recvRaw(t, br), readFixture(t, "media_ready_response.json"))
+	if got := h.downloadCalls(); !slices.Equal(got, []string{"15551230001@s.whatsapp.net 3EB0AAA0"}) {
+		t.Errorf("DownloadMedia calls = %q, want one for the fixture message", got)
+	}
+}
+
+func TestServeConnRefusesABadDownloadMediaAndAsksNothing(t *testing.T) {
+	h := newFakeHandler(t)
+	conn, br, _ := serveOne(t, h)
+	for _, frame := range []string{
+		`{"v":1,"op":"download_media","jid":"status@broadcast","id":"3EB0AAA0"}`,
+		`{"v":1,"op":"download_media","jid":"15551230001:3@s.whatsapp.net","id":"3EB0AAA0"}`,
+		`{"v":1,"op":"download_media","jid":"15551230001@s.whatsapp.net","id":""}`,
+		`{"v":1,"op":"download_media","jid":"15551230001@s.whatsapp.net"}`,
+		`{"v":1,"op":"download_media","jid":"15551230001@s.whatsapp.net","id":7}`,
+	} {
+		sendRaw(t, conn, frame)
+		if got := fieldOf(t, recvRaw(t, br), "code"); got != CodeBadFrame {
+			t.Errorf("%s: code = %v, want %s", frame, got, CodeBadFrame)
+		}
+	}
+	sendRaw(t, conn, `{"v":1,"op":"status"}`)
+	if got := fieldOf(t, recvRaw(t, br), "op"); got != OpStatus {
+		t.Errorf("after refused downloads the connection answered %v, want status", got)
+	}
+	if got := h.downloadCalls(); len(got) != 0 {
+		t.Errorf("DownloadMedia was asked %q for refused frames, want nothing", got)
+	}
+}
+
+func TestServeConnAnswersDownloadMediaErrors(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		code string
+	}{
+		"unlinked": {ErrNotLinked, CodeNotLinked},
+		"other":    {errors.New("no media message with that id in that chat"), CodeInternal},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newFakeHandler(t)
+			h.mediaErr = tc.err
+			conn, br, _ := serveOne(t, h)
+			sendRaw(t, conn, string(readFixture(t, "download_media_request.json")))
+			frame := recvRaw(t, br)
+			if fieldOf(t, frame, "code") != tc.code || fieldOf(t, frame, "message") != tc.err.Error() {
+				t.Errorf("reply %s, want a %s error carrying %q", frame, tc.code, tc.err)
+			}
+			sendRaw(t, conn, `{"v":1,"op":"status"}`)
+			if got := fieldOf(t, recvRaw(t, br), "op"); got != OpStatus {
+				t.Errorf("after a failed download the connection answered %v, want status", got)
+			}
+		})
+	}
+}
+
+func TestClientDownloadMediaReturnsMediaReadyOrTheDaemonError(t *testing.T) {
+	h := newFakeHandler(t)
+	h.mediaPath, h.mediaMime = fixtureMediaPath, "image/jpeg"
+	c, err := Dial(startServer(t, h), "test/0.1.0")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	got, err := c.DownloadMedia("15551230001@s.whatsapp.net", "3EB0AAA0")
+	want := MediaReady{V: 1, Op: OpMediaReady, JID: "15551230001@s.whatsapp.net", ID: "3EB0AAA0", Path: fixtureMediaPath, Mime: "image/jpeg"}
+	if err != nil || got != want {
+		t.Errorf("DownloadMedia = %+v, %v; want %+v", got, err, want)
+	}
+
+	h2 := newFakeHandler(t)
+	h2.mediaErr = ErrNotLinked
+	c2, err := Dial(startServer(t, h2), "test/0.1.0")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c2.Close() })
+	_, err = c2.DownloadMedia("15551230001@s.whatsapp.net", "3EB0AAA0")
+	var perr *ProtocolError
+	if !errors.As(err, &perr) || perr.Code != CodeNotLinked {
+		t.Errorf("DownloadMedia while unlinked = %v, want a %s error", err, CodeNotLinked)
 	}
 }

@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -395,4 +396,126 @@ func TestDuplicateMessageIsIgnored(t *testing.T) {
 
 	// The same id in another chat is a different message.
 	mustInsert(t, db, text("M1", chatBob, "same id, other chat", false, t0))
+}
+
+func TestMediaMessageKeepsItsDescriptionAndDownloadReference(t *testing.T) {
+	db := newMessagesDB(t)
+	img := Message{ID: "IMG1", ChatJID: chatAlice, Kind: KindImage, Text: "the venue", Timestamp: t0,
+		Mime: "image/jpeg", Size: 48213, MediaRef: []byte{0x0a, 0x03, 'r', 'e', 'f'}}
+	doc := Message{ID: "DOC1", ChatJID: chatAlice, Kind: KindDocument, Timestamp: t0.Add(time.Minute),
+		Mime: "application/pdf", Size: 1200, FileName: "menu.pdf", MediaRef: []byte{0x01}}
+	mustInsert(t, db, img)
+	mustInsert(t, db, doc)
+	mustInsert(t, db, text("TXT1", chatAlice, "plain", false, t0.Add(2*time.Minute)))
+
+	msgs, err := ListMessages(db, chatAlice, 10)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 3 {
+		t.Fatalf("ListMessages = %+v, want 3 messages", msgs)
+	}
+	if got := msgs[1]; got.Kind != KindDocument || got.Mime != "application/pdf" || got.Size != 1200 || got.FileName != "menu.pdf" {
+		t.Errorf("listed document = %+v, want its mime, size and file name", got)
+	}
+	if got := msgs[2]; got.Kind != KindImage || got.Text != "the venue" || got.Mime != "image/jpeg" || got.Size != 48213 {
+		t.Errorf("listed image = %+v, want kind, caption, mime and size", got)
+	}
+
+	got, err := GetMessage(db, chatAlice, "IMG1")
+	if err != nil {
+		t.Fatalf("GetMessage IMG1: %v", err)
+	}
+	if string(got.MediaRef) != string(img.MediaRef) || got.Kind != KindImage || got.Mime != "image/jpeg" {
+		t.Errorf("GetMessage IMG1 = %+v, want the stored image with its reference %v", got, img.MediaRef)
+	}
+	plain, err := GetMessage(db, chatAlice, "TXT1")
+	if err != nil {
+		t.Fatalf("GetMessage TXT1: %v", err)
+	}
+	if plain.Kind != KindText || plain.MediaRef != nil {
+		t.Errorf("GetMessage TXT1 = %+v, want a text message with no reference", plain)
+	}
+	for _, key := range [][2]string{{chatAlice, "NOPE"}, {chatBob, "IMG1"}} {
+		if _, err := GetMessage(db, key[0], key[1]); !errors.Is(err, ErrNoMessage) {
+			t.Errorf("GetMessage(%s, %s) = %v, want ErrNoMessage", key[0], key[1], err)
+		}
+	}
+	// A duplicate keeps the first reference.
+	dup := img
+	dup.MediaRef = []byte{0xff}
+	if inserted, err := InsertMessage(db, dup); err != nil || inserted {
+		t.Fatalf("duplicate InsertMessage = %v, %v; want false, nil", inserted, err)
+	}
+	if got, err := GetMessage(db, chatAlice, "IMG1"); err != nil || string(got.MediaRef) != string(img.MediaRef) {
+		t.Errorf("after a duplicate GetMessage = %+v, %v; want the first reference", got, err)
+	}
+}
+
+// t5Schema is the message schema as T5 shipped it, before the media references: a nuncio.db
+// created by that build must keep working.
+const t5Schema = `
+CREATE TABLE chats (
+	jid      TEXT PRIMARY KEY,
+	name     TEXT NOT NULL DEFAULT '',
+	archived INTEGER NOT NULL DEFAULT 0,
+	pinned   INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE messages (
+	seq       INTEGER PRIMARY KEY,
+	chat_jid  TEXT NOT NULL,
+	id        TEXT NOT NULL,
+	kind      TEXT NOT NULL,
+	text      TEXT NOT NULL DEFAULT '',
+	from_me   INTEGER NOT NULL,
+	ts        INTEGER NOT NULL,
+	read      INTEGER NOT NULL DEFAULT 0,
+	mime      TEXT,
+	size      INTEGER,
+	file_name TEXT,
+	UNIQUE (chat_jid, id)
+);
+CREATE INDEX messages_chat_ts ON messages (chat_jid, ts);
+CREATE VIRTUAL TABLE messages_fts USING fts5(text);
+INSERT INTO chats (jid, name, pinned) VALUES ('15550000001@s.whatsapp.net', 'Alice', 1);
+INSERT INTO messages (seq, chat_jid, id, kind, text, from_me, ts) VALUES
+	(1, '15550000001@s.whatsapp.net', 'OLD1', 'text', 'kept compiler', 0, 1760875200000000000);
+INSERT INTO messages_fts (rowid, text) VALUES (1, 'kept compiler');
+`
+
+func TestADatabaseWithTheT5SchemaOpensAndKeepsItsRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nuncio.db")
+	old, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := old.Exec(t5Schema); err != nil {
+		t.Fatalf("create the T5 schema: %v", err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db := openMessagesDB(t, path)
+	msgs, err := ListMessages(db, chatAlice, 10)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "OLD1" || msgs[0].Text != "kept compiler" {
+		t.Fatalf("ListMessages after the upgrade = %+v, want the old row", msgs)
+	}
+	if hits, err := Search(db, "compiler", 10); err != nil || len(hits) != 1 {
+		t.Fatalf("Search after the upgrade = %+v, %v; want the old row", hits, err)
+	}
+	if chats, err := ListChats(db, 10); err != nil || len(chats) != 1 || chats[0].Name != "Alice" {
+		t.Fatalf("ListChats after the upgrade = %+v, %v; want Alice", chats, err)
+	}
+	mustInsert(t, db, Message{ID: "NEW1", ChatJID: chatAlice, Kind: KindImage, Timestamp: t0,
+		Mime: "image/jpeg", Size: 10, MediaRef: []byte{0x01, 0x02}})
+	if got, err := GetMessage(db, chatAlice, "NEW1"); err != nil || string(got.MediaRef) != "\x01\x02" {
+		t.Fatalf("GetMessage after the upgrade = %+v, %v; want the new reference", got, err)
+	}
+	if got, err := GetMessage(db, chatAlice, "OLD1"); err != nil || got.MediaRef != nil {
+		t.Fatalf("GetMessage of the old row = %+v, %v; want it with no reference", got, err)
+	}
 }

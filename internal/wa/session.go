@@ -20,6 +20,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
+	"github.com/pwn27sbx/nuncio/internal/media"
 	"github.com/pwn27sbx/nuncio/internal/store"
 )
 
@@ -77,6 +78,8 @@ type Session struct {
 	cancel func() bool // the pending reconnect, nil when none
 	// logf reports a stop, once; log.Printf outside tests.
 	logf func(format string, args ...any)
+	// media serves DownloadMedia; nil until SetMedia.
+	media *media.Cache
 }
 
 // NewSession wraps client, which may be nil for "no device store at all". db is the message
@@ -330,7 +333,11 @@ func OpenSession(ctx context.Context, path string) (*Session, error) {
 	// (only an explicit SendPresence does, and Client has no such call), so the account is never
 	// marked online on connect.
 	client.EnableAutoReconnect = false
-	return NewSession(whatsmeowClient{client}, db, db.Close), nil
+	s := NewSession(whatsmeowClient{client}, db, db.Close)
+	// Attachments are downloaded only on a download_media request, by whatsmeow's Download
+	// (which fetches, decrypts and checks the hashes), into $XDG_DATA_HOME/nuncio/media.
+	s.SetMedia(filepath.Join(filepath.Dir(path), store.MediaDir), client)
+	return s, nil
 }
 
 // whatsmeowClient adapts *whatsmeow.Client to Client.

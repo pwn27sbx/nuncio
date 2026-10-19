@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -26,8 +27,12 @@ type Chat struct {
 	Unread        int
 }
 
+// ErrNoMessage: no message with that id is stored in that chat.
+var ErrNoMessage = errors.New("no such message in that chat")
+
 // Message is one stored message. Its identity is (ChatJID, ID). Mime, Size and FileName
-// describe media and stay empty for text.
+// describe media and stay empty for text. MediaRef is what a later download needs (the
+// serialised media sub-message, with its key, path and hashes); only GetMessage reads it back.
 type Message struct {
 	ID        string
 	ChatJID   string
@@ -39,6 +44,7 @@ type Message struct {
 	Mime      string
 	Size      int64
 	FileName  string
+	MediaRef  []byte
 }
 
 // SearchHit is one message that matched a search.
@@ -60,7 +66,8 @@ func UpsertChat(db *sql.DB, c Chat) error {
 	return nil
 }
 
-// InsertMessage stores m, creating its chat if needed, and indexes its text for search. A message
+// InsertMessage stores m, creating its chat if needed, indexes its text for search and keeps its
+// MediaRef, if any, for a later download (nothing is downloaded here). A message
 // whose (ChatJID, ID) is already stored is left untouched and InsertMessage returns false.
 func InsertMessage(db *sql.DB, m Message) (inserted bool, err error) {
 	tx, err := db.Begin()
@@ -99,10 +106,35 @@ func InsertMessage(db *sql.DB, m Message) (inserted bool, err error) {
 	if _, err = tx.Exec(`INSERT INTO messages_fts (rowid, text) VALUES (?, ?)`, seq, m.Text); err != nil {
 		return false, fmt.Errorf("cannot index message: %w", err)
 	}
+	if len(m.MediaRef) > 0 {
+		if _, err = tx.Exec(`INSERT INTO media_refs (chat_jid, id, ref) VALUES (?, ?, ?)`,
+			m.ChatJID, m.ID, m.MediaRef); err != nil {
+			return false, fmt.Errorf("cannot save media reference: %w", err)
+		}
+	}
 	if err = tx.Commit(); err != nil {
 		return false, fmt.Errorf("cannot save message: %w", err)
 	}
 	return true, nil
+}
+
+// GetMessage returns one stored message with its MediaRef (nil for text), or ErrNoMessage.
+func GetMessage(db *sql.DB, chatJID, id string) (Message, error) {
+	var m Message
+	var ts int64
+	err := db.QueryRow(`SELECT m.id, m.chat_jid, m.kind, m.text, m.from_me, m.ts, m.read,
+			COALESCE(m.mime, ''), COALESCE(m.size, 0), COALESCE(m.file_name, ''), r.ref
+		FROM messages m LEFT JOIN media_refs r ON r.chat_jid = m.chat_jid AND r.id = m.id
+		WHERE m.chat_jid = ? AND m.id = ?`, chatJID, id).
+		Scan(&m.ID, &m.ChatJID, &m.Kind, &m.Text, &m.FromMe, &ts, &m.Read, &m.Mime, &m.Size, &m.FileName, &m.MediaRef)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Message{}, ErrNoMessage
+	}
+	if err != nil {
+		return Message{}, fmt.Errorf("cannot read message: %w", err)
+	}
+	m.Timestamp = fromNanos(ts)
+	return m, nil
 }
 
 // ListChats returns up to limit chats, the one with the newest message first.

@@ -5,35 +5,59 @@ import (
 	"log"
 
 	waevents "go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
 	"github.com/pwn27sbx/nuncio/internal/store"
 )
 
-// messageRow turns a whatsmeow message into a store row. Only text and extended text are stored
-// for now: any other kind (media is a later task) and any chat the wire protocol does not carry
-// (status updates, broadcasts, newsletters) report false. The row starts unread; the store counts
-// it as unread only when it is not from me.
+// messageRow turns a whatsmeow message into a store row: text and extended text as text, and the
+// image, video, audio and document kinds with their caption as text, their mime type, size and file
+// name, and the serialised media sub-message as MediaRef, which is everything a download on request
+// needs later; nothing is downloaded here. Any other kind and any chat the wire protocol does not
+// carry (status updates, broadcasts, newsletters) report false. The row starts unread; the store
+// counts it as unread only when it is not from me.
 func messageRow(evt *waevents.Message) (store.Message, bool) {
 	chat := evt.Info.Chat.String()
 	if !ipc.ValidJID(chat) {
 		return store.Message{}, false
 	}
-	text := evt.Message.GetConversation()
-	if text == "" {
-		text = evt.Message.GetExtendedTextMessage().GetText()
-	}
-	if text == "" {
-		return store.Message{}, false
-	}
-	return store.Message{
+	m := store.Message{
 		ID:        evt.Info.ID,
 		ChatJID:   chat,
 		Kind:      store.KindText,
-		Text:      text,
 		FromMe:    evt.Info.IsFromMe,
 		Timestamp: evt.Info.Timestamp.UTC(),
-	}, true
+	}
+	m.Text = evt.Message.GetConversation()
+	if m.Text == "" {
+		m.Text = evt.Message.GetExtendedTextMessage().GetText()
+	}
+	if m.Text != "" {
+		return m, true
+	}
+	kind, sub, caption, fileName, ok := mediaOf(evt.Message)
+	if !ok {
+		return store.Message{}, false
+	}
+	ref, err := proto.Marshal(sub)
+	if err != nil {
+		log.Printf("wa: cannot keep the media reference of %s: %v", m.ID, err)
+		return store.Message{}, false
+	}
+	m.Kind, m.Text, m.FileName, m.MediaRef = kind, caption, fileName, ref
+	m.Mime, m.Size = sub.GetMimetype(), int64(sub.GetFileLength())
+	return m, true
+}
+
+// WireMessage is a stored message in its wire shape: the media kinds carry their media object,
+// text carries none.
+func WireMessage(m store.Message) ipc.Message {
+	w := ipc.Message{ID: m.ID, Kind: m.Kind, Text: m.Text, FromMe: m.FromMe, Timestamp: ipc.Timestamp(m.Timestamp)}
+	if m.Kind != store.KindText {
+		w.Media = &ipc.Media{Mime: m.Mime, Size: m.Size, FileName: m.FileName}
+	}
+	return w
 }
 
 // storeMessage saves one incoming or own message and publishes it, followed by the new unread
@@ -52,9 +76,7 @@ func (s *Session) storeMessage(evt *waevents.Message) {
 	if !inserted {
 		return
 	}
-	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: m.ChatJID, Message: ipc.Message{
-		ID: m.ID, Kind: m.Kind, Text: m.Text, FromMe: m.FromMe, Timestamp: ipc.Timestamp(m.Timestamp),
-	}})
+	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: m.ChatJID, Message: WireMessage(m)})
 	if !m.FromMe {
 		s.publishUnread(m.ChatJID)
 	}

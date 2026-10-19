@@ -41,6 +41,7 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `subscribe` | `v`, `op` | `subscribe_request.json` |
 | `focus` | `v`, `op`, `jid` | `focus_request.json` |
 | `wipe` | `v`, `op`, `unlink` (bool: first tell WhatsApp to unlink the device) | `wipe_request.json` |
+| `download_media` | `v`, `op`, `jid`, `id` (the message id) | `download_media_request.json` |
 
 ### daemon → client
 
@@ -56,6 +57,7 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `subscribed` | `v`, `op` | `subscribed_response.json` |
 | `focused` | `v`, `op`, `jid`, `delivered` (int: subscribed UIs that got the event; 0 = none running) | `focused_response.json` |
 | `wiped` | `v`, `op`, `unlinked` (bool: WhatsApp confirmed the unlink) | `wiped_response.json` |
+| `media_ready` | `v`, `op`, `jid`, `id`, `path` (string: the cached file), `mime` (string) | `media_ready_response.json` |
 
 ### Events (daemon → subscribed clients)
 
@@ -109,7 +111,11 @@ A string, not a boolean, so it can grow without a protocol break:
 | `media` | object or absent | set for the media kinds, omitted for `text` |
 
 `media` is `{ "mime": string, "size": int (bytes), "file_name": string (may be empty) }`. The
-bytes never travel over the socket: the daemon downloads them on demand into its media cache.
+bytes never travel over the socket: the daemon downloads them only when a client sends
+`download_media`, into its media cache `$XDG_DATA_HOME/nuncio/media` (directory `0700`, files
+`0600`), and answers `media_ready` with the path of the decrypted file, whose SHA-256 it has
+checked against the one the message carries. A download can take longer than an ordinary read, so
+the Go client waits up to 90 s for that reply.
 
 ## Error codes
 
@@ -173,6 +179,14 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `wipe` with `unlink: false` | the same without contacting WhatsApp; `wiped` with `unlinked: false` |
 | `wipe` with `unlink: true` while `unlinked` | `error` / `not_linked`; nothing is deleted (a `wipe` with `unlink: false` deletes the data of a device that is already gone) |
 | `wipe` with `unlink: true` that WhatsApp does not confirm | `error` / `internal` saying nothing was deleted; the daemon keeps serving |
+| A media message arrives | stored with its `media` object and what a download needs; nothing is downloaded |
+| `download_media` with a `jid` that is not a chat JID, or an empty or missing `id` | `bad_frame`; nothing is downloaded; the connection stays usable |
+| `download_media` for an id not stored in that chat, or for a text message | `error` / `internal` with the message `no media message with that id in that chat` |
+| `download_media` while `unlinked` | `error` / `not_linked`; nothing is downloaded |
+| `download_media` while `offline`, not cached yet | `error` / `internal` with the message `the WhatsApp session is offline, so the media was not downloaded`; a file already cached is answered with `media_ready` while offline too |
+| `download_media` for a file already cached | `media_ready` with the same `path`; nothing is downloaded again |
+| `download_media` whose bytes do not match the message's SHA-256 | `error` / `internal` with the message `the downloaded media does not match its SHA-256, so nothing was saved`; nothing is cached |
+| `download_media` that WhatsApp does not deliver | `error` / `internal` with the message `WhatsApp did not deliver the media`; nothing is cached |
 
 A WhatsApp chat JID is one of: `digits@s.whatsapp.net` (a user), `digits@lid` (a user addressed by
 its hidden id; WhatsApp uses it for direct chats too) or `digits-digits@g.us` / `digits@g.us` (a

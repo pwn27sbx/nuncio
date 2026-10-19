@@ -6,8 +6,10 @@
 //
 // The daemon, not `nuncio link`, owns the session: if the store holds a linked
 // device it connects; if not it stays unlinked and never starts a link. With a
-// nuncio.db it stores incoming text messages and answers chats, messages and
+// nuncio.db it stores incoming text and media messages and answers chats, messages and
 // unread counts from it; without one it answers the shared fixture chat list.
+// Attachments are downloaded only on a download_media request, into the private
+// media cache $XDG_DATA_HOME/nuncio/media.
 package main
 
 import (
@@ -282,6 +284,9 @@ type sessionState interface {
 	Logout(ctx context.Context) error
 	// Close disconnects the session and closes the store.
 	Close()
+	// DownloadMedia returns the cached path and mime type of a message's attachment, downloading
+	// it on this request only.
+	DownloadMedia(jid, id string) (path, mime string, err error)
 }
 
 // newDaemon serves session and, when db is not nil, the chats, messages and
@@ -344,7 +349,7 @@ func (d *daemon) Chats() []ipc.Chat {
 			return nil
 		}
 		if len(last) == 1 {
-			m := wireMessage(last[0])
+			m := wa.WireMessage(last[0])
 			c.LastMessage = &m
 		}
 		chats = append(chats, c)
@@ -367,15 +372,19 @@ func (d *daemon) Messages(jid string, limit int) ([]ipc.Message, error) {
 	}
 	msgs := make([]ipc.Message, 0, len(rows))
 	for _, r := range rows {
-		msgs = append(msgs, wireMessage(r))
+		msgs = append(msgs, wa.WireMessage(r))
 	}
 	return msgs, nil
 }
 
-// wireMessage is a stored text message in its wire shape. Media fields are a
-// later task: only text is stored for now.
-func wireMessage(m store.Message) ipc.Message {
-	return ipc.Message{ID: m.ID, Kind: m.Kind, Text: m.Text, FromMe: m.FromMe, Timestamp: ipc.Timestamp(m.Timestamp)}
+// DownloadMedia serves download_media: the session downloads the attachment into the media cache
+// on this request, or serves it from the cache, and answers its path and mime type. After a wipe
+// closed the store nothing is served.
+func (d *daemon) DownloadMedia(jid, id string) (string, string, error) {
+	if d.closed.Load() {
+		return "", "", errClosed
+	}
+	return d.session.DownloadMedia(jid, id)
 }
 
 // Send sends one text message through the session: sent with WhatsApp's id and timestamp, or the

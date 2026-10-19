@@ -5,11 +5,13 @@ package store
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	mathrand "math/rand/v2"
 
 	"github.com/google/uuid"
 	"github.com/zalando/go-keyring"
@@ -368,4 +370,29 @@ func (s *DeviceStore) secret(name string) ([]byte, error) {
 		return nil, fmt.Errorf("store: %s in the keyring is not valid base64: %w", name, err)
 	}
 	return secret, nil
+}
+
+// NewDevice returns an unpaired device with freshly generated keys, mirroring what whatsmeow's own
+// sqlstore container does. Nothing is persisted until PutDevice runs, which the pairing flow does
+// once a link succeeds — a device that was never linked leaves no trace.
+func (s *DeviceStore) NewDevice() *wastore.Device {
+	device := &wastore.Device{
+		Container:      s,
+		NoiseKey:       keys.NewKeyPair(),
+		IdentityKey:    keys.NewKeyPair(),
+		RegistrationID: mathrand.Uint32(),
+		AdvSecretKey:   randomBytes(32),
+	}
+	device.SignedPreKey = device.IdentityKey.CreateSignedPreKey(1)
+	return device
+}
+
+func randomBytes(n int) []byte {
+	buf := make([]byte, n)
+	if _, err := cryptorand.Read(buf); err != nil {
+		// crypto/rand.Read only fails if the kernel has no entropy source; there is nothing
+		// sensible to continue with, and a silently weak key would be worse than a crash.
+		panic(fmt.Sprintf("store: no randomness available: %v", err))
+	}
+	return buf
 }

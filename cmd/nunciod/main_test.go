@@ -48,7 +48,7 @@ func runMain(m *testing.M) int {
 	nunciodBin = filepath.Join(dir, "nunciod")
 	nuncioBin = filepath.Join(dir, "nuncio")
 
-	for _, target := range []struct{ out, pkg string }{{nunciodBin, "."}, {nuncioBin, "./nuncio"}} {
+	for _, target := range []struct{ out, pkg string }{{nunciodBin, "."}, {nuncioBin, "../nuncio"}} {
 		cmd := exec.Command("go", "build", "-o", target.out, target.pkg)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			fmt.Fprintf(os.Stderr, "go build %s: %v\n%s", target.pkg, err, out)

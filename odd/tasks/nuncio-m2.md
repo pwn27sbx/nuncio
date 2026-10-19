@@ -27,9 +27,9 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 | U7 | S8 daemon + wire (`mark_read`) | delegated writer; Risk items 1 and 3 → verifier | done: 14 mutants killed; verifier PASS S4/S5/S8, no blockers; parent reran the MarkRead tests | 5a53d30 |
 | U8 | S8 TUI + demo (send `mark_read` on open) | delegated writer, after U6 and U7 (started 15:58, before the 16:30 cut) | done: RED per rule, 8 mutants killed, cargo 92/0; final checks in L12 | this commit |
 | U9 | S9 (3), (4) | delegated writer (parallel) | done: RED per rule, 7 mutants killed; parent reran the MarkRead/Reconnect tests | 4fe21e2 |
-| U10 | S9 (6), (7), (8) + TUI handling of event_chat | delegated writer (parallel); Risk 3 → verifier | done: RED per rule, 14 mutants killed; verifier B1 (TUI lost the not-confirmed mark on the daemon's not_sent event) → one correction → recheck FIXED; A1 single-chat query, A4, A6 fixed in the same batch; parent reran `cargo test -p nuncio-tui` | this commit |
+| U10 | S9 (6), (7), (8) + TUI handling of event_chat | delegated writer (parallel); Risk 3 → verifier | done: RED per rule, 14 mutants killed; verifier B1 (TUI lost the not-confirmed mark on the daemon's not_sent event) → one correction → recheck FIXED; A1 single-chat query, A4, A6 fixed in the same batch; parent reran `cargo test -p nuncio-tui` | b8b48aa |
 | U11 | S9 (2), (5) | delegated writer (parallel); Risk 1 and 4 → verifier | done: RED per rule, 4 mutants killed; verifier PASS, no blockers (1500 race iterations, daemon exits after a wipe so the closed set never blocks a re-link); parent reran the store download tests with -race | 0d826a3 |
-| U12 | S9 (1) | after U9-U11 | open | |
+| U12 | S9 (1) | delegated writer, after U9-U11 | done: ~/Documents/nuncio-office-report-2026-10-19.md updated with M2 (outside the repo) | none |
 | U4 | S6 push + report | inline | done: final checks green (L8), pushed to origin/feat/m2-tui | this commit |
 
 ## Log

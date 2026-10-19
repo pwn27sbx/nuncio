@@ -11,6 +11,7 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 - S4 Wire additions needed by S1 that wire v1 lacks: in-chat search, reply (quote a message) and react. Additive only (new ops / optional fields); spec, fixtures and both contract suites change together (AGENTS.md). Assumption: the shape is the orchestrator's choice, recorded in L3.
 - S5 Hard rules from the handoff still hold: no real WhatsApp run, no keyring tests, no attribution trailer, no message text or full numbers in logs.
 - S6 Time box (owner, verbatim): "con el limite de tiempo de las 5 pm asi que 5 pm ya no debe haber nada aqui trabajandose y todo debe estar pusheado".
+- S7 (owner, 2026-10-19: "no podemos probar el TUI aqui?" → demo daemon proposal → "dale"): a demo daemon with invented chats, no WhatsApp, that answers sends, reactions, search and downloads, so the whole TUI flow can be tried by hand on the Mac.
 
 ## Tasks
 
@@ -19,6 +20,7 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 | U1 | S1 (list, conversation, send, keyboard, palette), S2 (sizes, emoji/RTL, 200 msgs) | delegated writer (context backstop + parallel with U2) | done: 10 app + 9 render tests, 7 mutants killed, clippy clean; parent reran `cargo test -p nuncio-tui` 26/0 | 1ff7ec1 |
 | U2 | S4 (search, reply, react: Go daemon + proto + Rust wire types) | delegated writer (context backstop + parallel with U1); Risk items 1 and 3 → independent verifier | done: RED per rule, 19 mutants killed; verifier S4 FAIL (B1) → one correction → recheck FIXED; S5 PASS; parent reran the B1 and outbox-transaction tests green | this commit |
 | U3 | S1 (reply/react/search/media in the TUI over U2's ops) | delegated writer, after U1+U2 (context backstop) | done except inline images (L6): RED per rule, 11 mutants killed, one correction batch (refused download/search), cargo 82/0; parent reran `cargo test -p nuncio-tui` | d866f0d |
+| U5 | S7 | delegated writer (context backstop) | done: 13 tests RED→GREEN, 5 mutants killed, smoke run over the socket, socket removed on SIGINT; parent reran `go test -count=1 ./cmd/nuncio-demo` | this commit |
 | U4 | S6 push + report | inline | done: final checks green (L8), pushed to origin/feat/m2-tui | this commit |
 
 ## Log
@@ -33,3 +35,4 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 - L6 U3 left out from S1: inline images of downloaded media in Ghostty. The `image` crate is built with `png` only (WhatsApp photos are JPEG) and a startup terminal query is a risk on foot/alacritty that only the Linux matrix can check. Media opens externally (`open`/`xdg-open`). Also: reply/react cannot target my own send that has no id yet.
 - L7 Follow-up commit bc65acf: reaction build errors no longer quote JIDs (GGA observation on 37f406b).
 - L8 Final checks on d866f0d (15:12): gofmt empty, go vet ok, CGO_ENABLED=0 build ok, `TMPDIR=/tmp go test ./...` all 6 packages ok, cargo fmt ok, clippy -D warnings clean, cargo test 82 passed / 0 failed, attribution grep empty. Next at home: the terminal matrix (foot/alacritty/ghostty) for S2/S3, inline images (L6, needs the `jpeg` feature of `image`), the U2 advisories in L4.
+- L9 (owner): "no podemos probar el TUI aqui? y ya no podemos avanzar anda mas aqui?" then "dale" to the demo daemon (S7, U5).

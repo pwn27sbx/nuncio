@@ -85,3 +85,16 @@ nuncio purge --confirm        the same without contacting WhatsApp, for a device
 go build ./cmd/nunciod
 cargo build --workspace
 ```
+
+## Try the TUI with the demo daemon
+
+`cmd/nuncio-demo` serves wire v1 with invented chats held in memory and has no WhatsApp code path
+(no network, no database, no keyring). It refuses to start while a real `nunciod` answers on the
+socket. In two terminals:
+
+```sh
+mkdir -m 700 -p /tmp/nuncio-demo && XDG_RUNTIME_DIR=/tmp/nuncio-demo go run ./cmd/nuncio-demo
+XDG_RUNTIME_DIR=/tmp/nuncio-demo cargo run -p nuncio-tui
+```
+
+See `crates/nuncio-tui/README.md` for what the demo answers.

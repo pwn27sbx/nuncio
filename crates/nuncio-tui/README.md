@@ -57,3 +57,30 @@ Everything works from the keyboard. `?` shows this list on screen.
 | `Tab` | switch between chats and conversation |
 | `?` | show or hide the key help |
 | `q`, `Ctrl-C` | quit |
+
+## Try the TUI with the demo daemon
+
+`nuncio-demo` (`cmd/nuncio-demo`) is a stand-in daemon with invented chats in memory and no
+WhatsApp code path: nothing is sent anywhere. From the repository root, in two terminals:
+
+```sh
+# terminal 1 (creates the runtime dir with mode 0700 if it is missing)
+mkdir -m 700 -p /tmp/nuncio-demo && XDG_RUNTIME_DIR=/tmp/nuncio-demo go run ./cmd/nuncio-demo
+# terminal 2
+XDG_RUNTIME_DIR=/tmp/nuncio-demo cargo run -p nuncio-tui
+```
+
+What it gives you to try:
+
+- Six chats with fake `555` numbers: one pinned, one muted, one archived, one group, one without a
+  name, several unread, and one with 240 messages; emoji/ZWJ, CJK and RTL text, a quoted reply, a
+  reaction, an image and a document.
+- A send is answered `sent` at once, and about 2 s later an invented reply arrives in that chat
+  (a live `event_message` and `event_unread`; `-reply-after 0` turns it off).
+- A text starting with `fail` ends `not sent`; `R` on it then sends it.
+- `e` reacts, `/` searches the open chat (every word, case-insensitive), `o` writes a small PNG or
+  text file under the runtime dir and opens it.
+- `wipe` (`nuncio logout`/`purge`) is refused. Like `nunciod`, opening a chat does not mark it read.
+
+`Ctrl-C` stops the demo; it removes its socket and its media files. It refuses to start without
+`XDG_RUNTIME_DIR` or while something answers on the socket (a real `nunciod`).

@@ -1,7 +1,7 @@
 # nuncio — M1 (core daemon), office session on the work Mac
 
 Objective: the Mac-safe part of M1 (tasks T1–T14 of the office handoff). Branch `feat/m1-core` from `ae35fea`.
-Delivery: one work-unit commit per task, no trailers, no push without the owner's OK. Runner: `TMPDIR=/tmp go test ./...` and `cargo test --workspace --exclude nuncio-desktop`.
+Delivery: `single-pr` (owner's choice, L7): one branch, one work-unit commit per task, no trailers, no push without the owner's OK. Runner: `TMPDIR=/tmp go test ./...` and `cargo test --workspace --exclude nuncio-desktop`.
 Source of record: the office handoff README (2026-10-19, kept outside the repo because it names the test number), sections 7 and 8.
 
 ## Specs
@@ -51,3 +51,5 @@ Source of record: the office handoff README (2026-10-19, kept outside the repo b
 - **L4** Receipt-driven review is on (global). Candidate consent for native review is asked per candidate (no pre-granted consent outside Misoku).
 - **L5** Known environmental failure (macOS only, pre-existing): `theme::watch_tests::a_theme_switch_is_noticed_within_500ms` (`left: Dark, right: Light`, theme.rs:498) and `theme::watch_tests::the_same_palette_is_not_emitted_twice` ("an unchanged palette must not be re-emitted", theme.rs:541) fail 6/6 runs after the baseline passed once; reproduced 3/3 on a clean `ae35fea` checkout, so not caused by M1 work. Likely cause (assumption, not proven): FSEvents delivers the creation events of the fixture files late, after the 250 ms settle, so the watcher re-reads and emits the initial dark palette. Not loosened (handoff 4: report, do not loosen). Rust count with it: 42 passed / 2 failed. Flaky, not deterministic: the full run after T2 passed 46/46.
 - **L6** Native assess needs `--untracked-scope=exclude` because of the untracked `.atl/` cache. Reviewed boundary stays `8b424bc` while commits are `under_budget`.
+- **L7** (owner, 2026-10-19, verbatim): "no necesitamos PRs apilados o encadenados es nuestro proyecto propio nadie mas que nosotros lo revisa, a lo mucho las RDD y GGA de gentle-orchetrator con lo que te dije que trabajes que vienen incluidas". Delivery strategy cached as `single-pr`: the ~400-line budget does not slice this branch; native RDD review still runs per commit whenever `review_due` is true.
+- **L8** (owner OK, 2026-10-19: "ok") GGA v2.10.1 set up: `AGENTS.md` (review rules from handoff section 8), project `.gga` (`*.go,*.rs`, tests included), local pre-commit hook `.git/hooks/pre-commit` (not tracked). T1–T3 predate the hook and were not GGA-reviewed.

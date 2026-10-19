@@ -1,0 +1,9 @@
+# Gentleman Guardian Angel: pre-commit review for nuncio.
+# Tests are reviewed too: they carry each task's acceptance criteria.
+
+PROVIDER="claude"
+FILE_PATTERNS="*.go,*.rs"
+EXCLUDE_PATTERNS="target/*"
+RULES_FILE="AGENTS.md"
+STRICT_MODE="true"
+TIMEOUT="300"

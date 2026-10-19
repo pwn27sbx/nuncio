@@ -243,7 +243,8 @@ func (s *Session) set(st State) {
 }
 
 // Close cancels a pending reconnect, disconnects a started session and closes the device store.
-// Nothing reconnects after it.
+// Nothing reconnects after it, and a linked session reports offline from then on (an unlinked
+// one stays unlinked).
 func (s *Session) Close() {
 	s.mu.Lock()
 	started := s.started
@@ -258,6 +259,12 @@ func (s *Session) Close() {
 		s.connMu.Lock()
 		s.client.Disconnect()
 		s.connMu.Unlock()
+	}
+	s.mu.Lock()
+	linked := s.state == StateLinked
+	s.mu.Unlock()
+	if linked {
+		s.set(StateOffline)
 	}
 	if s.closeStore != nil {
 		_ = s.closeStore()

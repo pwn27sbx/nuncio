@@ -34,10 +34,14 @@ type fakeClient struct {
 	// logouts counts Logout calls; Logout answers logoutErr.
 	logouts   int
 	logoutErr error
+	onLogout  func() // runs inside Logout, when set
 }
 
 func (f *fakeClient) Logout(context.Context) error {
 	f.logouts++
+	if f.onLogout != nil {
+		f.onLogout()
+	}
 	return f.logoutErr
 }
 

@@ -3,7 +3,9 @@ package wa
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	waevents "go.mau.fi/whatsmeow/types/events"
 
@@ -80,5 +82,87 @@ func TestLogoutThatWhatsAppDoesNotConfirmKeepsTheSession(t *testing.T) {
 	}
 	if s.StopReason() != "" {
 		t.Errorf("StopReason() after a refused Logout = %q, want none", s.StopReason())
+	}
+}
+
+// The stop must be recorded while connMu is held: a reconnect waiting on connMu then finds the
+// session stopped. Checked from inside the stop's log line, the one hook in that window.
+func TestLogoutRecordsTheStopWhileHoldingTheConnectionLock(t *testing.T) {
+	fake := &fakeClient{device: true}
+	s := NewSession(fake, nil, nil)
+	t.Cleanup(s.Close)
+	heldAtStop, logged := false, false
+	s.logf = func(string, ...any) {
+		logged = true
+		if s.connMu.TryLock() {
+			s.connMu.Unlock()
+			return
+		}
+		heldAtStop = true
+	}
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := s.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if !logged || !heldAtStop {
+		t.Errorf("stop logged=%t with connMu held=%t; the stop must happen before connMu is released", logged, heldAtStop)
+	}
+}
+
+// A drop during the unlink schedules a reconnect; it must not connect a logged-out device.
+func TestAReconnectQueuedDuringLogoutNeverConnects(t *testing.T) {
+	fake := &fakeClient{device: true}
+	s := NewSession(fake, nil, nil)
+	t.Cleanup(s.Close)
+	var pending sync.WaitGroup
+	s.after = func(_ time.Duration, f func()) func() bool {
+		pending.Add(1)
+		go func() { defer pending.Done(); f() }()
+		return func() bool { return false }
+	}
+	s.logf = t.Logf
+	fake.onLogout = func() { fake.emit(&waevents.Disconnected{}) }
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := s.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	pending.Wait()
+	if fake.connects != 1 {
+		t.Errorf("Connect called %d times, want only the first one: a logged-out device never reconnects", fake.connects)
+	}
+	if got := s.State(); got != StateUnlinked {
+		t.Errorf("State() = %q, want %q", got, StateUnlinked)
+	}
+}
+
+func TestCloseReportsALinkedSessionOffline(t *testing.T) {
+	fake := &fakeClient{device: true}
+	s := NewSession(fake, nil, nil)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	s.Close()
+	if got := s.State(); got != StateOffline {
+		t.Errorf("State() after Close = %q, want %q: nothing is connected any more", got, StateOffline)
+	}
+}
+
+func TestCloseKeepsALoggedOutSessionUnlinked(t *testing.T) {
+	fake := &fakeClient{device: true}
+	s := NewSession(fake, nil, nil)
+	s.logf = t.Logf
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if err := s.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	s.Close()
+	if got := s.State(); got != StateUnlinked {
+		t.Errorf("State() after Logout and Close = %q, want %q", got, StateUnlinked)
 	}
 }

@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -265,7 +266,13 @@ type daemon struct {
 	dataDir string
 	keyring store.Keyring
 	socket  string
+	// closed is set once Wipe closed the session and its store: from then on nothing is served
+	// from the store, even if the wipe failed and the daemon keeps serving.
+	closed atomic.Bool
 }
+
+// errClosed answers a store read after a wipe closed the store.
+var errClosed = errors.New("the local data is being deleted; run nuncio purge --confirm to finish")
 
 // sessionState is what the daemon reads from, and sends through, its WhatsApp session.
 type sessionState interface {
@@ -301,7 +308,7 @@ func (d *daemon) Status() ipc.Status {
 }
 
 func (d *daemon) unread() int {
-	if d.db == nil {
+	if d.db == nil || d.closed.Load() {
 		return 0
 	}
 	n, err := store.TotalUnread(d.db)
@@ -314,10 +321,14 @@ func (d *daemon) unread() int {
 
 // Chats lists the stored chats, newest message first, each with its unread
 // count and last message. Without a store it is the fixture list, the answer
-// while unlinked. A store failure is logged and answers no chats.
+// while unlinked. A store failure, or a store a wipe closed, is logged and answers no chats.
 func (d *daemon) Chats() []ipc.Chat {
 	if d.db == nil {
 		return d.chats
+	}
+	if d.closed.Load() {
+		log.Print(errClosed)
+		return nil
 	}
 	rows, err := store.ListChats(d.db, ipc.MaxChatLimit)
 	if err != nil {
@@ -346,6 +357,9 @@ func (d *daemon) Chats() []ipc.Chat {
 func (d *daemon) Messages(jid string, limit int) ([]ipc.Message, error) {
 	if d.db == nil {
 		return nil, nil
+	}
+	if d.closed.Load() {
+		return nil, errClosed
 	}
 	rows, err := store.ListMessages(d.db, jid, limit)
 	if err != nil {
@@ -382,7 +396,9 @@ const logoutTimeout = 20 * time.Second
 // tell WhatsApp to unlink the device through this daemon's session, and stop with nothing deleted
 // if it does not confirm; (2) close the session and the store, delete the keyring items and (3)
 // the database, media cache and exports; (4) remove the socket. ServeConn then answers wiped and
-// serve returns, so the daemon exits. Without unlink WhatsApp is never contacted.
+// serve returns, so the daemon exits. Without unlink WhatsApp is never contacted. When the
+// deletion fails the daemon keeps serving with the session closed (offline, or unlinked after a
+// confirmed logout) and no store, so a retried purge through it can finish.
 func (d *daemon) Wipe(unlink bool) error {
 	if d.dataDir == "" || d.socket == "" || d.keyring == nil {
 		return errors.New("this daemon cannot wipe: it does not know its data dir, keyring or socket")
@@ -395,6 +411,7 @@ func (d *daemon) Wipe(unlink bool) error {
 		}
 	}
 	d.session.Close()
+	d.closed.Store(true)
 	if err := store.Wipe(d.dataDir, d.keyring); err != nil {
 		log.Print(err)
 		return errors.New("could not delete all of nuncio's local data; run nuncio purge --confirm to finish")

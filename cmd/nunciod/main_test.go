@@ -1235,6 +1235,9 @@ func newWipeRig(t *testing.T, configure func(*wipeRig)) *wipeRig {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
+	// Closing the listener must not unlink the socket: only the daemon's own removal may, so a
+	// test can tell whether it happened.
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { _ = serve(ctx, ln, d, events); close(r.served) }()
 	t.Cleanup(func() { cancel(); <-r.served })
@@ -1252,13 +1255,15 @@ func (r *wipeRig) assertNothingLeft(t *testing.T) {
 	if n := r.keyring.count(); n != 0 {
 		t.Errorf("keyring holds %d items, want 0", n)
 	}
-	if _, err := os.Lstat(r.socket); !errors.Is(err, fs.ErrNotExist) {
-		t.Errorf("socket %s still exists: %v", r.socket, err)
-	}
 	select {
 	case <-r.served:
 	case <-time.After(5 * time.Second):
 		t.Error("the daemon kept serving after the wipe")
+	}
+	// Checked after the listener closed: it does not unlink the socket (see newWipeRig), so only
+	// the daemon's removal makes it go.
+	if _, err := os.Lstat(r.socket); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("socket %s still exists: %v", r.socket, err)
 	}
 }
 
@@ -1356,4 +1361,39 @@ func TestLogoutWhileUnlinkedAnswersNotLinkedAndDeletesNothing(t *testing.T) {
 		t.Errorf("client Logout called %d times while unlinked, want 0", n)
 	}
 	r.assertNothingDeleted(t)
+}
+
+// A wipe that fails after the session was closed must not leave the daemon claiming a live,
+// linked session or serving the closed store; a retry once the cause is gone finishes the job.
+func TestFailedLocalWipeDoesNotReportLinkedAndARetryFinishes(t *testing.T) {
+	r := newWipeRig(t, nil)
+	if err := os.Chmod(r.dataDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(r.dataDir, 0o700) })
+	c := dial(t, r.socket)
+	_, err := c.Wipe(false)
+	var perr *ipc.ProtocolError
+	if !errors.As(err, &perr) || !strings.Contains(perr.Message, "nuncio purge --confirm") {
+		t.Fatalf("Wipe(false) into a read-only data dir = %v, want an error with the purge hint", err)
+	}
+	st, err := c.Status()
+	if err != nil {
+		t.Fatalf("Status after a failed wipe: %v", err)
+	}
+	if st.Session == ipc.SessionLinked {
+		t.Errorf("status after a failed wipe = %+v; the session is closed", st)
+	}
+	_, err = c.Messages("15551230001@s.whatsapp.net", 10)
+	if !errors.As(err, &perr) || perr.Code != ipc.CodeInternal || !strings.Contains(perr.Message, "nuncio purge --confirm") {
+		t.Errorf("Messages after a failed wipe = %v, want an internal error with the purge hint", err)
+	}
+
+	if err := os.Chmod(r.dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Wipe(false); err != nil {
+		t.Fatalf("retried Wipe(false): %v", err)
+	}
+	r.assertNothingLeft(t)
 }

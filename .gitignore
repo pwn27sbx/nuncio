@@ -1,0 +1,13 @@
+# Rust
+/target/
+**/target/
+Cargo.lock.bak
+
+# Go
+/nunciod
+/nuncio
+*.test
+
+# local build + spike scratch
+/.local/
+*.log

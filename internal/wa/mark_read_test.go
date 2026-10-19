@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -93,6 +94,58 @@ func TestMarkReadInAGroupSendsOneReceiptPerSenderAndClearsM1RowsWithoutOne(t *te
 	}
 	if n, _ := store.UnreadCount(s.Store(), group.String()); n != 0 {
 		t.Errorf("unread of the group = %d, want 0 (OLD1 cleared too)", n)
+	}
+}
+
+// unreadIDs stores n unread incoming messages of sender in chat, a second apart, and returns their
+// ids oldest first.
+func unreadIDs(t *testing.T, fake *fakeClient, chat, sender types.JID, n int) []string {
+	t.Helper()
+	ids := make([]string, n)
+	for i := range n {
+		ids[i] = fmt.Sprintf("M%03d", i)
+		storeIncomingFrom(t, fake, chat, sender, ids[i], t0.Add(time.Duration(i)*time.Second))
+	}
+	return ids
+}
+
+func TestMarkReadSendsAtMostFiftyIdsPerReceiptOldestFirst(t *testing.T) {
+	s, fake, _ := subscribedSession(t)
+	ids := unreadIDs(t, fake, ada, ada, 120)
+
+	if _, err := s.MarkRead(ada.String()); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	prefix := "15551230001@s.whatsapp.net 15551230001@s.whatsapp.net read "
+	want := []string{
+		prefix + strings.Join(ids[:50], ","),
+		prefix + strings.Join(ids[50:100], ","),
+		prefix + strings.Join(ids[100:], ","),
+	}
+	if got := fake.markReadCalls; !reflect.DeepEqual(got, want) {
+		t.Errorf("receipts = %q,\nwant %q", got, want)
+	}
+	if n, _ := store.UnreadCount(s.Store(), ada.String()); n != 0 {
+		t.Errorf("unread of ada = %d, want 0", n)
+	}
+}
+
+func TestMarkReadStopsAtTheFirstFailedChunkAndKeepsTheChatUnread(t *testing.T) {
+	// The 240 stored-message events overflow the test subscriber, so events are not checked here;
+	// TestMarkReadThatCannotBeSentKeepsTheChatUnread covers "no event_unread after a failure".
+	s, fake, _ := subscribedSession(t)
+	unreadIDs(t, fake, ada, ada, 120)
+	fake.markReadErr, fake.markReadFailAt = errors.New("socket closed"), 2
+	before := readState(t, s.Store())
+
+	if _, err := s.MarkRead(ada.String()); !errors.Is(err, errReceiptNotSent) {
+		t.Errorf("MarkRead = %v, want %v", err, errReceiptNotSent)
+	}
+	if got := len(fake.markReadCalls); got != 2 {
+		t.Errorf("%d receipts sent, want 2: nothing after the failed second chunk", got)
+	}
+	if got := readState(t, s.Store()); got != before {
+		t.Errorf("read state changed after a failed chunk")
 	}
 }
 

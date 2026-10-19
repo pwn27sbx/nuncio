@@ -71,8 +71,10 @@ type Client interface {
 // and never starts a link: with no device it stays unlinked and Connect is never called.
 //
 // A dropped or failed connection reconnects after the Backoff delay, one pending attempt at a
-// time. A logout, a temporary ban, a replaced stream or an outdated client stops reconnecting for
-// good, and StopReason says why; the daemon logs that reason once. Surfacing it to clients (a
+// time, and each failed attempt is logged once with its number, the next delay and the error's
+// type (never its text, which can carry a JID). A logout, a temporary ban, a replaced stream, an
+// outdated client or a connection WhatsApp rejects (any other ConnectFailure) stops reconnecting
+// for good, and StopReason says why; the daemon logs that reason once. Surfacing it to clients (a
 // wire field) is a follow-up.
 type Session struct {
 	client     Client
@@ -91,7 +93,7 @@ type Session struct {
 	// after schedules f once after d and returns its cancel; time.AfterFunc outside tests.
 	after  func(d time.Duration, f func()) (cancel func() bool)
 	cancel func() bool // the pending reconnect, nil when none
-	// logf reports a stop, once; log.Printf outside tests.
+	// logf reports a stop, once, and each failed reconnect attempt; log.Printf outside tests.
 	logf func(format string, args ...any)
 	// media serves DownloadMedia; nil until SetMedia.
 	media *media.Cache
@@ -230,33 +232,43 @@ func (s *Session) stop(reason string, st State) {
 }
 
 // reconnectLater schedules one reconnect after the backoff delay, unless the session is closed,
-// stopped, or already has one pending (one drop can arrive as several events).
-func (s *Session) reconnectLater() {
+// stopped, or already has one pending (one drop can arrive as several events). It reports the
+// delay, and ok false when it scheduled nothing.
+func (s *Session) reconnectLater() (delay time.Duration, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if !s.started || s.cancel != nil {
-		return
+		return 0, false
 	}
-	delay, ok := s.backoff.Next()
+	delay, ok = s.backoff.Next()
 	if !ok {
-		return
+		return 0, false
 	}
 	s.cancel = s.after(delay, s.reconnect)
+	return delay, true
 }
 
-// reconnect is the timer's attempt; a failed one schedules the next.
+// reconnect is the timer's attempt; a failed one is logged once and schedules the next.
 func (s *Session) reconnect() {
 	s.connMu.Lock()
 	defer s.connMu.Unlock()
 	s.mu.Lock()
 	s.cancel = nil
 	run := s.started && s.backoff.Stopped() == ""
+	// The attempts since the last stable connection: this one is the latest Next handed out.
+	attempt := s.backoff.attempt
+	logf := s.logf
 	s.mu.Unlock()
 	if !run {
 		return
 	}
 	if err := s.client.Connect(); err != nil {
-		s.reconnectLater()
+		// The error's type only: whatsmeow's text can carry a JID.
+		if delay, ok := s.reconnectLater(); ok {
+			logf("wa: reconnect attempt %d failed (%T); next attempt in %s", attempt, err, delay.Round(time.Millisecond))
+		} else {
+			logf("wa: reconnect attempt %d failed (%T); no further attempt", attempt, err)
+		}
 	}
 }
 

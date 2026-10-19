@@ -29,11 +29,13 @@ type fakeClient struct {
 	disconnects int
 	handlers    []func(any)
 	// markReads counts MarkRead calls; markReadCalls records each as "chat sender type id,id" and
-	// markReadAt the time of the last one. MarkRead answers markReadErr.
-	markReads     int
-	markReadCalls []string
-	markReadAt    time.Time
-	markReadErr   error
+	// markReadAt the time of the last one. MarkRead answers markReadErr, or, when markReadFailAt is
+	// above 0, only its markReadFailAt-th call (from 1) fails, with markReadErr.
+	markReads      int
+	markReadCalls  []string
+	markReadAt     time.Time
+	markReadErr    error
+	markReadFailAt int
 	// readReceipts is the account's read-receipt privacy ("" reads as "all"); ReadReceiptsPrivacy
 	// counts its calls in privacyAsks and answers privacyErr when set.
 	readReceipts string
@@ -154,6 +156,9 @@ func (f *fakeClient) MarkRead(_ context.Context, chat, sender string, ids []stri
 	f.markReads++
 	f.markReadCalls = append(f.markReadCalls, chat+" "+sender+" "+receiptType+" "+strings.Join(ids, ","))
 	f.markReadAt = at
+	if f.markReadFailAt > 0 && f.markReads != f.markReadFailAt {
+		return nil
+	}
 	return f.markReadErr
 }
 
@@ -498,6 +503,39 @@ func TestRepeatedFailuresGrowTheDelayUpToTheCeiling(t *testing.T) {
 	}
 	if fake.connects != 13 {
 		t.Errorf("Connect was called %d times, want 13 (the start and 12 attempts)", fake.connects)
+	}
+}
+
+// A failed reconnect attempt stays visible: one log line with the attempt number, the next delay
+// and the error's type only, never the error's text, which can carry a JID.
+func TestAFailedReconnectAttemptIsLoggedOnceWithoutNumbers(t *testing.T) {
+	fake := &fakeClient{device: true}
+	s, timers, _ := reconnectingSession(t, fake)
+	var lines []string
+	s.logf = func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
+	fake.connectErr = errors.New("dial 15551230001@s.whatsapp.net: connection refused")
+	fake.emit(&waevents.Disconnected{})
+	if len(lines) != 0 {
+		t.Fatalf("logged %q on the drop, want nothing before an attempt failed", lines)
+	}
+	timers.fire(t) // attempt 1 fails
+	timers.fire(t) // attempt 2 fails
+	want := []string{
+		fmt.Sprintf("wa: reconnect attempt 1 failed (*errors.errorString); next attempt in %s", timers.delays[1].Round(time.Millisecond)),
+		fmt.Sprintf("wa: reconnect attempt 2 failed (*errors.errorString); next attempt in %s", timers.delays[2].Round(time.Millisecond)),
+	}
+	if !reflect.DeepEqual(lines, want) {
+		t.Errorf("log = %q, want %q", lines, want)
+	}
+	for _, l := range lines {
+		if strings.Contains(l, "1555123") || strings.Contains(l, "whatsapp.net") {
+			t.Errorf("log line %q carries the error's JID", l)
+		}
+	}
+	fake.connectErr = nil
+	timers.fire(t) // attempt 3 connects
+	if len(lines) != 2 {
+		t.Errorf("log after a successful attempt = %q, want no new line", lines)
 	}
 }
 

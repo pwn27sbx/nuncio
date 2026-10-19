@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"time"
 
 	"go.mau.fi/whatsmeow/types"
@@ -16,6 +17,11 @@ import (
 // markReadTimeout bounds the whole mark_read (the privacy read and every receipt), so the answer
 // reaches a client inside its ordinary 5 s read bound.
 const markReadTimeout = 4 * time.Second
+
+// maxReceiptIDs caps the message ids one read receipt carries. A receipt naming hundreds of ids is
+// not what the official clients send after a long absence, and an unusual traffic shape is a ban
+// risk, so a longer backlog goes out as consecutive receipts of at most this many ids.
+const maxReceiptIDs = 50
 
 var (
 	// ErrMarkReadOffline: read receipts are never queued, so a chat opened while offline stays
@@ -32,6 +38,12 @@ var (
 // receipts go out (AGENTS.md), and nothing else sends one. It sends WhatsApp one read receipt per
 // sender for the chat's unread incoming messages, as the official clients do, then marks those
 // messages read in the store, publishes event_unread and returns the new total unread count.
+//
+// One receipt carries at most 50 ids (maxReceiptIDs): a sender with more unread messages gets
+// consecutive receipts of at most 50 ids each, oldest first, before the next sender's. They are
+// still one operation: the first receipt WhatsApp does not take ends it, nothing after it is sent,
+// nothing is retried, and the store changes only after every receipt went out; the 4 s bound
+// (markReadTimeout) covers the privacy read and all the receipts together.
 //
 // The receipt type follows the account's read-receipt privacy: with read receipts off it is
 // read-self, so the user's other devices mark the chat read but the sender sees no blue ticks. A
@@ -60,7 +72,7 @@ func (s *Session) MarkRead(jid string) (int, error) {
 		return 0, ErrMarkReadOffline
 	}
 
-	// One receipt per sender, in the order of each sender's oldest unread message.
+	// The receipts of one sender after another, in the order of each sender's oldest unread message.
 	var senders []string
 	bySender := map[string][]string{}
 	ids := make([]string, 0, len(unread))
@@ -90,10 +102,12 @@ func (s *Session) MarkRead(jid string) (int, error) {
 		}
 		now := time.Now()
 		for _, sender := range senders {
-			if err := s.client.MarkRead(ctx, jid, sender, bySender[sender], now, receipt); err != nil {
-				// The error's type only: whatsmeow's text can carry a JID.
-				log.Printf("wa: a read receipt failed (%T)", err)
-				return 0, errReceiptNotSent
+			for chunk := range slices.Chunk(bySender[sender], maxReceiptIDs) {
+				if err := s.client.MarkRead(ctx, jid, sender, chunk, now, receipt); err != nil {
+					// The error's type only: whatsmeow's text can carry a JID.
+					log.Printf("wa: a read receipt failed (%T)", err)
+					return 0, errReceiptNotSent
+				}
 			}
 		}
 	}

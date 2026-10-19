@@ -5,13 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"testing"
-
-	// The pure-Go SQLite driver under test: no cgo, no system libsqlite3.
-	_ "modernc.org/sqlite"
 )
-
-// driverName is the pure-Go SQLite driver this project uses.
-const driverName = "sqlite"
 
 // openTestDB opens a throwaway SQLite database in the test's temp directory.
 func openTestDB(t *testing.T) *sql.DB {

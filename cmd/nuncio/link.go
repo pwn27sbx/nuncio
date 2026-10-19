@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"flag"
 	"fmt"
 	"os"
@@ -14,8 +13,8 @@ import (
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	waevents "go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
-	_ "modernc.org/sqlite"
 
+	"github.com/pwn27sbx/nuncio/internal/store"
 	"github.com/pwn27sbx/nuncio/internal/wa"
 )
 
@@ -52,7 +51,7 @@ func linkCommand(args []string) int {
 		fmt.Fprintln(os.Stderr, "nuncio link:", err)
 		return 1
 	}
-	db, err := openStoreDB(filepath.Join(dataDir, "nuncio.db"))
+	db, err := store.Open(filepath.Join(dataDir, "nuncio.db"))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "nuncio link:", err)
 		return 1
@@ -222,17 +221,4 @@ func nuncioDataDir() (string, error) {
 		return "", fmt.Errorf("cannot create %s: %w", dir, err)
 	}
 	return dir, nil
-}
-
-func openStoreDB(path string) (*sql.DB, error) {
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, fmt.Errorf("cannot open %s: %w", path, err)
-	}
-	db.SetMaxOpenConns(1) // one connection, so per-connection pragmas such as foreign_keys hold
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON`); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("cannot prepare %s: %w", path, err)
-	}
-	return db, nil
 }

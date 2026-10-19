@@ -6,9 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"go.mau.fi/whatsmeow"
 	wastore "go.mau.fi/whatsmeow/store"
@@ -42,22 +44,48 @@ type Client interface {
 
 // Session is the daemon's one WhatsApp session. It connects only a device that is already linked
 // and never starts a link: with no device it stays unlinked and Connect is never called.
+//
+// A dropped or failed connection reconnects after the Backoff delay, one pending attempt at a
+// time. A logout, a temporary ban, a replaced stream or an outdated client stops reconnecting for
+// good, and StopReason says why; the daemon logs that reason once. Surfacing it to clients (a
+// wire field) is a follow-up.
 type Session struct {
 	client     Client
 	db         *sql.DB
 	closeStore func() error
 
+	// connMu serialises a reconnect's Connect with Close's Disconnect, so nothing connects again
+	// once Close has run.
+	connMu sync.Mutex
+
 	mu      sync.Mutex
 	state   State
 	started bool
 	events  *ipc.Broker
+	backoff *Backoff
+	// after schedules f once after d and returns its cancel; time.AfterFunc outside tests.
+	after  func(d time.Duration, f func()) (cancel func() bool)
+	cancel func() bool // the pending reconnect, nil when none
+	// logf reports a stop, once; log.Printf outside tests.
+	logf func(format string, args ...any)
 }
 
 // NewSession wraps client, which may be nil for "no device store at all". db is the message
 // store that incoming messages are saved to, nil for none. closeStore, when not nil, runs on Close
 // after the client is disconnected.
 func NewSession(client Client, db *sql.DB, closeStore func() error) *Session {
-	return &Session{client: client, db: db, closeStore: closeStore, state: StateUnlinked}
+	return &Session{client: client, db: db, closeStore: closeStore, state: StateUnlinked,
+		backoff: NewBackoff(), after: afterFunc, logf: log.Printf}
+}
+
+func afterFunc(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
+
+// StopReason is why the session stopped reconnecting for good (logged out, banned, stream
+// replaced, client out of date), or "" while it reconnects.
+func (s *Session) StopReason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.backoff.Stopped()
 }
 
 // SetEvents makes the session publish its events to b: event_connection when the state changes,
@@ -80,8 +108,8 @@ func (s *Session) publish(frame any) {
 // Store is the message store, or nil when there is no database (unlinked).
 func (s *Session) Store() *sql.DB { return s.db }
 
-// Start connects a stored device. It returns the connect error, if any, and leaves the session
-// offline; reconnecting is not its job.
+// Start connects a stored device. It returns the connect error, if any, leaves the session
+// offline and schedules a reconnect after the first backoff delay.
 func (s *Session) Start() error {
 	if s.client == nil || !s.client.HasDevice() {
 		s.set(StateUnlinked)
@@ -92,10 +120,14 @@ func (s *Session) Start() error {
 	s.mu.Unlock()
 	// Subscribe before Connect, and count as offline until the Connected event arrives.
 	events := Events{
-		Connected:    func() { s.set(StateLinked) },
-		Disconnected: func() { s.set(StateOffline) },
-		LoggedOut:    func() { s.set(StateUnlinked) },
-		Dropped:      func() { s.set(StateOffline) },
+		Connected:    s.connected,
+		Disconnected: s.dropped,
+		LoggedOut:    func() { s.stop("logged out", StateUnlinked) },
+		// A replaced stream means another connection of this same device (a second nunciod, or
+		// `nuncio link` reusing the device) took the session over. Reconnecting would take it back,
+		// the other side would do the same, and the two would replace each other in a loop: stop
+		// and say why instead.
+		Stopped: func(reason string) { s.stop(reason, StateOffline) },
 	}
 	if s.db != nil {
 		events.Message = s.storeMessage
@@ -104,9 +136,84 @@ func (s *Session) Start() error {
 	s.set(StateOffline)
 	if err := s.client.Connect(); err != nil {
 		s.set(StateOffline)
+		s.reconnectLater()
 		return fmt.Errorf("wa: connecting the linked device: %w", err)
 	}
 	return nil
+}
+
+// connected records a connection that came up; one that lasts resets the backoff.
+func (s *Session) connected() {
+	s.mu.Lock()
+	s.backoff.Connected()
+	s.mu.Unlock()
+	s.set(StateLinked)
+}
+
+// dropped handles a lost or failed connection: offline, and one reconnect after the backoff
+// delay. After a stop it changes nothing, so the stop's state and reason stay visible.
+func (s *Session) dropped() {
+	s.mu.Lock()
+	stopped := s.backoff.Stopped() != ""
+	s.mu.Unlock()
+	if stopped {
+		return
+	}
+	s.set(StateOffline)
+	s.reconnectLater()
+}
+
+// stop ends reconnecting for good, cancels a pending reconnect, logs the reason once and reports
+// st. A later terminal event still sets its state but keeps the first reason and logs nothing.
+func (s *Session) stop(reason string, st State) {
+	s.mu.Lock()
+	first := s.backoff.Stopped() == ""
+	if first {
+		s.backoff.Stop(reason)
+	}
+	cancel := s.cancel
+	s.cancel = nil
+	logf := s.logf
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if first {
+		// reason carries whatsmeow's codes and ban expiry only: no JID, number or message text.
+		logf("wa: stopped reconnecting: %s", reason)
+	}
+	s.set(st)
+}
+
+// reconnectLater schedules one reconnect after the backoff delay, unless the session is closed,
+// stopped, or already has one pending (one drop can arrive as several events).
+func (s *Session) reconnectLater() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.started || s.cancel != nil {
+		return
+	}
+	delay, ok := s.backoff.Next()
+	if !ok {
+		return
+	}
+	s.cancel = s.after(delay, s.reconnect)
+}
+
+// reconnect is the timer's attempt; a failed one schedules the next.
+func (s *Session) reconnect() {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	s.mu.Lock()
+	s.cancel = nil
+	run := s.started && s.backoff.Stopped() == ""
+	s.mu.Unlock()
+	if !run {
+		return
+	}
+	if err := s.client.Connect(); err != nil {
+		s.reconnectLater()
+	}
 }
 
 // State is the current session state; safe for concurrent use.
@@ -126,14 +233,22 @@ func (s *Session) set(st State) {
 	}
 }
 
-// Close disconnects a started session and closes the device store.
+// Close cancels a pending reconnect, disconnects a started session and closes the device store.
+// Nothing reconnects after it.
 func (s *Session) Close() {
 	s.mu.Lock()
 	started := s.started
 	s.started = false
+	cancel := s.cancel
+	s.cancel = nil
 	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	if started {
+		s.connMu.Lock()
 		s.client.Disconnect()
+		s.connMu.Unlock()
 	}
 	if s.closeStore != nil {
 		_ = s.closeStore()
@@ -194,8 +309,10 @@ func OpenSession(ctx context.Context, path string) (*Session, error) {
 		return nil, err
 	}
 	client := whatsmeow.NewClient(device, nil)
-	// whatsmeow reconnects on its own by default; nuncio's capped backoff replaces that, and until
-	// it exists a dropped session stays offline instead of retrying silently.
+	// whatsmeow reconnects on its own by default, with no ceiling and no stop on bans; the
+	// Session's capped Backoff replaces that loop. whatsmeow's Connect sends no presence by itself
+	// (only an explicit SendPresence does, and Client has no such call), so the account is never
+	// marked online on connect.
 	client.EnableAutoReconnect = false
 	return NewSession(whatsmeowClient{client}, db, db.Close), nil
 }

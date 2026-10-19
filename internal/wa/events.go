@@ -14,9 +14,10 @@ type Events struct {
 	Disconnected func()
 	// LoggedOut: the device was unlinked (from the phone or by the server).
 	LoggedOut func()
-	// Dropped: the session ended without a Disconnected event and without a logout: a temporary
-	// ban, the stream replaced by another connection, or a failed connect.
-	Dropped func()
+	// Stopped: the server ended the session in a way a reconnect must not fight: a temporary ban,
+	// the stream replaced by another connection, a client too old to be accepted, or a rejected
+	// connect. reason is a short description (codes and expiry only, no personal data).
+	Stopped func(reason string)
 	Message func(*waevents.Message)
 }
 
@@ -39,9 +40,24 @@ func (e Events) Handle(raw any) {
 		if e.LoggedOut != nil {
 			e.LoggedOut()
 		}
-	case *waevents.TemporaryBan, *waevents.StreamReplaced, *waevents.ConnectFailure:
-		if e.Dropped != nil {
-			e.Dropped()
+	case *waevents.TemporaryBan:
+		if e.Stopped != nil {
+			e.Stopped(v.String())
+		}
+	case *waevents.StreamReplaced:
+		if e.Stopped != nil {
+			e.Stopped("stream replaced by another connection of this device")
+		}
+	case *waevents.ClientOutdated:
+		if e.Stopped != nil {
+			e.Stopped("client is out of date")
+		}
+	case *waevents.ConnectFailure:
+		// whatsmeow emits this only for codes it does not handle itself (e.g. 400, 409, 415, 418,
+		// 501), after it already gave up on the connection; the retryable 500 and 503 arrive as
+		// Disconnected instead. Retrying a server rejection would only repeat it.
+		if e.Stopped != nil {
+			e.Stopped("connect rejected: " + v.Reason.String())
 		}
 	case *waevents.Message:
 		if e.Message != nil {

@@ -112,7 +112,8 @@ func run() error {
 	}
 
 	// Connect only once this process is the one instance, so a second daemon
-	// never opens a competing session. A failed connect leaves it offline.
+	// never opens a competing session. A failed connect leaves it offline and
+	// retries after the backoff delay.
 	if err := session.Start(); err != nil {
 		log.Print(err)
 	}

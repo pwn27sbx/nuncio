@@ -1,8 +1,13 @@
 [package]
 name = "nuncio-tui"
+description = "nuncio's ratatui terminal client"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+nuncio-client = { path = "../nuncio-client" }
+ratatui = "0.30"
+ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png"] }

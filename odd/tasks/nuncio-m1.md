@@ -37,7 +37,7 @@ Source of record: the office handoff README (2026-10-19, kept outside the repo b
 | T6a | S6 | delegated (opus) | done | see commit; allow-list `replyable`: direct chats on `s.whatsapp.net` or `lid` only; RED 6/8 cases with a stub returning true; 6 mutants killed, parent re-ran "allow BroadcastServer": killed by status update + broadcast list; the skip-and-keep-waiting loop in `listen` has no test (needs a real client, Risk item 6); approved fix 1: `nuncio link` S1 auto-reply only to direct user chats |
 | T6b | S6 | delegated (opus) | done | see commit; RED 4/4 subtests stayed `linked`; 6 mutants killed, parent re-ran "LoggedOut sets offline": killed by logged_out_reports_unlinked; approved fix 2: LoggedOut → unlinked; TemporaryBan/StreamReplaced/ConnectFailure → offline |
 | T7 | S7 | delegated (opus) | done | see commit; text + extended-text stored, from-me never unread, duplicates once, status@broadcast and other non-chat jids ignored (`ipc.ValidJID`), `messages` op served with its corners, `chats`/`messages`/unread from the store when one exists (fixture only while unlinked), `Session.MarkChatRead` sends no receipt (no wire op yet); RED on 11 tests; 15 mutants killed, parent re-ran "jid accepts any server": killed by TestServeConnRejectsAJIDThatIsNotWhatsAppAndKeepsServing; live D-Bus UnreadCount and UnreadChanged left to T8 |
-| T8 | S8 | inline | pending | |
+| T8 | S8 | delegated (opus) | in progress | socket event stream (Go broker + Rust receive); D-Bus `UnreadChanged` is a separate Linux unit |
 | T9 | S9 | inline | pending | |
 | T10a | S10 | delegated (opus) | done | see commit; pure policy: base 2 s, ceiling 5 min, stable 1 min, equal jitter in [s/2, s) (full jitter rejected: near-zero delays); RED 5/5 with a constant stub; 6 mutants killed; parent verified on a clean HEAD worktree (T7 had the package mid-edit) |
 | T10 | S10 | delegated | pending | wiring into the Session after T7 (shares `session.go`) |
@@ -45,7 +45,8 @@ Source of record: the office handoff README (2026-10-19, kept outside the repo b
 | T12 | S12 | inline | pending | |
 | T13a | S13 | delegated (opus) | done | see commit; network + decrypt delegated to whatsmeow `Client.Download` (it checks FileEncSHA256, HMAC and FileSHA256); the package adds hashed cache names, its own SHA-256 check, 0700/0600, atomic write, cache hits; RED 5/6 (the no-fetch clause holds for any stub); 7 mutants killed, parent re-ran "file 0644": killed by TestFetchUsesPrivateModes; open question L14 |
 | T13 | S13 | delegated | pending | `download_media` frame, store reference and daemon wiring after T7 (shares `wire.go`) |
-| T14 | S14 | inline | pending | |
+| T14.2 | S14 | delegated (opus) | done | see commit; every licence verified from the module cache / cargo registry; gtk4/libadwaita/glib licences and upstream URLs left out (not verifiable on the Mac); parent re-checked libsignal GPL-3.0 |
+| T14 | S14 | delegated | pending | app-state sync and the bump drill |
 
 ## Log
 

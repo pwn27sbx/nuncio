@@ -31,6 +31,14 @@ type fakeClient struct {
 	sendID   string
 	sendTime time.Time
 	sendErr  error
+	// logouts counts Logout calls; Logout answers logoutErr.
+	logouts   int
+	logoutErr error
+}
+
+func (f *fakeClient) Logout(context.Context) error {
+	f.logouts++
+	return f.logoutErr
 }
 
 func (f *fakeClient) SendText(_ context.Context, jid, text string) (string, time.Time, error) {

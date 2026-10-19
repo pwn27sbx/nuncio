@@ -270,6 +270,31 @@ func (c *Client) Focus(jid string) (Focused, error) {
 	return resp, nil
 }
 
+// WipeTimeout bounds the wait for a wipe reply: with unlink the daemon first waits for WhatsApp
+// to confirm the unlink.
+const WipeTimeout = 30 * time.Second
+
+// Wipe asks the daemon to delete everything it keeps for the device and exit; with unlink it
+// first tells WhatsApp to unlink the device. It returns the wiped reply, or a *ProtocolError such
+// as not_linked, in which case nothing was deleted.
+func (c *Client) Wipe(unlink bool) (Wiped, error) {
+	if err := WriteFrame(c.conn, WipeRequest{V: Version, Op: OpWipe, Unlink: unlink}); err != nil {
+		return Wiped{}, err
+	}
+	var resp Wiped
+	timeout := c.timeout
+	c.timeout = max(timeout, WipeTimeout)
+	err := c.readReply(&resp)
+	c.timeout = timeout
+	if err != nil {
+		return Wiped{}, err
+	}
+	if resp.Op != OpWiped {
+		return Wiped{}, fmt.Errorf("ipc: expected op %s, got %q", OpWiped, resp.Op)
+	}
+	return resp, nil
+}
+
 // Close closes the connection.
 func (c *Client) Close() error { return c.conn.Close() }
 

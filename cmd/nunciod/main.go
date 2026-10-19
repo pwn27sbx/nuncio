@@ -96,6 +96,9 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// What a wipe (nuncio logout or purge) deletes: the device keys in the keyring, the data dir,
+	// and finally this socket.
+	d.dataDir, d.keyring, d.socket = filepath.Dir(dbPath), store.SecretService{}, socket
 
 	if bus != nil {
 		if err := exportDBus(bus, d); err != nil {
@@ -217,7 +220,11 @@ func (f *dbusFace) Status() (ipc.Status, *dbus.Error) {
 	return f.d.Status(), nil
 }
 
+// serve accepts connections until ctx is done or a connection's wipe succeeded (ipc.ErrWiped):
+// then the daemon has nothing left to serve and serve returns, so the daemon exits.
 func serve(ctx context.Context, ln net.Listener, h ipc.Handler, events *ipc.Broker) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
@@ -231,7 +238,13 @@ func serve(ctx context.Context, ln net.Listener, h ipc.Handler, events *ipc.Brok
 			return err
 		}
 		go func() {
-			if err := ipc.ServeConnEvents(conn, h, events); err != nil {
+			err := ipc.ServeConnEvents(conn, h, events)
+			if errors.Is(err, ipc.ErrWiped) {
+				log.Print("wiped on request; exiting")
+				cancel()
+				return
+			}
+			if err != nil {
 				log.Printf("connection: %v", err)
 			}
 		}()
@@ -246,12 +259,22 @@ type daemon struct {
 	// db is the message store, nil while there is no nuncio.db (unlinked).
 	db    *sql.DB
 	chats []ipc.Chat
+
+	// dataDir, keyring and socket are what Wipe deletes; an empty dataDir or socket, or a nil
+	// keyring, is refused by Wipe rather than skipped.
+	dataDir string
+	keyring store.Keyring
+	socket  string
 }
 
 // sessionState is what the daemon reads from, and sends through, its WhatsApp session.
 type sessionState interface {
 	State() wa.State
 	SendText(jid, text string) (ipc.Message, error)
+	// Logout tells WhatsApp to unlink the device through the daemon's own session.
+	Logout(ctx context.Context) error
+	// Close disconnects the session and closes the store.
+	Close()
 }
 
 // newDaemon serves session and, when db is not nil, the chats, messages and
@@ -350,4 +373,34 @@ func (d *daemon) Send(jid, text, _ string) (ipc.Sent, error) {
 		return ipc.Sent{}, err
 	}
 	return ipc.Sent{State: ipc.SendSent, ID: m.ID, Timestamp: m.Timestamp}, nil
+}
+
+// logoutTimeout bounds the wait for WhatsApp to confirm an unlink; the CLI waits ipc.WipeTimeout.
+const logoutTimeout = 20 * time.Second
+
+// Wipe is the ordered teardown behind `nuncio logout` (unlink) and `nuncio purge`: (1) with unlink,
+// tell WhatsApp to unlink the device through this daemon's session, and stop with nothing deleted
+// if it does not confirm; (2) close the session and the store, delete the keyring items and (3)
+// the database, media cache and exports; (4) remove the socket. ServeConn then answers wiped and
+// serve returns, so the daemon exits. Without unlink WhatsApp is never contacted.
+func (d *daemon) Wipe(unlink bool) error {
+	if d.dataDir == "" || d.socket == "" || d.keyring == nil {
+		return errors.New("this daemon cannot wipe: it does not know its data dir, keyring or socket")
+	}
+	if unlink {
+		ctx, cancel := context.WithTimeout(context.Background(), logoutTimeout)
+		defer cancel()
+		if err := d.session.Logout(ctx); err != nil {
+			return err
+		}
+	}
+	d.session.Close()
+	if err := store.Wipe(d.dataDir, d.keyring); err != nil {
+		log.Print(err)
+		return errors.New("could not delete all of nuncio's local data; run nuncio purge --confirm to finish")
+	}
+	if err := os.Remove(d.socket); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("the data is deleted, but the socket stays: %w", err)
+	}
+	return nil
 }

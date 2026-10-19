@@ -1,7 +1,8 @@
 // Command nuncio is the CLI: `nuncio` alone (or `nuncio status`) connects to the daemon, does the
 // NDJSON handshake and prints the session status; `chats` lists the chats, `send` sends one message
 // to one chat, `focus` asks a running UI to open a chat, and `link` is the linking entry point,
-// which refuses to do anything at all unless --consent is passed.
+// which refuses to do anything at all unless --consent is passed. `logout` and `purge` delete
+// everything nuncio keeps for the device and refuse to do anything unless --confirm is passed.
 //
 // There is no automation surface: `send` takes exactly one recipient and one message per
 // invocation and never reads stdin.
@@ -26,12 +27,16 @@ const usage = `usage:
   nuncio focus <jid>            ask the running UI to open that chat
   nuncio link --qr              link by scanning a QR code (needs --consent)
   nuncio link --phone N         link with an 8-digit pairing code (needs --consent)
+  nuncio logout --confirm       unlink this device from WhatsApp, delete all local data and keys, stop nunciod
+  nuncio purge --confirm        the same without contacting WhatsApp, for a device already removed on the phone
   nuncio --help
 
 A <jid> is a WhatsApp chat: 15551230001@s.whatsapp.net (a person) or 120363000000000000@g.us (a group).
 send prints "sent", "queued", "not sent: <reason>" or "not confirmed: …; it may have been delivered"
 (no acknowledgement in time), and exits non-zero unless it was sent or queued.
-Nothing links a device without --consent.`
+Nothing links a device without --consent. logout and purge without --confirm only list what they
+would delete. logout needs a running nunciod (it unlinks through the daemon's session); purge works
+with or without one.`
 
 func main() {
 	os.Exit(cli(os.Args[1:], os.Stdout, os.Stderr))
@@ -50,6 +55,10 @@ func cli(args []string, stdout, stderr io.Writer) int {
 			return sendCommand(args[1:], stdout, stderr)
 		case "focus":
 			return focusCommand(args[1:], stdout, stderr)
+		case "logout":
+			return logoutCommand(args[1:], stdout, stderr)
+		case "purge":
+			return purgeCommand(args[1:], stdout, stderr)
 		case "status":
 			// fall through to the default below
 		case "help":

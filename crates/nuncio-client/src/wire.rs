@@ -51,6 +51,13 @@ pub enum ClientFrame {
         v: u8,
         jid: String,
     },
+    /// Ask the daemon to delete everything it keeps for the device and exit. With `unlink` it
+    /// first tells WhatsApp to unlink the device (`nuncio logout`); without it WhatsApp is never
+    /// contacted (`nuncio purge`).
+    Wipe {
+        v: u8,
+        unlink: bool,
+    },
 }
 
 impl ClientFrame {
@@ -106,6 +113,13 @@ impl ClientFrame {
         Self::Focus {
             v: PROTOCOL_VERSION,
             jid: jid.into(),
+        }
+    }
+
+    pub fn wipe(unlink: bool) -> Self {
+        Self::Wipe {
+            v: PROTOCOL_VERSION,
+            unlink,
         }
     }
 }
@@ -168,6 +182,12 @@ pub enum DaemonFrame {
         jid: String,
         delivered: u32,
     },
+    /// Everything is deleted and the socket is gone; the daemon closes the connection and exits.
+    /// `unlinked` says whether WhatsApp confirmed the unlink.
+    Wiped {
+        v: u8,
+        unlinked: bool,
+    },
     EventMessage {
         v: u8,
         jid: String,
@@ -203,6 +223,7 @@ impl DaemonFrame {
             Self::SendFailed { .. } => "send_failed",
             Self::Subscribed { .. } => "subscribed",
             Self::Focused { .. } => "focused",
+            Self::Wiped { .. } => "wiped",
             Self::EventMessage { .. } => "event_message",
             Self::EventConnection { .. } => "event_connection",
             Self::EventUnread { .. } => "event_unread",

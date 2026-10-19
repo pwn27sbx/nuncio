@@ -48,6 +48,8 @@ nuncio send <jid> <message>   send one message to one chat; quote the message, i
 nuncio focus <jid>            ask the running UI to open that chat
 nuncio link --qr              link by scanning a QR code (needs --consent)
 nuncio link --phone N         link with an 8-digit pairing code (needs --consent)
+nuncio logout --confirm       unlink this device from WhatsApp, delete all local data and keys, stop nunciod
+nuncio purge --confirm        the same without contacting WhatsApp, for a device already removed on the phone
 ```
 
 - `chats` never prints message text; a chat without a name shows only the last four digits of
@@ -60,6 +62,16 @@ nuncio link --phone N         link with an 8-digit pairing code (needs --consent
   an error.
 - `link` refuses to connect an already linked device while `nunciod` answers on `core.sock`: the
   daemon owns that session.
+- `logout` and `purge` without `--confirm` only list what they would delete and exit 2. With it,
+  the teardown runs in this order: (1) WhatsApp unlinks the device (`logout` only), (2) the
+  keyring items under the service `nuncio` are deleted, (3) `nuncio.db` with its `-wal` and
+  `-shm` files, the `media` cache and the `exports` in `$XDG_DATA_HOME/nuncio` are deleted (the
+  directory too, when nothing else is in it), (4) `nunciod` removes its socket and exits.
+  `logout` needs a running `nunciod`, because only the daemon's session may talk to WhatsApp for
+  the device; when WhatsApp does not confirm, nothing is deleted. `purge` never contacts
+  WhatsApp: it asks a running daemon to do the same, or deletes the local data itself when no
+  daemon runs. Today no binary writes keyring items yet (whatsmeow keeps the Signal state inside
+  `nuncio.db`), so step 2 finds nothing until the keyring-backed device store is wired.
 
 ## Build
 

@@ -6,10 +6,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -32,8 +34,27 @@ type fakeDaemon struct {
 	sent    ipc.Sent
 	sendErr error
 
+	// wipeErr answers every Wipe; wipes records each call's unlink.
+	wipeErr error
+
 	mu    sync.Mutex
 	sends []ipc.SendRequest
+	wipes []bool
+}
+
+// Wipe records the request only: the fake daemon deletes nothing, so a test can tell what the
+// CLI deleted by itself.
+func (d *fakeDaemon) Wipe(unlink bool) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.wipes = append(d.wipes, unlink)
+	return d.wipeErr
+}
+
+func (d *fakeDaemon) wipeCalls() []bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]bool(nil), d.wipes...)
 }
 
 func (d *fakeDaemon) Hello(string) ipc.Status { return d.Status() }
@@ -448,7 +469,7 @@ func TestFocusRefusesAJIDThatIsNotAChat(t *testing.T) {
 }
 
 func TestHelpDocumentsEveryCommand(t *testing.T) {
-	for _, cmd := range []string{"nuncio status", "nuncio chats", "nuncio send <jid> <message>", "nuncio focus <jid>", "nuncio link --qr", "nuncio link --phone", "not confirmed"} {
+	for _, cmd := range []string{"nuncio status", "nuncio chats", "nuncio send <jid> <message>", "nuncio focus <jid>", "nuncio link --qr", "nuncio link --phone", "not confirmed", "nuncio logout --confirm", "nuncio purge --confirm"} {
 		if !strings.Contains(usage, cmd) {
 			t.Errorf("usage does not document %q:\n%s", cmd, usage)
 		}
@@ -533,5 +554,309 @@ func TestSendNotConfirmedNeverSaysNotSent(t *testing.T) {
 	}
 	if strings.Contains(errOut, "not sent") || !strings.Contains(errOut, "not confirmed") || !strings.Contains(errOut, "may have been delivered") {
 		t.Errorf("stderr %q, want the not-confirmed line and no not-sent claim", errOut)
+	}
+}
+
+// TestMain points the purge keyring at one that refuses every call, so no test can reach the
+// owner's real keyring even if it forgets fakeKeys.
+func TestMain(m *testing.M) {
+	localKeyring = refusingKeyring{}
+	os.Exit(m.Run())
+}
+
+type refusingKeyring struct{}
+
+var errRealKeyring = errors.New("test: the real keyring is off limits; call fakeKeys")
+
+func (refusingKeyring) Set(string, string, string) error   { return errRealKeyring }
+func (refusingKeyring) Get(string, string) (string, error) { return "", errRealKeyring }
+func (refusingKeyring) Delete(string, string) error        { return errRealKeyring }
+
+// memKeyring is an in-memory keyring.
+type memKeyring struct {
+	mu    sync.Mutex
+	items map[string]string
+}
+
+func (k *memKeyring) Set(service, user, secret string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.items[service+"/"+user] = secret
+	return nil
+}
+
+func (k *memKeyring) Get(service, user string) (string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if v, ok := k.items[service+"/"+user]; ok {
+		return v, nil
+	}
+	return "", store.ErrKeyNotFound
+}
+
+func (k *memKeyring) Delete(service, user string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.items[service+"/"+user]; !ok {
+		return store.ErrKeyNotFound
+	}
+	delete(k.items, service+"/"+user)
+	return nil
+}
+
+func (k *memKeyring) count() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return len(k.items)
+}
+
+// fakeKeys makes localKeyring a fake holding every device item under the nuncio service.
+func fakeKeys(t *testing.T) *memKeyring {
+	t.Helper()
+	k := &memKeyring{items: map[string]string{}}
+	for _, name := range []string{"device.noise_key", "device.identity_key", "device.signed_pre_key", "device.adv_secret_key"} {
+		_ = k.Set(store.KeyringService, name, "synthetic")
+	}
+	prev := localKeyring
+	localKeyring = k
+	t.Cleanup(func() { localKeyring = prev })
+	return k
+}
+
+// populatedData isolates the data dirs and fills the nuncio data dir with a database, a media
+// file and an export, as a used install leaves it. It returns the isolated root and the data dir.
+func populatedData(t *testing.T) (root, dataDir string) {
+	t.Helper()
+	root = isolateData(t)
+	path, err := wa.DBPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.EnsureSchema(db); err != nil {
+		t.Fatal(err)
+	}
+	_ = db.Close()
+	dataDir = filepath.Dir(path)
+	for _, p := range []string{filepath.Join(dataDir, store.MediaDir, "0f3a.jpg"), filepath.Join(dataDir, store.ExportsDir, "chat.txt")} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("synthetic"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root, dataDir
+}
+
+// listing is every path under root with its mode and size, to prove nothing changed.
+func listing(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		out = append(out, fmt.Sprintf("%s %v %d", p, fi.Mode(), fi.Size()))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestLogoutAndPurgeWithoutConfirmChangeNothing(t *testing.T) {
+	for _, cmd := range []string{"logout", "purge"} {
+		t.Run(cmd, func(t *testing.T) {
+			root, dataDir := populatedData(t)
+			keys := fakeKeys(t)
+			d := &fakeDaemon{session: ipc.SessionLinked}
+			sock := serveFakeDaemon(t, d)
+			before := listing(t, root)
+			calls := fakeConnect(t)
+
+			code, out, errOut := runCLI(cmd)
+			if code != 2 {
+				t.Errorf("exit %d, want 2", code)
+			}
+			if out != "" {
+				t.Errorf("stdout %q, want nothing", out)
+			}
+			for _, want := range []string{filepath.Join(dataDir, store.DBFile), filepath.Join(dataDir, store.MediaDir), "--confirm", "Nothing was deleted"} {
+				if !strings.Contains(errOut, want) {
+					t.Errorf("stderr %q, want it to name %q", errOut, want)
+				}
+			}
+			if after := listing(t, root); !slices.Equal(before, after) {
+				t.Errorf("the data dirs changed:\n before %v\n after  %v", before, after)
+			}
+			if n := keys.count(); n != 4 {
+				t.Errorf("keyring holds %d items, want the 4 it had", n)
+			}
+			if got := d.wipeCalls(); len(got) != 0 {
+				t.Errorf("the daemon was asked to wipe %v, want never", got)
+			}
+			if _, err := os.Stat(sock); err != nil {
+				t.Errorf("socket: %v", err)
+			}
+			if *calls != 0 {
+				t.Errorf("connected %d times, want never", *calls)
+			}
+		})
+	}
+}
+
+func TestLogoutAsksTheRunningDaemonToUnlinkAndWipe(t *testing.T) {
+	d := &fakeDaemon{session: ipc.SessionLinked}
+	serveFakeDaemon(t, d)
+	code, out, errOut := runCLI("logout", "--confirm")
+	if code != 0 || !strings.Contains(out, "logged out") {
+		t.Errorf("exit %d, stdout %q, stderr %q; want 0 and logged out", code, out, errOut)
+	}
+	if got := d.wipeCalls(); !slices.Equal(got, []bool{true}) {
+		t.Errorf("wipe requests %v, want exactly one with unlink", got)
+	}
+}
+
+func TestLogoutWithoutADaemonRefusesAndConnectsNothing(t *testing.T) {
+	root, _ := populatedData(t)
+	keys := fakeKeys(t)
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // no core.sock there
+	linkedDevice(t)
+	before := listing(t, root)
+	calls := fakeConnect(t)
+
+	code, out, errOut := runCLI("logout", "--confirm")
+	if code != 1 || out != "" {
+		t.Errorf("exit %d, stdout %q; want 1 and nothing on stdout", code, out)
+	}
+	for _, want := range []string{"nunciod is not running", "nuncio purge --confirm", "Nothing was deleted"} {
+		if !strings.Contains(errOut, want) {
+			t.Errorf("stderr %q, want %q", errOut, want)
+		}
+	}
+	if *calls != 0 {
+		t.Errorf("connected %d times, want never: only the daemon's session may unlink", *calls)
+	}
+	if after := listing(t, root); !slices.Equal(before, after) {
+		t.Errorf("the data dirs changed:\n before %v\n after  %v", before, after)
+	}
+	if n := keys.count(); n != 4 {
+		t.Errorf("keyring holds %d items, want the 4 it had", n)
+	}
+}
+
+func TestLogoutWhileUnlinkedPointsAtPurge(t *testing.T) {
+	serveFakeDaemon(t, &fakeDaemon{wipeErr: ipc.ErrNotLinked})
+	code, _, errOut := runCLI("logout", "--confirm")
+	if code != 1 || !strings.Contains(errOut, "no WhatsApp device is linked") || !strings.Contains(errOut, "nuncio purge --confirm") {
+		t.Errorf("exit %d, stderr %q; want 1, the not-linked line and the purge hint", code, errOut)
+	}
+}
+
+func TestPurgeAsksTheRunningDaemonWithoutTheNetwork(t *testing.T) {
+	root, _ := populatedData(t)
+	keys := fakeKeys(t)
+	d := &fakeDaemon{session: ipc.SessionLinked}
+	serveFakeDaemon(t, d)
+	before := listing(t, root)
+
+	code, out, errOut := runCLI("purge", "--confirm")
+	if code != 0 || !strings.Contains(out, "purged") || !strings.Contains(out, "WhatsApp was not contacted") {
+		t.Errorf("exit %d, stdout %q, stderr %q; want 0 and purged", code, out, errOut)
+	}
+	if got := d.wipeCalls(); !slices.Equal(got, []bool{false}) {
+		t.Errorf("wipe requests %v, want exactly one without unlink", got)
+	}
+	// The daemon does the deleting: the CLI touches nothing under a running daemon.
+	if after := listing(t, root); !slices.Equal(before, after) {
+		t.Errorf("the CLI deleted files under a running daemon:\n before %v\n after  %v", before, after)
+	}
+	if n := keys.count(); n != 4 {
+		t.Errorf("the CLI emptied the keyring under a running daemon: %d items left", n)
+	}
+}
+
+func TestPurgeWithoutADaemonLeavesNothingBehind(t *testing.T) {
+	_, dataDir := populatedData(t)
+	keys := fakeKeys(t)
+	runtime := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtime)
+	// A socket left behind by a dead daemon.
+	sock := filepath.Join(runtime, "nuncio", "core.sock")
+	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	_ = ln.Close()
+	calls := fakeConnect(t)
+
+	code, out, errOut := runCLI("purge", "--confirm")
+	if code != 0 || !strings.Contains(out, "purged") {
+		t.Errorf("exit %d, stdout %q, stderr %q; want 0 and purged", code, out, errOut)
+	}
+	if _, err := os.Lstat(dataDir); !os.IsNotExist(err) {
+		entries, _ := os.ReadDir(dataDir)
+		t.Errorf("data dir still exists (%v), holding %v", err, entries)
+	}
+	if n := keys.count(); n != 0 {
+		t.Errorf("keyring holds %d items, want 0", n)
+	}
+	if _, err := os.Lstat(sock); !os.IsNotExist(err) {
+		t.Errorf("stale socket still exists: %v", err)
+	}
+	if *calls != 0 {
+		t.Errorf("connected %d times, want never", *calls)
+	}
+}
+
+// Something that accepts on core.sock but never answers may be a wedged daemon: purge deletes
+// nothing under it.
+func TestPurgeRefusesWhileSomethingListensButDoesNotAnswer(t *testing.T) {
+	root, _ := populatedData(t)
+	keys := fakeKeys(t)
+	runtime := t.TempDir()
+	t.Setenv("XDG_RUNTIME_DIR", runtime)
+	sock := filepath.Join(runtime, "nuncio", "core.sock")
+	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { _ = conn.Close() })
+		}
+	}()
+	before := listing(t, root)
+
+	code, _, errOut := runCLI("purge", "--confirm")
+	if code != 1 || !strings.Contains(errOut, "does not answer") || !strings.Contains(errOut, "Nothing was deleted") {
+		t.Errorf("exit %d, stderr %q; want 1 and the does-not-answer refusal", code, errOut)
+	}
+	if after := listing(t, root); !slices.Equal(before, after) {
+		t.Errorf("the data dirs changed:\n before %v\n after  %v", before, after)
+	}
+	if n := keys.count(); n != 4 {
+		t.Errorf("keyring holds %d items, want the 4 it had", n)
 	}
 }

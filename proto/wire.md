@@ -40,6 +40,7 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `send` | `v`, `op`, `jid`, `text` (string), `client_id` (string, chosen by the client) | `send_request.json` |
 | `subscribe` | `v`, `op` | `subscribe_request.json` |
 | `focus` | `v`, `op`, `jid` | `focus_request.json` |
+| `wipe` | `v`, `op`, `unlink` (bool: first tell WhatsApp to unlink the device) | `wipe_request.json` |
 
 ### daemon → client
 
@@ -54,6 +55,7 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `send_failed` | `v`, `op`, `client_id`, `message` (string) | `send_failed_response.json` |
 | `subscribed` | `v`, `op` | `subscribed_response.json` |
 | `focused` | `v`, `op`, `jid`, `delivered` (int: subscribed UIs that got the event; 0 = none running) | `focused_response.json` |
+| `wiped` | `v`, `op`, `unlinked` (bool: WhatsApp confirmed the unlink) | `wiped_response.json` |
 
 ### Events (daemon → subscribed clients)
 
@@ -167,6 +169,10 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `focus` with no subscribed UI | `focused` with `delivered: 0` |
 | `focus` with subscribed UIs | `event_focus` to every subscriber (the asking connection too, if it subscribed); `focused` with `delivered` = how many got it |
 | A subscriber that stops reading | dropped (connection closed) when an event finds its 64-frame queue full; never blocks the daemon or other clients |
+| `wipe` with `unlink: true` | in this order: WhatsApp unlinks the device through the daemon's own session (never a second one); the keyring items, the database (with WAL/SHM), the media cache and the exports are deleted; the socket is removed; then `wiped` with `unlinked: true`, the connection closes and the daemon exits |
+| `wipe` with `unlink: false` | the same without contacting WhatsApp; `wiped` with `unlinked: false` |
+| `wipe` with `unlink: true` while `unlinked` | `error` / `not_linked`; nothing is deleted (a `wipe` with `unlink: false` deletes the data of a device that is already gone) |
+| `wipe` with `unlink: true` that WhatsApp does not confirm | `error` / `internal` saying nothing was deleted; the daemon keeps serving |
 
 A WhatsApp chat JID is one of: `digits@s.whatsapp.net` (a user), `digits@lid` (a user addressed by
 its hidden id; WhatsApp uses it for direct chats too) or `digits-digits@g.us` / `digits@g.us` (a

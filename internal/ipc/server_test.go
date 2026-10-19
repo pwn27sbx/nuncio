@@ -29,6 +29,22 @@ type fakeHandler struct {
 	sends   []string
 	sent    Sent
 	sendErr error
+	// wipes records every Wipe call's unlink; Wipe answers wipeErr.
+	wipes   []bool
+	wipeErr error
+}
+
+func (f *fakeHandler) Wipe(unlink bool) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.wipes = append(f.wipes, unlink)
+	return f.wipeErr
+}
+
+func (f *fakeHandler) wipeCalls() []bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]bool(nil), f.wipes...)
 }
 
 func (f *fakeHandler) Send(jid, text, clientID string) (Sent, error) {
@@ -566,5 +582,97 @@ func TestServeConnAnswersANotConfirmedSendAsNotConfirmed(t *testing.T) {
 	}
 	if got := fieldOf(t, frame, "message"); got != ErrNotConfirmed.Error() {
 		t.Errorf("message = %v, want %q", got, ErrNotConfirmed.Error())
+	}
+}
+
+// serveOne serves h on one end of a pipe and returns the other end, a reader of it, and the
+// channel that receives ServeConn's result.
+func serveOne(t *testing.T, h Handler) (net.Conn, *bufio.Reader, <-chan error) {
+	t.Helper()
+	server, client := net.Pipe()
+	t.Cleanup(func() { _ = client.Close() })
+	done := make(chan error, 1)
+	go func() { done <- ServeConn(server, h) }()
+	if err := client.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	br := bufio.NewReader(client)
+	handshake(t, client, br)
+	return client, br, done
+}
+
+func TestServeConnAnswersAWipeWithWipedThenStops(t *testing.T) {
+	for _, unlink := range []bool{true, false} {
+		h := newFakeHandler(t)
+		conn, br, done := serveOne(t, h)
+		sendRaw(t, conn, fmt.Sprintf(`{"v":1,"op":"wipe","unlink":%t}`, unlink))
+		if got, want := string(recvRaw(t, br)), fmt.Sprintf(`{"v":1,"op":"wiped","unlinked":%t}`, unlink); got != want {
+			t.Errorf("reply %s, want %s", got, want)
+		}
+		select {
+		case err := <-done:
+			if !errors.Is(err, ErrWiped) {
+				t.Errorf("ServeConn after a wipe = %v, want ErrWiped", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("ServeConn kept serving after a wipe")
+		}
+		if got := h.wipeCalls(); !slices.Equal(got, []bool{unlink}) {
+			t.Errorf("Wipe calls = %v, want [%t]", got, unlink)
+		}
+	}
+}
+
+func TestServeConnAnswersAWipeWhileUnlinkedWithNotLinkedAndKeepsServing(t *testing.T) {
+	h := newFakeHandler(t)
+	h.wipeErr = ErrNotLinked
+	conn, br, _ := serveOne(t, h)
+	sendRaw(t, conn, `{"v":1,"op":"wipe","unlink":true}`)
+	if frame := recvRaw(t, br); fieldOf(t, frame, "code") != CodeNotLinked {
+		t.Errorf("reply %s, want a %s error", frame, CodeNotLinked)
+	}
+	sendRaw(t, conn, `{"v":1,"op":"status"}`)
+	if got := fieldOf(t, recvRaw(t, br), "op"); got != OpStatus {
+		t.Errorf("after a refused wipe the connection answered %v, want status", got)
+	}
+}
+
+func TestServeConnAnswersAFailedWipeWithAnInternalErrorAndKeepsServing(t *testing.T) {
+	h := newFakeHandler(t)
+	h.wipeErr = errors.New("WhatsApp did not confirm the logout; nothing was deleted")
+	conn, br, _ := serveOne(t, h)
+	sendRaw(t, conn, `{"v":1,"op":"wipe","unlink":true}`)
+	frame := recvRaw(t, br)
+	if fieldOf(t, frame, "code") != CodeInternal || fieldOf(t, frame, "message") != h.wipeErr.Error() {
+		t.Errorf("reply %s, want an %s error carrying the handler's message", frame, CodeInternal)
+	}
+	sendRaw(t, conn, `{"v":1,"op":"status"}`)
+	if got := fieldOf(t, recvRaw(t, br), "op"); got != OpStatus {
+		t.Errorf("after a failed wipe the connection answered %v, want status", got)
+	}
+}
+
+func TestClientWipeReturnsWipedOrTheDaemonError(t *testing.T) {
+	h := newFakeHandler(t)
+	c, err := Dial(startServer(t, h), "test/0.1.0")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	got, err := c.Wipe(false)
+	if err != nil || got != (Wiped{V: 1, Op: OpWiped, Unlinked: false}) {
+		t.Errorf("Wipe(false) = %+v, %v; want wiped with unlinked false", got, err)
+	}
+
+	h.wipeErr = ErrNotLinked
+	c2, err := Dial(startServer(t, h), "test/0.1.0")
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c2.Close() })
+	_, err = c2.Wipe(true)
+	var perr *ProtocolError
+	if !errors.As(err, &perr) || perr.Code != CodeNotLinked {
+		t.Errorf("Wipe(true) while unlinked = %v, want a %s error", err, CodeNotLinked)
 	}
 }

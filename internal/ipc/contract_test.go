@@ -207,6 +207,16 @@ func fixtureCases() []fixtureCase {
 			build: func() any { return Focused{V: 1, Op: OpFocused, JID: "15551230002@s.whatsapp.net", Delivered: 1} },
 		},
 		{
+			file:  "wipe_request.json",
+			into:  func() any { return &WipeRequest{} },
+			build: func() any { return WipeRequest{V: 1, Op: OpWipe, Unlink: true} },
+		},
+		{
+			file:  "wiped_response.json",
+			into:  func() any { return &Wiped{} },
+			build: func() any { return Wiped{V: 1, Op: OpWiped, Unlinked: true} },
+		},
+		{
 			file: "event_message.json",
 			into: func() any { return &EventMessage{} },
 			build: func() any {
@@ -323,7 +333,7 @@ func TestFixturesCarryVersionOne(t *testing.T) {
 		OpHello: true, OpHelloOK: true, OpStatus: true, OpChats: true, OpError: true,
 		OpMessages: true, OpSend: true, OpSent: true, OpSendFailed: true, OpSubscribe: true,
 		OpSubscribed: true, OpFocus: true, OpFocused: true, OpEventMessage: true,
-		OpEventConnection: true, OpEventUnread: true, OpEventFocus: true,
+		OpEventConnection: true, OpEventUnread: true, OpEventFocus: true, OpWipe: true, OpWiped: true,
 	}
 	for _, tc := range fixtureCases() {
 		t.Run(tc.file, func(t *testing.T) {

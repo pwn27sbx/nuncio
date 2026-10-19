@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -278,6 +279,11 @@ func (s fixedSession) State() wa.State { return wa.State(s) }
 func (s fixedSession) SendText(string, string) (ipc.Message, error) {
 	return ipc.Message{}, errors.New("a fixed session cannot send")
 }
+
+func (s fixedSession) Logout(context.Context) error {
+	return errors.New("a fixed session cannot log out")
+}
+func (s fixedSession) Close() {}
 
 func TestStatusReportsTheSessionState(t *testing.T) {
 	for _, tc := range []struct {
@@ -711,6 +717,19 @@ type fakeWAClient struct {
 	sendID   string
 	sendTime time.Time
 	sends    atomic.Int64
+	// logouts counts Logout calls; onLogout, when set, runs inside each one; Logout answers
+	// logoutErr.
+	logouts   atomic.Int64
+	onLogout  func()
+	logoutErr error
+}
+
+func (f *fakeWAClient) Logout(context.Context) error {
+	f.logouts.Add(1)
+	if f.onLogout != nil {
+		f.onLogout()
+	}
+	return f.logoutErr
 }
 
 func (f *fakeWAClient) SendText(context.Context, string, string) (string, time.Time, error) {
@@ -1094,4 +1113,247 @@ func TestDaemonFocusReachesASubscribedUI(t *testing.T) {
 	if got, want := readFrame(t, ui, uiR, 5*time.Second), `{"v":1,"op":"event_focus","jid":"15551230002@s.whatsapp.net"}`; got != want {
 		t.Errorf("subscriber got %s, want %s", got, want)
 	}
+}
+
+// fakeKeyring is an in-memory keyring; tests never touch the real one.
+type fakeKeyring struct {
+	mu    sync.Mutex
+	items map[string]string
+}
+
+func (k *fakeKeyring) Set(service, user, secret string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.items[service+"/"+user] = secret
+	return nil
+}
+
+func (k *fakeKeyring) Get(service, user string) (string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	secret, ok := k.items[service+"/"+user]
+	if !ok {
+		return "", store.ErrKeyNotFound
+	}
+	return secret, nil
+}
+
+func (k *fakeKeyring) Delete(service, user string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.items[service+"/"+user]; !ok {
+		return store.ErrKeyNotFound
+	}
+	delete(k.items, service+"/"+user)
+	return nil
+}
+
+func (k *fakeKeyring) count() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return len(k.items)
+}
+
+// deviceKeyItems are the keyring items the device store writes under the nuncio service.
+var deviceKeyItems = []string{"device.noise_key", "device.identity_key", "device.signed_pre_key", "device.adv_secret_key"}
+
+// wipeRig is a daemon over a started session with a fake linked client, a real store in a temp
+// data dir that also holds media and exports, a fake keyring full of device items, served on
+// $XDG_RUNTIME_DIR/nuncio/core.sock of a temp runtime dir.
+type wipeRig struct {
+	fake    *fakeWAClient
+	keyring *fakeKeyring
+	dataDir string
+	runtime string
+	socket  string
+	// served is closed when serve returns.
+	served chan struct{}
+}
+
+// shortTempDir is a temp dir with a short path: a unix socket path must fit in 104 bytes on macOS,
+// and t.TempDir carries the long test name.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "nw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// newWipeRig builds the rig; configure, when not nil, sets up the rig's fake client before anything
+// serves, so the daemon's goroutines only read it.
+func newWipeRig(t *testing.T, configure func(*wipeRig)) *wipeRig {
+	t.Helper()
+	root := t.TempDir()
+	r := &wipeRig{
+		fake:    &fakeWAClient{sendID: "3EB0BBB1"},
+		keyring: &fakeKeyring{items: map[string]string{}},
+		dataDir: filepath.Join(root, "data", "nuncio"),
+		runtime: shortTempDir(t),
+		served:  make(chan struct{}),
+	}
+	r.socket = socketPath(r.runtime)
+	db, err := store.Open(filepath.Join(r.dataDir, store.DBFile))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := store.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	for _, p := range []string{filepath.Join(r.dataDir, store.MediaDir, "0f3a.jpg"), filepath.Join(r.dataDir, store.ExportsDir, "chat.txt")} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("synthetic"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range deviceKeyItems {
+		_ = r.keyring.Set(store.KeyringService, name, "synthetic")
+	}
+	if configure != nil {
+		configure(r)
+	}
+	session := wa.NewSession(r.fake, db, db.Close)
+	t.Cleanup(session.Close)
+	events := ipc.NewBroker()
+	session.SetEvents(events)
+	if err := session.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	d, err := newDaemon(session, db)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	d.dataDir, d.keyring, d.socket = r.dataDir, r.keyring, r.socket
+	if err := os.MkdirAll(filepath.Dir(r.socket), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", r.socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = serve(ctx, ln, d, events); close(r.served) }()
+	t.Cleanup(func() { cancel(); <-r.served })
+	return r
+}
+
+// assertNothingLeft checks the S12 outcome: no data dir (so no DB, WAL, SHM, media or exports),
+// an empty keyring, no socket, and a daemon that stopped serving.
+func (r *wipeRig) assertNothingLeft(t *testing.T) {
+	t.Helper()
+	if _, err := os.Lstat(r.dataDir); !errors.Is(err, fs.ErrNotExist) {
+		entries, _ := os.ReadDir(r.dataDir)
+		t.Errorf("data dir %s still exists (%v), holding %v", r.dataDir, err, entries)
+	}
+	if n := r.keyring.count(); n != 0 {
+		t.Errorf("keyring holds %d items, want 0", n)
+	}
+	if _, err := os.Lstat(r.socket); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("socket %s still exists: %v", r.socket, err)
+	}
+	select {
+	case <-r.served:
+	case <-time.After(5 * time.Second):
+		t.Error("the daemon kept serving after the wipe")
+	}
+}
+
+// assertNothingDeleted checks that a refused wipe left the data, the keys and the socket alone.
+func (r *wipeRig) assertNothingDeleted(t *testing.T) {
+	t.Helper()
+	for _, p := range []string{filepath.Join(r.dataDir, store.DBFile), filepath.Join(r.dataDir, store.MediaDir, "0f3a.jpg"), filepath.Join(r.dataDir, store.ExportsDir, "chat.txt"), r.socket} {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("%s is gone after a refused wipe: %v", p, err)
+		}
+	}
+	if n := r.keyring.count(); n != len(deviceKeyItems) {
+		t.Errorf("keyring holds %d items after a refused wipe, want %d", n, len(deviceKeyItems))
+	}
+}
+
+// TestLogoutUnlinksFirstThenLeavesNothingBehind drives the real CLI binary against the daemon:
+// `nuncio logout --confirm` makes the daemon call the client's Logout exactly once, while the
+// data is still there, and then leaves nothing behind.
+func TestLogoutUnlinksFirstThenLeavesNothingBehind(t *testing.T) {
+	// Set in the daemon's connection goroutine, read here after the CLI exits.
+	var dbAtLogout, keysAtLogout atomic.Bool
+	r := newWipeRig(t, func(r *wipeRig) {
+		r.fake.onLogout = func() {
+			_, err := os.Stat(filepath.Join(r.dataDir, store.DBFile))
+			dbAtLogout.Store(err == nil)
+			keysAtLogout.Store(r.keyring.count() == len(deviceKeyItems))
+		}
+	})
+	cmd := exec.Command(nuncioBin, "logout", "--confirm")
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"XDG_RUNTIME_DIR=" + r.runtime,
+		"XDG_DATA_HOME=" + filepath.Dir(r.dataDir),
+		"DBUS_SESSION_BUS_ADDRESS=" + noBus(t),
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("nuncio logout --confirm: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "logged out") {
+		t.Errorf("nuncio logout printed %q, want it to say logged out", out)
+	}
+	if n := r.fake.logouts.Load(); n != 1 {
+		t.Errorf("client Logout called %d times, want 1", n)
+	}
+	if !dbAtLogout.Load() || !keysAtLogout.Load() {
+		t.Errorf("at Logout the database existed=%t and the keys were all there=%t; the network step must come before any deletion", dbAtLogout.Load(), keysAtLogout.Load())
+	}
+	r.assertNothingLeft(t)
+}
+
+func TestPurgeThroughTheDaemonNeverCallsTheNetworkAndLeavesNothingBehind(t *testing.T) {
+	r := newWipeRig(t, nil)
+	c := dial(t, r.socket)
+	got, err := c.Wipe(false)
+	if err != nil {
+		t.Fatalf("Wipe(false): %v", err)
+	}
+	if got.Unlinked {
+		t.Errorf("Wipe(false) = %+v, want unlinked false", got)
+	}
+	if n := r.fake.logouts.Load(); n != 0 {
+		t.Errorf("client Logout called %d times by a purge, want 0", n)
+	}
+	r.assertNothingLeft(t)
+}
+
+func TestLogoutThatWhatsAppDoesNotConfirmDeletesNothing(t *testing.T) {
+	r := newWipeRig(t, func(r *wipeRig) { r.fake.logoutErr = errors.New("error sending logout request: timed out") })
+	c := dial(t, r.socket)
+	_, err := c.Wipe(true)
+	var perr *ipc.ProtocolError
+	if !errors.As(err, &perr) || perr.Code != ipc.CodeInternal || !strings.Contains(perr.Message, "nothing was deleted") {
+		t.Errorf("Wipe(true) with a refused logout = %v, want an internal error saying nothing was deleted", err)
+	}
+	r.assertNothingDeleted(t)
+	if _, err := c.Status(); err != nil {
+		t.Errorf("the daemon stopped serving after a refused logout: %v", err)
+	}
+}
+
+func TestLogoutWhileUnlinkedAnswersNotLinkedAndDeletesNothing(t *testing.T) {
+	r := newWipeRig(t, nil)
+	// The device is gone (an external logout): the session is unlinked, the local data is still
+	// there and only purge may delete it.
+	r.fake.emit(&waevents.LoggedOut{})
+	c := dial(t, r.socket)
+	_, err := c.Wipe(true)
+	var perr *ipc.ProtocolError
+	if !errors.As(err, &perr) || perr.Code != ipc.CodeNotLinked {
+		t.Errorf("Wipe(true) while unlinked = %v, want a %s error", err, ipc.CodeNotLinked)
+	}
+	if n := r.fake.logouts.Load(); n != 0 {
+		t.Errorf("client Logout called %d times while unlinked, want 0", n)
+	}
+	r.assertNothingDeleted(t)
 }

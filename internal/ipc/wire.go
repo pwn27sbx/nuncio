@@ -51,6 +51,8 @@ const (
 	OpSubscribed = "subscribed"
 	OpFocus      = "focus"
 	OpFocused    = "focused"
+	OpWipe       = "wipe"
+	OpWiped      = "wiped"
 
 	OpEventMessage    = "event_message"
 	OpEventConnection = "event_connection"
@@ -107,6 +109,9 @@ var (
 	// message in time. The message may have been delivered, so it is neither sent nor not sent:
 	// ServeConn answers an internal error with this text, never send_failed.
 	ErrNotConfirmed = errors.New("not confirmed: WhatsApp did not acknowledge in time; it may have been delivered")
+	// ErrWiped is what ServeConn returns after it answered a wipe with wiped: the daemon's data is
+	// gone and it must stop serving.
+	ErrWiped = errors.New("ipc: the daemon's data was wiped; it stops serving")
 )
 
 // Hello is the first frame a client sends. The daemon refuses anything else.
@@ -159,6 +164,15 @@ type FocusRequest struct {
 	V   int    `json:"v"`
 	Op  string `json:"op"`
 	JID string `json:"jid"`
+}
+
+// WipeRequest asks the daemon to delete everything it keeps for the device (keyring items,
+// database, media cache, exports), remove its socket and exit. With Unlink it first tells WhatsApp
+// to unlink the device (`nuncio logout`); without it WhatsApp is never contacted (`nuncio purge`).
+type WipeRequest struct {
+	V      int    `json:"v"`
+	Op     string `json:"op"`
+	Unlink bool   `json:"unlink"`
 }
 
 // HelloOK answers a Hello.
@@ -227,6 +241,14 @@ type Focused struct {
 	Op        string `json:"op"`
 	JID       string `json:"jid"`
 	Delivered int    `json:"delivered"`
+}
+
+// Wiped answers a WipeRequest once everything is deleted and the socket is gone; the daemon then
+// closes the connection and exits. Unlinked says whether WhatsApp confirmed the unlink.
+type Wiped struct {
+	V        int    `json:"v"`
+	Op       string `json:"op"`
+	Unlinked bool   `json:"unlinked"`
 }
 
 // EventMessage is pushed to subscribers when a message is stored.
@@ -326,6 +348,12 @@ type Handler interface {
 	// unknown, which ServeConn answers with an internal error; any other error is a send_failed reply
 	// whose message is the error's text, so it must be short and carry no number or message text.
 	Send(jid, text, clientID string) (Sent, error)
+	// Wipe deletes everything the daemon keeps for the device and removes its socket; with unlink
+	// it first tells WhatsApp to unlink the device and deletes nothing if that fails. It returns
+	// ErrNotLinked for an unlink with no paired device, which ServeConn answers with not_linked;
+	// any other error is an internal error whose message is the error's text, so it must carry no
+	// number. After a nil return ServeConn answers wiped and returns ErrWiped.
+	Wipe(unlink bool) error
 }
 
 // ValidJID reports whether jid names a WhatsApp chat the protocol carries: a user
@@ -595,6 +623,30 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
 			// Every subscribed UI gets the event, this connection included if it subscribed.
 			delivered := events.Publish(EventFocus{V: Version, Op: OpEventFocus, JID: req.JID})
 			if err := WriteFrame(out, Focused{V: Version, Op: OpFocused, JID: req.JID, Delivered: delivered}); err != nil {
+				return err
+			}
+		case OpWipe:
+			var req WipeRequest
+			if err := json.Unmarshal(line, &req); err != nil {
+				if err := WriteFrame(out, badFrame("malformed wipe frame")); err != nil {
+					return err
+				}
+				continue
+			}
+			err := h.Wipe(req.Unlink)
+			switch {
+			case errors.Is(err, ErrNotLinked):
+				err = WriteFrame(out, Error{V: Version, Op: OpError, Code: CodeNotLinked, Message: ErrNotLinked.Error()})
+			case err != nil:
+				err = WriteFrame(out, Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()})
+			default:
+				// The reply is written before the connection closes, so the client reads it whole.
+				if err := WriteFrame(out, Wiped{V: Version, Op: OpWiped, Unlinked: req.Unlink}); err != nil {
+					return err
+				}
+				return ErrWiped
+			}
+			if err != nil {
 				return err
 			}
 		case OpHello:

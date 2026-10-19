@@ -46,6 +46,9 @@ type Client interface {
 	// SendText sends one text message to the chat jid and returns WhatsApp's message id and
 	// timestamp.
 	SendText(ctx context.Context, jid, text string) (id string, ts time.Time, err error)
+	// Logout tells WhatsApp to unlink this device, then disconnects. It is the only call that
+	// unlinks, and only `nuncio logout --confirm` reaches it.
+	Logout(ctx context.Context) error
 }
 
 // Session is the daemon's one WhatsApp session. It connects only a device that is already linked
@@ -326,10 +329,11 @@ func OpenSession(ctx context.Context, path string) (*Session, error) {
 // whatsmeowClient adapts *whatsmeow.Client to Client.
 type whatsmeowClient struct{ c *whatsmeow.Client }
 
-func (w whatsmeowClient) HasDevice() bool             { return w.c.Store.ID != nil }
-func (w whatsmeowClient) Connect() error              { return w.c.Connect() }
-func (w whatsmeowClient) Disconnect()                 { w.c.Disconnect() }
-func (w whatsmeowClient) AddEventHandler(h func(any)) { w.c.AddEventHandler(h) }
+func (w whatsmeowClient) HasDevice() bool                  { return w.c.Store.ID != nil }
+func (w whatsmeowClient) Connect() error                   { return w.c.Connect() }
+func (w whatsmeowClient) Disconnect()                      { w.c.Disconnect() }
+func (w whatsmeowClient) AddEventHandler(h func(any))      { w.c.AddEventHandler(h) }
+func (w whatsmeowClient) Logout(ctx context.Context) error { return w.c.Logout(ctx) }
 
 // SendText sends a plain conversation message, the simplest text message whatsmeow has.
 func (w whatsmeowClient) SendText(ctx context.Context, jid, text string) (string, time.Time, error) {

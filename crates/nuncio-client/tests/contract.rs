@@ -85,12 +85,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_twenty_two_documented_files() {
+fn fixture_directory_holds_the_twenty_four_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 22, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 24, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -120,6 +120,7 @@ fn constructed_client_frames_match_their_fixtures() {
         &dir.join("focus_request.json"),
         &ClientFrame::focus("15551230002@s.whatsapp.net"),
     );
+    assert_frame(&dir.join("wipe_request.json"), &ClientFrame::wipe(true));
 }
 
 /// The M1 daemon frames, constructed in Rust.
@@ -244,6 +245,13 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
         &DaemonFrame::EventFocus {
             v: PROTOCOL_VERSION,
             jid: grace,
+        },
+    );
+    assert_frame(
+        &dir.join("wiped_response.json"),
+        &DaemonFrame::Wiped {
+            v: PROTOCOL_VERSION,
+            unlinked: true,
         },
     );
 }

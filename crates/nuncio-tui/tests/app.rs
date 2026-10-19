@@ -156,7 +156,10 @@ fn open_first(app: &mut App, jid: &str, oldest_first: Vec<Message>) {
         "Enter on a chat asks the daemon for its messages"
     );
     assert_eq!(app.pane(), Pane::Messages);
-    assert_eq!(app.apply(&messages_reply(jid, oldest_first)), None);
+    let unread = app.chats()[app.selected()].unread;
+    // An unread chat is marked read once its messages are in (S8).
+    let mark_read = (unread > 0).then(|| Action::Request(ClientFrame::mark_read(jid)));
+    assert_eq!(app.apply(&messages_reply(jid, oldest_first)), mark_read);
 }
 
 #[test]
@@ -1314,5 +1317,184 @@ fn a_message_whatsapp_does_not_have_cannot_be_reacted_to_or_replied_to() {
         footer(&mut app).contains("that message was not sent, so it cannot be reacted to"),
         "{}",
         footer(&mut app)
+    );
+}
+
+// --- U8: opening a chat marks it read here and on WhatsApp (S8) ---------------------------
+
+fn marked_read(jid: &str, unread: u32) -> DaemonFrame {
+    DaemonFrame::MarkedRead {
+        v: 1,
+        jid: jid.to_owned(),
+        unread,
+    }
+}
+
+fn event_unread(jid: &str, unread: u32, chat_unread: u32) -> DaemonFrame {
+    DaemonFrame::EventUnread {
+        v: 1,
+        unread,
+        jid: jid.to_owned(),
+        chat_unread,
+    }
+}
+
+fn event_message(jid: &str, message: Message) -> DaemonFrame {
+    DaemonFrame::EventMessage {
+        v: 1,
+        jid: jid.to_owned(),
+        message,
+    }
+}
+
+#[test]
+fn opening_an_unread_chat_sends_one_mark_read_and_marked_read_clears_the_counts() {
+    // The reply and the chat's event_unread may come in either order.
+    for event_first in [false, true] {
+        let mut app = app_with(vec![
+            chat(ADA, "Ada Lovelace", 2),
+            chat(GRACE, "Grace Hopper", 3),
+        ]);
+        assert_eq!(
+            app.handle_key(key(KeyCode::Enter)),
+            Some(Action::Request(ClientFrame::messages(ADA, 200)))
+        );
+        let reply = messages_reply(ADA, vec![message("A1", "first", false, 1)]);
+        assert_eq!(
+            app.apply(&reply),
+            Some(Action::Request(ClientFrame::mark_read(ADA)))
+        );
+        // A later load of the same chat (a resync) sends no second one.
+        assert_eq!(app.apply(&reply), None);
+        if event_first {
+            app.apply(&event_unread(ADA, 3, 0));
+        }
+        assert_eq!(app.apply(&marked_read(ADA, 3)), None);
+        if !event_first {
+            app.apply(&event_unread(ADA, 3, 0));
+        }
+        assert_eq!(app.chats()[0].unread, 0, "event_first: {event_first}");
+        assert_eq!(app.chats()[1].unread, 3, "other chats keep theirs");
+        let screen = render(&mut app, 80, 24).text();
+        assert!(screen.contains("3 unread"), "{screen}");
+        assert!(!screen.contains("Ada Lovelace (2)"), "{screen}");
+        assert!(screen.contains("Grace Hopper (3)"), "{screen}");
+    }
+}
+
+#[test]
+fn opening_a_chat_with_nothing_unread_sends_no_mark_read() {
+    let mut app = two_chats();
+    app.select_next();
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Some(Action::Request(ClientFrame::messages(GRACE, 200)))
+    );
+    assert_eq!(
+        app.apply(&messages_reply(GRACE, vec![message("G1", "hi", false, 1)])),
+        None
+    );
+}
+
+#[test]
+fn the_daemon_driver_marks_an_opened_chat_read_and_a_refusal_keeps_the_count() {
+    for refuse in [false, true] {
+        let path = socket_path();
+        let server = fake_daemon(path.clone(), move |request| match request["op"].as_str() {
+            Some("messages") => serde_json::json!({"v":1,"op":"messages","jid":ADA,
+                "messages":[{"id":"A1","kind":"text","text":"first","from_me":false,
+                "timestamp":"2026-10-18T17:01:00Z"}]}),
+            Some("mark_read") if refuse => serde_json::json!({"v":1,"op":"error",
+                "code":"internal",
+                "message":"the WhatsApp session is offline, so the chat was not marked read"}),
+            Some("mark_read") => {
+                assert_eq!(request["jid"], ADA);
+                serde_json::json!({"v":1,"op":"marked_read","jid":ADA,"unread":0})
+            }
+            other => panic!("unexpected request {other:?}"),
+        });
+        let mut daemon = Daemon::connect(&path, "nuncio-tui/test").expect("connect");
+        let mut app = two_chats();
+        let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Enter)) else {
+            panic!("Enter opens the chat");
+        };
+        daemon.perform(&mut app, &frame).expect("perform");
+        let screen = render(&mut app, 120, 24).text();
+        let footer = screen.lines().last().unwrap_or_default().to_owned();
+        if refuse {
+            assert_eq!(
+                app.chats()[0].unread,
+                2,
+                "a refused mark_read keeps the count"
+            );
+            assert!(screen.contains("2 unread"), "{screen}");
+            assert!(
+                footer.contains("the WhatsApp session is offline, so the chat was not marked read"),
+                "{footer}"
+            );
+        } else {
+            assert_eq!(app.chats()[0].unread, 0);
+            assert!(screen.contains("0 unread"), "{screen}");
+            assert!(!footer.contains("not marked read"), "{footer}");
+        }
+        // Nothing more happens on its own: no retry.
+        for _ in 0..3 {
+            daemon.drain_events(&mut app).expect("drain");
+        }
+        drop(daemon);
+        assert_eq!(
+            server.join().expect("fake daemon"),
+            ["messages", "mark_read"],
+            "refuse: {refuse}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[test]
+fn a_new_message_in_the_open_chat_is_marked_read_one_at_a_time() {
+    let mut app = two_chats();
+    app.select_next();
+    app.handle_key(key(KeyCode::Enter));
+    app.apply(&messages_reply(GRACE, vec![message("G1", "hi", false, 1)]));
+    assert_eq!(
+        app.apply(&event_message(
+            GRACE,
+            message("G2", "are you there?", false, 2)
+        )),
+        Some(Action::Request(ClientFrame::mark_read(GRACE)))
+    );
+    // At most one in flight: the next message waits for the answer.
+    assert_eq!(
+        app.apply(&event_message(GRACE, message("G3", "hello?", false, 3))),
+        None
+    );
+    app.apply(&event_unread(GRACE, 4, 2));
+    app.apply(&marked_read(GRACE, 2));
+    assert_eq!(app.chats()[1].unread, 0);
+    assert_eq!(
+        app.apply(&event_message(GRACE, message("G4", "ok", false, 4))),
+        Some(Action::Request(ClientFrame::mark_read(GRACE)))
+    );
+}
+
+#[test]
+fn a_new_message_in_another_chat_sends_no_mark_read() {
+    let mut app = two_chats();
+    // Ada's conversation is loaded (and read), then Grace's chat is the open one.
+    open_first(&mut app, ADA, vec![message("A1", "first", false, 1)]);
+    app.apply(&marked_read(ADA, 0));
+    app.handle_key(key(KeyCode::Esc));
+    app.select_next();
+    app.handle_key(key(KeyCode::Enter));
+    app.apply(&messages_reply(GRACE, vec![message("G1", "hi", false, 1)]));
+    assert_eq!(
+        app.apply(&event_message(ADA, message("A7", "news", false, 7))),
+        None
+    );
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(
+        !screen.contains("news"),
+        "Grace's conversation stays open: {screen}"
     );
 }

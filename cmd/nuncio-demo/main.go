@@ -2,8 +2,8 @@
 // (proto/wire.md) on $XDG_RUNTIME_DIR/nuncio/core.sock with invented chats held in memory, and has
 // no WhatsApp code path at all: no network, no database, no keyring. Sends are answered at once (a
 // text starting with "fail" ends not sent, and retry then sends it; until then it cannot be replied
-// or reacted to), reactions, search and media downloads work, and a short while after each send an
-// invented reply arrives in that chat.
+// or reacted to), reactions, search, media downloads and mark_read work (opening a chat clears its
+// unread), and a short while after each send an invented reply arrives in that chat.
 //
 //	XDG_RUNTIME_DIR=/tmp/nuncio-demo go run ./cmd/nuncio-demo [-reply-after 2s]
 //
@@ -127,7 +127,7 @@ type send struct {
 	failed  bool
 }
 
-// demo is the in-memory ipc.Handler (with the M2 Searcher, Replier and Reactor).
+// demo is the in-memory ipc.Handler (with the M2 Searcher, Replier, Reactor and MarkReader).
 type demo struct {
 	mu         sync.Mutex
 	chats      []*chat
@@ -201,7 +201,7 @@ func (d *demo) Chats() []ipc.Chat {
 }
 
 // Messages lists up to limit messages newest first. Like nunciod, reading a chat does not mark it
-// read.
+// read: a UI sends mark_read for that.
 func (d *demo) Messages(jid string, limit int) ([]ipc.Message, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -403,6 +403,22 @@ func gradient() image.Image {
 		}
 	}
 	return img
+}
+
+// MarkRead clears the chat's unread (no read receipt: there is no WhatsApp), publishes its
+// event_unread and returns the new total. It always succeeds; a chat with nothing unread, or one the
+// demo does not have, just answers the total and publishes nothing, like nunciod.
+func (d *demo) MarkRead(jid string) (int, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	c := d.find(jid)
+	if c == nil || c.info.Unread == 0 {
+		return d.unreadLocked(), nil
+	}
+	c.info.Unread = 0
+	total := d.unreadLocked()
+	d.events.Publish(ipc.EventUnread{V: ipc.Version, Op: ipc.OpEventUnread, Unread: total, JID: jid})
+	return total, nil
 }
 
 // Wipe is always refused: the demo has nothing real to delete.

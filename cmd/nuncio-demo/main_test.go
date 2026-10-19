@@ -534,3 +534,45 @@ func TestReactAndReplyRefuseAMessageThatWasNotSent(t *testing.T) {
 		t.Errorf("react after the retry answered %v; want reacted", got)
 	}
 }
+
+func TestMarkReadAnswersMarkedReadWithTheNewTotalAndPublishesEventUnread(t *testing.T) {
+	sock, _ := runDemo(t)
+	ui := subscriber(t, sock)
+	c := dial(t, sock)
+	before, err := c.Status()
+	if err != nil {
+		t.Fatal(err)
+	}
+	chats, _ := c.Chats(200)
+	anaUnread := 0
+	for _, ch := range chats.Chats {
+		if ch.JID == ana {
+			anaUnread = ch.Unread
+		}
+	}
+	if anaUnread == 0 {
+		t.Fatal("the seed must leave Ana unread")
+	}
+	want := float64(before.Unread - anaUnread)
+	r := dialRaw(t, sock)
+	r.send(t, map[string]any{"v": 1, "op": "mark_read", "jid": ana})
+	if got := r.next(t); got["op"] != "marked_read" || got["jid"] != ana || got["unread"] != want {
+		t.Fatalf("mark_read answered %v; want marked_read with unread %v", got, want)
+	}
+	ev := ui.until(t, "the event_unread of Ana", func(m map[string]any) bool {
+		return m["op"] == "event_unread" && m["jid"] == ana
+	})
+	if ev["chat_unread"] != float64(0) || ev["unread"] != want {
+		t.Errorf("event_unread = %v; want chat_unread 0 and unread %v", ev, want)
+	}
+	if st, _ := c.Status(); float64(st.Unread) != want {
+		t.Errorf("status unread = %d; want %v", st.Unread, want)
+	}
+	// Nothing unread any more, and a chat the demo does not have, answer the same total.
+	for _, jid := range []string{ana, "15551239999@s.whatsapp.net"} {
+		r.send(t, map[string]any{"v": 1, "op": "mark_read", "jid": jid})
+		if got := r.next(t); got["op"] != "marked_read" || got["jid"] != jid || got["unread"] != want {
+			t.Errorf("mark_read %s answered %v; want marked_read with unread %v", jid, got, want)
+		}
+	}
+}

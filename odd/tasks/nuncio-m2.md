@@ -23,8 +23,8 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 | U3 | S1 (reply/react/search/media in the TUI over U2's ops) | delegated writer, after U1+U2 (context backstop) | done except inline images (L6): RED per rule, 11 mutants killed, one correction batch (refused download/search), cargo 82/0; parent reran `cargo test -p nuncio-tui` | d866f0d |
 | U5 | S7 | delegated writer (context backstop) | done: 13 tests RED→GREEN, 5 mutants killed, smoke run over the socket, socket removed on SIGINT; parent reran `go test -count=1 ./cmd/nuncio-demo` | this commit |
 | U6 | S2, S5 (manual-test bugs: local time, preview cut, ZWJ frame drift, react/reply on not-sent) | delegated writer | done: RED per fix, 5 mutants killed; ZWJ/FE0F/skin tones stripped at render (trade-off in README); `time` (already locked) for the local offset; parent reran `cargo test -p nuncio-tui` | d5e5dda |
-| U7 | S8 daemon + wire (`mark_read`) | delegated writer; Risk items 1 and 3 → verifier | done: 14 mutants killed; verifier PASS S4/S5/S8, no blockers; parent reran the MarkRead tests | this commit |
-| U8 | S8 TUI + demo (send `mark_read` on open) | delegated writer, after U6 and U7 | open | |
+| U7 | S8 daemon + wire (`mark_read`) | delegated writer; Risk items 1 and 3 → verifier | done: 14 mutants killed; verifier PASS S4/S5/S8, no blockers; parent reran the MarkRead tests | 5a53d30 |
+| U8 | S8 TUI + demo (send `mark_read` on open) | delegated writer, after U6 and U7 (started 15:58, before the 16:30 cut) | done: RED per rule, 8 mutants killed, cargo 92/0; final checks in L12 | this commit |
 | U4 | S6 push + report | inline | done: final checks green (L8), pushed to origin/feat/m2-tui | this commit |
 
 ## Log

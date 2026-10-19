@@ -20,6 +20,12 @@ nuncio-tui [--image <png>]
   be read, times are UTC and the footer says so.
 - **Conversation** (right): the selected chat, newest message at the bottom. Before a chat is
   opened it shows the chat's last message only.
+- **Read**: opening a chat that has unread messages marks it read, here and on WhatsApp too, as
+  the official clients do: your other devices clear it and the sender sees blue ticks, unless read
+  receipts are off in WhatsApp's privacy settings (then only your own devices clear it). A new
+  message arriving in the open chat is marked read the same way. The unread counts clear when the
+  daemon answers; if it refuses (offline, not linked, ...) the footer shows why, the chat stays
+  unread, and nothing retries on its own: opening the chat again does.
 - **Composer**: the last row of the conversation. A send shows `sending` until the daemon
   answers, then `queued` (offline, waiting for the reconnect), nothing (sent) or `not sent`
   (it waits for a manual retry).
@@ -59,7 +65,7 @@ Everything works from the keyboard. `?` shows this list on screen.
 | Keys | Does |
 |---|---|
 | `j`/`k`, `↓`/`↑` | chats: move · conversation: scroll a line |
-| `Enter`, `l`, `→` | open the selected chat |
+| `Enter`, `l`, `→` | open the selected chat, marking it read on WhatsApp too (blue ticks, unless read receipts are off) |
 | `i` | write a message to the selected chat |
 | `Enter` | in the composer: send |
 | `K`/`J` | conversation: select an older / newer message |
@@ -98,7 +104,9 @@ What it gives you to try:
   `nunciod`, refuses a reply to it or a reaction on it.
 - `e` reacts, `/` searches the open chat (every word, case-insensitive), `o` writes a small PNG or
   text file under the runtime dir and opens it.
-- `wipe` (`nuncio logout`/`purge`) is refused. Like `nunciod`, opening a chat does not mark it read.
+- Opening an unread chat clears its unread count (`mark_read`; the demo sends no receipts, since
+  there is no WhatsApp).
+- `wipe` (`nuncio logout`/`purge`) is refused.
 
 `Ctrl-C` stops the demo; it removes its socket and its media files. It refuses to start without
 `XDG_RUNTIME_DIR` or while something answers on the socket (a real `nunciod`).

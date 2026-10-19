@@ -79,7 +79,10 @@ const SNIPPET: usize = 40;
 /// Every key, by pane; drawn by the `?` help screen and documented in the crate README.
 pub const KEYS: &[(&str, &str)] = &[
     ("j/k ↑/↓", "chats: move · conversation: scroll a line"),
-    ("Enter l →", "open the selected chat"),
+    (
+        "Enter l →",
+        "open the chat, marking it read on WhatsApp (blue ticks)",
+    ),
     ("i", "write a message to the selected chat"),
     ("Enter", "in the composer: send"),
     ("K/J", "conversation: select an older / newer message"),
@@ -147,6 +150,10 @@ pub struct App {
     search: Option<Search>,
     /// Ids of media messages whose download was asked for with `o` and not answered yet.
     downloading: HashSet<String>,
+    /// The chat opened with Enter whose `messages` reply has not come yet.
+    opening: Option<String>,
+    /// JIDs of chats with a `mark_read` sent and not answered yet (at most one per chat).
+    marking: HashSet<String>,
     utc_offset: time::UtcOffset,
 }
 
@@ -188,6 +195,8 @@ impl App {
             picking: false,
             search: None,
             downloading: HashSet::new(),
+            opening: None,
+            marking: HashSet::new(),
             utc_offset: time::UtcOffset::UTC,
         };
         let chats = std::mem::take(&mut app.snapshot.chats);
@@ -311,7 +320,20 @@ impl App {
         let jid = self.selected_jid()?.to_owned();
         self.pane = Pane::Messages;
         self.search = None;
+        self.opening = Some(jid.clone());
         Some(Action::Request(ClientFrame::messages(jid, MESSAGE_LIMIT)))
+    }
+
+    /// Mark chat `jid` read here and on WhatsApp, unless a `mark_read` for it is in flight.
+    fn mark_read(&mut self, jid: &str) -> Option<Action> {
+        self.marking
+            .insert(jid.to_owned())
+            .then(|| Action::Request(ClientFrame::mark_read(jid)))
+    }
+
+    /// The chat whose conversation the user has open (not just selected in the list).
+    fn is_open(&self, jid: &str) -> bool {
+        self.pane != Pane::Chats && self.selected_jid() == Some(jid)
     }
 
     /// The open chat's loaded conversation, oldest first.
@@ -571,7 +593,8 @@ impl App {
     }
 
     /// Fold one daemon frame (a reply or an event) into the model. An `event_focus` asks for
-    /// the focused chat's messages.
+    /// the focused chat's messages; the messages of a chat just opened with unread messages, or
+    /// a new message in the open chat, ask for a `mark_read` (one in flight per chat).
     pub fn apply(&mut self, frame: &DaemonFrame) -> Option<Action> {
         match frame {
             DaemonFrame::Status {
@@ -607,6 +630,21 @@ impl App {
                     loaded.extend(old.iter().filter(|m| self.is_sending(m)).cloned());
                 }
                 self.conversations.insert(jid.clone(), loaded);
+                // The chat the user opened is read once its messages are shown (S8).
+                if self.opening.as_deref() == Some(jid.as_str()) {
+                    self.opening = None;
+                    let unread = self.snapshot.chats.iter().find(|c| &c.jid == jid);
+                    if unread.is_some_and(|chat| chat.unread > 0) {
+                        return self.mark_read(jid);
+                    }
+                }
+            }
+            DaemonFrame::MarkedRead { jid, unread, .. } => {
+                self.marking.remove(jid);
+                self.snapshot.unread = *unread;
+                if let Some(chat) = self.snapshot.chats.iter_mut().find(|c| &c.jid == jid) {
+                    chat.unread = 0;
+                }
             }
             DaemonFrame::Sent {
                 client_id,
@@ -644,7 +682,12 @@ impl App {
             DaemonFrame::MediaReady { id, path, .. } if self.downloading.remove(id) => {
                 return Some(Action::Open(PathBuf::from(path)));
             }
-            DaemonFrame::EventMessage { jid, message, .. } => self.message_event(jid, message),
+            DaemonFrame::EventMessage { jid, message, .. } => {
+                // A new message in the open chat is read at once, as the official clients do.
+                if self.message_event(jid, message) && !message.from_me && self.is_open(jid) {
+                    return self.mark_read(jid);
+                }
+            }
             DaemonFrame::EventUnread {
                 unread,
                 jid,
@@ -683,6 +726,10 @@ impl App {
                     search.awaiting = false;
                     search.editing = true;
                 }
+            }
+            // The chat stays unread; nothing retries it (the next open does).
+            ClientFrame::MarkRead { jid, .. } => {
+                self.marking.remove(jid);
             }
             _ => {}
         }
@@ -738,8 +785,8 @@ impl App {
     }
 
     /// A new message, or a new state of one already shown (same `id`, or same `client_id` for
-    /// a send of mine).
-    fn message_event(&mut self, jid: &str, message: &Message) {
+    /// a send of mine). True when it was added to the loaded conversation as a new message.
+    fn message_event(&mut self, jid: &str, message: &Message) -> bool {
         if let Some(client_id) = &message.client_id {
             self.sending.remove(client_id);
         }
@@ -759,15 +806,21 @@ impl App {
             self.set_chats(chats);
         }
         let Some(messages) = self.conversations.get_mut(jid) else {
-            return;
+            return false;
         };
         let same = |m: &Message| {
             (!message.id.is_empty() && m.id == message.id)
                 || (message.client_id.is_some() && m.client_id == message.client_id)
         };
         match messages.iter_mut().find(|m| same(m)) {
-            Some(existing) => *existing = message.clone(),
-            None => messages.push(message.clone()),
+            Some(existing) => {
+                *existing = message.clone();
+                false
+            }
+            None => {
+                messages.push(message.clone());
+                true
+            }
         }
     }
 

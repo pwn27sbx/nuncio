@@ -86,7 +86,7 @@ impl Daemon {
     /// (as `not_linked`, or a send that was not confirmed) is shown as not sent; any other
     /// `error` becomes the footer notice. A broken connection is returned as the error, after a
     /// send (or retry) it carried is marked not sent. A `media_ready` the user asked for is
-    /// opened.
+    /// opened, and a request the reply asks for (a `mark_read` after a chat is opened) is sent.
     pub fn perform(&mut self, app: &mut App, frame: &ClientFrame) -> Result<(), ClientError> {
         let result = match frame {
             ClientFrame::DownloadMedia { .. } => self.requests.request_within(frame, MEDIA_WAIT),
@@ -104,12 +104,14 @@ impl Daemon {
             }
         };
         match result {
-            Ok(reply) => {
-                if let Some(Action::Open(path)) = app.apply(&reply) {
+            Ok(reply) => match app.apply(&reply) {
+                Some(Action::Open(path)) => {
                     self.open(app, &path);
+                    Ok(())
                 }
-                Ok(())
-            }
+                Some(Action::Request(next)) => self.perform(app, &next),
+                Some(Action::Quit) | None => Ok(()),
+            },
             Err(ClientError::Daemon { code, message }) => {
                 failed_send(app, message.clone());
                 app.request_failed(frame, format!("daemon: {code}: {message}"));

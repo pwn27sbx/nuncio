@@ -32,8 +32,8 @@ Source of record: the office handoff README (2026-10-19, kept outside the repo b
 | T2 | S2 | inline | done | see commit; RED: Go test hung until `-timeout 5s`, Rust request hung 8 s; GREEN Go 3 tests + Rust 2 tests; mutants killed: no Go deadline, no Rust `set_read_timeout`, `WouldBlock` not mapped |
 | T3 | S3 | inline | done | see commit; characterization tests (behaviour already existed, so RED does not apply; proof is mutation): 5 tests; mutants killed: data dir before the gate, no ban warning, unknown command exits 1, status format, no flag check. `main` now delegates to `cli(args, stdout, stderr) int` |
 | T4 | S4 | inline | done | see commit; 15 new fixtures (22 total); RED: Go 9 undefined types, Rust missing variants; GREEN Go + Rust contract suites; drift mutants killed: Rust `chat_unread` renamed, Go `client_id` renamed, Go `media` without omitempty; added `subscribed`, `focused`, `event_focus` and `sent` state `queued` beyond the suggested ops (CLI needs honest acks, T9 needs the focus event); corners table in `proto/wire.md` |
-| T5 | S5 | inline | pending | |
-| T6 | S6 | inline | pending | |
+| T5 | S5 | delegated (opus) | done | see commit; RED: compile + stubbed functions (8/8 tests failed); GREEN 8 tests; 18 mutants killed (writer), parent re-ran "duplicate guard becomes DO UPDATE": killed by TestDuplicateMessageIsIgnored + TestReopenKeepsEverything; `EnsureSchema(db)` must be called after `store.Open` by the daemon (T7) |
+| T6 | S6 | delegated (opus) | in progress | |
 | T7 | S7 | inline | pending | |
 | T8 | S8 | inline | pending | |
 | T9 | S9 | inline | pending | |
@@ -53,3 +53,4 @@ Source of record: the office handoff README (2026-10-19, kept outside the repo b
 - **L6** Native assess needs `--untracked-scope=exclude` because of the untracked `.atl/` cache. Reviewed boundary stays `8b424bc` while commits are `under_budget`.
 - **L7** (owner, 2026-10-19, verbatim): "no necesitamos PRs apilados o encadenados es nuestro proyecto propio nadie mas que nosotros lo revisa, a lo mucho las RDD y GGA de gentle-orchetrator con lo que te dije que trabajes que vienen incluidas". Delivery strategy cached as `single-pr`: the ~400-line budget does not slice this branch; native RDD review still runs per commit whenever `review_due` is true.
 - **L8** (owner OK, 2026-10-19: "ok") GGA v2.10.1 set up: `AGENTS.md` (review rules from handoff section 8), project `.gga` (`*.go,*.rs`, tests included), local pre-commit hook `.git/hooks/pre-commit` (not tracked). T1–T3 predate the hook and were not GGA-reviewed.
+- **L9** Route change from T5 on: the owner's long-session rule applies (four code tasks already done in this session), so every code-writing task goes to a clean-context Opus writer, one task per writer; the parent reviews each diff against its allowed surface, repeats one check, commits and updates this file. T5 (`internal/store/messages*.go`, `schema.go`) and T6 (`internal/wa/session*.go`, `events.go`, `cmd/nunciod/main*.go`, `cmd/nuncio/link.go`) have disjoint surfaces and run in parallel in the same tree; the parent owns git.

@@ -1,0 +1,398 @@
+package store
+
+import (
+	"database/sql"
+	"fmt"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// Fake chat ids: never real phone numbers.
+const (
+	chatAlice = "15550000001@s.whatsapp.net"
+	chatBob   = "15550000002@s.whatsapp.net"
+	chatGroup = "120363000000000001@g.us"
+)
+
+// t0 is a fixed base time so ordering is deterministic.
+var t0 = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+
+// openMessagesDB opens nuncio.db through store.Open with the chat schema in place.
+func openMessagesDB(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	return db
+}
+
+func newMessagesDB(t *testing.T) *sql.DB {
+	t.Helper()
+	return openMessagesDB(t, filepath.Join(t.TempDir(), "nuncio.db"))
+}
+
+func mustInsert(t *testing.T, db *sql.DB, m Message) {
+	t.Helper()
+	inserted, err := InsertMessage(db, m)
+	if err != nil {
+		t.Fatalf("InsertMessage %s: %v", m.ID, err)
+	}
+	if !inserted {
+		t.Fatalf("InsertMessage %s reported a duplicate", m.ID)
+	}
+}
+
+func text(id, chat, body string, fromMe bool, at time.Time) Message {
+	return Message{ID: id, ChatJID: chat, Kind: KindText, Text: body, FromMe: fromMe, Timestamp: at}
+}
+
+func messageIDs(ms []Message) []string {
+	ids := make([]string, len(ms))
+	for i, m := range ms {
+		ids[i] = m.ID
+	}
+	return ids
+}
+
+func chatJIDs(cs []Chat) []string {
+	jids := make([]string, len(cs))
+	for i, c := range cs {
+		jids[i] = c.JID
+	}
+	return jids
+}
+
+func hitIDs(hs []SearchHit) []string {
+	ids := make([]string, len(hs))
+	for i, h := range hs {
+		ids[i] = h.MessageID
+	}
+	return ids
+}
+
+func TestInsertChatAndMessageRoundTrip(t *testing.T) {
+	db := newMessagesDB(t)
+	if err := UpsertChat(db, Chat{JID: chatAlice, Name: "Alice", Pinned: true}); err != nil {
+		t.Fatalf("UpsertChat: %v", err)
+	}
+	media := Message{
+		ID: "M1", ChatJID: chatAlice, Kind: KindImage, Text: "a caption", FromMe: true,
+		Timestamp: t0, Mime: "image/jpeg", Size: 1234, FileName: "cat.jpg",
+	}
+	mustInsert(t, db, media)
+
+	msgs, err := ListMessages(db, chatAlice, 10)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("ListMessages = %v, want one message", messageIDs(msgs))
+	}
+	got := msgs[0]
+	if got.ID != "M1" || got.ChatJID != chatAlice || got.Kind != KindImage || got.Text != "a caption" ||
+		!got.FromMe || !got.Timestamp.Equal(t0) || got.Mime != "image/jpeg" || got.Size != 1234 ||
+		got.FileName != "cat.jpg" {
+		t.Fatalf("round trip = %+v, want %+v", got, media)
+	}
+
+	chats, err := ListChats(db, 10)
+	if err != nil {
+		t.Fatalf("ListChats: %v", err)
+	}
+	if len(chats) != 1 || chats[0].JID != chatAlice || chats[0].Name != "Alice" || !chats[0].Pinned ||
+		chats[0].Archived || !chats[0].LastMessageAt.Equal(t0) {
+		t.Fatalf("ListChats = %+v, want Alice pinned with last message at %v", chats, t0)
+	}
+
+	// Updating a chat changes its fields instead of adding a second row.
+	if err := UpsertChat(db, Chat{JID: chatAlice, Name: "Alice B", Archived: true}); err != nil {
+		t.Fatalf("UpsertChat update: %v", err)
+	}
+	chats, err = ListChats(db, 10)
+	if err != nil {
+		t.Fatalf("ListChats: %v", err)
+	}
+	if len(chats) != 1 || chats[0].Name != "Alice B" || !chats[0].Archived || chats[0].Pinned {
+		t.Fatalf("after update ListChats = %+v, want one archived unpinned 'Alice B'", chats)
+	}
+}
+
+func TestInsertMessageCreatesItsChat(t *testing.T) {
+	db := newMessagesDB(t)
+	mustInsert(t, db, text("M1", chatBob, "hi", false, t0))
+	chats, err := ListChats(db, 10)
+	if err != nil {
+		t.Fatalf("ListChats: %v", err)
+	}
+	if fmt.Sprint(chatJIDs(chats)) != fmt.Sprint([]string{chatBob}) {
+		t.Fatalf("ListChats = %v, want [%s]", chatJIDs(chats), chatBob)
+	}
+}
+
+func TestListMessagesNewestFirstWithLimit(t *testing.T) {
+	db := newMessagesDB(t)
+	// Inserted out of order so the result order comes from the timestamp.
+	mustInsert(t, db, text("M2", chatAlice, "second", false, t0.Add(2*time.Minute)))
+	mustInsert(t, db, text("M1", chatAlice, "first", false, t0.Add(1*time.Minute)))
+	mustInsert(t, db, text("M3", chatAlice, "third", false, t0.Add(3*time.Minute)))
+	mustInsert(t, db, text("B1", chatBob, "other chat", false, t0.Add(4*time.Minute)))
+
+	all, err := ListMessages(db, chatAlice, 10)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if want := []string{"M3", "M2", "M1"}; fmt.Sprint(messageIDs(all)) != fmt.Sprint(want) {
+		t.Fatalf("ListMessages = %v, want %v", messageIDs(all), want)
+	}
+
+	two, err := ListMessages(db, chatAlice, 2)
+	if err != nil {
+		t.Fatalf("ListMessages limit 2: %v", err)
+	}
+	if want := []string{"M3", "M2"}; fmt.Sprint(messageIDs(two)) != fmt.Sprint(want) {
+		t.Fatalf("ListMessages limit 2 = %v, want %v", messageIDs(two), want)
+	}
+}
+
+func TestListChatsNewestFirstWithLimit(t *testing.T) {
+	db := newMessagesDB(t)
+	// The time order differs from the jid order in both directions.
+	mustInsert(t, db, text("A1", chatAlice, "old", false, t0))
+	mustInsert(t, db, text("G1", chatGroup, "older", false, t0.Add(2*time.Minute)))
+	mustInsert(t, db, text("B1", chatBob, "newer", false, t0.Add(3*time.Minute)))
+	// A newer message moves Alice to the top.
+	mustInsert(t, db, text("A2", chatAlice, "newest", false, t0.Add(4*time.Minute)))
+
+	all, err := ListChats(db, 10)
+	if err != nil {
+		t.Fatalf("ListChats: %v", err)
+	}
+	if want := []string{chatAlice, chatBob, chatGroup}; fmt.Sprint(chatJIDs(all)) != fmt.Sprint(want) {
+		t.Fatalf("ListChats = %v, want %v", chatJIDs(all), want)
+	}
+
+	two, err := ListChats(db, 2)
+	if err != nil {
+		t.Fatalf("ListChats limit 2: %v", err)
+	}
+	if want := []string{chatAlice, chatBob}; fmt.Sprint(chatJIDs(two)) != fmt.Sprint(want) {
+		t.Fatalf("ListChats limit 2 = %v, want %v", chatJIDs(two), want)
+	}
+}
+
+func TestSearchMatch(t *testing.T) {
+	db := newMessagesDB(t)
+	// The better match (M2) is the older one, so the order comes from bm25, not time.
+	mustInsert(t, db, text("M1", chatAlice, "the compiler is done", false, t0.Add(time.Minute)))
+	mustInsert(t, db, text("M2", chatGroup, "compiler compiler compiler", false, t0))
+	mustInsert(t, db, text("M3", chatBob, "see you at six", false, t0.Add(2*time.Minute)))
+
+	t.Run("matches with chat jid ranked by bm25", func(t *testing.T) {
+		hits, err := Search(db, "compiler", 10)
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		// M2 repeats the term in a shorter text, so bm25 ranks it first.
+		if want := []string{"M2", "M1"}; fmt.Sprint(hitIDs(hits)) != fmt.Sprint(want) {
+			t.Fatalf("Search compiler = %v, want %v", hitIDs(hits), want)
+		}
+		if hits[0].ChatJID != chatGroup || hits[0].Text != "compiler compiler compiler" ||
+			!hits[0].Timestamp.Equal(t0) {
+			t.Fatalf("first hit = %+v, want M2 in %s", hits[0], chatGroup)
+		}
+	})
+
+	t.Run("all terms must match", func(t *testing.T) {
+		hits, err := Search(db, "compiler done", 10)
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if want := []string{"M1"}; fmt.Sprint(hitIDs(hits)) != fmt.Sprint(want) {
+			t.Fatalf("Search 'compiler done' = %v, want %v", hitIDs(hits), want)
+		}
+	})
+
+	t.Run("limit", func(t *testing.T) {
+		hits, err := Search(db, "compiler", 1)
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if want := []string{"M2"}; fmt.Sprint(hitIDs(hits)) != fmt.Sprint(want) {
+			t.Fatalf("Search limit 1 = %v, want %v", hitIDs(hits), want)
+		}
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		hits, err := Search(db, "whatsapp", 10)
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if len(hits) != 0 {
+			t.Fatalf("Search whatsapp = %v, want none", hitIDs(hits))
+		}
+	})
+
+	t.Run("fts syntax in the query is not an error", func(t *testing.T) {
+		for _, q := range []string{`"`, `compiler"`, `AND`, `compiler OR`, `(`, `text:`, `*`, `-x`, `NEAR(`, `^`, `   `} {
+			if _, err := Search(db, q, 10); err != nil {
+				t.Errorf("Search(%q): %v", q, err)
+			}
+		}
+		hits, err := Search(db, `compiler"`, 10)
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if want := []string{"M2", "M1"}; fmt.Sprint(hitIDs(hits)) != fmt.Sprint(want) {
+			t.Fatalf(`Search compiler" = %v, want %v`, hitIDs(hits), want)
+		}
+	})
+}
+
+func TestUnreadCounts(t *testing.T) {
+	db := newMessagesDB(t)
+	mustInsert(t, db, text("A1", chatAlice, "one", false, t0))
+	mustInsert(t, db, text("A2", chatAlice, "two", false, t0.Add(time.Minute)))
+	mustInsert(t, db, text("A3", chatAlice, "mine", true, t0.Add(2*time.Minute)))
+	mustInsert(t, db, text("B1", chatBob, "hey", false, t0.Add(3*time.Minute)))
+	mustInsert(t, db, text("G1", chatGroup, "mine too", true, t0.Add(4*time.Minute)))
+
+	assertUnread := func(t *testing.T, alice, bob, group, total int) {
+		t.Helper()
+		for jid, want := range map[string]int{chatAlice: alice, chatBob: bob, chatGroup: group} {
+			got, err := UnreadCount(db, jid)
+			if err != nil {
+				t.Fatalf("UnreadCount %s: %v", jid, err)
+			}
+			if got != want {
+				t.Errorf("UnreadCount %s = %d, want %d", jid, got, want)
+			}
+		}
+		got, err := TotalUnread(db)
+		if err != nil {
+			t.Fatalf("TotalUnread: %v", err)
+		}
+		if got != total {
+			t.Errorf("TotalUnread = %d, want %d", got, total)
+		}
+		chats, err := ListChats(db, 10)
+		if err != nil {
+			t.Fatalf("ListChats: %v", err)
+		}
+		for _, c := range chats {
+			want := map[string]int{chatAlice: alice, chatBob: bob, chatGroup: group}[c.JID]
+			if c.Unread != want {
+				t.Errorf("ListChats %s Unread = %d, want %d", c.JID, c.Unread, want)
+			}
+		}
+	}
+
+	t.Run("own messages are never unread", func(t *testing.T) {
+		assertUnread(t, 2, 1, 0, 3)
+	})
+
+	t.Run("marking a chat read clears only that chat", func(t *testing.T) {
+		if err := MarkChatRead(db, chatAlice); err != nil {
+			t.Fatalf("MarkChatRead: %v", err)
+		}
+		assertUnread(t, 0, 1, 0, 1)
+	})
+
+	t.Run("a new incoming message is unread again", func(t *testing.T) {
+		mustInsert(t, db, text("A4", chatAlice, "again", false, t0.Add(5*time.Minute)))
+		assertUnread(t, 1, 1, 0, 2)
+	})
+}
+
+func TestReopenKeepsEverything(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nuncio.db")
+	db, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	if err := UpsertChat(db, Chat{JID: chatAlice, Name: "Alice", Pinned: true}); err != nil {
+		t.Fatalf("UpsertChat: %v", err)
+	}
+	mustInsert(t, db, text("A1", chatAlice, "persisted compiler", false, t0))
+	mustInsert(t, db, text("A2", chatAlice, "read one", false, t0.Add(time.Minute)))
+	if err := MarkChatRead(db, chatAlice); err != nil {
+		t.Fatalf("MarkChatRead: %v", err)
+	}
+	mustInsert(t, db, text("A3", chatAlice, "unread one", false, t0.Add(2*time.Minute)))
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopening runs the schema again on an existing database.
+	db = openMessagesDB(t, path)
+	msgs, err := ListMessages(db, chatAlice, 10)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if want := []string{"A3", "A2", "A1"}; fmt.Sprint(messageIDs(msgs)) != fmt.Sprint(want) {
+		t.Fatalf("after reopen ListMessages = %v, want %v", messageIDs(msgs), want)
+	}
+	chats, err := ListChats(db, 10)
+	if err != nil {
+		t.Fatalf("ListChats: %v", err)
+	}
+	if len(chats) != 1 || chats[0].Name != "Alice" || !chats[0].Pinned {
+		t.Fatalf("after reopen ListChats = %+v, want pinned Alice", chats)
+	}
+	hits, err := Search(db, "compiler", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if want := []string{"A1"}; fmt.Sprint(hitIDs(hits)) != fmt.Sprint(want) {
+		t.Fatalf("after reopen Search = %v, want %v", hitIDs(hits), want)
+	}
+	if n, err := TotalUnread(db); err != nil || n != 1 {
+		t.Fatalf("after reopen TotalUnread = %d, %v; want 1", n, err)
+	}
+	// A duplicate after reopen is still recognised.
+	if inserted, err := InsertMessage(db, text("A1", chatAlice, "persisted compiler", false, t0)); err != nil || inserted {
+		t.Fatalf("after reopen duplicate InsertMessage = %v, %v; want false, nil", inserted, err)
+	}
+}
+
+func TestDuplicateMessageIsIgnored(t *testing.T) {
+	db := newMessagesDB(t)
+	mustInsert(t, db, text("M1", chatAlice, "original compiler", false, t0))
+
+	inserted, err := InsertMessage(db, text("M1", chatAlice, "replayed compiler", false, t0.Add(time.Hour)))
+	if err != nil {
+		t.Fatalf("duplicate InsertMessage: %v", err)
+	}
+	if inserted {
+		t.Fatal("duplicate InsertMessage reported inserted=true, want false")
+	}
+
+	msgs, err := ListMessages(db, chatAlice, 10)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(msgs) != 1 || msgs[0].Text != "original compiler" || !msgs[0].Timestamp.Equal(t0) {
+		t.Fatalf("ListMessages = %+v, want only the original M1", msgs)
+	}
+	hits, err := Search(db, "compiler", 10)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 1 || hits[0].Text != "original compiler" {
+		t.Fatalf("Search = %+v, want one hit for the original", hits)
+	}
+	if n, err := UnreadCount(db, chatAlice); err != nil || n != 1 {
+		t.Fatalf("UnreadCount = %d, %v; want 1", n, err)
+	}
+
+	// The same id in another chat is a different message.
+	mustInsert(t, db, text("M1", chatBob, "same id, other chat", false, t0))
+}

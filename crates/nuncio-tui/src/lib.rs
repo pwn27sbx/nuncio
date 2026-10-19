@@ -22,6 +22,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_image::StatefulImage;
 use ratatui_image::protocol::StatefulProtocol;
+use unicode_segmentation::UnicodeSegmentation;
 
 mod daemon;
 
@@ -75,6 +76,8 @@ const SEARCH_LIMIT: u16 = 50;
 pub const REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 /// How many characters of a quoted message are shown.
 const SNIPPET: usize = 40;
+/// How many rows the composer grows to; a longer draft scrolls with the cursor.
+const COMPOSER_ROWS: usize = 5;
 
 /// Every key, by pane; drawn by the `?` help screen and documented in the crate README.
 pub const KEYS: &[(&str, &str)] = &[
@@ -85,6 +88,11 @@ pub const KEYS: &[(&str, &str)] = &[
     ),
     ("i", "write a message to the selected chat"),
     ("Enter", "in the composer: send"),
+    ("Alt-Enter C-j", "in the composer: a new line"),
+    (
+        "←/→ Home/End",
+        "in the composer: move the cursor · Bksp/Delete erase",
+    ),
     ("K/J", "conversation: select an older / newer message"),
     ("r", "reply to the selected sent or received message"),
     (
@@ -133,6 +141,8 @@ pub struct App {
     /// Lines scrolled up from the newest message; clamped when drawn.
     scroll: usize,
     composer: String,
+    /// The composer's cursor: a byte offset into `composer`, on a grapheme boundary.
+    caret: usize,
     /// `client_id`s of sends that have no reply yet.
     sending: HashSet<String>,
     client_prefix: String,
@@ -187,6 +197,7 @@ impl App {
             conversations: HashMap::new(),
             scroll: 0,
             composer: String::new(),
+            caret: 0,
             sending: HashSet::new(),
             client_prefix: "tui".to_owned(),
             sends: 0,
@@ -546,20 +557,61 @@ impl App {
         self.scroll = self.scroll.saturating_sub(lines);
     }
 
+    /// A key in the composer. Enter sends; Alt-Enter and Ctrl-J (for a terminal that does not
+    /// pass Alt-Enter on) start a new line; the cursor moves and deletes by grapheme, so an emoji
+    /// sequence or an accented letter is one step.
     fn compose_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => {
                 self.reply_to = None;
                 self.pane = Pane::Messages;
             }
-            KeyCode::Backspace => {
-                self.composer.pop();
-            }
+            KeyCode::Enter if alt => self.insert('\n'),
+            KeyCode::Char('j') if ctrl => self.insert('\n'),
             KeyCode::Enter => return self.send(),
-            KeyCode::Char(c) => self.composer.push(c),
+            KeyCode::Backspace => {
+                if let Some(start) = previous_grapheme(&self.composer, self.caret) {
+                    self.composer.replace_range(start..self.caret, "");
+                    self.caret = start;
+                }
+            }
+            KeyCode::Delete => {
+                if let Some(end) = next_grapheme(&self.composer, self.caret) {
+                    self.composer.replace_range(self.caret..end, "");
+                }
+            }
+            KeyCode::Left => {
+                if let Some(start) = previous_grapheme(&self.composer, self.caret) {
+                    self.caret = start;
+                }
+            }
+            KeyCode::Right => {
+                if let Some(end) = next_grapheme(&self.composer, self.caret) {
+                    self.caret = end;
+                }
+            }
+            KeyCode::Home => {
+                self.caret = self.composer[..self.caret]
+                    .rfind('\n')
+                    .map_or(0, |newline| newline + 1);
+            }
+            KeyCode::End => {
+                self.caret = self.composer[self.caret..]
+                    .find('\n')
+                    .map_or(self.composer.len(), |newline| self.caret + newline);
+            }
+            KeyCode::Char(c) => self.insert(c),
             _ => {}
         }
         None
+    }
+
+    /// Put `c` into the draft at the cursor and move the cursor after it.
+    fn insert(&mut self, c: char) {
+        self.composer.insert(self.caret, c);
+        self.caret += c.len_utf8();
     }
 
     /// Send the composer's text to the selected chat as one message. It is shown at once as
@@ -570,6 +622,7 @@ impl App {
         }
         let jid = self.selected_jid()?.to_owned();
         let text = std::mem::take(&mut self.composer);
+        self.caret = 0;
         self.sends += 1;
         let client_id = format!("{}-{}", self.client_prefix, self.sends);
         self.sending.insert(client_id.clone());
@@ -717,8 +770,9 @@ impl App {
                     Some(shown) => *shown = chat.clone(),
                     None => chats.push(chat.clone()),
                 }
-                // RFC 3339 UTC timestamps sort as text; a chat with no message sorts last.
-                chats.sort_by(|a, b| newest(b).cmp(newest(a)));
+                // RFC 3339 UTC timestamps sort as text; a chat with no message sorts last; the
+                // same time sorts by JID, as the daemon's `ORDER BY ... DESC, c.jid` does.
+                chats.sort_by(|a, b| newest(b).cmp(newest(a)).then_with(|| a.jid.cmp(&b.jid)));
                 self.set_chats(chats);
             }
             DaemonFrame::EventFocus { jid, .. } => {
@@ -1002,8 +1056,10 @@ impl App {
                 " r reply · e react · R retry · o open media · J/K select · Esc unselect "
             }
             Pane::Messages => " Esc chats · j/k scroll · K select · i write · / search · ? help ",
-            Pane::Compose if self.reply_to.is_some() => " Enter send reply · Esc cancel ",
-            Pane::Compose => " Enter send · Esc cancel ",
+            Pane::Compose if self.reply_to.is_some() => {
+                " Enter send reply · Alt-Enter newline · ←/→ move · Esc cancel "
+            }
+            Pane::Compose => " Enter send · Alt-Enter newline · ←/→ move · Esc cancel ",
         };
         // The notice comes first, so a narrow terminal still shows it.
         let mut spans = Vec::new();
@@ -1030,15 +1086,16 @@ impl App {
                 ])
             })
             .collect();
-        let popup = popup(area, 72, lines.len() as u16 + 2);
+        // As tall as the wrapped lines need, so the last keys are not cut off.
+        let help = Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(Style::default().bg(rgb(self.palette.background)))
+            .block(bordered(&self.palette).title(" Keys "));
+        // `line_count` counts the block's rows but wraps at the width it is given: the inner one.
+        let height = help.line_count(area.width.min(72).saturating_sub(2));
+        let popup = popup(area, 72, u16::try_from(height).unwrap_or(u16::MAX));
         frame.render_widget(Clear, popup);
-        frame.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .style(Style::default().bg(rgb(self.palette.background)))
-                .block(bordered(&self.palette).title(" Keys ")),
-            popup,
-        );
+        frame.render_widget(help, popup);
     }
 
     fn draw_chats(&mut self, frame: &mut Frame, area: Rect) {
@@ -1094,11 +1151,16 @@ impl App {
             frame.render_stateful_widget(StatefulImage::new(), image_area, image);
         }
 
-        // The composer is the last row, under a rule, inside the same border.
+        // The composer is the last rows (up to five, growing upwards), under a rule, inside the
+        // same border.
+        let draft = self.draft_rows(rest.width);
+        let height = draft
+            .as_ref()
+            .map_or(1, |(rows, _)| rows.len().min(COMPOSER_ROWS));
         let [text_area, rule, composer] = Layout::vertical([
             Constraint::Min(0),
             Constraint::Length(1),
-            Constraint::Length(1),
+            Constraint::Length(height as u16),
         ])
         .areas(rest);
         self.draw_conversation(frame, text_area);
@@ -1112,30 +1174,51 @@ impl App {
             });
         let rule_text = quoted.unwrap_or_default() + &"─".repeat(usize::from(rule.width));
         frame.render_widget(Paragraph::new(rule_text).style(self.muted()), rule);
-        self.draw_composer(frame, composer);
+        self.draw_composer(frame, composer, draft);
     }
 
-    fn draw_composer(&self, frame: &mut Frame, area: Rect) {
+    /// The draft laid out for a composer `width` columns wide, after the 2-column prompt, plus
+    /// the cursor's row and column; `None` when there is no draft to show (the hint instead).
+    fn draft_rows(&self, width: u16) -> Option<DraftRows> {
+        (self.pane == Pane::Compose || !self.composer.is_empty()).then(|| {
+            layout_draft(
+                &self.composer,
+                self.caret,
+                usize::from(width.saturating_sub(2)),
+            )
+        })
+    }
+
+    fn draw_composer(&self, frame: &mut Frame, area: Rect, draft: Option<DraftRows>) {
         if area.is_empty() {
             return;
         }
-        let line = if self.pane == Pane::Compose || !self.composer.is_empty() {
-            Line::from(vec![
-                Span::styled("› ", Style::default().fg(rgb(self.palette.accent))),
-                Span::styled(
-                    plain(&self.composer),
-                    Style::default().fg(rgb(self.palette.foreground)),
-                ),
-            ])
-        } else {
-            Line::from(Span::styled("  i to write a message", self.muted()))
+        let Some((rows, (row, column))) = draft else {
+            let hint = Line::from(Span::styled("  i to write a message", self.muted()));
+            frame.render_widget(Paragraph::new(hint), area);
+            return;
         };
-        // Keep the end of a long draft (and the cursor) in view.
-        let width = line.width() as u16;
-        let offset = (width + 1).saturating_sub(area.width);
-        frame.render_widget(Paragraph::new(line).scroll((0, offset)), area);
+        // The rows shown: from the first, or scrolled so the cursor's row is the last one.
+        let visible = usize::from(area.height);
+        let top = (row + 1).saturating_sub(visible);
+        let text = Style::default().fg(rgb(self.palette.foreground));
+        let lines: Vec<Line> = rows
+            .into_iter()
+            .enumerate()
+            .skip(top)
+            .take(visible)
+            .map(|(index, shown)| {
+                let prompt = if index == 0 { "› " } else { "  " };
+                Line::from(vec![
+                    Span::styled(prompt, Style::default().fg(rgb(self.palette.accent))),
+                    Span::styled(shown, text),
+                ])
+            })
+            .collect();
+        frame.render_widget(Paragraph::new(lines), area);
         if self.pane == Pane::Compose {
-            frame.set_cursor_position((area.x + (width - offset).min(area.width - 1), area.y));
+            let x = (2 + column).min(usize::from(area.width.saturating_sub(1)));
+            frame.set_cursor_position((area.x + x as u16, area.y + (row - top) as u16));
         }
     }
 
@@ -1261,6 +1344,88 @@ impl App {
             .fg(rgb(self.palette.foreground))
             .add_modifier(Modifier::DIM)
     }
+}
+
+/// A draft as drawn: its rows, and the cursor's row and column in them.
+type DraftRows = (Vec<String>, (usize, usize));
+
+/// Lay `draft` out in rows of at most `width` columns: each line of it starts a row, and a line
+/// wider than that wraps after its last space that fits (between graphemes when a word alone is
+/// wider than the row). The last column is kept free so the cursor always has a cell after the
+/// text. Rows hold the text as drawn ([`plain`]), so the columns are the ones the terminal draws;
+/// the cursor (`caret`, a byte offset) is placed by the same widths.
+fn layout_draft(draft: &str, caret: usize, width: usize) -> DraftRows {
+    let room = width.saturating_sub(1).max(1);
+    let mut rows = vec![String::new()];
+    let mut used = 0;
+    // Where the current row may break: the byte and column just after its last space.
+    let mut space: Option<(usize, usize)> = None;
+    let mut cursor: Option<(usize, usize)> = None;
+    for (start, grapheme) in draft.grapheme_indices(true) {
+        if grapheme == "\n" || grapheme == "\r\n" {
+            if cursor.is_none() && start >= caret {
+                cursor = Some((rows.len() - 1, used));
+            }
+            rows.push(String::new());
+            used = 0;
+            space = None;
+            continue;
+        }
+        let shown = plain(grapheme);
+        let w = display_width(&shown);
+        if used > 0 && used + w > room {
+            let row = rows.len() - 1;
+            match space.take().filter(|_| !grapheme.trim().is_empty()) {
+                // Carry the word being written over to the next row, cursor included.
+                Some((byte, column)) => {
+                    let word = rows[row].split_off(byte);
+                    rows.push(word);
+                    used -= column;
+                    if let Some((at_row, at_column)) = cursor.as_mut()
+                        && *at_row == row
+                        && *at_column >= column
+                    {
+                        *at_row += 1;
+                        *at_column -= column;
+                    }
+                }
+                None => {
+                    rows.push(String::new());
+                    used = 0;
+                }
+            }
+        }
+        if cursor.is_none() && start >= caret {
+            cursor = Some((rows.len() - 1, used));
+        }
+        if let Some(row) = rows.last_mut() {
+            row.push_str(&shown);
+            used += w;
+            if grapheme.trim().is_empty() {
+                space = Some((row.len(), used));
+            }
+        }
+    }
+    let cursor = cursor.unwrap_or((rows.len() - 1, used));
+    (rows, cursor)
+}
+
+/// The start of the grapheme before byte `at` of `text`, if there is one.
+fn previous_grapheme(text: &str, at: usize) -> Option<usize> {
+    text.grapheme_indices(true)
+        .map(|(start, _)| start)
+        .take_while(|&start| start < at)
+        .last()
+}
+
+/// The end of the grapheme after byte `at` of `text`, if there is one.
+fn next_grapheme(text: &str, at: usize) -> Option<usize> {
+    (at < text.len()).then(|| {
+        text.grapheme_indices(true)
+            .map(|(start, _)| start)
+            .find(|&start| start > at)
+            .unwrap_or(text.len())
+    })
 }
 
 /// The timestamp of a chat's newest message, or "" for a chat with none.

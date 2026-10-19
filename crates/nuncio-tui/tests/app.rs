@@ -1707,3 +1707,387 @@ fn the_not_confirmed_mark_survives_either_order_and_a_queued_state_clears_it() {
     assert!(screen.contains("· not sent"), "{screen}");
     assert!(!screen.contains("not confirmed"), "{screen}");
 }
+
+// --- U15: a newer daemon's unknown ops (L15) -----------------------------------------------
+
+/// A fake daemon whose request connection answers each request with the next of `replies` and
+/// whose event connection pushes `events` once subscribed, then stays open a while.
+fn newer_daemon(
+    replies: Vec<serde_json::Value>,
+    events: Vec<serde_json::Value>,
+) -> (PathBuf, thread::JoinHandle<()>) {
+    let path = socket_path();
+    let listener = UnixListener::bind(&path).expect("bind");
+    let server = thread::spawn(move || {
+        let hello_ok = frame_line(serde_json::json!(
+            {"v":1,"op":"hello_ok","daemon":"newer","session":"linked","unread":0}
+        ));
+        let mut line = String::new();
+        let (requests, _) = listener.accept().expect("request connection");
+        let mut writer = requests.try_clone().expect("clone");
+        let mut reader = BufReader::new(requests);
+        reader.read_line(&mut line).expect("hello");
+        writer.write_all(hello_ok.as_bytes()).expect("w");
+        let (subscribed, _) = listener.accept().expect("event connection");
+        let mut events_writer = subscribed.try_clone().expect("clone");
+        let mut events_reader = BufReader::new(subscribed);
+        line.clear();
+        events_reader.read_line(&mut line).expect("hello");
+        events_writer.write_all(hello_ok.as_bytes()).expect("w");
+        line.clear();
+        events_reader.read_line(&mut line).expect("subscribe");
+        events_writer
+            .write_all(frame_line(serde_json::json!({"v":1,"op":"subscribed"})).as_bytes())
+            .expect("w");
+        for event in events {
+            events_writer
+                .write_all(frame_line(event).as_bytes())
+                .expect("w");
+        }
+        for reply in replies {
+            line.clear();
+            reader.read_line(&mut line).expect("request");
+            writer.write_all(frame_line(reply).as_bytes()).expect("w");
+        }
+        thread::sleep(Duration::from_millis(500));
+    });
+    (path, server)
+}
+
+#[test]
+fn an_event_this_tui_does_not_know_is_ignored_and_the_event_connection_stays() {
+    let (path, server) = newer_daemon(
+        Vec::new(),
+        vec![
+            serde_json::json!({"v":1,"op":"event_typing","jid":ADA,"typing":true}),
+            serde_json::json!({"v":1,"op":"event_message","jid":ADA,"message":
+                {"id":"3EB0NEW","kind":"text","text":"after the unknown one","from_me":false,
+                 "timestamp":"2026-10-18T17:40:00Z"}}),
+        ],
+    );
+    let mut daemon = Daemon::connect(&path, "nuncio-tui/test").expect("connect");
+    let mut app = two_chats();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        daemon.drain_events(&mut app).expect("drain");
+        let screen = render(&mut app, 80, 24).text();
+        assert!(
+            !screen.contains("lost the event connection"),
+            "an unknown event dropped the event connection:\n{screen}"
+        );
+        if screen.contains("after the unknown one") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the next event never arrived:\n{screen}"
+        );
+    }
+    server.join().expect("the fake daemon ran its script");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_reply_this_tui_does_not_know_is_a_footer_error_and_the_send_is_not_confirmed() {
+    let (path, server) = newer_daemon(
+        vec![
+            serde_json::json!({"v":1,"op":"sent_later","client_id":"t-1"}),
+            serde_json::json!({"v":1,"op":"subscribed"}),
+        ],
+        Vec::new(),
+    );
+    let mut daemon = Daemon::connect(&path, "nuncio-tui/test").expect("connect");
+    let mut app = two_chats().with_client_prefix("t");
+    app.handle_key(key(KeyCode::Char('i')));
+    type_text(&mut app, "hello there");
+    let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Enter)) else {
+        panic!("sends");
+    };
+    daemon
+        .perform(&mut app, &frame)
+        .expect("an unknown reply keeps the connection");
+    let screen = render(&mut app, 120, 24).text();
+    assert!(
+        screen.contains("unknown reply `sent_later`"),
+        "the footer names the unknown reply:\n{screen}"
+    );
+    // It may have been sent: not confirmed, and `R` retries it under the same WhatsApp id.
+    assert!(screen.contains("· not confirmed"), "{screen}");
+    assert!(!screen.contains("sending"), "{screen}");
+    // The request connection still works.
+    daemon
+        .perform(&mut app, &ClientFrame::subscribe())
+        .expect("the next request is answered");
+    server.join().expect("the fake daemon ran its script");
+    let _ = std::fs::remove_file(&path);
+}
+
+// --- U15: the chat sort matches the daemon's `chats` order (L15) ---------------------------
+
+/// The daemon lists chats newest message first and, on the same time, by JID (`ORDER BY
+/// COALESCE(MAX(m.ts), 0) DESC, c.jid`); a chat with no message sorts last. The TUI's resort after
+/// an `event_chat` gives the same order, whatever order the chats were in before.
+#[test]
+fn chats_whose_last_messages_share_a_time_sort_by_jid_as_the_daemon_lists_them() {
+    let at = |jid: &str, name: &str, minute: Option<u32>| {
+        let mut c = chat(jid, name, 0);
+        c.last_message = minute.map(|m| message(&format!("{name}-1"), "hi", false, m));
+        c
+    };
+    let mut app = app_with(vec![
+        at("15551230009@s.whatsapp.net", "Empty B", None),
+        at("15551230008@s.whatsapp.net", "Empty A", None),
+        at(FAMILY, "Family", Some(7)),
+        at(GRACE, "Grace", Some(7)),
+        at(ADA, "Ada", Some(7)),
+        at("15551230004@s.whatsapp.net", "Newest", Some(9)),
+    ]);
+    let mut grace = at(GRACE, "Grace", Some(7));
+    grace.pinned = true;
+    app.apply(&DaemonFrame::EventChat { v: 1, chat: grace });
+    let names: Vec<&str> = app.chats().iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Newest", "Ada", "Grace", "Family", "Empty A", "Empty B"]
+    );
+}
+
+// --- U15: the multi-line composer (S10 (10)) ----------------------------------------------
+
+fn alt(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::ALT)
+}
+
+fn ctrl(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+}
+
+/// Draw `app` and return the screen plus where the terminal cursor was put.
+fn render_with_cursor(app: &mut App, width: u16, height: u16) -> (Screen, (u16, u16)) {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("the app draws without panicking");
+    let cursor = terminal.get_cursor_position().expect("a cursor position");
+    let buffer = terminal.backend().buffer();
+    let rows = (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer.cell((x, y)).map_or("", |c| c.symbol()).to_owned())
+                .collect()
+        })
+        .collect();
+    (Screen { rows }, (cursor.x, cursor.y))
+}
+
+/// The row and column of the first cell holding `symbol`, searching from the right pane.
+fn find_cell(screen: &Screen, symbol: &str) -> (u16, u16) {
+    let from = screen.split() + 1;
+    for (y, row) in screen.rows.iter().enumerate() {
+        if let Some(x) = row.iter().skip(from).position(|cell| cell == symbol) {
+            return ((from + x) as u16, y as u16);
+        }
+    }
+    panic!("{symbol:?} is not on screen:\n{}", screen.text());
+}
+
+#[test]
+fn alt_enter_and_ctrl_j_insert_a_newline_and_enter_sends_the_text_with_its_newlines() {
+    let mut app = two_chats().with_client_prefix("t");
+    app.handle_key(key(KeyCode::Char('i')));
+    type_text(&mut app, "first");
+    assert_eq!(app.handle_key(alt(KeyCode::Enter)), None);
+    type_text(&mut app, "second");
+    assert_eq!(app.handle_key(ctrl('j')), None);
+    type_text(&mut app, "third");
+    assert_eq!(app.composer(), "first\nsecond\nthird");
+    assert_eq!(app.pane(), Pane::Compose, "a newline does not send");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Some(Action::Request(ClientFrame::send(
+            ADA,
+            "first\nsecond\nthird",
+            "t-1"
+        )))
+    );
+    assert_eq!(app.composer(), "");
+    // The transcript draws each line of the message on its own row.
+    let screen = render(&mut app, 80, 24).conversation();
+    let rows: Vec<&str> = screen
+        .lines()
+        .filter(|l| l.contains("first") || l.contains("second") || l.contains("third"))
+        .collect();
+    assert_eq!(rows.len(), 3, "{screen}");
+    assert!(rows[0].contains("│first "), "{screen}");
+    assert!(rows[1].contains("│second "), "{screen}");
+    assert!(rows[2].contains("│third "), "{screen}");
+}
+
+#[test]
+fn left_right_home_end_backspace_and_delete_edit_at_the_cursor_by_grapheme() {
+    let mut app = two_chats();
+    app.handle_key(key(KeyCode::Char('i')));
+    // The family is one grapheme of seven code points.
+    type_text(&mut app, "ab👨\u{200d}👩\u{200d}👧\u{200d}👦c");
+    app.handle_key(key(KeyCode::Left));
+    app.handle_key(key(KeyCode::Left));
+    app.handle_key(key(KeyCode::Backspace));
+    assert_eq!(app.composer(), "a👨\u{200d}👩\u{200d}👧\u{200d}👦c");
+    app.handle_key(key(KeyCode::Delete));
+    assert_eq!(app.composer(), "ac", "Delete takes the whole family");
+    app.handle_key(key(KeyCode::Home));
+    type_text(&mut app, "x");
+    app.handle_key(key(KeyCode::End));
+    type_text(&mut app, "y");
+    assert_eq!(app.composer(), "xacy");
+    app.handle_key(key(KeyCode::Left));
+    app.handle_key(key(KeyCode::Right));
+    app.handle_key(key(KeyCode::Right));
+    type_text(&mut app, "z");
+    assert_eq!(app.composer(), "xacyz", "Right stops at the end");
+    app.handle_key(key(KeyCode::Home));
+    app.handle_key(key(KeyCode::Left));
+    app.handle_key(key(KeyCode::Backspace));
+    assert_eq!(
+        app.composer(),
+        "xacyz",
+        "Left and Backspace stop at the start"
+    );
+    app.handle_key(key(KeyCode::Delete));
+    assert_eq!(app.composer(), "acyz");
+
+    // Home and End work on the cursor's line of a multi-line draft.
+    app.handle_key(key(KeyCode::End));
+    app.handle_key(alt(KeyCode::Enter));
+    type_text(&mut app, "two");
+    app.handle_key(key(KeyCode::Home));
+    type_text(&mut app, ">");
+    app.handle_key(key(KeyCode::Left));
+    app.handle_key(key(KeyCode::Left));
+    app.handle_key(key(KeyCode::Home));
+    type_text(&mut app, "<");
+    assert_eq!(app.composer(), "<acyz\n>two");
+    app.handle_key(key(KeyCode::End));
+    type_text(&mut app, "!");
+    assert_eq!(app.composer(), "<acyz!\n>two");
+    // Backspace at the start of a line joins it to the line above.
+    app.handle_key(key(KeyCode::Right));
+    app.handle_key(key(KeyCode::Right));
+    app.handle_key(key(KeyCode::Backspace));
+    app.handle_key(key(KeyCode::Backspace));
+    assert_eq!(app.composer(), "<acyz!two");
+}
+
+#[test]
+fn the_cursor_is_drawn_after_wide_characters_at_their_display_width() {
+    for (width, height) in [(80, 24), (240, 60)] {
+        let mut app = two_chats();
+        app.handle_key(key(KeyCode::Char('i')));
+        type_text(&mut app, "日本語");
+        app.handle_key(key(KeyCode::Left));
+        let (screen, cursor) = render_with_cursor(&mut app, width, height);
+        let (x, y) = find_cell(&screen, "日");
+        assert_eq!(cursor, (x + 4, y), "after 日本 at {width}x{height}");
+
+        app.handle_key(key(KeyCode::End));
+        type_text(&mut app, " a👍b");
+        app.handle_key(key(KeyCode::Left));
+        let (screen, cursor) = render_with_cursor(&mut app, width, height);
+        let (x, y) = find_cell(&screen, "日");
+        assert_eq!(
+            cursor,
+            (x + 6 + 1 + 1 + 2, y),
+            "after 👍 at {width}x{height}"
+        );
+    }
+}
+
+#[test]
+fn the_composer_grows_to_five_rows_then_scrolls_with_the_cursor() {
+    for (width, height) in [(80, 24), (240, 60)] {
+        let mut app = two_chats();
+        app.handle_key(key(KeyCode::Char('i')));
+        type_text(&mut app, "line1");
+        let (_, one) = render_with_cursor(&mut app, width, height);
+        app.handle_key(alt(KeyCode::Enter));
+        type_text(&mut app, "line2");
+        let (screen, two) = render_with_cursor(&mut app, width, height);
+        assert_eq!(
+            two.1, one.1,
+            "the composer grew upwards at {width}x{height}"
+        );
+        assert_eq!(find_cell(&screen, "›").1 + 1, two.1, "{}", screen.text());
+        for n in 3..=7 {
+            app.handle_key(alt(KeyCode::Enter));
+            type_text(&mut app, &format!("line{n}"));
+        }
+        let (screen, cursor) = render_with_cursor(&mut app, width, height);
+        let text = screen.conversation();
+        for n in 3..=7 {
+            assert!(text.contains(&format!("line{n}")), "line{n}:\n{text}");
+        }
+        for n in 1..=2 {
+            assert!(
+                !text.contains(&format!("line{n}")),
+                "line{n} scrolled off:\n{text}"
+            );
+        }
+        assert_eq!(cursor.1, one.1, "the cursor stays on the last row");
+        let line7 = screen.rows[usize::from(cursor.1)].concat();
+        assert!(line7.contains("line7"), "{line7}");
+
+        // Moving the cursor up to the first line scrolls the composer back to it.
+        for _ in 0..50 {
+            app.handle_key(key(KeyCode::Left));
+        }
+        let (screen, cursor) = render_with_cursor(&mut app, width, height);
+        let text = screen.conversation();
+        assert!(text.contains("line1"), "{text}");
+        assert!(!text.contains("line7"), "{text}");
+        let row = screen.rows[usize::from(cursor.1)].concat();
+        assert!(row.contains("› line1"), "{row}");
+        assert_eq!(cursor.0, find_cell(&screen, "›").0 + 2);
+    }
+}
+
+#[test]
+fn a_draft_longer_than_the_pane_wraps_and_the_cursor_follows_it() {
+    let mut app = two_chats();
+    app.handle_key(key(KeyCode::Char('i')));
+    let long = "word ".repeat(20);
+    type_text(&mut app, long.trim_end());
+    let (screen, cursor) = render_with_cursor(&mut app, 80, 24);
+    let prompt = find_cell(&screen, "›");
+    assert!(cursor.1 > prompt.1, "the draft wrapped:\n{}", screen.text());
+    let border = screen.rows[usize::from(cursor.1)]
+        .iter()
+        .rposition(|cell| cell == "│")
+        .expect("the right border");
+    assert!(
+        usize::from(cursor.0) < border,
+        "the cursor is inside the pane"
+    );
+    // Every word is on screen: nothing was cut off.
+    let text = screen.conversation();
+    assert_eq!(text.matches("word").count(), 20, "{text}");
+}
+
+#[test]
+fn the_help_footer_and_keys_name_the_composer_keys() {
+    let mut app = two_chats();
+    app.handle_key(key(KeyCode::Char('i')));
+    let footer = render(&mut app, 80, 24).rows[23].concat();
+    assert!(footer.contains("Alt-Enter newline"), "{footer}");
+    let keys: Vec<String> = nuncio_tui::KEYS
+        .iter()
+        .map(|(k, what)| format!("{k} {what}"))
+        .collect();
+    assert!(keys.iter().any(|k| k.contains("Alt-Enter")), "{keys:?}");
+    assert!(keys.iter().any(|k| k.contains("Delete")), "{keys:?}");
+    // The whole list fits the help screen at 80x24, down to the last key.
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('?')));
+    let screen = render(&mut app, 80, 24).text();
+    assert!(screen.contains("q Ctrl-C quit"), "{screen}");
+    assert!(screen.contains("Alt-Enter C-j"), "{screen}");
+}

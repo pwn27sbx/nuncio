@@ -88,6 +88,8 @@ impl Daemon {
     /// the footer notice. A broken connection is returned as the error, after a
     /// send (or retry) it carried is marked not sent. A `media_ready` the user asked for is
     /// opened, and a request the reply asks for (a `mark_read` after a chat is opened) is sent.
+    /// A reply whose op this build does not know (a newer daemon) becomes the footer notice, and
+    /// a send (or retry) it answered is shown as not confirmed.
     pub fn perform(&mut self, app: &mut App, frame: &ClientFrame) -> Result<(), ClientError> {
         let result = match frame {
             ClientFrame::DownloadMedia { .. } => self.requests.request_within(frame, MEDIA_WAIT),
@@ -105,6 +107,20 @@ impl Daemon {
             }
         };
         match result {
+            // A newer daemon's reply this build cannot read: the request's outcome is unknown, so
+            // a send (or retry) is shown as not confirmed (`R` reuses its WhatsApp id).
+            Ok(DaemonFrame::Unknown { op }) => {
+                if let ClientFrame::Send { client_id, .. } | ClientFrame::Retry { client_id, .. } =
+                    frame
+                {
+                    app.send_not_confirmed(client_id);
+                }
+                app.request_failed(
+                    frame,
+                    format!("daemon: unknown reply `{op}`; this nuncio-tui may be too old"),
+                );
+                Ok(())
+            }
             Ok(reply) => match app.apply(&reply) {
                 Some(Action::Open(path)) => {
                     self.open(app, &path);
@@ -132,7 +148,8 @@ impl Daemon {
         }
     }
 
-    /// Read every queued event into `app` (the daemon drops a subscriber that falls behind).
+    /// Read every queued event into `app` (the daemon drops a subscriber that falls behind). An
+    /// event whose op this build does not know (a newer daemon) is ignored.
     /// When the event connection is lost, subscribe again (at most every few seconds) and
     /// resync the chat list, the status and the open conversation, since events were missed.
     pub fn drain_events(&mut self, app: &mut App) -> Result<(), ClientError> {

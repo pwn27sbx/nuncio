@@ -51,10 +51,7 @@ pub enum ClientError {
     #[error("the daemon replied with error `{code}`: {message}")]
     Daemon { code: String, message: String },
     #[error("expected a `{expected}` frame, got `{got}`")]
-    Unexpected {
-        expected: &'static str,
-        got: &'static str,
-    },
+    Unexpected { expected: &'static str, got: String },
 }
 
 /// What a client needs to render: the daemon state plus the chat list.
@@ -85,7 +82,7 @@ impl Snapshot {
             }),
             other => Err(ClientError::Unexpected {
                 expected: "chats",
-                got: other.op(),
+                got: other.op().to_owned(),
             }),
         }
     }
@@ -171,7 +168,8 @@ impl Connection {
     }
 
     /// Send a frame and read the reply, turning an `error` frame into
-    /// [`ClientError::Daemon`].
+    /// [`ClientError::Daemon`]. A reply whose op this build does not know comes back as
+    /// [`DaemonFrame::Unknown`]; the caller decides what that means for its request.
     pub fn request(&mut self, frame: &ClientFrame) -> Result<DaemonFrame, ClientError> {
         self.send(frame)?;
         match self.recv()? {
@@ -210,15 +208,16 @@ impl Connection {
             DaemonFrame::Subscribed { .. } => Ok(()),
             other => Err(ClientError::Unexpected {
                 expected: "subscribed",
-                got: other.op(),
+                got: other.op().to_owned(),
             }),
         }
     }
 
     /// Wait up to `wait` (at least 1 ms) for the next event frame. `Ok(None)` means
     /// none arrived in time, and the connection stays usable, even when the wait ended in the
-    /// middle of a frame. Any frame that is not an event is
-    /// [`ClientError::Unexpected`]. A closed connection is [`ClientError::Closed`], also when it
+    /// middle of a frame. A frame whose op this build does not know is returned as
+    /// [`DaemonFrame::Unknown`] (a newer daemon's event: ignore it); any other frame that is not
+    /// an event is [`ClientError::Unexpected`]. A closed connection is [`ClientError::Closed`], also when it
     /// ends inside a frame: the daemon drops a subscriber that falls behind. Drain on each tick
     /// (call until `Ok(None)`), and after `Closed` reconnect, subscribe and resync.
     pub fn next_event(&mut self, wait: Duration) -> Result<Option<DaemonFrame>, ClientError> {
@@ -234,7 +233,7 @@ impl Connection {
             Ok(frame) if is_event(&frame) => Ok(Some(frame)),
             Ok(other) => Err(ClientError::Unexpected {
                 expected: "event",
-                got: other.op(),
+                got: other.op().to_owned(),
             }),
             Err(ClientError::Timeout(_)) => Ok(None),
             Err(err) => Err(err),
@@ -248,13 +247,15 @@ impl Connection {
             DaemonFrame::HelloOk { .. } => Ok(()),
             other => Err(ClientError::Unexpected {
                 expected: "hello_ok",
-                got: other.op(),
+                got: other.op().to_owned(),
             }),
         }
     }
 }
 
-/// Whether `frame` is one the daemon pushes to subscribers, unprompted.
+/// Whether `frame` is one the daemon pushes to subscribers, unprompted. An op this build does
+/// not know counts as one: on a subscribed connection it is a newer daemon's event, which a UI
+/// ignores rather than drop the connection.
 fn is_event(frame: &DaemonFrame) -> bool {
     matches!(
         frame,
@@ -263,6 +264,7 @@ fn is_event(frame: &DaemonFrame) -> bool {
             | DaemonFrame::EventUnread { .. }
             | DaemonFrame::EventFocus { .. }
             | DaemonFrame::EventChat { .. }
+            | DaemonFrame::Unknown { .. }
     )
 }
 
@@ -282,7 +284,7 @@ pub fn fetch(path: &Path, client: &str, limit: u16) -> Result<Snapshot, ClientEr
         other => {
             return Err(ClientError::Unexpected {
                 expected: "status",
-                got: other.op(),
+                got: other.op().to_owned(),
             });
         }
     };
@@ -292,7 +294,7 @@ pub fn fetch(path: &Path, client: &str, limit: u16) -> Result<Snapshot, ClientEr
         other => {
             return Err(ClientError::Unexpected {
                 expected: "chats",
-                got: other.op(),
+                got: other.op().to_owned(),
             });
         }
     };
@@ -343,8 +345,8 @@ mod tests {
             err,
             super::ClientError::Unexpected {
                 expected: "chats",
-                got: "hello_ok"
-            }
+                ref got
+            } if got == "hello_ok"
         ));
     }
 

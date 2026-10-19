@@ -13,8 +13,9 @@ nuncio-tui [--image <png>]
 
 - **Chat list** (left): name, unread count `(n)`, `★` pinned, `⊘` muted, `▤` archived.
   Archived chats are kept in the list, sectioned after every other chat. A pin, archive or mute
-  made on the phone (`event_chat`) updates the markers at once and sorts the list again (newest
-  message first, archived last), keeping the selection on the same chat. Under the name, the
+  made on the phone (`event_chat`) updates the markers at once and sorts the list again as the
+  daemon's `chats` lists it (newest message first, the same time by JID, archived last), keeping
+  the selection on the same chat. Under the name, the
   last message and its time; a preview too long for the pane is cut with `…` (by display width,
   so wide characters count as two columns) and the ` · HH:MM` after it is always whole.
 - **Times** are local: the time zone offset is read once at startup (so a message from the other
@@ -28,7 +29,13 @@ nuncio-tui [--image <png>]
   message arriving in the open chat is marked read the same way. The unread counts clear when the
   daemon answers; if it refuses (offline, not linked, ...) the footer shows why, the chat stays
   unread, and nothing retries on its own: opening the chat again does.
-- **Composer**: the last row of the conversation. A send shows `sending` until the daemon
+- **Composer**: the last rows of the conversation. `Enter` sends; `Alt-Enter` or `Ctrl-J` starts a
+  new line (use `Ctrl-J` where the terminal keeps `Alt-Enter`, as macOS terminals do unless
+  Option is set to act as Alt), and the message is sent with its line breaks. `←`/`→` move the
+  cursor one character (a whole emoji sequence or accented letter is one step), `Home`/`End` to
+  the start or end of its line, `Backspace`/`Delete` erase before or after it. A long line wraps at
+  the pane's width; the composer grows up to five rows, then scrolls to keep the cursor in view.
+  A send shows `sending` until the daemon
   answers, then `queued` (offline, waiting for the reconnect), nothing (sent), `not sent`
   (it waits for a manual retry) or `not confirmed` (WhatsApp's acknowledgement timed out, so it
   may have been delivered). The TUI keeps that mark in memory only: after a restart the daemon
@@ -52,6 +59,9 @@ nuncio-tui [--image <png>]
   images are only the `--image` check for now: downloaded media is not drawn in the terminal.
 - Live updates: new messages, a send's state changes, unread counts, the connection state, and a
   focus request (`nuncio focus <jid>`) selects and opens that chat.
+- **A newer daemon**: an event this TUI does not know is ignored (the event connection stays
+  up); a reply it does not know shows `daemon: unknown reply` in the footer, and a send it
+  answered shows `not confirmed`, since it may have been sent (`R` retries it safely).
 - Colours follow the Omarchy theme live (the shared `ThemeWatcher`).
 - **Emoji sequences are drawn taken apart.** ratatui gives a whole emoji sequence one width
   (`👨‍👩‍👧‍👦`, `🏳️‍🌈`, `❤️`, `👋🏽` are each 2 columns), but terminals draw some of them at
@@ -73,6 +83,9 @@ Everything works from the keyboard. `?` shows this list on screen.
 | `Enter`, `l`, `→` | open the selected chat, marking it read on WhatsApp too (blue ticks, unless read receipts are off) |
 | `i` | write a message to the selected chat |
 | `Enter` | in the composer: send |
+| `Alt-Enter`, `Ctrl-J` | in the composer: a new line |
+| `←`/`→`, `Home`/`End` | in the composer: move the cursor (`Home`/`End`: start / end of the line) |
+| `Backspace`/`Delete` | in the composer: erase before / after the cursor |
 | `K`/`J` | conversation: select an older / newer message |
 | `r` | reply to the selected message (the composer quotes it); only a sent or received one |
 | `e` | react to it: `1`-`6` 👍 ❤️ 😂 😮 😢 🙏, `x` removes mine, `Esc` cancels; only a sent or received one |

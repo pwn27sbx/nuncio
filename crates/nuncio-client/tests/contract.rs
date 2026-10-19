@@ -661,3 +661,64 @@ fn constructed_event_chat_and_not_confirmed_frames_match_their_fixtures() {
         },
     );
 }
+
+/// A newer daemon may send an op this client does not know (an event or a reply added later):
+/// it parses into [`DaemonFrame::Unknown`] carrying its op instead of failing the connection.
+#[test]
+fn a_daemon_op_this_client_does_not_know_parses_as_unknown() {
+    let text = r#"{"v":1,"op":"event_typing","jid":"15551230001@s.whatsapp.net","typing":true}"#;
+    let frame: DaemonFrame = serde_json::from_str(text).expect("an unknown op still parses");
+    assert_eq!(
+        frame,
+        DaemonFrame::Unknown {
+            op: "event_typing".to_owned()
+        }
+    );
+    assert_eq!(frame.op(), "event_typing");
+}
+
+/// The catch-all never swallows a known op: a known op with a broken shape is still an error,
+/// and a frame with no op at all too.
+#[test]
+fn a_known_op_with_a_broken_shape_is_still_an_error() {
+    for text in [
+        r#"{"v":1,"op":"sent"}"#,
+        r#"{"v":1,"op":"event_chat","chat":7}"#,
+        r#"{"v":1}"#,
+        r#"{"v":1,"op":7}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<DaemonFrame>(text).is_err(),
+            "{text} must not parse"
+        );
+    }
+}
+
+/// Every daemon fixture still parses to its own variant (never to the catch-all), and only the
+/// client fixtures, whose ops the daemon never sends, read as unknown daemon frames.
+#[test]
+fn every_daemon_fixture_parses_to_its_own_variant_not_the_catch_all() {
+    let mut daemon_fixtures = 0;
+    for path in fixture_files() {
+        let want = read_json(&path);
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let op = want["op"].as_str().expect("every fixture has an op");
+        let is_client = round_trips::<ClientFrame>(&path, &want).is_some();
+        let text = fs::read_to_string(&path).expect("fixture is readable");
+        match serde_json::from_str::<DaemonFrame>(&text) {
+            Ok(DaemonFrame::Unknown { op: got }) => {
+                assert!(is_client, "{name}: a daemon fixture parsed as unknown");
+                assert_eq!(got, op, "{name}");
+            }
+            Ok(frame) => {
+                assert!(!is_client, "{name}: a client fixture parsed as {frame:?}");
+                assert_eq!(frame.op(), op, "{name}: parsed to another variant");
+                daemon_fixtures += 1;
+            }
+            // A client op the daemon also uses (`status`, `chats`, `messages`) with the client's
+            // fields: that is the daemon variant's shape failing, as before.
+            Err(_) => assert!(is_client, "{name}: a daemon fixture does not parse"),
+        }
+    }
+    assert_eq!(daemon_fixtures, 23, "every daemon fixture was checked");
+}

@@ -226,8 +226,13 @@ impl ClientFrame {
 }
 
 /// A frame the daemon sends to a client.
+///
+/// An `op` this build does not know parses as [`DaemonFrame::Unknown`] instead of failing, so a
+/// newer daemon's events and replies never break an older client (a known op with a broken shape
+/// is still an error). The derived serde code is reached through `remote = "Self"`, wrapped by
+/// the hand-written `Serialize`/`Deserialize` impls below.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[serde(remote = "Self", tag = "op", rename_all = "snake_case")]
 pub enum DaemonFrame {
     HelloOk {
         v: u8,
@@ -337,11 +342,65 @@ pub enum DaemonFrame {
         v: u8,
         chat: Chat,
     },
+    /// A frame whose `op` this build does not know: an event or a reply a newer daemon added.
+    /// Only its `op` is kept; it serialises as `{"op": op}`.
+    #[serde(skip)]
+    Unknown {
+        op: String,
+    },
+}
+
+/// Every `op` a [`DaemonFrame`] variant other than `Unknown` stands for.
+const KNOWN_DAEMON_OPS: &[&str] = &[
+    "hello_ok",
+    "status",
+    "chats",
+    "error",
+    "messages",
+    "sent",
+    "send_failed",
+    "subscribed",
+    "focused",
+    "wiped",
+    "media_ready",
+    "reacted",
+    "marked_read",
+    "event_message",
+    "event_connection",
+    "event_unread",
+    "event_focus",
+    "event_chat",
+];
+
+impl Serialize for DaemonFrame {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        match self {
+            Self::Unknown { op } => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("op", op)?;
+                map.end()
+            }
+            // The inherent function `remote = "Self"` derived, not this trait method.
+            known => DaemonFrame::serialize(known, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for DaemonFrame {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        match value.get("op").and_then(serde_json::Value::as_str) {
+            Some(op) if !KNOWN_DAEMON_OPS.contains(&op) => Ok(Self::Unknown { op: op.to_owned() }),
+            // A known op, or no string op at all: the derived code reports what is wrong.
+            _ => DaemonFrame::deserialize(value).map_err(serde::de::Error::custom),
+        }
+    }
 }
 
 impl DaemonFrame {
     /// The `op` value, for error messages and logging.
-    pub fn op(&self) -> &'static str {
+    pub fn op(&self) -> &str {
         match self {
             Self::HelloOk { .. } => "hello_ok",
             Self::Status { .. } => "status",
@@ -361,6 +420,7 @@ impl DaemonFrame {
             Self::EventUnread { .. } => "event_unread",
             Self::EventFocus { .. } => "event_focus",
             Self::EventChat { .. } => "event_chat",
+            Self::Unknown { op } => op,
         }
     }
 }

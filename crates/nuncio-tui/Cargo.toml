@@ -13,6 +13,8 @@ ratatui-image = { version = "11.1", default-features = false, features = ["cross
 image = { version = "0.25", default-features = false, features = ["png"] }
 # Already in Cargo.lock (through ratatui-widgets, with local-offset): local message times.
 time = { version = "0.3", features = ["local-offset"] }
+# Already in Cargo.lock (through ratatui): the composer's cursor moves by grapheme.
+unicode-segmentation = "1.13"
 
 [dev-dependencies]
 serde_json = "1.0"

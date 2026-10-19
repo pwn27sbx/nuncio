@@ -1352,6 +1352,7 @@ dependencies = [
  "ratatui-image",
  "serde_json",
  "time",
+ "unicode-segmentation",
 ]
 
 [[package]]

@@ -2,7 +2,7 @@
 //!
 //! Connects to `nunciod` over `$XDG_RUNTIME_DIR/nuncio/core.sock` (one request connection and
 //! one subscribed event connection), renders the chat list and conversations, sends one message
-//! at a time from the composer, and follows the daemon's events and the Omarchy theme. **If the
+//! at a time from the (multi-line) composer, and follows the daemon's events and the Omarchy theme. **If the
 //! daemon is not reachable it still runs**, rendering `proto/fixtures/chats_response.json`
 //! instead and saying so on screen; sends are then shown as not sent.
 //!
@@ -30,9 +30,10 @@ const TICK: Duration = Duration::from_millis(100);
 const USAGE: &str = "\
 usage: nuncio-tui [--image <png>]
 
-  Keys: j/k move or scroll, Enter open, i write, Enter send, Esc back, g/G oldest/newest,
-  PgUp/PgDn page, K/J select a message, r reply, e react, R retry, o open media,
-  / search, Tab pane, ? help, q quit.
+  Keys: j/k move or scroll, Enter open, i write, Enter send, Alt-Enter or Ctrl-J new line,
+  Left/Right/Home/End move in the draft, Esc back, g/G oldest/newest, PgUp/PgDn page,
+  K/J select a message, r reply, e react, R retry, o open media, / search, Tab pane,
+  ? help, q quit.
 
   --image <png>   render a local PNG inline, next to the chat list (S9's ratatui-image
                   check; nothing in M0 serves images, so this points at any file)

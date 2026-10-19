@@ -287,8 +287,8 @@ fn a_subscribe_answered_with_another_frame_is_unexpected() {
             err,
             ClientError::Unexpected {
                 expected: "subscribed",
-                got: "status"
-            }
+                ref got
+            } if got == "status"
         ),
         "expected an unexpected-frame error, got {err:?}"
     );
@@ -324,8 +324,8 @@ fn a_reply_where_an_event_belongs_is_unexpected() {
             err,
             ClientError::Unexpected {
                 expected: "event",
-                got: "status"
-            }
+                ref got
+            } if got == "status"
         ),
         "expected an unexpected-frame error, got {err:?}"
     );
@@ -351,4 +351,33 @@ fn a_dropped_subscriber_cut_mid_frame_is_closed() {
         matches!(second, Err(ClientError::Closed)),
         "second = {second:?}"
     );
+}
+
+/// An event a newer daemon pushes that this client does not know arrives as
+/// [`DaemonFrame::Unknown`] and the connection stays usable for the next event.
+#[test]
+fn an_unknown_event_is_delivered_as_unknown_and_the_connection_goes_on() {
+    let (_dir, path, server) = fake_daemon(vec![
+        Step::Reply(HELLO_OK),
+        Step::Reply(SUBSCRIBED),
+        Step::Push(line(
+            r#"{"v":1,"op":"event_typing","jid":"x@s.whatsapp.net"}"#,
+        )),
+        Step::Push(line(EVENT_FIXTURES[0].1)),
+    ]);
+
+    let mut connection = subscribed_connection(&path);
+    let unknown = connection.next_event(WAIT).expect("not an error");
+    assert_eq!(
+        unknown,
+        Some(DaemonFrame::Unknown {
+            op: "event_typing".to_owned()
+        })
+    );
+    let next = connection
+        .next_event(WAIT)
+        .expect("still usable")
+        .expect("the next event arrives");
+    assert_eq!(next.op(), "event_message");
+    let _ = server.join();
 }

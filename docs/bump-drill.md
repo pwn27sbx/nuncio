@@ -66,6 +66,26 @@ warm build: 0.1s   (same cache, nothing changed)
 | **cold build (empty build cache)** | **5.1** |
 | warm build (same cache, nothing changed) | 0.1 |
 
+## The M1 run (2026-10-19)
+
+The drill re-run on the M1 code (the daemon now owns the session, stores messages and media
+references, streams events and serves send, focus, wipe and download_media), as the M1
+acceptance asks: "the S7 bump drill still passes on the current code".
+
+Machine: Apple M4, 10 cores, `darwin/arm64`, go1.27.1. Command: `contrib/bump-drill.sh`
+(default reference, throwaway `GOCACHE`, no `--global-clean`).
+
+| | |
+|---|---|
+| whatsmeow | `v0.0.0-20261017175727-b2b1e71d45e2` (`b2b1e71d45e2`), unchanged |
+| packages in the build | 438 |
+| cold build | **8.4 s** |
+| warm build | 0.2 s |
+| `go.mod` / `go.sum` | unchanged (same SHA-1 before and after) |
+
+The drill passes. The cold number is not comparable with the M0 run above: it is a different
+machine and OS, so it says nothing about whether M1 made the build slower.
+
 ## What the two numbers mean
 
 - **Cold (5.1 s)** is the drill's headline: an empty build cache, so the standard

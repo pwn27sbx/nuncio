@@ -394,16 +394,18 @@ func (w whatsmeowClient) SendMessage(ctx context.Context, jid string, msg *waE2E
 	return resp.Timestamp, nil
 }
 
-// BuildReaction is whatsmeow's BuildReaction over parsed JIDs; an empty sender is me.
+// BuildReaction is whatsmeow's BuildReaction over parsed JIDs; an empty sender is me. A JID that
+// does not parse answers a fixed error: ParseJID's text can quote part of the JID, and this error
+// reaches the client.
 func (w whatsmeowClient) BuildReaction(chat, sender, id, emoji string) (*waE2E.Message, error) {
 	c, err := types.ParseJID(chat)
 	if err != nil {
-		return nil, fmt.Errorf("wa: %w", err)
+		return nil, errors.New("wa: the chat JID does not parse")
 	}
 	var from types.JID
 	if sender != "" {
 		if from, err = types.ParseJID(sender); err != nil {
-			return nil, fmt.Errorf("wa: %w", err)
+			return nil, errors.New("wa: the sender JID does not parse")
 		}
 	}
 	return w.c.BuildReaction(c, from, id, emoji), nil

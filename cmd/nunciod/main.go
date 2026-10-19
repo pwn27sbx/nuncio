@@ -9,7 +9,9 @@
 // nuncio.db it stores incoming text and media messages and answers chats, messages and
 // unread counts from it; without one it answers the shared fixture chat list.
 // Attachments are downloaded only on a download_media request, into the private
-// media cache $XDG_DATA_HOME/nuncio/media.
+// media cache $XDG_DATA_HOME/nuncio/media. It searches the stored messages of a
+// chat without contacting WhatsApp, sends a reply that quotes a stored message,
+// and sets or removes my reaction on one, once and only while linked.
 package main
 
 import (

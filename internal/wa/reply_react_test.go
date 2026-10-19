@@ -3,6 +3,7 @@ package wa
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -230,5 +231,24 @@ func TestAReactionOnAGroupMessageWithAnUnknownSenderIsRefused(t *testing.T) {
 	}
 	if m, _ := store.GetMessage(s.Store(), group.String(), "OLD1"); len(m.Reactions) != 0 {
 		t.Errorf("reactions = %+v, want none stored", m.Reactions)
+	}
+}
+
+// whatsmeow's ParseJID error can quote part of the JID, and a React error reaches the client as an
+// internal error, so the adapter's error names no JID. Both checks fail before the whatsmeow
+// client is used.
+func TestBuildReactionErrorsCarryNoJID(t *testing.T) {
+	const bad = "15551230009:15551230008x@s.whatsapp.net"
+	for _, tc := range []struct{ chat, sender string }{
+		{bad, ""},
+		{group.String(), bad},
+	} {
+		_, err := whatsmeowClient{}.BuildReaction(tc.chat, tc.sender, "Q1", "👍")
+		if err == nil {
+			t.Fatalf("BuildReaction(%q, %q) succeeded, want an error", tc.chat, tc.sender)
+		}
+		if strings.Contains(err.Error(), "1555123000") {
+			t.Errorf("BuildReaction(%q, %q) error %q carries the JID", tc.chat, tc.sender, err)
+		}
 	}
 }

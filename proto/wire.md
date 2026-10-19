@@ -83,15 +83,33 @@ A string, not a boolean, so it can grow without a protocol break:
 
 ## D-Bus face (thin, not the data plane)
 
-Name `io.github.pwn27sbx.nuncio` on the **session** bus, with an activation file
-at `~/.local/share/dbus-1/services/io.github.pwn27sbx.nuncio.service` (installed
-by us, no root). It exists for:
+Name `io.github.pwn27sbx.nuncio` on the **session** bus, at object path
+`/io/github/pwn27sbx/nuncio`, interface `io.github.pwn27sbx.nuncio`, with an activation file at
+`~/.local/share/dbus-1/services/io.github.pwn27sbx.nuncio.service` (installed by us, no root).
+It exposes a `Status` method and an `UnreadCount` property (int). It exists for:
 
 - **activation on demand** — a client calling the name starts the daemon;
 - **single instance** — the daemon owns the name, so a second start exits;
 - **unread count** — property `UnreadCount` (int) plus signal `UnreadChanged`.
 
 Message bodies and media never travel over D-Bus.
+
+## Behaviour the two implementations have fixed
+
+These corners were left open by the first draft and are now pinned by tests on both sides. They
+are part of the contract, not implementation detail:
+
+| Situation | Behaviour |
+|---|---|
+| First client frame is not `hello` | `bad_frame`, then close |
+| Any frame carries `v` other than 1 | `version_mismatch`, then close |
+| Malformed JSON | `bad_frame`; the connection stays usable |
+| Unknown `op` | `bad_frame`; the connection stays usable |
+| A second `hello` on the same connection | `bad_frame`; the connection stays usable |
+| `chats` `limit` outside 1..200 | `bad_frame`; the connection stays usable |
+| Frame over 1 MiB | `bad_frame`, then close |
+
+A frame of exactly 1 MiB is accepted; one byte more is not.
 
 ## Contract tests
 

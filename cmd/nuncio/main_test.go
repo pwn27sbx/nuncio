@@ -646,6 +646,13 @@ func TestSendNotConfirmedNeverSaysNotSent(t *testing.T) {
 	if strings.Contains(errOut, "not sent") || !strings.Contains(errOut, "not confirmed") || !strings.Contains(errOut, "may have been delivered") {
 		t.Errorf("stderr %q, want the not-confirmed line and no not-sent claim", errOut)
 	}
+	// The daemon answers it with the not_confirmed code; the CLI prints the same honest text as
+	// before the code existed, and the retry hint that reuses the same WhatsApp id.
+	lines := strings.Split(strings.TrimSuffix(errOut, "\n"), "\n")
+	if len(lines) != 2 || lines[0] != "nuncio: "+ipc.ErrNotConfirmed.Error() ||
+		!strings.HasPrefix(lines[1], "nuncio: if it did not arrive, try again with the same message id: nuncio retry ") {
+		t.Errorf("stderr %q, want exactly the not-confirmed line and the same-id retry hint", errOut)
+	}
 }
 
 // TestMain points the purge keyring at one that refuses every call, so no test can reach the

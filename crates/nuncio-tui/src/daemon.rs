@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use nuncio_client::{ClientError, ClientFrame, Connection, DaemonFrame};
+use nuncio_client::{ClientError, ClientFrame, Connection, DaemonFrame, ErrorCode};
 
 use crate::{Action, App};
 
@@ -82,9 +82,10 @@ impl Daemon {
         }
     }
 
-    /// Send `frame`, then fold the reply into `app`. A send the daemon refuses with an `error`
-    /// (as `not_linked`, or a send that was not confirmed) is shown as not sent; any other
-    /// `error` becomes the footer notice. A broken connection is returned as the error, after a
+    /// Send `frame`, then fold the reply into `app`. A send (or retry) the daemon answers with
+    /// `not_confirmed` is shown as not confirmed (it may have been delivered); one it refuses
+    /// with any other `error` (as `not_linked`) is shown as not sent; every `error` also becomes
+    /// the footer notice. A broken connection is returned as the error, after a
     /// send (or retry) it carried is marked not sent. A `media_ready` the user asked for is
     /// opened, and a request the reply asks for (a `mark_read` after a chat is opened) is sent.
     pub fn perform(&mut self, app: &mut App, frame: &ClientFrame) -> Result<(), ClientError> {
@@ -113,7 +114,14 @@ impl Daemon {
                 Some(Action::Quit) | None => Ok(()),
             },
             Err(ClientError::Daemon { code, message }) => {
-                failed_send(app, message.clone());
+                match frame {
+                    ClientFrame::Send { client_id, .. } | ClientFrame::Retry { client_id, .. }
+                        if code == ErrorCode::NotConfirmed.as_str() =>
+                    {
+                        app.send_not_confirmed(client_id)
+                    }
+                    _ => failed_send(app, message.clone()),
+                }
                 app.request_failed(frame, format!("daemon: {code}: {message}"));
                 Ok(())
             }

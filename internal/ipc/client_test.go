@@ -125,6 +125,23 @@ func startSilentServer(t *testing.T, answerHello bool) string {
 
 const testReadTimeout = 100 * time.Millisecond
 
+// returnsWithin runs call and returns its error, failing the test when call has not returned after
+// bound. A client that never times out then fails the test, which runs its cleanups; reaching go
+// test's -timeout instead panics and exits without them, leaving the test's temp dir and its
+// core.sock behind in $TMPDIR.
+func returnsWithin(t *testing.T, bound time.Duration, call func() error) error {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- call() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(bound):
+		t.Fatalf("still blocked after %v: the client read is not bounded", bound)
+		return nil
+	}
+}
+
 func TestStatusTimesOutOnAWedgedDaemon(t *testing.T) {
 	sock := startSilentServer(t, true)
 	c, err := DialTimeout(sock, "nuncio/0.1.0", testReadTimeout)
@@ -134,7 +151,7 @@ func TestStatusTimesOutOnAWedgedDaemon(t *testing.T) {
 	defer func() { _ = c.Close() }()
 
 	started := time.Now()
-	_, err = c.Status()
+	err = returnsWithin(t, 10*testReadTimeout, func() error { _, err := c.Status(); return err })
 	if !errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatalf("Status() error = %v, want a deadline-exceeded timeout", err)
 	}
@@ -146,7 +163,13 @@ func TestStatusTimesOutOnAWedgedDaemon(t *testing.T) {
 func TestDialTimesOutWhenTheHandshakeNeverAnswers(t *testing.T) {
 	sock := startSilentServer(t, false)
 	started := time.Now()
-	_, err := DialTimeout(sock, "nuncio/0.1.0", testReadTimeout)
+	err := returnsWithin(t, 10*testReadTimeout, func() error {
+		c, err := DialTimeout(sock, "nuncio/0.1.0", testReadTimeout)
+		if err == nil {
+			_ = c.Close()
+		}
+		return err
+	})
 	if !errors.Is(err, os.ErrDeadlineExceeded) {
 		t.Fatalf("DialTimeout() error = %v, want a deadline-exceeded timeout", err)
 	}

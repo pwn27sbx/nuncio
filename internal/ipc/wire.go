@@ -69,6 +69,7 @@ const (
 	OpEventConnection = "event_connection"
 	OpEventUnread     = "event_unread"
 	OpEventFocus      = "event_focus"
+	OpEventChat       = "event_chat"
 )
 
 // Values of the message kind field.
@@ -99,6 +100,9 @@ const (
 	CodeBadFrame        = "bad_frame"
 	CodeNotLinked       = "not_linked"
 	CodeInternal        = "internal"
+	// CodeNotConfirmed answers a send or retry whose acknowledgement from WhatsApp timed out: it may
+	// have been delivered, so it is neither sent nor send_failed (added in M2).
+	CodeNotConfirmed = "not_confirmed"
 )
 
 // Values of the session field.
@@ -125,7 +129,7 @@ var (
 	ErrNotLinked = errors.New("no WhatsApp device is linked")
 	// ErrNotConfirmed is what a Handler's Send returns when WhatsApp did not acknowledge the
 	// message in time. The message may have been delivered, so it is neither sent nor not sent:
-	// ServeConn answers an internal error with this text, never send_failed.
+	// ServeConn answers a not_confirmed error with this text, never send_failed.
 	ErrNotConfirmed = errors.New("not confirmed: WhatsApp did not acknowledge in time; it may have been delivered")
 	// ErrWiped is what ServeConn returns after it answered a wipe with wiped: the daemon's data is
 	// gone and it must stop serving.
@@ -383,6 +387,14 @@ type EventFocus struct {
 	JID string `json:"jid"`
 }
 
+// EventChat is pushed to subscribers when app-state sync from another device changes a chat's pin,
+// archive or mute: Chat is the chat as it now is, as `chats` would list it (added in M2).
+type EventChat struct {
+	V    int    `json:"v"`
+	Op   string `json:"op"`
+	Chat Chat   `json:"chat"`
+}
+
 // Error reports a protocol or request failure. Code is one of the Code*
 // constants; Message is for logs, not for users.
 type Error struct {
@@ -460,7 +472,7 @@ type Handler interface {
 	// Send sends text to the chat jid once. ServeConn has already checked jid, text and clientID,
 	// and fills in the reply's V, Op and ClientID. It returns ErrNotLinked when no device is
 	// paired, which ServeConn answers with not_linked, and ErrNotConfirmed when the outcome is
-	// unknown, which ServeConn answers with an internal error; any other error is a send_failed reply
+	// unknown, which ServeConn answers with a not_confirmed error; any other error is a send_failed reply
 	// whose message is the error's text, so it must be short and carry no number or message text.
 	Send(jid, text, clientID string) (Sent, error)
 	// Retry sends again, once, the send stored under clientID when it ended not sent, and answers
@@ -968,7 +980,7 @@ func sendReply(clientID string, sent Sent, err error) any {
 		return Error{V: Version, Op: OpError, Code: CodeNotLinked, Message: ErrNotLinked.Error()}
 	}
 	if errors.Is(err, ErrNotConfirmed) {
-		return Error{V: Version, Op: OpError, Code: CodeInternal, Message: ErrNotConfirmed.Error()}
+		return Error{V: Version, Op: OpError, Code: CodeNotConfirmed, Message: ErrNotConfirmed.Error()}
 	}
 	if err != nil {
 		return SendFailed{V: Version, Op: OpSendFailed, ClientID: clientID, Message: err.Error()}

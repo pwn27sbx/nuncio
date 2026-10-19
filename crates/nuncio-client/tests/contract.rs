@@ -86,12 +86,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_thirty_six_documented_files() {
+fn fixture_directory_holds_the_thirty_eight_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 36, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 38, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -616,4 +616,48 @@ fn an_m1_message_parses_without_reply_to_or_reactions() {
     assert!(m.reactions.is_empty());
     let plain = serde_json::to_value(ClientFrame::send("j", "t", "c")).unwrap();
     assert!(plain.get("reply_to").is_none(), "plain send: {plain}");
+}
+
+/// `event_chat` (app-state sync changed a chat's pin, archive or mute) and the `not_confirmed`
+/// error (a send whose acknowledgement timed out), constructed in Rust (added in M2).
+#[test]
+fn constructed_event_chat_and_not_confirmed_frames_match_their_fixtures() {
+    let dir = fixtures_dir();
+    let event = DaemonFrame::EventChat {
+        v: PROTOCOL_VERSION,
+        chat: Chat {
+            jid: "15551230001@s.whatsapp.net".to_owned(),
+            name: "Ada Lovelace".to_owned(),
+            unread: 2,
+            archived: false,
+            pinned: true,
+            muted: true,
+            last_message: Some(Message {
+                id: "3EB0AAA1".to_owned(),
+                kind: "text".to_owned(),
+                text: "See you at 18:00".to_owned(),
+                from_me: false,
+                timestamp: "2026-10-18T17:55:04Z".to_owned(),
+                media: None,
+                state: None,
+                client_id: None,
+                reply_to: None,
+                reactions: Vec::new(),
+            }),
+        },
+    };
+    assert_eq!(event.op(), "event_chat");
+    assert_frame(&dir.join("event_chat.json"), &event);
+
+    assert_eq!(ErrorCode::NotConfirmed.as_str(), "not_confirmed");
+    assert_frame(
+        &dir.join("error_not_confirmed.json"),
+        &DaemonFrame::Error {
+            v: PROTOCOL_VERSION,
+            code: ErrorCode::NotConfirmed,
+            message:
+                "not confirmed: WhatsApp did not acknowledge in time; it may have been delivered"
+                    .to_owned(),
+        },
+    );
 }

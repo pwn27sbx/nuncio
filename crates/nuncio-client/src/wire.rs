@@ -331,6 +331,12 @@ pub enum DaemonFrame {
         v: u8,
         jid: String,
     },
+    /// App-state sync from another device changed a chat's pin, archive or mute: `chat` is the
+    /// chat as it now is, as `chats` would list it (added in M2).
+    EventChat {
+        v: u8,
+        chat: Chat,
+    },
 }
 
 impl DaemonFrame {
@@ -354,6 +360,7 @@ impl DaemonFrame {
             Self::EventConnection { .. } => "event_connection",
             Self::EventUnread { .. } => "event_unread",
             Self::EventFocus { .. } => "event_focus",
+            Self::EventChat { .. } => "event_chat",
         }
     }
 }
@@ -410,6 +417,9 @@ pub enum ErrorCode {
     BadFrame,
     NotLinked,
     Internal,
+    /// A send or retry whose acknowledgement from WhatsApp timed out: it may have been delivered,
+    /// so it is neither sent nor not sent; a `retry` reuses its WhatsApp id (added in M2).
+    NotConfirmed,
     #[serde(other)]
     Unknown,
 }
@@ -422,6 +432,7 @@ impl ErrorCode {
             Self::BadFrame => "bad_frame",
             Self::NotLinked => "not_linked",
             Self::Internal => "internal",
+            Self::NotConfirmed => "not_confirmed",
             Self::Unknown => "unknown",
         }
     }

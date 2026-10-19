@@ -644,3 +644,46 @@ func TestChatFlagsOfAnUnknownChatCreateIt(t *testing.T) {
 		t.Errorf("new muted chat = %+v", c)
 	}
 }
+
+// GetChat answers one chat exactly as ListChats lists it (name, flags, unread, newest message time,
+// mute), without aggregating every chat; an unknown chat is ErrNoChat.
+func TestGetChatEqualsItsListChatsRow(t *testing.T) {
+	db := newMessagesDB(t)
+	if err := UpsertChat(db, Chat{JID: chatAlice, Name: "Alice"}); err != nil {
+		t.Fatalf("UpsertChat: %v", err)
+	}
+	mustInsert(t, db, text("A1", chatAlice, "one", false, t0))
+	mustInsert(t, db, text("A2", chatAlice, "two", false, t0.Add(time.Minute)))
+	mustInsert(t, db, text("A3", chatAlice, "mine", true, t0.Add(2*time.Minute)))
+	mustInsert(t, db, text("B1", chatBob, "hi", false, t0.Add(3*time.Minute)))
+	if err := MarkChatRead(db, chatBob); err != nil {
+		t.Fatalf("MarkChatRead: %v", err)
+	}
+	for _, step := range []error{
+		SetChatPinned(db, chatBob, true),
+		SetChatArchived(db, chatBob, true),
+		SetChatMutedUntil(db, chatBob, MutedForever),
+		SetChatMutedUntil(db, chatGroup, t0.Add(8*time.Hour)), // a chat with no messages
+	} {
+		if step != nil {
+			t.Fatalf("seed: %v", step)
+		}
+	}
+	chats, err := ListChats(db, 200)
+	if err != nil || len(chats) != 3 {
+		t.Fatalf("ListChats = %+v, %v; want 3 chats", chats, err)
+	}
+	for _, want := range chats {
+		got, err := GetChat(db, want.JID)
+		if err != nil {
+			t.Errorf("GetChat(%s): %v", want.JID, err)
+			continue
+		}
+		if got != want {
+			t.Errorf("GetChat(%s) = %+v, want its ListChats row %+v", want.JID, got, want)
+		}
+	}
+	if _, err := GetChat(db, "15550000009@s.whatsapp.net"); !errors.Is(err, ErrNoChat) {
+		t.Errorf("GetChat of an unknown chat = %v, want ErrNoChat", err)
+	}
+}

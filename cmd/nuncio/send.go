@@ -59,7 +59,7 @@ func reportSend(sent ipc.Sent, err error, clientID string, stdout, stderr io.Wri
 	case errors.As(err, &perr) && perr.Code == ipc.CodeNotLinked:
 		fmt.Fprintf(stderr, "nuncio: not sent: %s; link one with `nuncio link --qr --consent`\n", perr.Message)
 		return 1
-	case errors.As(err, &perr) && perr.Code == ipc.CodeInternal && perr.Message == ipc.ErrNotConfirmed.Error():
+	case errors.As(err, &perr) && perr.Code == ipc.CodeNotConfirmed:
 		// It may have been delivered: never say "not sent", which would invite a duplicate. A retry
 		// reuses the same WhatsApp id, so it cannot become a second message.
 		fmt.Fprintln(stderr, "nuncio:", perr.Message)

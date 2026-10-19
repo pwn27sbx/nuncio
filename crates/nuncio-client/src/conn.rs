@@ -262,6 +262,7 @@ fn is_event(frame: &DaemonFrame) -> bool {
             | DaemonFrame::EventConnection { .. }
             | DaemonFrame::EventUnread { .. }
             | DaemonFrame::EventFocus { .. }
+            | DaemonFrame::EventChat { .. }
     )
 }
 

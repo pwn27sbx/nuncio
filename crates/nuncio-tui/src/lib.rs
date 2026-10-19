@@ -91,7 +91,7 @@ pub const KEYS: &[(&str, &str)] = &[
         "e",
         "react to it: 1-6 pick an emoji, x remove mine, Esc cancel",
     ),
-    ("R", "retry the selected send that is not sent"),
+    ("R", "retry the selected not sent or not confirmed send"),
     ("o", "download the selected media and open it externally"),
     (
         "/",
@@ -154,6 +154,9 @@ pub struct App {
     opening: Option<String>,
     /// JIDs of chats with a `mark_read` sent and not answered yet (at most one per chat).
     marking: HashSet<String>,
+    /// `client_id`s of my sends whose acknowledgement timed out (`not_confirmed`): they may have
+    /// been delivered, so they are shown as not confirmed rather than not sent.
+    unconfirmed: HashSet<String>,
     utc_offset: time::UtcOffset,
 }
 
@@ -197,6 +200,7 @@ impl App {
             downloading: HashSet::new(),
             opening: None,
             marking: HashSet::new(),
+            unconfirmed: HashSet::new(),
             utc_offset: time::UtcOffset::UTC,
         };
         let chats = std::mem::take(&mut app.snapshot.chats);
@@ -654,10 +658,12 @@ impl App {
                 ..
             } => {
                 self.sending.remove(client_id);
+                self.unconfirmed.remove(client_id);
                 self.settle(client_id, state, id.as_deref(), timestamp.as_deref());
             }
             DaemonFrame::SendFailed { client_id, .. } => {
                 self.sending.remove(client_id);
+                self.unconfirmed.remove(client_id);
                 if let Some(message) = self.find_send(client_id) {
                     message.state = Some(MessageState::NotSent);
                 }
@@ -702,6 +708,19 @@ impl App {
             DaemonFrame::EventConnection { session, .. } => {
                 self.snapshot.session = session.clone();
             }
+            // App-state sync changed a chat's pin, archive or mute: take the chat as it now is and
+            // sort the list again as the daemon lists it (newest message first, so an unarchived
+            // chat goes back to its place; archived chats last), keeping the selection.
+            DaemonFrame::EventChat { chat, .. } => {
+                let mut chats = self.snapshot.chats.clone();
+                match chats.iter_mut().find(|c| c.jid == chat.jid) {
+                    Some(shown) => *shown = chat.clone(),
+                    None => chats.push(chat.clone()),
+                }
+                // RFC 3339 UTC timestamps sort as text; a chat with no message sorts last.
+                chats.sort_by(|a, b| newest(b).cmp(newest(a)));
+                self.set_chats(chats);
+            }
             DaemonFrame::EventFocus { jid, .. } => {
                 let index = self.snapshot.chats.iter().position(|c| &c.jid == jid)?;
                 self.select(index);
@@ -733,6 +752,27 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// The daemon answered my send (or retry) `client_id` with `not_confirmed`: WhatsApp's
+    /// acknowledgement timed out, so it may have been delivered. It is shown as not confirmed, not
+    /// as not sent, and `R` still retries it: a retry reuses its WhatsApp id, so it can never
+    /// become a second message.
+    pub fn send_not_confirmed(&mut self, client_id: &str) {
+        self.sending.remove(client_id);
+        let Some(message) = self.find_send(client_id) else {
+            return;
+        };
+        message.state = Some(MessageState::NotSent);
+        self.unconfirmed.insert(client_id.to_owned());
+    }
+
+    fn is_unconfirmed(&self, message: &Message) -> bool {
+        message.state == Some(MessageState::NotSent)
+            && message
+                .client_id
+                .as_ref()
+                .is_some_and(|id| self.unconfirmed.contains(id))
     }
 
     fn is_sending(&self, message: &Message) -> bool {
@@ -789,6 +829,11 @@ impl App {
     fn message_event(&mut self, jid: &str, message: &Message) -> bool {
         if let Some(client_id) = &message.client_id {
             self.sending.remove(client_id);
+            // The daemon publishes a not-confirmed send as not_sent (before or after its reply),
+            // so only a later queued or sent state clears the mark.
+            if message.state != Some(MessageState::NotSent) {
+                self.unconfirmed.remove(client_id);
+            }
         }
         if let Some(chat) = self.snapshot.chats.iter_mut().find(|c| c.jid == jid) {
             chat.last_message = Some(message.clone());
@@ -903,7 +948,7 @@ impl App {
             (Some(found), false) => found
                 .iter()
                 .map(|m| {
-                    let by = sent_by(chat.as_ref(), m, self.utc_offset);
+                    let by = sent_by(chat.as_ref(), m, self.utc_offset, false);
                     ListItem::new(format!("{by} {}", snippet(m)))
                 })
                 .collect(),
@@ -1152,9 +1197,9 @@ impl App {
             let chosen = loaded.is_some() && self.cursor == Some(index);
             let mut header = if chosen {
                 selected = Some(lines.len());
-                format!("› {}", sent_by(Some(chat), message, self.utc_offset))
+                format!("› {}", self.header_of(chat, message))
             } else {
-                sent_by(Some(chat), message, self.utc_offset)
+                self.header_of(chat, message)
             };
             if self.is_sending(message) {
                 header.push_str(" · sending");
@@ -1202,11 +1247,27 @@ impl App {
         (lines, selected)
     }
 
+    fn header_of(&self, chat: &Chat, message: &Message) -> String {
+        sent_by(
+            Some(chat),
+            message,
+            self.utc_offset,
+            self.is_unconfirmed(message),
+        )
+    }
+
     fn muted(&self) -> Style {
         Style::default()
             .fg(rgb(self.palette.foreground))
             .add_modifier(Modifier::DIM)
     }
+}
+
+/// The timestamp of a chat's newest message, or "" for a chat with none.
+fn newest(chat: &Chat) -> &str {
+    chat.last_message
+        .as_ref()
+        .map_or("", |message| message.timestamp.as_str())
 }
 
 /// A centred overlay at most `width` by `height`, inside `area`.
@@ -1310,8 +1371,14 @@ fn chat_title(chat: &Chat) -> String {
 }
 
 /// Who sent the message (us, or the chat) and when; a send of ours that is not sent yet says
-/// so, so a failure stays visible.
-fn sent_by(chat: Option<&Chat>, message: &Message, offset: time::UtcOffset) -> String {
+/// so, so a failure stays visible, and one that was not confirmed (`unconfirmed`) says that
+/// instead, since it may have been delivered.
+fn sent_by(
+    chat: Option<&Chat>,
+    message: &Message,
+    offset: time::UtcOffset,
+    unconfirmed: bool,
+) -> String {
     let who = match (message.from_me, chat) {
         (true, _) => "you".to_owned(),
         (false, Some(chat)) => chat_title(chat),
@@ -1319,6 +1386,7 @@ fn sent_by(chat: Option<&Chat>, message: &Message, offset: time::UtcOffset) -> S
     };
     let state = match message.state {
         Some(MessageState::Queued) => " · queued",
+        Some(MessageState::NotSent) if unconfirmed => " · not confirmed",
         Some(MessageState::NotSent) => " · not sent",
         Some(MessageState::Unknown) | None => "",
     };
@@ -1444,7 +1512,7 @@ mod tests {
             reactions: Vec::new(),
         };
         assert_eq!(
-            super::sent_by(Some(&chat("Ada", "a@b")), &message, UTC),
+            super::sent_by(Some(&chat("Ada", "a@b")), &message, UTC, false),
             "Ada · 17:55"
         );
     }
@@ -1464,12 +1532,15 @@ mod tests {
             reactions: Vec::new(),
         };
         assert_eq!(
-            super::sent_by(None, &message, UTC),
+            super::sent_by(None, &message, UTC, false),
             "you · 17:56 · not sent"
         );
         message.state = Some(nuncio_client::wire::MessageState::Queued);
-        assert_eq!(super::sent_by(None, &message, UTC), "you · 17:56 · queued");
+        assert_eq!(
+            super::sent_by(None, &message, UTC, false),
+            "you · 17:56 · queued"
+        );
         message.state = None;
-        assert_eq!(super::sent_by(None, &message, UTC), "you · 17:56");
+        assert_eq!(super::sent_by(None, &message, UTC, false), "you · 17:56");
     }
 }

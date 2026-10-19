@@ -356,16 +356,10 @@ func (d *daemon) Chats() []ipc.Chat {
 	chats := make([]ipc.Chat, 0, len(rows))
 	now := time.Now()
 	for _, r := range rows {
-		c := ipc.Chat{JID: r.JID, Name: r.Name, Unread: r.Unread, Archived: r.Archived, Pinned: r.Pinned,
-			Muted: r.Muted(now)}
-		last, err := store.ListMessages(d.db, r.JID, 1)
+		c, err := wa.WireChat(d.db, r, now)
 		if err != nil {
 			log.Print(err)
 			return nil
-		}
-		if len(last) == 1 {
-			m := wa.WireMessage(last[0])
-			c.LastMessage = &m
 		}
 		chats = append(chats, c)
 	}

@@ -12,7 +12,9 @@ nuncio-tui [--image <png>]
 ## Screen
 
 - **Chat list** (left): name, unread count `(n)`, `★` pinned, `⊘` muted, `▤` archived.
-  Archived chats are kept in the list, sectioned after every other chat. Under the name, the
+  Archived chats are kept in the list, sectioned after every other chat. A pin, archive or mute
+  made on the phone (`event_chat`) updates the markers at once and sorts the list again (newest
+  message first, archived last), keeping the selection on the same chat. Under the name, the
   last message and its time; a preview too long for the pane is cut with `…` (by display width,
   so wide characters count as two columns) and the ` · HH:MM` after it is always whole.
 - **Times** are local: the time zone offset is read once at startup (so a message from the other
@@ -27,11 +29,14 @@ nuncio-tui [--image <png>]
   daemon answers; if it refuses (offline, not linked, ...) the footer shows why, the chat stays
   unread, and nothing retries on its own: opening the chat again does.
 - **Composer**: the last row of the conversation. A send shows `sending` until the daemon
-  answers, then `queued` (offline, waiting for the reconnect), nothing (sent) or `not sent`
-  (it waits for a manual retry).
+  answers, then `queued` (offline, waiting for the reconnect), nothing (sent), `not sent`
+  (it waits for a manual retry) or `not confirmed` (WhatsApp's acknowledgement timed out, so it
+  may have been delivered). The TUI keeps that mark in memory only: after a restart the daemon
+  lists such a send as `not sent`, since the wire has no not-confirmed message state.
 - **Selected message**: `K`/`J` select a message (`›`); `r` replies to it, `e` reacts, `R`
-  retries a send of mine that is `not sent` (one attempt per key press; nothing is ever retried
-  on its own), `o` downloads its media. Only a message WhatsApp has (received, or a send of mine
+  retries a send of mine that is `not sent` or `not confirmed` (one attempt per key press, under
+  the same WhatsApp message id, so a send that did arrive is never sent as a second message;
+  nothing is ever retried on its own), `o` downloads its media. Only a message WhatsApp has (received, or a send of mine
   that was sent) can be replied or reacted to: on one still `sending`, `queued` or `not sent`,
   `r`/`e` send nothing and the footer says `that message was not sent, so it cannot be replied
   to` (or `reacted to`).
@@ -71,7 +76,7 @@ Everything works from the keyboard. `?` shows this list on screen.
 | `K`/`J` | conversation: select an older / newer message |
 | `r` | reply to the selected message (the composer quotes it); only a sent or received one |
 | `e` | react to it: `1`-`6` 👍 ❤️ 😂 😮 😢 🙏, `x` removes mine, `Esc` cancels; only a sent or received one |
-| `R` | retry the selected send that is not sent |
+| `R` | retry the selected send that is not sent or not confirmed (same message, never a second) |
 | `o` | download the selected media and open it externally |
 | `/` | search this chat: type, `Enter` search, `j`/`k` move, `Enter` select, `/` edit, `Esc` close |
 | `Esc` | unselect the message; composer → conversation → chats; quit from the chats |

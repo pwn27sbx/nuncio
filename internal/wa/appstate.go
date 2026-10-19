@@ -1,6 +1,7 @@
 package wa
 
 import (
+	"database/sql"
 	"log"
 	"time"
 
@@ -16,8 +17,9 @@ import (
 // WhatsApp. A change to a chat not stored yet creates it, so the flag is not lost before its first
 // message. Events for chats the wire protocol does not carry, or with no action, are ignored.
 //
-// A flag change publishes nothing (there is no chat event yet): clients see it on their next
-// `chats`. A failure is logged without the chat JID and the session goes on.
+// A pin, archive or mute that is applied publishes the chat as `event_chat`, as `chats` would list
+// it now, so a UI updates its markers at once. A read state publishes only its `event_unread`. A
+// failure is logged without the chat JID and the session goes on.
 
 // appStateChat is the chat JID of an app-state event, or false when it is not a chat JID.
 func appStateChat(jid types.JID) (string, bool) {
@@ -32,7 +34,9 @@ func (s *Session) applyPin(evt *waevents.Pin) {
 	}
 	if err := store.SetChatPinned(s.db, chat, evt.Action.GetPinned()); err != nil {
 		log.Printf("wa: cannot apply a pin from app state: %v", err)
+		return
 	}
+	s.publishChat(chat)
 }
 
 func (s *Session) applyArchive(evt *waevents.Archive) {
@@ -42,7 +46,9 @@ func (s *Session) applyArchive(evt *waevents.Archive) {
 	}
 	if err := store.SetChatArchived(s.db, chat, evt.Action.GetArchived()); err != nil {
 		log.Printf("wa: cannot apply an archive from app state: %v", err)
+		return
 	}
+	s.publishChat(chat)
 }
 
 // applyMute stores the mute end the way whatsmeow reads it: a negative end is no end, otherwise
@@ -61,7 +67,9 @@ func (s *Session) applyMute(evt *waevents.Mute) {
 	}
 	if err := store.SetChatMutedUntil(s.db, chat, until); err != nil {
 		log.Printf("wa: cannot apply a mute from app state: %v", err)
+		return
 	}
+	s.publishChat(chat)
 }
 
 // applyMarkChatAsRead marks a chat read on the phone as read here too (MarkChatRead: the unread
@@ -75,4 +83,39 @@ func (s *Session) applyMarkChatAsRead(evt *waevents.MarkChatAsRead) {
 	if err := s.MarkChatRead(chat); err != nil {
 		log.Printf("wa: cannot apply a read state from app state: %v", err)
 	}
+}
+
+// publishChat publishes chat jid as event_chat, as it is stored now.
+func (s *Session) publishChat(jid string) {
+	c, err := StoredChat(s.db, jid, time.Now())
+	if err != nil {
+		log.Printf("wa: cannot publish a chat changed by app state: %v", err)
+		return
+	}
+	s.publish(ipc.EventChat{V: ipc.Version, Op: ipc.OpEventChat, Chat: c})
+}
+
+// StoredChat is chat jid as the wire carries it (see WireChat), or store.ErrNoChat.
+func StoredChat(db *sql.DB, jid string, now time.Time) (ipc.Chat, error) {
+	c, err := store.GetChat(db, jid)
+	if err != nil {
+		return ipc.Chat{}, err
+	}
+	return WireChat(db, c, now)
+}
+
+// WireChat is the stored chat c as the wire carries it: its name, unread count, flags (muted only
+// while its mute lasts at now) and newest message, if any.
+func WireChat(db *sql.DB, c store.Chat, now time.Time) (ipc.Chat, error) {
+	chat := ipc.Chat{JID: c.JID, Name: c.Name, Unread: c.Unread, Archived: c.Archived, Pinned: c.Pinned,
+		Muted: c.Muted(now)}
+	last, err := store.ListMessages(db, c.JID, 1)
+	if err != nil {
+		return ipc.Chat{}, err
+	}
+	if len(last) == 1 {
+		m := WireMessage(last[0])
+		chat.LastMessage = &m
+	}
+	return chat, nil
 }

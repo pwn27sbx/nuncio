@@ -85,6 +85,7 @@ because events were lost; to avoid it, a UI drains every queued event on each ti
 | `event_connection` | `v`, `op`, `session` | `event_connection.json` |
 | `event_unread` | `v`, `op`, `unread` (int, total), `jid`, `chat_unread` (int) | `event_unread.json` |
 | `event_focus` | `v`, `op`, `jid` | `event_focus.json` |
+| `event_chat` | `v`, `op`, `chat` (Chat): published when app-state sync from another device changes a chat's pin, archive or mute; `chat` is the chat as it now is, as `chats` would list it (its unread count and `last_message` included), so a client replaces the chat with the same `jid` or adds it (added in M2) | `event_chat.json` |
 
 ### `session`
 
@@ -107,10 +108,11 @@ A string, not a boolean, so it can grow without a protocol break:
 | `last_message` | object or absent | omitted for a chat with no messages |
 
 `archived`, `pinned` and `muted` follow the phone: the daemon applies WhatsApp's app-state sync
-(the initial full sync and every later change) read-only and never sends a change back. A change
-publishes no event yet; a client sees it on its next `chats`. A chat marked read on another device
-is marked read here too (its `event_unread` is published, and no read receipt is sent: only
-`mark_read` sends one); a chat
+(the initial full sync and every later change) read-only and never sends a change back. Each pin,
+archive or mute it applies publishes `event_chat` with the chat as it now is (added in M2; before
+it, a client saw the change on its next `chats`). A chat marked read on another device
+is marked read here too (only its `event_unread` is published, never `event_chat`, and no read
+receipt is sent: only `mark_read` sends one); a chat
 marked *unread* on another device leaves the counts as they are, since the daemon has no "marked
 unread" flag.
 
@@ -148,12 +150,13 @@ the Go client waits up to 90 s for that reply.
 
 ## Error codes
 
-| `code` | Meaning |
-|---|---|
-| `version_mismatch` | requested `v` is not served |
-| `bad_frame` | malformed JSON, or a frame over the size limit |
-| `not_linked` | operation requires a paired device and there is none |
-| `internal` | anything else; `message` is for logs, not for users |
+| `code` | Meaning | Fixture |
+|---|---|---|
+| `version_mismatch` | requested `v` is not served | `error_version_mismatch.json` |
+| `bad_frame` | malformed JSON, or a frame over the size limit | |
+| `not_linked` | operation requires a paired device and there is none | `error_not_linked.json` |
+| `not_confirmed` | a `send` or `retry` whose acknowledgement from WhatsApp timed out: it may have been delivered, so it is neither `sent` nor `send_failed`; a `retry` reuses its WhatsApp id. Added in M2 (before it, `internal` with the same `message`); a client that does not know it reads it as an unknown code | `error_not_confirmed.json` |
+| `internal` | anything else; `message` is for logs, not for users | |
 
 ## D-Bus face (thin, not the data plane)
 
@@ -199,9 +202,9 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `send` while `offline` | `sent` with `state: "queued"`; the send is stored in the outbox (and published as `event_message` with `state: "queued"`) and nothing is sent |
 | The session reconnects | one drain pass: every queued send, oldest first, gets exactly one attempt under the WhatsApp id it was queued with. Each ends `sent` (stored, published as `event_message` without `state`) or `not_sent` (published with `state: "not_sent"`). A second reconnect event, or a later reconnect, never attempts a send again; when the connection drops mid-pass the rest stays queued for the next one. Nothing is retried on a timer, ever |
 | `send` while `linked` | stored in the outbox, then attempted once right away, with the same outcomes as a drained send. It never overtakes an older send: every send queued before it (a drain in progress included) gets its one attempt first, in order |
-| `send` repeating a `client_id` already accepted | the stored state of that send, whatever its `jid` and `text`: `sent` (`queued`, or `sent` with its `id` and `timestamp`), `send_failed` for one WhatsApp did not accept, or the not-confirmed `error` / `internal` for one whose ack never came; never a second message. Only `retry` sends a not-sent message again |
+| `send` repeating a `client_id` already accepted | the stored state of that send, whatever its `jid` and `text`: `sent` (`queued`, or `sent` with its `id` and `timestamp`), `send_failed` for one WhatsApp did not accept, or the `error` / `not_confirmed` for one whose ack never came; never a second message. Only `retry` sends a not-sent message again |
 | `send` that WhatsApp does not accept | `send_failed` with a short reason that names no number and quotes no text; the message stays listed with `state: "not_sent"` until a `retry`; it is never deleted |
-| `send` that WhatsApp does not acknowledge in time | `error` / `internal` with the message `not confirmed: WhatsApp did not acknowledge in time; it may have been delivered`; never `send_failed`, because the frame may have reached WhatsApp. The message stays listed with `state: "not_sent"`; a `retry` reuses its WhatsApp id, so it is the same message again, never a second one with a new id |
+| `send` that WhatsApp does not acknowledge in time | `error` / `not_confirmed` (M1 answered `internal`) with the message `not confirmed: WhatsApp did not acknowledge in time; it may have been delivered`; never `send_failed`, because the frame may have reached WhatsApp. The message stays listed with `state: "not_sent"`; a `retry` reuses its WhatsApp id, so it is the same message again, never a second one with a new id |
 | `retry` of a send that ended not sent (not accepted or not confirmed) | while `linked`, one more attempt under its first WhatsApp id, answered like `send`; while `offline`, it is queued again (`sent` with `state: "queued"`) for the next drain. Two retries at once make one attempt |
 | `retry` of a send that is queued or sent | its stored state, as for a repeated `client_id`; nothing is sent |
 | `retry` with an empty or missing `client_id` | `bad_frame`; the connection stays usable |
@@ -224,7 +227,7 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `download_media` whose bytes do not match the message's SHA-256 | `error` / `internal` with the message `the downloaded media does not match its SHA-256, so nothing was saved`; nothing is cached |
 | `download_media` that WhatsApp does not deliver | `error` / `internal` with the message `WhatsApp did not deliver the media`; nothing is cached |
 
-### M2 corners (search, reply, react, mark_read; pinned by daemon tests)
+### M2 corners (search, reply, react, mark_read, event_chat, not_confirmed; pinned by daemon tests)
 
 | Situation | Behaviour |
 |---|---|
@@ -253,6 +256,10 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `mark_read` when the daemon cannot read the read-receipt privacy setting | `error` / `internal` with the message `could not read the read-receipt privacy setting, so the chat was not marked read`; nothing is sent (a receipt could show blue ticks the user turned off) and the chat stays unread |
 | `mark_read` whose receipt WhatsApp does not take | `error` / `internal` with the message `WhatsApp did not accept the read receipt, so the chat was not marked read`; no further receipt is sent, nothing is retried and the chat stays unread here (a later `mark_read` sends its receipts again, which WhatsApp reads as the same read) |
 | `mark_read` timing | the daemon answers within 4 s, inside a client's ordinary 5 s read bound |
+| `mark_read` of many unread messages | mark_read sends at most 50 message ids per read receipt, as consecutive receipts; the first failure stops it and the chat stays unread |
+| A pin, archive or mute from app-state sync (the initial full sync included) | stored, then `event_chat` with the chat as `chats` would list it; a chat not stored yet is created and published without `last_message`. A full sync can publish many at once, and a subscriber whose queue fills is dropped and re-reads `chats` as for any event |
+| App-state for a JID that is not a chat JID, or with no action | ignored; nothing is stored or published |
+| A chat marked read (or unread) on another device | no `event_chat`: a read publishes `event_unread` only, an unread nothing |
 
 A WhatsApp chat JID is one of: `digits@s.whatsapp.net` (a user), `digits@lid` (a user addressed by
 its hidden id; WhatsApp uses it for direct chats too) or `digits-digits@g.us` / `digits@g.us` (a

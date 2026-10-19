@@ -141,6 +141,13 @@ func fixtureCases() []fixtureCase {
 			},
 		},
 		{
+			file: "error_not_confirmed.json",
+			into: func() any { return &Error{} },
+			build: func() any {
+				return Error{V: 1, Op: OpError, Code: CodeNotConfirmed, Message: ErrNotConfirmed.Error()}
+			},
+		},
+		{
 			file: "messages_request.json",
 			into: func() any { return &MessagesRequest{} },
 			build: func() any {
@@ -250,6 +257,15 @@ func fixtureCases() []fixtureCase {
 			into: func() any { return &EventUnread{} },
 			build: func() any {
 				return EventUnread{V: 1, Op: OpEventUnread, Unread: 20, JID: "15551230001@s.whatsapp.net", ChatUnread: 3}
+			},
+		},
+		{
+			file: "event_chat.json",
+			into: func() any { return &EventChat{} },
+			build: func() any {
+				ada := fixtureChatList()[0]
+				ada.Muted = true
+				return EventChat{V: 1, Op: OpEventChat, Chat: ada}
 			},
 		},
 		{
@@ -431,7 +447,7 @@ func TestFixturesCarryVersionOne(t *testing.T) {
 		OpSubscribed: true, OpFocus: true, OpFocused: true, OpEventMessage: true,
 		OpEventConnection: true, OpEventUnread: true, OpEventFocus: true, OpWipe: true, OpWiped: true,
 		OpDownloadMedia: true, OpMediaReady: true, OpRetry: true, OpSearch: true, OpReact: true, OpReacted: true,
-		OpMarkRead: true, OpMarkedRead: true,
+		OpMarkRead: true, OpMarkedRead: true, OpEventChat: true,
 	}
 	for _, tc := range fixtureCases() {
 		t.Run(tc.file, func(t *testing.T) {

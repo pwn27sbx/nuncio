@@ -2,6 +2,7 @@ package wa
 
 import (
 	"database/sql"
+	"fmt"
 	"testing"
 	"time"
 
@@ -234,4 +235,57 @@ func TestSessionWithoutStoreIgnoresAppState(t *testing.T) {
 	fake.emit(archiveEvent(ada, true))
 	fake.emit(muteEvent(ada, true, -1))
 	fake.emit(markReadEvent(ada, true))
+}
+
+// A pin, archive or mute from app-state sync publishes the chat as event_chat with its flags as
+// they now are (its unread count and last message too), so a UI updates its list at once.
+func TestPinArchiveAndMuteFromAppStatePublishTheChat(t *testing.T) {
+	_, fake, events := subscribedSession(t)
+	fake.emit(textEvent(ada, "A1", false, t0, "one"))
+	events()
+
+	chat := func(archived, pinned, muted bool) string {
+		return fmt.Sprintf(`{"v":1,"op":"event_chat","chat":{"jid":"15551230001@s.whatsapp.net","name":"","unread":1,`+
+			`"archived":%t,"pinned":%t,"muted":%t,"last_message":{"id":"A1","kind":"text","text":"one","from_me":false,`+
+			`"timestamp":"2026-10-18T17:55:04Z"}}}`, archived, pinned, muted)
+	}
+	fake.emit(pinEvent(ada, true))
+	fake.emit(archiveEvent(ada, true))
+	fake.emit(muteEvent(ada, true, -1))
+	fake.emit(muteEvent(ada, false, 0))
+	fake.emit(pinEvent(ada, false))
+	assertEvents(t, events(),
+		chat(false, true, false),
+		chat(true, true, false),
+		chat(true, true, true),
+		chat(true, true, false),
+		chat(true, false, false),
+	)
+}
+
+// App state for a chat with no messages yet creates it and publishes it without a last_message.
+func TestAppStateForANewChatPublishesItWithoutALastMessage(t *testing.T) {
+	_, fake, events := subscribedSession(t)
+	fake.emit(archiveEvent(grace, true))
+	assertEvents(t, events(),
+		`{"v":1,"op":"event_chat","chat":{"jid":"15551230002@s.whatsapp.net","name":"","unread":0,"archived":true,"pinned":false,"muted":false}}`)
+}
+
+// App state that is ignored (a JID that is not a chat, or no action) publishes nothing, and a read
+// state from another device publishes only its event_unread, never event_chat.
+func TestIgnoredAppStatePublishesNoChat(t *testing.T) {
+	_, fake, events := subscribedSession(t)
+	fake.emit(textEvent(ada, "A1", false, t0, "one"))
+	events()
+	status := types.NewJID("status", types.BroadcastServer)
+	fake.emit(pinEvent(status, true))
+	fake.emit(archiveEvent(status, true))
+	fake.emit(muteEvent(status, true, -1))
+	fake.emit(&waevents.Pin{JID: ada})
+	fake.emit(&waevents.Archive{JID: ada})
+	fake.emit(&waevents.Mute{JID: ada})
+	assertEvents(t, events())
+
+	fake.emit(markReadEvent(ada, true))
+	assertEvents(t, events(), `{"v":1,"op":"event_unread","unread":0,"jid":"15551230001@s.whatsapp.net","chat_unread":0}`)
 }

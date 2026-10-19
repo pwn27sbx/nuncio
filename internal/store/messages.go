@@ -215,10 +215,37 @@ func GetMessage(db *sql.DB, chatJID, id string) (Message, error) {
 	return m, nil
 }
 
+// chatColumns is what ListChats and GetChat select for one chat (c is chats, m its messages, mu
+// its mute), in the order scanChat reads it.
+const chatColumns = `c.jid, c.name, c.archived, c.pinned, COALESCE(MAX(m.ts), 0),
+			COUNT(CASE WHEN m.from_me = 0 AND m.read = 0 THEN 1 END), COALESCE(mu.until, 0)`
+
+// scanChat reads one row of chatColumns. A missing row is sql.ErrNoRows, unwrapped.
+func scanChat(row interface{ Scan(...any) error }) (Chat, error) {
+	var c Chat
+	var last, muted int64
+	if err := row.Scan(&c.JID, &c.Name, &c.Archived, &c.Pinned, &last, &c.Unread, &muted); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Chat{}, err
+		}
+		return Chat{}, fmt.Errorf("cannot read chat: %w", err)
+	}
+	if last != 0 {
+		c.LastMessageAt = fromNanos(last)
+	}
+	switch muted {
+	case 0:
+	case mutedForeverNanos:
+		c.MutedUntil = MutedForever
+	default:
+		c.MutedUntil = fromNanos(muted)
+	}
+	return c, nil
+}
+
 // ListChats returns up to limit chats, the one with the newest message first.
 func ListChats(db *sql.DB, limit int) ([]Chat, error) {
-	rows, err := db.Query(`SELECT c.jid, c.name, c.archived, c.pinned, COALESCE(MAX(m.ts), 0),
-			COUNT(CASE WHEN m.from_me = 0 AND m.read = 0 THEN 1 END), COALESCE(mu.until, 0)
+	rows, err := db.Query(`SELECT `+chatColumns+`
 		FROM chats c LEFT JOIN messages m ON m.chat_jid = c.jid LEFT JOIN chat_mutes mu ON mu.jid = c.jid
 		GROUP BY c.jid ORDER BY COALESCE(MAX(m.ts), 0) DESC, c.jid LIMIT ?`, limit)
 	if err != nil {
@@ -227,20 +254,9 @@ func ListChats(db *sql.DB, limit int) ([]Chat, error) {
 	defer func() { _ = rows.Close() }()
 	var chats []Chat
 	for rows.Next() {
-		var c Chat
-		var last, muted int64
-		if err := rows.Scan(&c.JID, &c.Name, &c.Archived, &c.Pinned, &last, &c.Unread, &muted); err != nil {
-			return nil, fmt.Errorf("cannot read chat: %w", err)
-		}
-		if last != 0 {
-			c.LastMessageAt = fromNanos(last)
-		}
-		switch muted {
-		case 0:
-		case mutedForeverNanos:
-			c.MutedUntil = MutedForever
-		default:
-			c.MutedUntil = fromNanos(muted)
+		c, err := scanChat(rows)
+		if err != nil {
+			return nil, err
 		}
 		chats = append(chats, c)
 	}
@@ -248,6 +264,25 @@ func ListChats(db *sql.DB, limit int) ([]Chat, error) {
 		return nil, fmt.Errorf("cannot list chats: %w", err)
 	}
 	return chats, nil
+}
+
+// ErrNoChat: no chat with that JID is stored.
+var ErrNoChat = errors.New("no such chat")
+
+// GetChat returns the stored chat jid exactly as ListChats lists it, or ErrNoChat. It aggregates
+// that chat's messages only, so it stays cheap when called once per app-state event.
+func GetChat(db *sql.DB, jid string) (Chat, error) {
+	row := db.QueryRow(`SELECT `+chatColumns+`
+		FROM chats c LEFT JOIN messages m ON m.chat_jid = c.jid LEFT JOIN chat_mutes mu ON mu.jid = c.jid
+		WHERE c.jid = ? GROUP BY c.jid`, jid)
+	c, err := scanChat(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Chat{}, ErrNoChat
+	}
+	if err != nil {
+		return Chat{}, err
+	}
+	return c, nil
 }
 
 // ListMessages returns up to limit messages of a chat, newest first: the stored messages and the

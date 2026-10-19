@@ -1498,3 +1498,212 @@ fn a_new_message_in_another_chat_sends_no_mark_read() {
         "Grace's conversation stays open: {screen}"
     );
 }
+
+// --- event_chat and not_confirmed (S9 (6), (7)) ------------------------------------------
+
+#[test]
+fn event_chat_updates_the_chats_markers_and_resorts_the_list_keeping_the_selection() {
+    let mut app = two_chats();
+    app.select_next();
+    assert_eq!(app.selected_jid(), Some(GRACE));
+
+    let mut ada = chat(ADA, "Ada Lovelace", 2);
+    ada.last_message = Some(message("A1", "Are we still on?", false, 10));
+    ada.archived = true;
+    ada.pinned = true;
+    ada.muted = true;
+    assert_eq!(
+        app.apply(&DaemonFrame::EventChat {
+            v: 1,
+            chat: ada.clone()
+        }),
+        None
+    );
+    let names: Vec<&str> = app.chats().iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Grace Hopper", "Ada Lovelace"],
+        "archived sits last"
+    );
+    assert_eq!(
+        app.selected_jid(),
+        Some(GRACE),
+        "the selection follows the chat"
+    );
+    let screen = render(&mut app, 80, 24).chats();
+    let ada_row = screen
+        .lines()
+        .find(|l| l.contains("Ada Lovelace"))
+        .unwrap_or_else(|| panic!("{screen}"))
+        .to_owned();
+    for marker in ['★', '⊘', '▤'] {
+        assert!(ada_row.contains(marker), "{marker} in {ada_row:?}");
+    }
+
+    // Unarchived, unpinned and unmuted on the phone: the markers go and the chat comes back up,
+    // above Grace, whose chat has no newer message (the daemon's order: newest message first).
+    ada.archived = false;
+    ada.pinned = false;
+    ada.muted = false;
+    app.apply(&DaemonFrame::EventChat { v: 1, chat: ada });
+    let names: Vec<&str> = app.chats().iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(names, ["Ada Lovelace", "Grace Hopper"]);
+    assert_eq!(app.selected_jid(), Some(GRACE));
+    let screen = render(&mut app, 80, 24).chats();
+    for marker in ['★', '⊘', '▤'] {
+        assert!(!screen.contains(marker), "{marker} left in:\n{screen}");
+    }
+
+    // A chat the list does not show yet (pinned on the phone before its first message) is added.
+    let mut family = chat(FAMILY, "Old group", 0);
+    family.pinned = true;
+    app.apply(&DaemonFrame::EventChat { v: 1, chat: family });
+    assert_eq!(app.chats().len(), 3);
+    assert!(app.chats().iter().any(|c| c.jid == FAMILY && c.pinned));
+}
+
+/// A send whose acknowledgement timed out is shown as not confirmed, never as not sent; `R`
+/// retries it under its `client_id`, which reuses its WhatsApp id, so it cannot become a second
+/// message (the M1 semantics); a send refused for another reason still shows as not sent.
+#[test]
+fn a_not_confirmed_send_says_so_and_r_retries_it_under_the_same_client_id() {
+    let path = socket_path();
+    let answers = std::sync::Mutex::new(0);
+    let server = fake_daemon(path.clone(), move |request| {
+        let mut n = answers.lock().expect("lock");
+        *n += 1;
+        match (*n, request["op"].as_str()) {
+            (1, Some("send")) => serde_json::json!({"v":1,"op":"error","code":"not_confirmed",
+                "message":"not confirmed: WhatsApp did not acknowledge in time; it may have been delivered"}),
+            (2, Some("retry")) => serde_json::json!({"v":1,"op":"sent",
+                "client_id":request["client_id"],"state":"sent","id":"3EB0F1","timestamp":"2026-10-18T17:06:00Z"}),
+            (3, Some("send")) => serde_json::json!({"v":1,"op":"error","code":"internal",
+                "message":"the store is closed"}),
+            other => panic!("unexpected request {other:?}: {request}"),
+        }
+    });
+    let mut daemon = Daemon::connect(&path, "nuncio-tui/test").expect("connect");
+    let mut app = two_chats().with_client_prefix("t");
+    let client_id = write_and_send(&mut app);
+    daemon
+        .perform(
+            &mut app,
+            &ClientFrame::send(GRACE, "on my way", client_id.clone()),
+        )
+        .expect("perform");
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(screen.contains("· not confirmed"), "{screen}");
+    assert!(!screen.contains("not sent"), "{screen}");
+
+    app.handle_key(shift('K'));
+    let retry = app.handle_key(shift('R'));
+    assert_eq!(
+        retry,
+        Some(Action::Request(ClientFrame::retry(client_id.clone())))
+    );
+    daemon
+        .perform(&mut app, &ClientFrame::retry(client_id))
+        .expect("perform");
+    app.handle_key(key(KeyCode::Esc));
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(!screen.contains("not confirmed"), "{screen}");
+    assert!(screen.contains("you · "), "{screen}");
+
+    // Any other refusal of a send is still not sent.
+    app.handle_key(key(KeyCode::Char('i')));
+    type_text(&mut app, "again");
+    let Some(Action::Request(send)) = app.handle_key(key(KeyCode::Enter)) else {
+        panic!("Enter sends");
+    };
+    daemon.perform(&mut app, &send).expect("perform");
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(screen.contains("· not sent"), "{screen}");
+    assert_eq!(screen.matches("not confirmed").count(), 0, "{screen}");
+
+    drop(daemon);
+    assert_eq!(
+        server.join().expect("fake daemon"),
+        ["send", "retry", "send"]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_not_confirmed_send_stays_not_confirmed_after_its_event_message() {
+    let path = socket_path();
+    let listener = UnixListener::bind(&path).expect("bind");
+    let server = thread::spawn(move || {
+        let hello_ok = frame_line(
+            serde_json::json!({"v":1,"op":"hello_ok","daemon":"fake","session":"linked","unread":0}),
+        );
+        let mut line = String::new();
+        let (requests, _) = listener.accept().expect("request connection");
+        let mut writer = requests.try_clone().expect("clone");
+        let mut reader = BufReader::new(requests);
+        reader.read_line(&mut line).expect("hello");
+        writer.write_all(hello_ok.as_bytes()).expect("w");
+        let (events, _) = listener.accept().expect("event connection");
+        let mut events_writer = events.try_clone().expect("clone");
+        let mut events_reader = BufReader::new(events);
+        line.clear();
+        events_reader.read_line(&mut line).expect("hello");
+        events_writer.write_all(hello_ok.as_bytes()).expect("w");
+        line.clear();
+        events_reader.read_line(&mut line).expect("subscribe");
+        events_writer
+            .write_all(frame_line(serde_json::json!({"v":1,"op":"subscribed"})).as_bytes())
+            .expect("w");
+        line.clear();
+        reader.read_line(&mut line).expect("send");
+        let request: serde_json::Value = serde_json::from_str(&line).expect("json");
+        // What wa/send.go attempt does: publish not_sent first, then answer not_confirmed.
+        events_writer.write_all(frame_line(serde_json::json!({"v":1,"op":"event_message","jid":GRACE,
+            "message":{"id":"3EB0F1","kind":"text","text":"on my wayy","from_me":true,
+            "timestamp":"2026-10-18T17:06:00Z","state":"not_sent","client_id":request["client_id"]}})).as_bytes()).expect("w");
+        writer.write_all(frame_line(serde_json::json!({"v":1,"op":"error","code":"not_confirmed",
+            "message":"not confirmed: WhatsApp did not acknowledge in time; it may have been delivered"})).as_bytes()).expect("w");
+        thread::sleep(Duration::from_millis(300));
+    });
+    let mut daemon = Daemon::connect(&path, "nuncio-tui/test").expect("connect");
+    let mut app = two_chats().with_client_prefix("t");
+    let client_id = write_and_send(&mut app);
+    daemon
+        .perform(&mut app, &ClientFrame::send(GRACE, "on my wayy", client_id))
+        .expect("perform");
+    thread::sleep(Duration::from_millis(100));
+    daemon.drain_events(&mut app).expect("drain");
+    let screen = render(&mut app, 80, 24).conversation();
+    let _ = server.join();
+    let _ = std::fs::remove_file(&path);
+    assert!(screen.contains("· not confirmed"), "{screen}");
+    assert!(!screen.contains("not sent"), "{screen}");
+}
+
+/// Either order of the not_sent event and the not_confirmed reply keeps the mark; a later queued
+/// state (a retry while offline) clears it, so a drain that then fails shows not sent.
+#[test]
+fn the_not_confirmed_mark_survives_either_order_and_a_queued_state_clears_it() {
+    let mut app = two_chats().with_client_prefix("t");
+    let client_id = write_and_send(&mut app);
+    let event = |state: MessageState| {
+        let mut m = message("3EB0F1", "on my way", true, 6);
+        m.state = Some(state);
+        m.client_id = Some(client_id.clone());
+        DaemonFrame::EventMessage {
+            v: 1,
+            jid: GRACE.to_owned(),
+            message: m,
+        }
+    };
+    app.apply(&event(MessageState::NotSent));
+    app.send_not_confirmed(&client_id);
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(screen.contains("· not confirmed"), "{screen}");
+    assert!(!screen.contains("not sent"), "{screen}");
+
+    app.apply(&event(MessageState::Queued));
+    app.apply(&event(MessageState::NotSent));
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(screen.contains("· not sent"), "{screen}");
+    assert!(!screen.contains("not confirmed"), "{screen}");
+}

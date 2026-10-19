@@ -56,7 +56,7 @@ nuncio purge --confirm        the same without contacting WhatsApp, for a device
 - `chats` never prints message text; a chat without a name shows only the last four digits of
   its number.
 - `send` prints `sent`, `queued`, `not sent: <reason>` or, when WhatsApp did not acknowledge in
-  time, `not confirmed: …; it may have been delivered`, and exits 1 unless the message was sent
+  time (the daemon's `not_confirmed` error), `not confirmed: …; it may have been delivered`, and exits 1 unless the message was sent
   or queued. With no linked device it says so and exits 1. While the session is offline the
   message is queued and sent once when it reconnects (one pass, oldest first). Nothing is ever
   retried on its own: a message that ends `not sent` or `not confirmed` stays listed as not sent,

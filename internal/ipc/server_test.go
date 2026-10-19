@@ -622,11 +622,8 @@ func TestServeConnAnswersANotConfirmedSendAsNotConfirmed(t *testing.T) {
 	handshake(t, conn, br)
 	sendRaw(t, conn, sendFrame(t, "15551230001@s.whatsapp.net", "On my way", "c-1"))
 	frame := recvRaw(t, br)
-	if op, code := fieldOf(t, frame, "op"), fieldOf(t, frame, "code"); op != OpError || code != CodeInternal {
-		t.Errorf("reply %s, want an %s error, never send_failed", frame, CodeInternal)
-	}
-	if got := fieldOf(t, frame, "message"); got != ErrNotConfirmed.Error() {
-		t.Errorf("message = %v, want %q", got, ErrNotConfirmed.Error())
+	if want := readFixture(t, "error_not_confirmed.json"); !sameJSON(t, []byte(frame), want) {
+		t.Errorf("reply %s, want %s (a not_confirmed error, never send_failed)", frame, want)
 	}
 }
 
@@ -834,7 +831,7 @@ func TestServeConnAnswersARetryLikeASend(t *testing.T) {
 	}{
 		{"not linked", ErrNotLinked, string(readFixture(t, "error_not_linked.json"))},
 		{"not accepted", errors.New("the server did not acknowledge the message"), string(readFixture(t, "send_failed_response.json"))},
-		{"not confirmed", ErrNotConfirmed, `{"v":1,"op":"error","code":"internal","message":"` + ErrNotConfirmed.Error() + `"}`},
+		{"not confirmed", ErrNotConfirmed, string(readFixture(t, "error_not_confirmed.json"))},
 	} {
 		h := newFakeHandler(t)
 		h.sendErr = tc.err

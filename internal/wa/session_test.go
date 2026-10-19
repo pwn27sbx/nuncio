@@ -149,3 +149,44 @@ func TestDBPathFollowsXDGDataHomeWithoutCreatingIt(t *testing.T) {
 		t.Errorf("DBPath created the data dir (stat: %v)", err)
 	}
 }
+
+// whatsmeow can end a session without a Disconnected event; each of these must still leave
+// the linked state.
+func TestSessionEndEventsLeaveLinked(t *testing.T) {
+	cases := []struct {
+		name  string
+		event any
+		want  State
+	}{
+		{"logged out reports unlinked", &waevents.LoggedOut{}, StateUnlinked},
+		{"temporary ban reports offline", &waevents.TemporaryBan{}, StateOffline},
+		{"stream replaced reports offline", &waevents.StreamReplaced{}, StateOffline},
+		{"connect failure reports offline", &waevents.ConnectFailure{}, StateOffline},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeClient{device: true}
+			s := NewSession(fake, nil)
+			if err := s.Start(); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			if got := s.State(); got != StateLinked {
+				t.Fatalf("State() before the event = %q, want %q", got, StateLinked)
+			}
+			fake.emit(tc.event)
+			if got := s.State(); got != tc.want {
+				t.Errorf("State() after %T = %q, want %q", tc.event, got, tc.want)
+			}
+			if fake.connects != 1 {
+				t.Errorf("Connect was called %d times after %T, want 1: reconnecting is not the session's job", fake.connects, tc.event)
+			}
+		})
+	}
+}
+
+func TestEventsWithNilHandlersIgnoreSessionEndEvents(t *testing.T) {
+	var e Events
+	for _, ev := range []any{&waevents.LoggedOut{}, &waevents.TemporaryBan{}, &waevents.StreamReplaced{}, &waevents.ConnectFailure{}} {
+		e.Handle(ev) // must not panic
+	}
+}

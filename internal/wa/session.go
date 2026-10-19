@@ -71,6 +71,8 @@ func (s *Session) Start() error {
 	s.client.AddEventHandler(Events{
 		Connected:    func() { s.set(StateLinked) },
 		Disconnected: func() { s.set(StateOffline) },
+		LoggedOut:    func() { s.set(StateUnlinked) },
+		Dropped:      func() { s.set(StateOffline) },
 	}.Handle)
 	s.set(StateOffline)
 	if err := s.client.Connect(); err != nil {

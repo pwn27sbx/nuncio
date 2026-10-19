@@ -12,7 +12,12 @@ type Events struct {
 	Paired       func(user string)
 	Connected    func()
 	Disconnected func()
-	Message      func(*waevents.Message)
+	// LoggedOut: the device was unlinked (from the phone or by the server).
+	LoggedOut func()
+	// Dropped: the session ended without a Disconnected event and without a logout: a temporary
+	// ban, the stream replaced by another connection, or a failed connect.
+	Dropped func()
+	Message func(*waevents.Message)
 }
 
 // Handle dispatches one raw whatsmeow event.
@@ -29,6 +34,14 @@ func (e Events) Handle(raw any) {
 	case *waevents.Disconnected:
 		if e.Disconnected != nil {
 			e.Disconnected()
+		}
+	case *waevents.LoggedOut:
+		if e.LoggedOut != nil {
+			e.LoggedOut()
+		}
+	case *waevents.TemporaryBan, *waevents.StreamReplaced, *waevents.ConnectFailure:
+		if e.Dropped != nil {
+			e.Dropped()
 		}
 	case *waevents.Message:
 		if e.Message != nil {

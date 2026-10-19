@@ -26,6 +26,19 @@ type fakeClient struct {
 	disconnects int
 	markReads   int
 	handlers    []func(any)
+	// sends records every SendText call as "jid text"; it answers sendID and sendTime, or sendErr.
+	sends    []string
+	sendID   string
+	sendTime time.Time
+	sendErr  error
+}
+
+func (f *fakeClient) SendText(_ context.Context, jid, text string) (string, time.Time, error) {
+	f.sends = append(f.sends, jid+" "+text)
+	if f.sendErr != nil {
+		return "", time.Time{}, f.sendErr
+	}
+	return f.sendID, f.sendTime, nil
 }
 
 func (f *fakeClient) HasDevice() bool { return f.device }

@@ -35,6 +35,32 @@ docs/ contrib/ packaging/
 `proto/wire.md` is the contract; `proto/fixtures/*.json` are read by **both**
 sides' tests, so the Go daemon and the Rust clients cannot drift apart silently.
 
+## CLI
+
+`nuncio` is a thin client of the running daemon. It has no automation surface: `send` takes
+exactly one recipient and one message per invocation and never reads stdin; `chats` and `status`
+only read.
+
+```
+nuncio status                 print the daemon's session status (also: nuncio alone)
+nuncio chats                  list the chats: name, unread count, pinned/archived, last message time
+nuncio send <jid> <message>   send one message to one chat; quote the message, it is one argument
+nuncio focus <jid>            ask the running UI to open that chat
+nuncio link --qr              link by scanning a QR code (needs --consent)
+nuncio link --phone N         link with an 8-digit pairing code (needs --consent)
+```
+
+- `chats` never prints message text; a chat without a name shows only the last four digits of
+  its number.
+- `send` prints `sent`, `queued`, `not sent: <reason>` or, when WhatsApp did not acknowledge in
+  time, `not confirmed: …; it may have been delivered`, and exits 1 unless the message was sent
+  or queued. With no linked device it says so and exits 1. Until the offline outbox lands, a send
+  while the session is offline is `not sent`, never silently dropped.
+- `focus` prints how many running UIs got the request; 0 means no UI is running, and that is not
+  an error.
+- `link` refuses to connect an already linked device while `nunciod` answers on `core.sock`: the
+  daemon owns that session.
+
 ## Build
 
 ```sh

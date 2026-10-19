@@ -214,6 +214,62 @@ func (c *Client) Messages(jid string, limit int) (MessagesResponse, error) {
 	return resp, nil
 }
 
+// NotSentError is a send_failed reply: the daemon did not send the message.
+type NotSentError struct {
+	ClientID string
+	Reason   string
+}
+
+func (e *NotSentError) Error() string { return "not sent: " + e.Reason }
+
+// SendTimeout bounds the wait for a send reply: the daemon waits for WhatsApp's acknowledgement
+// before it answers, which can take longer than an ordinary read.
+const SendTimeout = 30 * time.Second
+
+// Send asks the daemon to send text to the chat jid once. It returns the sent reply (state sent
+// or queued), a *NotSentError when the daemon answered send_failed, or a *ProtocolError such as
+// not_linked.
+func (c *Client) Send(jid, text, clientID string) (Sent, error) {
+	if err := WriteFrame(c.conn, SendRequest{V: Version, Op: OpSend, JID: jid, Text: text, ClientID: clientID}); err != nil {
+		return Sent{}, err
+	}
+	// Both replies decode into one value: Sent's fields plus send_failed's message.
+	var reply struct {
+		Sent
+		Message string `json:"message"`
+	}
+	timeout := c.timeout
+	c.timeout = max(timeout, SendTimeout)
+	err := c.readReply(&reply)
+	c.timeout = timeout
+	if err != nil {
+		return Sent{}, err
+	}
+	switch reply.Op {
+	case OpSent:
+		return reply.Sent, nil
+	case OpSendFailed:
+		return Sent{}, &NotSentError{ClientID: reply.ClientID, Reason: reply.Message}
+	}
+	return Sent{}, fmt.Errorf("ipc: expected op %s or %s, got %q", OpSent, OpSendFailed, reply.Op)
+}
+
+// Focus asks the running UIs to open the chat jid. Delivered in the reply is how many subscribed
+// UIs got the request; 0 means no UI is running.
+func (c *Client) Focus(jid string) (Focused, error) {
+	if err := WriteFrame(c.conn, FocusRequest{V: Version, Op: OpFocus, JID: jid}); err != nil {
+		return Focused{}, err
+	}
+	var resp Focused
+	if err := c.readReply(&resp); err != nil {
+		return Focused{}, err
+	}
+	if resp.Op != OpFocused {
+		return Focused{}, fmt.Errorf("ipc: expected op %s, got %q", OpFocused, resp.Op)
+	}
+	return resp, nil
+}
+
 // Close closes the connection.
 func (c *Client) Close() error { return c.conn.Close() }
 

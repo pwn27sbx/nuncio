@@ -13,8 +13,11 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
 	"github.com/pwn27sbx/nuncio/internal/store"
@@ -40,6 +43,9 @@ type Client interface {
 	Connect() error
 	Disconnect()
 	AddEventHandler(func(any))
+	// SendText sends one text message to the chat jid and returns WhatsApp's message id and
+	// timestamp.
+	SendText(ctx context.Context, jid, text string) (id string, ts time.Time, err error)
 }
 
 // Session is the daemon's one WhatsApp session. It connects only a device that is already linked
@@ -324,3 +330,16 @@ func (w whatsmeowClient) HasDevice() bool             { return w.c.Store.ID != n
 func (w whatsmeowClient) Connect() error              { return w.c.Connect() }
 func (w whatsmeowClient) Disconnect()                 { w.c.Disconnect() }
 func (w whatsmeowClient) AddEventHandler(h func(any)) { w.c.AddEventHandler(h) }
+
+// SendText sends a plain conversation message, the simplest text message whatsmeow has.
+func (w whatsmeowClient) SendText(ctx context.Context, jid, text string) (string, time.Time, error) {
+	to, err := types.ParseJID(jid)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("wa: %w", err)
+	}
+	resp, err := w.c.SendMessage(ctx, to, &waE2E.Message{Conversation: proto.String(text)})
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return resp.ID, resp.Timestamp, nil
+}

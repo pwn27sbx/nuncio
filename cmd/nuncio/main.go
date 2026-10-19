@@ -1,6 +1,10 @@
-// Command nuncio is the CLI: `nuncio` alone connects to the daemon, does the NDJSON handshake and
-// prints the session status; `nuncio link` is the linking entry point, and it refuses to do
-// anything at all unless --consent is passed.
+// Command nuncio is the CLI: `nuncio` alone (or `nuncio status`) connects to the daemon, does the
+// NDJSON handshake and prints the session status; `chats` lists the chats, `send` sends one message
+// to one chat, `focus` asks a running UI to open a chat, and `link` is the linking entry point,
+// which refuses to do anything at all unless --consent is passed.
+//
+// There is no automation surface: `send` takes exactly one recipient and one message per
+// invocation and never reads stdin.
 //
 // When the socket is not there this asks the session bus for the daemon's name, which activates
 // the daemon; it never starts a daemon itself.
@@ -16,11 +20,17 @@ import (
 )
 
 const usage = `usage:
-  nuncio                 print the daemon's session status
-  nuncio link --qr       link by scanning a QR code (needs --consent)
-  nuncio link --phone N  link with an 8-digit pairing code (needs --consent)
+  nuncio status                 print the daemon's session status (also: nuncio alone)
+  nuncio chats                  list the chats: name, unread count, pinned/archived, last message time
+  nuncio send <jid> <message>   send one message to one chat; quote the message, it is one argument
+  nuncio focus <jid>            ask the running UI to open that chat
+  nuncio link --qr              link by scanning a QR code (needs --consent)
+  nuncio link --phone N         link with an 8-digit pairing code (needs --consent)
   nuncio --help
 
+A <jid> is a WhatsApp chat: 15551230001@s.whatsapp.net (a person) or 120363000000000000@g.us (a group).
+send prints "sent", "queued", "not sent: <reason>" or "not confirmed: …; it may have been delivered"
+(no acknowledgement in time), and exits non-zero unless it was sent or queued.
 Nothing links a device without --consent.`
 
 func main() {
@@ -34,6 +44,12 @@ func cli(args []string, stdout, stderr io.Writer) int {
 		switch args[0] {
 		case "link":
 			return linkCommand(args[1:], stdout, stderr)
+		case "chats":
+			return chatsCommand(args[1:], stdout, stderr)
+		case "send":
+			return sendCommand(args[1:], stdout, stderr)
+		case "focus":
+			return focusCommand(args[1:], stdout, stderr)
 		case "status":
 			// fall through to the default below
 		case "help":

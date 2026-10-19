@@ -159,15 +159,18 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `send` with `text` over 65 536 bytes | `bad_frame`; nothing is stored or sent |
 | `send` with an empty `client_id` | `bad_frame` |
 | `send` while `unlinked` | `error` / `not_linked`; nothing is stored or sent |
-| `send` while `offline` | `sent` with `state: "queued"`; drained once on reconnect |
-| `send` repeating a `client_id` already accepted | the stored state of that send; never a second message |
+| `send` while `offline` | `sent` with `state: "queued"`; drained once on reconnect. Until the outbox lands (T11) the daemon answers `send_failed` instead, saying the session is offline and nothing was queued; it never answers `queued` without a queue |
+| `send` repeating a `client_id` already accepted | the stored state of that send; never a second message. Not served until the outbox (T11): until then each `send` frame is one send attempt, and `client_id` only labels the reply |
+| `send` that WhatsApp does not accept | `send_failed` with a short reason that names no number and quotes no text; nothing is stored |
+| `send` that WhatsApp does not acknowledge in time | `error` / `internal` with the message `not confirmed: WhatsApp did not acknowledge in time; it may have been delivered`; never `send_failed`, because the frame may have reached WhatsApp. Nothing is stored (reconciling it belongs to the outbox, T11) |
 | `subscribe` twice on one connection | `subscribed` again; events are still delivered once |
 | `focus` with no subscribed UI | `focused` with `delivered: 0` |
+| `focus` with subscribed UIs | `event_focus` to every subscriber (the asking connection too, if it subscribed); `focused` with `delivered` = how many got it |
 | A subscriber that stops reading | dropped (connection closed) when an event finds its 64-frame queue full; never blocks the daemon or other clients |
 
 A WhatsApp chat JID is one of: `digits@s.whatsapp.net` (a user), `digits@lid` (a user addressed by
 its hidden id; WhatsApp uses it for direct chats too) or `digits-digits@g.us` / `digits@g.us` (a
-group). Device suffixes (`user:2@...`), `status@broadcast`, broadcast lists and newsletters are not
+group; the hyphen only between two runs of digits). Device suffixes (`user:2@...`), `status@broadcast`, broadcast lists and newsletters are not
 chat JIDs.
 
 ## Contract tests

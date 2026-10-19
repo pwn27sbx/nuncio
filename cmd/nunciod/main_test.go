@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -273,6 +274,10 @@ func TestDaemonWithoutDatabaseIsUnlinkedAndCreatesNoDataDir(t *testing.T) {
 type fixedSession wa.State
 
 func (s fixedSession) State() wa.State { return wa.State(s) }
+
+func (s fixedSession) SendText(string, string) (ipc.Message, error) {
+	return ipc.Message{}, errors.New("a fixed session cannot send")
+}
 
 func TestStatusReportsTheSessionState(t *testing.T) {
 	for _, tc := range []struct {
@@ -700,7 +705,18 @@ func TestEmbeddedChatListMatchesContractFixture(t *testing.T) {
 }
 
 // fakeWAClient is a linked whatsmeow stand-in that never opens a socket; emit feeds it events.
-type fakeWAClient struct{ handlers []func(any) }
+// SendText answers sendID and sendTime and counts the sends.
+type fakeWAClient struct {
+	handlers []func(any)
+	sendID   string
+	sendTime time.Time
+	sends    atomic.Int64
+}
+
+func (f *fakeWAClient) SendText(context.Context, string, string) (string, time.Time, error) {
+	f.sends.Add(1)
+	return f.sendID, f.sendTime, nil
+}
 
 func (f *fakeWAClient) HasDevice() bool             { return true }
 func (f *fakeWAClient) Connect() error              { f.emit(&waevents.Connected{}); return nil }
@@ -965,5 +981,117 @@ func TestTwoSubscribedClientsBothReceiveAStoredMessage(t *testing.T) {
 	fake.emit(msg)
 	if got := readFrame(t, first, firstR, 200*time.Millisecond); got != "" {
 		t.Errorf("a duplicate message published %s, want nothing", got)
+	}
+}
+
+func TestDaemonSendWhileUnlinkedAnswersNotLinked(t *testing.T) {
+	session := wa.NewSession(nil, nil, nil)
+	d, err := newDaemon(session, nil)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	c := serveInProcess(t, d)
+	_, err = c.Send("15551230001@s.whatsapp.net", "On my way", "c-1")
+	var perr *ipc.ProtocolError
+	if !errors.As(err, &perr) || perr.Code != ipc.CodeNotLinked {
+		t.Errorf("Send while unlinked = %v, want a %s error", err, ipc.CodeNotLinked)
+	}
+}
+
+// linkedDaemon is a daemon over a started session with a fake linked client and a real store,
+// served with events on a private socket.
+func linkedDaemon(t *testing.T) (*wa.Session, *fakeWAClient, string) {
+	t.Helper()
+	db := openTestStore(t)
+	fake := &fakeWAClient{sendID: "3EB0BBB1", sendTime: time.Date(2026, 10, 18, 17, 56, 10, 0, time.UTC)}
+	session := wa.NewSession(fake, db, nil)
+	t.Cleanup(session.Close)
+	events := ipc.NewBroker()
+	session.SetEvents(events)
+	if err := session.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	d, err := newDaemon(session, db)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	return session, fake, serveSocket(t, d, events)
+}
+
+func dial(t *testing.T, sock string) *ipc.Client {
+	t.Helper()
+	c, err := ipc.Dial(sock, "test/0.1.0")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func TestDaemonSendWhileLinkedAnswersSentStoresAndPublishes(t *testing.T) {
+	_, fake, sock := linkedDaemon(t)
+	ui, uiR := subscriber(t, sock)
+	c := dial(t, sock)
+
+	sent, err := c.Send("15551230001@s.whatsapp.net", "On my way", "c-7f3a9e21")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	want := ipc.Sent{V: 1, Op: ipc.OpSent, ClientID: "c-7f3a9e21", State: ipc.SendSent, ID: "3EB0BBB1", Timestamp: "2026-10-18T17:56:10Z"}
+	if sent != want {
+		t.Errorf("Send = %+v, want %+v", sent, want)
+	}
+	if n := fake.sends.Load(); n != 1 {
+		t.Errorf("client sends = %d, want 1", n)
+	}
+	msgs, err := c.Messages("15551230001@s.whatsapp.net", 10)
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	wantMsg := ipc.Message{ID: "3EB0BBB1", Kind: ipc.KindText, Text: "On my way", FromMe: true, Timestamp: "2026-10-18T17:56:10Z"}
+	if len(msgs.Messages) != 1 || msgs.Messages[0] != wantMsg {
+		t.Errorf("Messages after a send = %+v, want only %+v", msgs.Messages, wantMsg)
+	}
+	wantEvent := `{"v":1,"op":"event_message","jid":"15551230001@s.whatsapp.net","message":{"id":"3EB0BBB1","kind":"text","text":"On my way","from_me":true,"timestamp":"2026-10-18T17:56:10Z"}}`
+	if got := readFrame(t, ui, uiR, 5*time.Second); got != wantEvent {
+		t.Errorf("subscriber got %s, want %s", got, wantEvent)
+	}
+}
+
+// Until the outbox (T11) an offline send answers send_failed, never sent/queued.
+func TestDaemonSendWhileOfflineAnswersNotSent(t *testing.T) {
+	_, fake, sock := linkedDaemon(t)
+	fake.emit(&waevents.Disconnected{})
+	c := dial(t, sock)
+
+	_, err := c.Send("15551230001@s.whatsapp.net", "On my way", "c-1")
+	var notSent *ipc.NotSentError
+	if !errors.As(err, &notSent) {
+		t.Fatalf("Send while offline = %v, want a send_failed reply", err)
+	}
+	if notSent.ClientID != "c-1" || !strings.Contains(notSent.Reason, "offline") {
+		t.Errorf("send_failed = %+v, want client_id c-1 and an offline reason", notSent)
+	}
+	if n := fake.sends.Load(); n != 0 {
+		t.Errorf("client sends = %d, want 0", n)
+	}
+	if msgs, err := c.Messages("15551230001@s.whatsapp.net", 10); err != nil || len(msgs.Messages) != 0 {
+		t.Errorf("Messages after an offline send = %+v, %v; want none stored", msgs.Messages, err)
+	}
+}
+
+func TestDaemonFocusReachesASubscribedUI(t *testing.T) {
+	_, _, sock := linkedDaemon(t)
+	ui, uiR := subscriber(t, sock)
+	c := dial(t, sock)
+	focused, err := c.Focus("15551230002@s.whatsapp.net")
+	if err != nil {
+		t.Fatalf("Focus: %v", err)
+	}
+	if focused.Delivered != 1 || focused.JID != "15551230002@s.whatsapp.net" {
+		t.Errorf("Focus = %+v, want delivered 1", focused)
+	}
+	if got, want := readFrame(t, ui, uiR, 5*time.Second), `{"v":1,"op":"event_focus","jid":"15551230002@s.whatsapp.net"}`; got != want {
+		t.Errorf("subscriber got %s, want %s", got, want)
 	}
 }

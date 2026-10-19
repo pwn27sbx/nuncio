@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -24,6 +25,23 @@ type fakeHandler struct {
 	// messages per chat jid; asked records every Messages call as "jid limit".
 	messages map[string][]Message
 	asked    []string
+	// sends records every Send call as "jid client_id text"; Send answers sent, or sendErr.
+	sends   []string
+	sent    Sent
+	sendErr error
+}
+
+func (f *fakeHandler) Send(jid, text, clientID string) (Sent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sends = append(f.sends, jid+" "+clientID+" "+text)
+	return f.sent, f.sendErr
+}
+
+func (f *fakeHandler) sendCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.sends...)
 }
 
 func (f *fakeHandler) Hello(client string) Status {
@@ -386,5 +404,167 @@ func TestServeConnRejectsAJIDThatIsNotWhatsAppAndKeepsServing(t *testing.T) {
 	assertSameJSON(t, recvRaw(t, br), readFixture(t, "status_response.json"))
 	if got := h.askedMessages(); len(got) != 0 {
 		t.Fatalf("handler was asked %q for rejected requests, want nothing", got)
+	}
+}
+
+// sendFrame is a send request with the given fields, JSON-encoded.
+func sendFrame(t *testing.T, jid, text, clientID string) string {
+	t.Helper()
+	data, err := json.Marshal(SendRequest{V: Version, Op: OpSend, JID: jid, Text: text, ClientID: clientID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}
+
+func TestServeConnRefusesABadSendAndSendsNothing(t *testing.T) {
+	h := newFakeHandler(t)
+	sock := startServer(t, h)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+
+	const ada = "15551230001@s.whatsapp.net"
+	for _, tc := range []struct{ name, frame string }{
+		{"empty text", sendFrame(t, ada, "", "c-1")},
+		{"whitespace-only text", sendFrame(t, ada, " \t\n ", "c-1")},
+		{"text over 65536 bytes", sendFrame(t, ada, strings.Repeat("a", MaxTextLen+1), "c-1")},
+		{"empty client_id", sendFrame(t, ada, "On my way", "")},
+		{"jid that is not a chat", sendFrame(t, "status@broadcast", "On my way", "c-1")},
+		{"malformed send", `{"v":1,"op":"send","jid":1}`},
+	} {
+		sendRaw(t, conn, tc.frame)
+		if got := fieldOf(t, recvRaw(t, br), "code"); got != CodeBadFrame {
+			t.Errorf("%s: code = %v, want %s", tc.name, got, CodeBadFrame)
+		}
+	}
+	sendRaw(t, conn, `{"v":1,"op":"status"}`)
+	assertSameJSON(t, recvRaw(t, br), readFixture(t, "status_response.json"))
+	if got := h.sendCalls(); len(got) != 0 {
+		t.Errorf("handler was asked to send %q for rejected requests, want nothing", got)
+	}
+}
+
+func TestServeConnSendsTextOfExactlyTheLimit(t *testing.T) {
+	h := newFakeHandler(t)
+	h.sent = Sent{State: SendSent, ID: "3EB0BBB1", Timestamp: "2026-10-18T17:56:10Z"}
+	sock := startServer(t, h)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+	sendRaw(t, conn, sendFrame(t, "15551230001@s.whatsapp.net", strings.Repeat("a", MaxTextLen), "c-1"))
+	if got := fieldOf(t, recvRaw(t, br), "op"); got != OpSent {
+		t.Errorf("op = %v, want %s", got, OpSent)
+	}
+	if got := len(h.sendCalls()); got != 1 {
+		t.Errorf("handler sends = %d, want 1", got)
+	}
+}
+
+func TestServeConnAnswersSentWithTheClientID(t *testing.T) {
+	h := newFakeHandler(t)
+	h.sent = Sent{State: SendSent, ID: "3EB0BBB1", Timestamp: "2026-10-18T17:56:10Z"}
+	sock := startServer(t, h)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+	sendRaw(t, conn, string(readFixture(t, "send_request.json")))
+	assertSameJSON(t, recvRaw(t, br), readFixture(t, "sent_response.json"))
+	if got, want := h.sendCalls(), []string{"15551230001@s.whatsapp.net c-7f3a9e21 On my way"}; !slices.Equal(got, want) {
+		t.Errorf("handler sends = %q, want %q", got, want)
+	}
+}
+
+func TestServeConnAnswersNotLinkedWhenNoDeviceIsLinked(t *testing.T) {
+	h := newFakeHandler(t)
+	h.sendErr = ErrNotLinked
+	sock := startServer(t, h)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+	sendRaw(t, conn, string(readFixture(t, "send_request.json")))
+	assertSameJSON(t, recvRaw(t, br), readFixture(t, "error_not_linked.json"))
+	// The connection stays usable.
+	sendRaw(t, conn, `{"v":1,"op":"status"}`)
+	assertSameJSON(t, recvRaw(t, br), readFixture(t, "status_response.json"))
+}
+
+func TestServeConnAnswersSendFailedWithTheReason(t *testing.T) {
+	h := newFakeHandler(t)
+	h.sendErr = errors.New("the server did not acknowledge the message")
+	sock := startServer(t, h)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+	sendRaw(t, conn, sendFrame(t, "15551230001@s.whatsapp.net", "On my way", "c-7f3a9e23"))
+	assertSameJSON(t, recvRaw(t, br), readFixture(t, "send_failed_response.json"))
+}
+
+func TestFocusWithNoSubscribedUIIsDeliveredToNone(t *testing.T) {
+	sock := startEventServer(t, newFakeHandler(t), NewBroker())
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+	sendRaw(t, conn, string(readFixture(t, "focus_request.json")))
+	assertSameJSON(t, recvRaw(t, br), []byte(`{"v":1,"op":"focused","jid":"15551230002@s.whatsapp.net","delivered":0}`))
+}
+
+func TestFocusReachesEverySubscribedUI(t *testing.T) {
+	sock := startEventServer(t, newFakeHandler(t), NewBroker())
+	_, firstR := subscribed(t, sock)
+	_, secondR := subscribed(t, sock)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+
+	sendRaw(t, conn, string(readFixture(t, "focus_request.json")))
+	assertSameJSON(t, recvRaw(t, br), []byte(`{"v":1,"op":"focused","jid":"15551230002@s.whatsapp.net","delivered":2}`))
+	assertSameJSON(t, recvRaw(t, firstR), readFixture(t, "event_focus.json"))
+	assertSameJSON(t, recvRaw(t, secondR), readFixture(t, "event_focus.json"))
+	// The asking connection did not subscribe, so it gets no event of its own.
+	assertNoFrame(t, conn, br)
+}
+
+func TestFocusRejectsAJIDThatIsNotAChat(t *testing.T) {
+	b := NewBroker()
+	sock := startEventServer(t, newFakeHandler(t), b)
+	ui, uiR := subscribed(t, sock)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+	sendRaw(t, conn, `{"v":1,"op":"focus","jid":"status@broadcast"}`)
+	if got := fieldOf(t, recvRaw(t, br), "code"); got != CodeBadFrame {
+		t.Errorf("code = %v, want %s", got, CodeBadFrame)
+	}
+	assertNoFrame(t, ui, uiR)
+}
+
+func TestValidJIDTakesGroupHyphensOnlyBetweenDigits(t *testing.T) {
+	for _, tc := range []struct {
+		jid  string
+		want bool
+	}{
+		{"120363000000000000@g.us", true},
+		{"15550001234-1600000000@g.us", true},
+		{"-@g.us", false},
+		{"1-@g.us", false},
+		{"-1@g.us", false},
+		{"1--2@g.us", false},
+		{"1-2-3@g.us", false},
+		{"1-2@s.whatsapp.net", false},
+		{"15551230001@s.whatsapp.net", true},
+		{"123456789@lid", true},
+	} {
+		if got := ValidJID(tc.jid); got != tc.want {
+			t.Errorf("ValidJID(%q) = %v, want %v", tc.jid, got, tc.want)
+		}
+	}
+}
+
+func TestServeConnAnswersANotConfirmedSendAsNotConfirmed(t *testing.T) {
+	h := newFakeHandler(t)
+	h.sendErr = ErrNotConfirmed
+	sock := startServer(t, h)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+	sendRaw(t, conn, sendFrame(t, "15551230001@s.whatsapp.net", "On my way", "c-1"))
+	frame := recvRaw(t, br)
+	if op, code := fieldOf(t, frame, "op"), fieldOf(t, frame, "code"); op != OpError || code != CodeInternal {
+		t.Errorf("reply %s, want an %s error, never send_failed", frame, CodeInternal)
+	}
+	if got := fieldOf(t, frame, "message"); got != ErrNotConfirmed.Error() {
+		t.Errorf("message = %v, want %q", got, ErrNotConfirmed.Error())
 	}
 }

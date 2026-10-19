@@ -14,9 +14,14 @@ import (
 	waevents "go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/pwn27sbx/nuncio/internal/ipc"
 	"github.com/pwn27sbx/nuncio/internal/store"
 	"github.com/pwn27sbx/nuncio/internal/wa"
 )
+
+// connectLinked connects the client of an already linked device; tests replace it so that no
+// test can reach WhatsApp.
+var connectLinked = func(c *whatsmeow.Client) error { return c.Connect() }
 
 // linkCommand is the S1–S3 entry point. It is prepared in full — the gate, the device store, the
 // whatsmeow client, both flows and the QR renderer — and it does nothing at all until --consent is
@@ -65,6 +70,12 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "nuncio link:", err)
 		return 1
 	}
+	// The daemon owns the session of a linked device. A second connection of the same device would
+	// replace the daemon's stream, and each would take it back from the other.
+	if device.ID != nil && daemonAnswers() {
+		fmt.Fprintln(stderr, "nuncio link: nunciod is running and owns this device's session; stop it first. Nothing was connected.")
+		return 1
+	}
 	client := whatsmeow.NewClient(device, nil)
 	// whatsmeow's own retry has no cap, no jitter and no stop on a ban, so it stays off.
 	client.EnableAutoReconnect = false
@@ -72,7 +83,7 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 
 	if device.ID != nil {
 		fmt.Fprintln(stdout, "nuncio: this machine already holds a linked device:", maskPhone(device.ID.User))
-		if err := client.Connect(); err != nil {
+		if err := connectLinked(client); err != nil {
 			fmt.Fprintln(stderr, "nuncio link:", err)
 			return 1
 		}
@@ -210,6 +221,21 @@ func runQRLink(ctx context.Context, linker wa.Linker) int {
 	}
 	fmt.Fprintln(os.Stderr, "nuncio: the QR stream ended without a result")
 	return 1
+}
+
+// daemonAnswers reports whether a daemon completes the handshake on core.sock. It dials the
+// socket only: it never asks the session bus, so it never activates a daemon.
+func daemonAnswers() bool {
+	path, err := ipc.DefaultSocketPath()
+	if err != nil {
+		return false
+	}
+	c, err := ipc.DialTimeout(path, ipc.ClientName, 2*time.Second)
+	if err != nil {
+		return false
+	}
+	_ = c.Close()
+	return true
 }
 
 // maskPhone keeps only the last four digits of a phone number, so nothing this command prints can

@@ -248,9 +248,10 @@ type daemon struct {
 	chats []ipc.Chat
 }
 
-// sessionState is what the daemon reads from its WhatsApp session.
+// sessionState is what the daemon reads from, and sends through, its WhatsApp session.
 type sessionState interface {
 	State() wa.State
+	SendText(jid, text string) (ipc.Message, error)
 }
 
 // newDaemon serves session and, when db is not nil, the chats, messages and
@@ -338,4 +339,15 @@ func (d *daemon) Messages(jid string, limit int) ([]ipc.Message, error) {
 // later task: only text is stored for now.
 func wireMessage(m store.Message) ipc.Message {
 	return ipc.Message{ID: m.ID, Kind: m.Kind, Text: m.Text, FromMe: m.FromMe, Timestamp: ipc.Timestamp(m.Timestamp)}
+}
+
+// Send sends one text message through the session: sent with WhatsApp's id and timestamp, or the
+// session's error (ipc.ErrNotLinked while unlinked; a short not-sent reason otherwise, offline
+// included until the outbox of T11 queues it). The client_id only labels the reply for now.
+func (d *daemon) Send(jid, text, _ string) (ipc.Sent, error) {
+	m, err := d.session.SendText(jid, text)
+	if err != nil {
+		return ipc.Sent{}, err
+	}
+	return ipc.Sent{State: ipc.SendSent, ID: m.ID, Timestamp: m.Timestamp}, nil
 }

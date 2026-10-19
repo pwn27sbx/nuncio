@@ -100,6 +100,13 @@ var (
 	ErrFrameTooLong = errors.New("ipc: frame exceeds 1 MiB")
 	// ErrBadFrame reports a frame that is not a single JSON object.
 	ErrBadFrame = errors.New("ipc: malformed frame")
+	// ErrNotLinked is what a Handler's Send returns when no device is paired; ServeConn answers it
+	// with the not_linked error frame, whose message is this error's text.
+	ErrNotLinked = errors.New("no WhatsApp device is linked")
+	// ErrNotConfirmed is what a Handler's Send returns when WhatsApp did not acknowledge the
+	// message in time. The message may have been delivered, so it is neither sent nor not sent:
+	// ServeConn answers an internal error with this text, never send_failed.
+	ErrNotConfirmed = errors.New("not confirmed: WhatsApp did not acknowledge in time; it may have been delivered")
 )
 
 // Hello is the first frame a client sends. The daemon refuses anything else.
@@ -313,27 +320,35 @@ type Handler interface {
 	// Messages returns up to limit messages of the chat jid, newest first; none for a chat it
 	// does not know. ServeConn has already checked jid and limit.
 	Messages(jid string, limit int) ([]Message, error)
+	// Send sends text to the chat jid once. ServeConn has already checked jid, text and clientID,
+	// and fills in the reply's V, Op and ClientID. It returns ErrNotLinked when no device is
+	// paired, which ServeConn answers with not_linked, and ErrNotConfirmed when the outcome is
+	// unknown, which ServeConn answers with an internal error; any other error is a send_failed reply
+	// whose message is the error's text, so it must be short and carry no number or message text.
+	Send(jid, text, clientID string) (Sent, error)
 }
 
 // ValidJID reports whether jid names a WhatsApp chat the protocol carries: a user
-// (`digits@s.whatsapp.net`, or `digits@lid` for a hidden-number user) or a group (`id@g.us`, digits
-// with an optional hyphen in old group ids). Device suffixes, broadcasts and other servers are not
+// (`digits@s.whatsapp.net`, or `digits@lid` for a hidden-number user) or a group (`digits@g.us`, or
+// `digits-digits@g.us` for an old group id). Device suffixes, broadcasts and other servers are not
 // chats.
 func ValidJID(jid string) bool {
 	user, server, ok := strings.Cut(jid, "@")
-	if !ok || user == "" {
+	if !ok {
 		return false
 	}
-	allowed := "0123456789"
 	switch server {
 	case "s.whatsapp.net", "lid":
+		return digits(user)
 	case "g.us":
-		allowed += "-"
-	default:
-		return false
+		first, second, hyphen := strings.Cut(user, "-")
+		return digits(first) && (!hyphen || digits(second))
 	}
-	return strings.Trim(user, allowed) == ""
+	return false
 }
+
+// digits reports whether s is one or more ASCII digits.
+func digits(s string) bool { return s != "" && strings.Trim(s, "0123456789") == "" }
 
 // WriteFrame writes v as one NDJSON frame.
 func WriteFrame(w io.Writer, v any) error {
@@ -565,6 +580,23 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
 			if err != nil {
 				return err
 			}
+		case OpSend:
+			if err := WriteFrame(out, serveSend(line, h)); err != nil {
+				return err
+			}
+		case OpFocus:
+			var req FocusRequest
+			if err := json.Unmarshal(line, &req); err != nil || !ValidJID(req.JID) {
+				if err := WriteFrame(out, badFrame("focus needs the jid of a WhatsApp chat")); err != nil {
+					return err
+				}
+				continue
+			}
+			// Every subscribed UI gets the event, this connection included if it subscribed.
+			delivered := events.Publish(EventFocus{V: Version, Op: OpEventFocus, JID: req.JID})
+			if err := WriteFrame(out, Focused{V: Version, Op: OpFocused, JID: req.JID, Delivered: delivered}); err != nil {
+				return err
+			}
 		case OpHello:
 			if err := WriteFrame(out, badFrame("hello is only valid as the first frame")); err != nil {
 				return err
@@ -575,6 +607,37 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
 			}
 		}
 	}
+}
+
+// serveSend checks a send frame and asks h to send it, returning the reply frame. A refused frame
+// never reaches h, so nothing is stored or sent.
+func serveSend(line []byte, h Handler) any {
+	var req SendRequest
+	if err := json.Unmarshal(line, &req); err != nil {
+		return badFrame("malformed send frame")
+	}
+	switch {
+	case req.ClientID == "":
+		return badFrame("send needs a client_id")
+	case !ValidJID(req.JID):
+		return badFrame("jid is not a WhatsApp chat")
+	case strings.TrimSpace(req.Text) == "":
+		return badFrame("send needs a text that is not empty")
+	case len(req.Text) > MaxTextLen:
+		return badFrame(fmt.Sprintf("text is longer than %d bytes", MaxTextLen))
+	}
+	sent, err := h.Send(req.JID, req.Text, req.ClientID)
+	if errors.Is(err, ErrNotLinked) {
+		return Error{V: Version, Op: OpError, Code: CodeNotLinked, Message: ErrNotLinked.Error()}
+	}
+	if errors.Is(err, ErrNotConfirmed) {
+		return Error{V: Version, Op: OpError, Code: CodeInternal, Message: ErrNotConfirmed.Error()}
+	}
+	if err != nil {
+		return SendFailed{V: Version, Op: OpSendFailed, ClientID: req.ClientID, Message: err.Error()}
+	}
+	sent.V, sent.Op, sent.ClientID = Version, OpSent, req.ClientID
+	return sent
 }
 
 // lockedWriter writes each frame whole, so replies and events never interleave mid-frame.

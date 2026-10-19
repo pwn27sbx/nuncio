@@ -199,3 +199,38 @@ func TestEventsWithNilHandlersIgnoreSessionEndEvents(t *testing.T) {
 		e.Handle(ev) // must not panic
 	}
 }
+
+func TestSessionPublishesEachConnectionChangeOnce(t *testing.T) {
+	fake := &fakeClient{device: true}
+	s := NewSession(fake, nil, nil)
+	events := eventsOf(t, s)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.emit(&waevents.Disconnected{})
+	fake.emit(&waevents.Disconnected{}) // no change, no event
+	fake.emit(&waevents.LoggedOut{})
+
+	assertEvents(t, events(),
+		`{"v":1,"op":"event_connection","session":"offline"}`,
+		`{"v":1,"op":"event_connection","session":"linked"}`,
+		`{"v":1,"op":"event_connection","session":"offline"}`,
+		`{"v":1,"op":"event_connection","session":"unlinked"}`,
+	)
+}
+
+func TestSessionWithoutEventsStillRuns(t *testing.T) {
+	db := openTestStore(t)
+	fake := &fakeClient{device: true}
+	s := NewSession(fake, db, nil)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.emit(textEvent(ada, "A1", false, t0, "one"))
+	if err := s.MarkChatRead(ada.String()); err != nil {
+		t.Fatalf("MarkChatRead: %v", err)
+	}
+	if n := totalUnread(t, db); n != 0 {
+		t.Errorf("total unread = %d, want 0", n)
+	}
+}

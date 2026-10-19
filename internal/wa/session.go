@@ -50,6 +50,7 @@ type Session struct {
 	mu      sync.Mutex
 	state   State
 	started bool
+	events  *ipc.Broker
 }
 
 // NewSession wraps client, which may be nil for "no device store at all". db is the message
@@ -57,6 +58,23 @@ type Session struct {
 // after the client is disconnected.
 func NewSession(client Client, db *sql.DB, closeStore func() error) *Session {
 	return &Session{client: client, db: db, closeStore: closeStore, state: StateUnlinked}
+}
+
+// SetEvents makes the session publish its events to b: event_connection when the state changes,
+// event_message for every newly stored message and event_unread when an unread count changes.
+// Call it before Start.
+func (s *Session) SetEvents(b *ipc.Broker) {
+	s.mu.Lock()
+	s.events = b
+	s.mu.Unlock()
+}
+
+// publish sends frame to the subscribers, if the session has a broker.
+func (s *Session) publish(frame any) {
+	s.mu.Lock()
+	b := s.events
+	s.mu.Unlock()
+	b.Publish(frame)
 }
 
 // Store is the message store, or nil when there is no database (unlinked).
@@ -100,8 +118,12 @@ func (s *Session) State() State {
 
 func (s *Session) set(st State) {
 	s.mu.Lock()
+	changed := s.state != st
 	s.state = st
 	s.mu.Unlock()
+	if changed {
+		s.publish(ipc.EventConnection{V: ipc.Version, Op: ipc.OpEventConnection, Session: string(st)})
+	}
 }
 
 // Close disconnects a started session and closes the device store.

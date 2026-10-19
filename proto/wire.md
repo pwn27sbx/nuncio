@@ -58,7 +58,16 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 ### Events (daemon → subscribed clients)
 
 A connection that sent `subscribe` receives these frames, unprompted, interleaved with replies;
-a connection that did not subscribe never receives them.
+a connection that did not subscribe never receives them. Events published after the `subscribed`
+reply are delivered after it, in the order they were published.
+
+The daemon holds at most **64 event frames** per subscriber that it has not yet written to the
+socket. When an event is published while that queue is full, the subscriber is dropped: the
+daemon closes its connection (the client reads the frames already sent, then end of stream) and
+never waits for it. The close can cut the frame being written, so a dropped subscriber's last line
+may be partial: clients treat a final line without its `\n` as end of stream, not as a malformed
+frame. A client that is dropped reconnects, subscribes again and re-reads the state it shows,
+because events were lost; to avoid it, a UI drains every queued event on each tick. Publishing never blocks the daemon or the other connections.
 
 | `op` | Fields | Fixture |
 |---|---|---|
@@ -154,7 +163,7 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `send` repeating a `client_id` already accepted | the stored state of that send; never a second message |
 | `subscribe` twice on one connection | `subscribed` again; events are still delivered once |
 | `focus` with no subscribed UI | `focused` with `delivered: 0` |
-| A subscriber that stops reading | dropped once its bounded queue is full; never blocks the daemon or other clients |
+| A subscriber that stops reading | dropped (connection closed) when an event finds its 64-frame queue full; never blocks the daemon or other clients |
 
 A WhatsApp chat JID is one of: `digits@s.whatsapp.net` (a user), `digits@lid` (a user addressed by
 its hidden id; WhatsApp uses it for direct chats too) or `digits-digits@g.us` / `digits@g.us` (a

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -410,8 +411,25 @@ type envelope struct {
 // first, then requests. It returns nil for a clean close and an error
 // describing why it stopped otherwise.
 func ServeConn(conn io.ReadWriteCloser, h Handler) error {
+	return ServeConnEvents(conn, h, nil)
+}
+
+// ServeConnEvents is ServeConn with events: after `subscribe` the connection also receives every
+// frame published to events, interleaved with its replies. A subscriber that falls
+// SubscriberQueue frames behind is dropped and its connection closed. With a nil events broker,
+// subscribe is answered and no event ever follows.
+func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
 	defer func() { _ = conn.Close() }()
 	rd := NewReader(conn)
+	// Replies and events interleave on one socket, so every frame is written whole under out's
+	// lock.
+	out := &lockedWriter{w: conn}
+	var cancel func()
+	defer func() {
+		if cancel != nil {
+			cancel()
+		}
+	}()
 
 	first, err := rd.Next()
 	if err != nil {
@@ -419,22 +437,22 @@ func ServeConn(conn io.ReadWriteCloser, h Handler) error {
 			return nil
 		}
 		// The stream cannot be resynchronised after a framing error.
-		return refuse(conn, CodeBadFrame, err.Error())
+		return refuse(out, CodeBadFrame, err.Error())
 	}
 
 	var hello Hello
 	if err := json.Unmarshal(first, &hello); err != nil {
-		return refuse(conn, CodeBadFrame, fmt.Sprintf("malformed hello frame: %v", err))
+		return refuse(out, CodeBadFrame, fmt.Sprintf("malformed hello frame: %v", err))
 	}
 	if hello.V != Version {
-		return refuse(conn, CodeVersionMismatch, "unsupported protocol version")
+		return refuse(out, CodeVersionMismatch, "unsupported protocol version")
 	}
 	if hello.Op != OpHello {
-		return refuse(conn, CodeBadFrame, fmt.Sprintf("first frame must be %q", OpHello))
+		return refuse(out, CodeBadFrame, fmt.Sprintf("first frame must be %q", OpHello))
 	}
 
 	st := h.Hello(hello.Client)
-	if err := WriteFrame(conn, HelloOK{
+	if err := WriteFrame(out, HelloOK{
 		V: Version, Op: OpHelloOK, Daemon: st.Daemon, Session: st.Session, Unread: st.Unread,
 	}); err != nil {
 		return err
@@ -447,25 +465,25 @@ func ServeConn(conn io.ReadWriteCloser, h Handler) error {
 				return nil
 			}
 			// A frame past the size cap leaves the stream desynchronised.
-			return refuse(conn, CodeBadFrame, err.Error())
+			return refuse(out, CodeBadFrame, err.Error())
 		}
 
 		var env envelope
 		if err := json.Unmarshal(line, &env); err != nil {
 			// The line boundary was intact, so the connection survives.
-			if err := WriteFrame(conn, badFrame("malformed frame")); err != nil {
+			if err := WriteFrame(out, badFrame("malformed frame")); err != nil {
 				return err
 			}
 			continue
 		}
 		if env.V != Version {
-			return refuse(conn, CodeVersionMismatch, "unsupported protocol version")
+			return refuse(out, CodeVersionMismatch, "unsupported protocol version")
 		}
 
 		switch env.Op {
 		case OpStatus:
 			st := h.Status()
-			if err := WriteFrame(conn, StatusResponse{
+			if err := WriteFrame(out, StatusResponse{
 				V: Version, Op: OpStatus, Daemon: st.Daemon,
 				Linked: st.Linked, Session: st.Session, Unread: st.Unread,
 			}); err != nil {
@@ -474,14 +492,14 @@ func ServeConn(conn io.ReadWriteCloser, h Handler) error {
 		case OpChats:
 			var req ChatsRequest
 			if err := json.Unmarshal(line, &req); err != nil {
-				if err := WriteFrame(conn, badFrame("malformed chats frame")); err != nil {
+				if err := WriteFrame(out, badFrame("malformed chats frame")); err != nil {
 					return err
 				}
 				continue
 			}
 			if req.Limit < MinChatLimit || req.Limit > MaxChatLimit {
 				msg := fmt.Sprintf("limit must be between %d and %d", MinChatLimit, MaxChatLimit)
-				if err := WriteFrame(conn, badFrame(msg)); err != nil {
+				if err := WriteFrame(out, badFrame(msg)); err != nil {
 					return err
 				}
 				continue
@@ -493,33 +511,33 @@ func ServeConn(conn io.ReadWriteCloser, h Handler) error {
 			if chats == nil {
 				chats = []Chat{}
 			}
-			if err := WriteFrame(conn, ChatsResponse{V: Version, Op: OpChats, Chats: chats}); err != nil {
+			if err := WriteFrame(out, ChatsResponse{V: Version, Op: OpChats, Chats: chats}); err != nil {
 				return err
 			}
 		case OpMessages:
 			var req MessagesRequest
 			if err := json.Unmarshal(line, &req); err != nil {
-				if err := WriteFrame(conn, badFrame("malformed messages frame")); err != nil {
+				if err := WriteFrame(out, badFrame("malformed messages frame")); err != nil {
 					return err
 				}
 				continue
 			}
 			if req.Limit < MinChatLimit || req.Limit > MaxChatLimit {
 				msg := fmt.Sprintf("limit must be between %d and %d", MinChatLimit, MaxChatLimit)
-				if err := WriteFrame(conn, badFrame(msg)); err != nil {
+				if err := WriteFrame(out, badFrame(msg)); err != nil {
 					return err
 				}
 				continue
 			}
 			if !ValidJID(req.JID) {
-				if err := WriteFrame(conn, badFrame("jid is not a WhatsApp chat")); err != nil {
+				if err := WriteFrame(out, badFrame("jid is not a WhatsApp chat")); err != nil {
 					return err
 				}
 				continue
 			}
 			msgs, err := h.Messages(req.JID, req.Limit)
 			if err != nil {
-				if err := WriteFrame(conn, Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()}); err != nil {
+				if err := WriteFrame(out, Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()}); err != nil {
 					return err
 				}
 				continue
@@ -530,17 +548,55 @@ func ServeConn(conn io.ReadWriteCloser, h Handler) error {
 			if msgs == nil {
 				msgs = []Message{}
 			}
-			if err := WriteFrame(conn, MessagesResponse{V: Version, Op: OpMessages, JID: req.JID, Messages: msgs}); err != nil {
+			if err := WriteFrame(out, MessagesResponse{V: Version, Op: OpMessages, JID: req.JID, Messages: msgs}); err != nil {
+				return err
+			}
+		case OpSubscribe:
+			// The reply is written under out's lock, so no event can overtake it; a second
+			// subscribe answers again without a second subscription.
+			out.mu.Lock()
+			if cancel == nil {
+				var frames <-chan []byte
+				frames, cancel = events.Subscribe(func() { _ = conn.Close() })
+				go writeEvents(out, frames)
+			}
+			err := WriteFrame(out.w, Subscribed{V: Version, Op: OpSubscribed})
+			out.mu.Unlock()
+			if err != nil {
 				return err
 			}
 		case OpHello:
-			if err := WriteFrame(conn, badFrame("hello is only valid as the first frame")); err != nil {
+			if err := WriteFrame(out, badFrame("hello is only valid as the first frame")); err != nil {
 				return err
 			}
 		default:
-			if err := WriteFrame(conn, badFrame(fmt.Sprintf("unknown op %q", env.Op))); err != nil {
+			if err := WriteFrame(out, badFrame(fmt.Sprintf("unknown op %q", env.Op))); err != nil {
 				return err
 			}
+		}
+	}
+}
+
+// lockedWriter writes each frame whole, so replies and events never interleave mid-frame.
+type lockedWriter struct {
+	mu sync.Mutex
+	w  io.Writer
+}
+
+func (l *lockedWriter) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.w.Write(p)
+}
+
+// writeEvents copies queued event frames to the connection until the subscription ends. A write
+// that blocks holds only this connection's lock; dropping the subscriber closes the connection,
+// which ends the write.
+func writeEvents(out *lockedWriter, frames <-chan []byte) {
+	for frame := range frames {
+		if _, err := out.Write(frame); err != nil {
+			// The connection is broken; the read loop sees it too and ends the subscription.
+			return
 		}
 	}
 }

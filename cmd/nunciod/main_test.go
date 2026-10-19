@@ -724,8 +724,8 @@ func textMessage(chat types.JID, id string, fromMe bool, ts time.Time, text stri
 	}
 }
 
-// serveInProcess serves h on a private socket and returns a connected client.
-func serveInProcess(t *testing.T, h ipc.Handler) *ipc.Client {
+// serveSocket serves h, with events from b, on a private socket and returns its path.
+func serveSocket(t *testing.T, h ipc.Handler, b *ipc.Broker) string {
 	t.Helper()
 	sock := filepath.Join(t.TempDir(), "core.sock")
 	ln, err := net.Listen("unix", sock)
@@ -734,8 +734,15 @@ func serveInProcess(t *testing.T, h ipc.Handler) *ipc.Client {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	go func() { _ = serve(ctx, ln, h); close(done) }()
+	go func() { _ = serve(ctx, ln, h, b); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
+	return sock
+}
+
+// serveInProcess serves h on a private socket and returns a connected client.
+func serveInProcess(t *testing.T, h ipc.Handler) *ipc.Client {
+	t.Helper()
+	sock := serveSocket(t, h, nil)
 	c, err := ipc.Dial(sock, "test/0.1.0")
 	if err != nil {
 		t.Fatalf("dial: %v", err)
@@ -877,4 +884,86 @@ func jsonOf(t *testing.T, v any) string {
 		t.Fatalf("marshal: %v", err)
 	}
 	return string(data)
+}
+
+// subscriber dials sock, handshakes and subscribes, and returns a reader of the frames that
+// follow.
+func subscriber(t *testing.T, sock string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial %s: %v", sock, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	br := bufio.NewReader(conn)
+	for _, step := range []struct{ send, reply string }{
+		{`{"v":1,"op":"hello","client":"test/0.1.0"}`, `"op":"hello_ok"`},
+		{`{"v":1,"op":"subscribe"}`, `{"v":1,"op":"subscribed"}`},
+	} {
+		if _, err := io.WriteString(conn, step.send+"\n"); err != nil {
+			t.Fatalf("write %s: %v", step.send, err)
+		}
+		if got := readFrame(t, conn, br, 5*time.Second); !strings.Contains(got, step.reply) {
+			t.Fatalf("reply to %s = %s, want %s", step.send, got, step.reply)
+		}
+	}
+	return conn, br
+}
+
+// readFrame reads one frame within wait; it returns "" when none arrives in time.
+func readFrame(t *testing.T, conn net.Conn, br *bufio.Reader, wait time.Duration) string {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(wait)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	line, err := br.ReadString('\n')
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read frame: %v", err)
+	}
+	return strings.TrimSuffix(line, "\n")
+}
+
+func TestTwoSubscribedClientsBothReceiveAStoredMessage(t *testing.T) {
+	db := openTestStore(t)
+	fake := &fakeWAClient{}
+	session := wa.NewSession(fake, db, nil)
+	events := ipc.NewBroker()
+	session.SetEvents(events)
+	if err := session.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	d, err := newDaemon(session, db)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	sock := serveSocket(t, d, events)
+	first, firstR := subscriber(t, sock)
+	second, secondR := subscriber(t, sock)
+
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	msg := textMessage(ada, "3EB0AAA3", false, time.Date(2026, 10, 18, 17, 58, 0, 0, time.UTC), "Running late")
+	fake.emit(msg)
+	want := []string{
+		`{"v":1,"op":"event_message","jid":"15551230001@s.whatsapp.net","message":{"id":"3EB0AAA3","kind":"text","text":"Running late","from_me":false,"timestamp":"2026-10-18T17:58:00Z"}}`,
+		`{"v":1,"op":"event_unread","unread":1,"jid":"15551230001@s.whatsapp.net","chat_unread":1}`,
+	}
+	for i, r := range []struct {
+		conn net.Conn
+		br   *bufio.Reader
+	}{{first, firstR}, {second, secondR}} {
+		for _, w := range want {
+			if got := readFrame(t, r.conn, r.br, 5*time.Second); got != w {
+				t.Errorf("subscriber %d got %s, want %s", i+1, got, w)
+			}
+		}
+	}
+
+	// The same message again is a duplicate: stored once, published once.
+	fake.emit(msg)
+	if got := readFrame(t, first, firstR, 200*time.Millisecond); got != "" {
+		t.Errorf("a duplicate message published %s, want nothing", got)
+	}
 }

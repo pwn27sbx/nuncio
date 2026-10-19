@@ -3,6 +3,15 @@
 //! This uses a **blocking** `std::os::unix::net::UnixStream`, not `tokio`: the client
 //! work is one short request/response handshake, so a blocking socket is the simpler of
 //! the two and needs no async runtime in the TUI or in the GTK main loop.
+//!
+//! Events are polled, not pushed: after [`Connection::subscribe`] a UI calls
+//! [`Connection::next_event`] with a short wait from its own loop (a TUI tick, a GTK timeout).
+//! A subscribed connection carries only events once it is subscribed, so a UI keeps it apart
+//! from the connection it makes requests on. On each tick a UI drains the queue, calling
+//! `next_event` until it returns `Ok(None)`: the daemon drops a subscriber that falls 64 events
+//! behind, so reading one event per tick can lose the connection in a burst. After
+//! [`ClientError::Closed`] the UI subscribes again on a new connection and resyncs its state
+//! (`status`, `chats`), since events may have been missed.
 
 use std::env;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -87,6 +96,9 @@ impl Snapshot {
 pub struct Connection {
     stream: BufReader<UnixStream>,
     timeout: Duration,
+    /// The start of a frame whose end has not arrived yet, kept across a quiet
+    /// [`Connection::next_event`] wait so the stream never loses its place.
+    pending: Vec<u8>,
 }
 
 impl Connection {
@@ -106,6 +118,7 @@ impl Connection {
         Ok(Self {
             stream: BufReader::new(stream),
             timeout,
+            pending: Vec::new(),
         })
     }
 
@@ -126,27 +139,33 @@ impl Connection {
 
     /// Read one frame, failing on a malformed line or one over the size limit.
     pub fn recv(&mut self) -> Result<DaemonFrame, ClientError> {
-        let mut line = Vec::new();
+        // A frame begun before a timed-out wait continues where it stopped.
+        let mut line = std::mem::take(&mut self.pending);
         // `take` bounds the read so a daemon that never sends a newline cannot make the
         // client allocate without limit.
-        let read = (&mut self.stream)
-            .take((MAX_FRAME_BYTES + 1) as u64)
-            .read_until(b'\n', &mut line)
-            .map_err(|err| match err.kind() {
-                // A socket read timeout surfaces as WouldBlock on Unix and TimedOut elsewhere.
-                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
-                    ClientError::Timeout(self.timeout)
-                }
-                _ => ClientError::Io(err),
-            })?;
-        if read == 0 {
+        let room = (MAX_FRAME_BYTES + 1).saturating_sub(line.len()) as u64;
+        let result = (&mut self.stream).take(room).read_until(b'\n', &mut line);
+        if result.is_err() {
+            self.pending = line;
+            line = Vec::new();
+        }
+        let read = result.map_err(|err| match err.kind() {
+            // A socket read timeout surfaces as WouldBlock on Unix and TimedOut elsewhere.
+            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => {
+                ClientError::Timeout(self.timeout)
+            }
+            _ => ClientError::Io(err),
+        })?;
+        if read == 0 && line.is_empty() {
             return Err(ClientError::Closed);
         }
         if line.len() > MAX_FRAME_BYTES {
             return Err(ClientError::FrameTooLarge { bytes: line.len() });
         }
-        if line.last() == Some(&b'\n') {
-            line.pop();
+        // Within the size bound, a line without its newline means the stream ended inside a
+        // frame: the daemon closed the connection mid-write (as when it drops a subscriber).
+        if line.pop() != Some(b'\n') {
+            return Err(ClientError::Closed);
         }
         Ok(serde_json::from_slice(&line)?)
     }
@@ -164,6 +183,45 @@ impl Connection {
         }
     }
 
+    /// Send `subscribe` and check the daemon's `subscribed`. From then on the daemon pushes
+    /// event frames on this connection; read them with [`Connection::next_event`]. Subscribing
+    /// again is harmless: each event still arrives once.
+    pub fn subscribe(&mut self) -> Result<(), ClientError> {
+        match self.request(&ClientFrame::subscribe())? {
+            DaemonFrame::Subscribed { .. } => Ok(()),
+            other => Err(ClientError::Unexpected {
+                expected: "subscribed",
+                got: other.op(),
+            }),
+        }
+    }
+
+    /// Wait up to `wait` (at least 1 ms) for the next event frame. `Ok(None)` means
+    /// none arrived in time, and the connection stays usable, even when the wait ended in the
+    /// middle of a frame. Any frame that is not an event is
+    /// [`ClientError::Unexpected`]. A closed connection is [`ClientError::Closed`], also when it
+    /// ends inside a frame: the daemon drops a subscriber that falls behind. Drain on each tick
+    /// (call until `Ok(None)`), and after `Closed` reconnect, subscribe and resync.
+    pub fn next_event(&mut self, wait: Duration) -> Result<Option<DaemonFrame>, ClientError> {
+        // macOS refuses to set a socket timeout once the peer has closed (EINVAL). The read
+        // still tells the truth then: the frames already buffered, then `Closed`.
+        let _ = self
+            .stream
+            .get_ref()
+            .set_read_timeout(Some(wait.max(Duration::from_millis(1))));
+        let frame = self.recv();
+        let _ = self.stream.get_ref().set_read_timeout(Some(self.timeout));
+        match frame {
+            Ok(frame) if is_event(&frame) => Ok(Some(frame)),
+            Ok(other) => Err(ClientError::Unexpected {
+                expected: "event",
+                got: other.op(),
+            }),
+            Err(ClientError::Timeout(_)) => Ok(None),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Send `hello` and check the daemon's `hello_ok`, which the wire contract requires to
     /// be the first exchange.
     pub fn handshake(&mut self, client: &str) -> Result<(), ClientError> {
@@ -175,6 +233,17 @@ impl Connection {
             }),
         }
     }
+}
+
+/// Whether `frame` is one the daemon pushes to subscribers, unprompted.
+fn is_event(frame: &DaemonFrame) -> bool {
+    matches!(
+        frame,
+        DaemonFrame::EventMessage { .. }
+            | DaemonFrame::EventConnection { .. }
+            | DaemonFrame::EventUnread { .. }
+            | DaemonFrame::EventFocus { .. }
+    )
 }
 
 /// Connect, handshake, and fetch the daemon state and chat list.

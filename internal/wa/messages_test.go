@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	waevents "go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/pwn27sbx/nuncio/internal/ipc"
 	"github.com/pwn27sbx/nuncio/internal/store"
 )
 
@@ -252,4 +255,103 @@ func TestOpenSessionOverAnExistingDatabasePreparesTheMessageStore(t *testing.T) 
 	if n, err := store.TotalUnread(s.Store()); err != nil || n != 0 {
 		t.Errorf("TotalUnread = %d, %v; want 0 and the message schema in place", n, err)
 	}
+}
+
+// eventsOf subscribes to a broker the session publishes to, and returns a function that takes
+// every frame published so far, as JSON lines without the newline.
+func eventsOf(t *testing.T, s *Session) func() []string {
+	t.Helper()
+	b := ipc.NewBroker()
+	s.SetEvents(b)
+	frames, cancel := b.Subscribe(nil)
+	t.Cleanup(cancel)
+	return func() []string {
+		var got []string
+		for {
+			select {
+			case f := <-frames:
+				got = append(got, strings.TrimSuffix(string(f), "\n"))
+			default:
+				return got
+			}
+		}
+	}
+}
+
+// subscribedSession is a linked session over a real store whose events are collected.
+func subscribedSession(t *testing.T) (*Session, *fakeClient, func() []string) {
+	t.Helper()
+	db := openTestStore(t)
+	fake := &fakeClient{device: true}
+	s := NewSession(fake, db, nil)
+	events := eventsOf(t, s)
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	events() // the connection events of Start
+	return s, fake, events
+}
+
+func assertEvents(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("events =\n %s\nwant\n %s", strings.Join(got, "\n "), strings.Join(want, "\n "))
+	}
+}
+
+func TestAStoredIncomingMessagePublishesItAndTheNewUnread(t *testing.T) {
+	_, fake, events := subscribedSession(t)
+	fake.emit(textEvent(grace, "G1", false, t0, "hello"))
+	fake.emit(textEvent(ada, "A1", false, t0.Add(time.Second), "Running late"))
+
+	assertEvents(t, events(),
+		`{"v":1,"op":"event_message","jid":"15551230002@s.whatsapp.net","message":{"id":"G1","kind":"text","text":"hello","from_me":false,"timestamp":"2026-10-18T17:55:04Z"}}`,
+		`{"v":1,"op":"event_unread","unread":1,"jid":"15551230002@s.whatsapp.net","chat_unread":1}`,
+		`{"v":1,"op":"event_message","jid":"15551230001@s.whatsapp.net","message":{"id":"A1","kind":"text","text":"Running late","from_me":false,"timestamp":"2026-10-18T17:55:05Z"}}`,
+		`{"v":1,"op":"event_unread","unread":2,"jid":"15551230001@s.whatsapp.net","chat_unread":1}`,
+	)
+}
+
+func TestAMessageFromMePublishesItButNoUnreadChange(t *testing.T) {
+	_, fake, events := subscribedSession(t)
+	fake.emit(textEvent(ada, "MINE", true, t0, "on my way"))
+
+	assertEvents(t, events(),
+		`{"v":1,"op":"event_message","jid":"15551230001@s.whatsapp.net","message":{"id":"MINE","kind":"text","text":"on my way","from_me":true,"timestamp":"2026-10-18T17:55:04Z"}}`,
+	)
+}
+
+func TestADuplicateMessagePublishesNothing(t *testing.T) {
+	_, fake, events := subscribedSession(t)
+	ev := textEvent(ada, "DUP", false, t0, "once")
+	fake.emit(ev)
+	if got := events(); len(got) != 2 {
+		t.Fatalf("first delivery published %d events, want 2: %q", len(got), got)
+	}
+	fake.emit(ev)
+	assertEvents(t, events())
+}
+
+func TestAMessageThatIsNotStoredPublishesNothing(t *testing.T) {
+	_, fake, events := subscribedSession(t)
+	fake.emit(messageEvent(ada, "IMG", false, t0, &waE2E.Message{ImageMessage: &waE2E.ImageMessage{}}))
+	fake.emit(textEvent(types.NewJID("status", types.BroadcastServer), "S1", false, t0, "story"))
+	assertEvents(t, events())
+}
+
+func TestMarkChatReadPublishesTheClearedUnreadOnlyWhenItChanges(t *testing.T) {
+	s, fake, events := subscribedSession(t)
+	fake.emit(textEvent(ada, "A1", false, t0, "one"))
+	fake.emit(textEvent(grace, "G1", false, t0, "hello"))
+	events()
+
+	if err := s.MarkChatRead(ada.String()); err != nil {
+		t.Fatalf("MarkChatRead: %v", err)
+	}
+	assertEvents(t, events(), `{"v":1,"op":"event_unread","unread":1,"jid":"15551230001@s.whatsapp.net","chat_unread":0}`)
+
+	if err := s.MarkChatRead(ada.String()); err != nil {
+		t.Fatalf("MarkChatRead: %v", err)
+	}
+	assertEvents(t, events())
 }

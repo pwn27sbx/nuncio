@@ -88,6 +88,10 @@ func run() error {
 		return err
 	}
 	defer session.Close()
+	// Every connection that subscribes gets the session's events (new messages, unread and
+	// connection changes) through this broker.
+	events := ipc.NewBroker()
+	session.SetEvents(events)
 	d, err := newDaemon(session, session.Store())
 	if err != nil {
 		return err
@@ -116,7 +120,7 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	log.Printf("serving %s", socket)
-	return serve(ctx, ln, d)
+	return serve(ctx, ln, d, events)
 }
 
 // errAlreadyRunning reports a daemon that answers on the socket already.
@@ -212,7 +216,7 @@ func (f *dbusFace) Status() (ipc.Status, *dbus.Error) {
 	return f.d.Status(), nil
 }
 
-func serve(ctx context.Context, ln net.Listener, h ipc.Handler) error {
+func serve(ctx context.Context, ln net.Listener, h ipc.Handler, events *ipc.Broker) error {
 	go func() {
 		<-ctx.Done()
 		_ = ln.Close()
@@ -226,7 +230,7 @@ func serve(ctx context.Context, ln net.Listener, h ipc.Handler) error {
 			return err
 		}
 		go func() {
-			if err := ipc.ServeConn(conn, h); err != nil {
+			if err := ipc.ServeConnEvents(conn, h, events); err != nil {
 				log.Printf("connection: %v", err)
 			}
 		}()

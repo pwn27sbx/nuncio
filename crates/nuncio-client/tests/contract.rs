@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use nuncio_client::wire::MessageState;
+use nuncio_client::wire::{MessageState, Reaction};
 use nuncio_client::{
     Chat, ClientFrame, DaemonFrame, ErrorCode, MAX_FRAME_BYTES, Media, Message, PROTOCOL_VERSION,
     SendState, Session,
@@ -86,12 +86,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_twenty_eight_documented_files() {
+fn fixture_directory_holds_the_thirty_four_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 28, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 34, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -162,6 +162,8 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                     media: None,
                     state: None,
                     client_id: None,
+                    reply_to: None,
+                    reactions: Vec::new(),
                 },
                 Message {
                     id: "3EB0AAA0".to_owned(),
@@ -176,6 +178,8 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                     }),
                     state: None,
                     client_id: None,
+                    reply_to: None,
+                    reactions: Vec::new(),
                 },
             ],
         },
@@ -236,6 +240,8 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                 media: None,
                 state: None,
                 client_id: None,
+                reply_to: None,
+                reactions: Vec::new(),
             },
         },
     );
@@ -253,6 +259,8 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                 media: None,
                 state: Some(MessageState::NotSent),
                 client_id: Some("c-7f3a9e23".to_owned()),
+                reply_to: None,
+                reactions: Vec::new(),
             },
         },
     );
@@ -368,6 +376,8 @@ fn constructed_daemon_frames_match_their_fixtures() {
                         media: None,
                         state: None,
                         client_id: None,
+                        reply_to: None,
+                        reactions: Vec::new(),
                     }),
                 },
                 Chat {
@@ -386,6 +396,8 @@ fn constructed_daemon_frames_match_their_fixtures() {
                         media: None,
                         state: None,
                         client_id: None,
+                        reply_to: None,
+                        reactions: Vec::new(),
                     }),
                 },
                 Chat {
@@ -500,4 +512,90 @@ fn a_message_without_an_outbox_state_parses_as_sent_and_an_unknown_state_still_p
     )
     .unwrap();
     assert_eq!(queued.state, Some(MessageState::Queued));
+}
+
+/// The M2 frames (search, reply, react), constructed in Rust.
+#[test]
+fn constructed_m2_frames_match_their_fixtures() {
+    let dir = fixtures_dir();
+    let ada = "15551230001@s.whatsapp.net";
+    assert_frame(
+        &dir.join("search_request.json"),
+        &ClientFrame::search(ada, "venue", 50),
+    );
+    assert_frame(
+        &dir.join("send_reply_request.json"),
+        &ClientFrame::send_reply(ada, "Which venue?", "c-7f3a9e22", "3EB0AAA0"),
+    );
+    assert_frame(
+        &dir.join("react_request.json"),
+        &ClientFrame::react(ada, "3EB0AAA1", "\u{1F44D}"),
+    );
+    assert_frame(
+        &dir.join("react_remove_request.json"),
+        &ClientFrame::react(ada, "3EB0AAA1", ""),
+    );
+    assert_frame(
+        &dir.join("reacted_response.json"),
+        &DaemonFrame::Reacted {
+            v: PROTOCOL_VERSION,
+            jid: ada.to_owned(),
+            id: "3EB0AAA1".to_owned(),
+            emoji: "\u{1F44D}".to_owned(),
+        },
+    );
+    assert_frame(
+        &dir.join("search_response.json"),
+        &DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: ada.to_owned(),
+            messages: vec![
+                Message {
+                    id: "3EB0AAA2".to_owned(),
+                    kind: "text".to_owned(),
+                    text: "Which venue?".to_owned(),
+                    from_me: true,
+                    timestamp: "2026-10-18T17:56:40Z".to_owned(),
+                    media: None,
+                    state: None,
+                    client_id: None,
+                    reply_to: Some("3EB0AAA0".to_owned()),
+                    reactions: vec![Reaction {
+                        emoji: "\u{1F44D}".to_owned(),
+                        from_me: false,
+                    }],
+                },
+                Message {
+                    id: "3EB0AAA0".to_owned(),
+                    kind: "image".to_owned(),
+                    text: "the venue".to_owned(),
+                    from_me: false,
+                    timestamp: "2026-10-18T17:50:30Z".to_owned(),
+                    media: Some(Media {
+                        mime: "image/jpeg".to_owned(),
+                        size: 48213,
+                        file_name: String::new(),
+                    }),
+                    state: None,
+                    client_id: None,
+                    reply_to: None,
+                    reactions: Vec::new(),
+                },
+            ],
+        },
+    );
+}
+
+/// A message from an M1 daemon (no `reply_to`, no `reactions`) still parses, as quoting nothing
+/// and with no reactions, and a plain send still has no `reply_to` key.
+#[test]
+fn an_m1_message_parses_without_reply_to_or_reactions() {
+    let m: Message = serde_json::from_str(
+        r#"{"id":"A","kind":"text","text":"x","from_me":false,"timestamp":"2026-10-18T17:55:04Z"}"#,
+    )
+    .unwrap();
+    assert_eq!(m.reply_to, None);
+    assert!(m.reactions.is_empty());
+    let plain = serde_json::to_value(ClientFrame::send("j", "t", "c")).unwrap();
+    assert!(plain.get("reply_to").is_none(), "plain send: {plain}");
 }

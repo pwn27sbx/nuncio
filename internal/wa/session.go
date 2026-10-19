@@ -17,7 +17,6 @@ import (
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
 	"github.com/pwn27sbx/nuncio/internal/media"
@@ -47,9 +46,14 @@ type Client interface {
 	// NewMessageID returns a fresh WhatsApp message id. The outbox picks it when a send is queued
 	// and every attempt of that send uses it, so a retry is never a second message.
 	NewMessageID() string
-	// SendText sends one text message to the chat jid under the WhatsApp message id and returns
-	// WhatsApp's timestamp.
-	SendText(ctx context.Context, jid, text, id string) (ts time.Time, err error)
+	// SendMessage sends one built message to the chat jid under the WhatsApp message id (empty
+	// lets whatsmeow choose one) and returns WhatsApp's timestamp.
+	SendMessage(ctx context.Context, jid string, msg *waE2E.Message, id string) (ts time.Time, err error)
+	// BuildReaction builds my reaction (empty emoji removes it) on message id of chat, sent by
+	// sender (its JID without device, empty for mine), with whatsmeow's BuildReaction.
+	BuildReaction(chat, sender, id, emoji string) (*waE2E.Message, error)
+	// OwnJID is this device's account JID without device, empty when nothing is linked.
+	OwnJID() string
 	// Logout tells WhatsApp to unlink this device, then disconnects. It is the only call that
 	// unlinks, and only `nuncio logout --confirm` reaches it.
 	Logout(ctx context.Context) error
@@ -377,17 +381,37 @@ func (w whatsmeowClient) Logout(ctx context.Context) error { return w.c.Logout(c
 
 func (w whatsmeowClient) NewMessageID() string { return w.c.GenerateMessageID() }
 
-// SendText sends a plain conversation message, the simplest text message whatsmeow has, under the
-// message id the outbox chose.
-func (w whatsmeowClient) SendText(ctx context.Context, jid, text, id string) (time.Time, error) {
+// SendMessage sends msg under the message id the outbox chose.
+func (w whatsmeowClient) SendMessage(ctx context.Context, jid string, msg *waE2E.Message, id string) (time.Time, error) {
 	to, err := types.ParseJID(jid)
 	if err != nil {
 		return time.Time{}, fmt.Errorf("wa: %w", err)
 	}
-	resp, err := w.c.SendMessage(ctx, to, &waE2E.Message{Conversation: proto.String(text)},
-		whatsmeow.SendRequestExtra{ID: id})
+	resp, err := w.c.SendMessage(ctx, to, msg, whatsmeow.SendRequestExtra{ID: id})
 	if err != nil {
 		return time.Time{}, err
 	}
 	return resp.Timestamp, nil
+}
+
+// BuildReaction is whatsmeow's BuildReaction over parsed JIDs; an empty sender is me.
+func (w whatsmeowClient) BuildReaction(chat, sender, id, emoji string) (*waE2E.Message, error) {
+	c, err := types.ParseJID(chat)
+	if err != nil {
+		return nil, fmt.Errorf("wa: %w", err)
+	}
+	var from types.JID
+	if sender != "" {
+		if from, err = types.ParseJID(sender); err != nil {
+			return nil, fmt.Errorf("wa: %w", err)
+		}
+	}
+	return w.c.BuildReaction(c, from, id, emoji), nil
+}
+
+func (w whatsmeowClient) OwnJID() string {
+	if w.c.Store.ID == nil {
+		return ""
+	}
+	return w.c.Store.ID.ToNonAD().String()
 }

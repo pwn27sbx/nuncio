@@ -61,6 +61,9 @@ type Message struct {
 	MediaRef  []byte
 	State     string
 	ClientID  string
+	Sender    string
+	ReplyTo   string
+	Reactions []Reaction
 }
 
 // SearchHit is one message that matched a search.
@@ -166,6 +169,12 @@ func InsertMessage(db *sql.DB, m Message) (inserted bool, err error) {
 	if _, err = tx.Exec(`INSERT INTO messages_fts (rowid, text) VALUES (?, ?)`, seq, m.Text); err != nil {
 		return false, fmt.Errorf("cannot index message: %w", err)
 	}
+	if m.Sender != "" || m.ReplyTo != "" {
+		if _, err = tx.Exec(`INSERT INTO message_meta (chat_jid, id, sender, reply_to) VALUES (?, ?, ?, ?)
+			ON CONFLICT (chat_jid, id) DO NOTHING`, m.ChatJID, m.ID, m.Sender, m.ReplyTo); err != nil {
+			return false, fmt.Errorf("cannot save message details: %w", err)
+		}
+	}
 	if len(m.MediaRef) > 0 {
 		if _, err = tx.Exec(`INSERT INTO media_refs (chat_jid, id, ref) VALUES (?, ?, ?)`,
 			m.ChatJID, m.ID, m.MediaRef); err != nil {
@@ -178,15 +187,19 @@ func InsertMessage(db *sql.DB, m Message) (inserted bool, err error) {
 	return true, nil
 }
 
-// GetMessage returns one stored message with its MediaRef (nil for text), or ErrNoMessage.
+// GetMessage returns one stored message with its MediaRef (nil for text), sender, quoted id and
+// reactions, or ErrNoMessage.
 func GetMessage(db *sql.DB, chatJID, id string) (Message, error) {
 	var m Message
 	var ts int64
 	err := db.QueryRow(`SELECT m.id, m.chat_jid, m.kind, m.text, m.from_me, m.ts, m.read,
-			COALESCE(m.mime, ''), COALESCE(m.size, 0), COALESCE(m.file_name, ''), r.ref
+			COALESCE(m.mime, ''), COALESCE(m.size, 0), COALESCE(m.file_name, ''), r.ref,
+			COALESCE(mm.sender, ''), COALESCE(mm.reply_to, '')
 		FROM messages m LEFT JOIN media_refs r ON r.chat_jid = m.chat_jid AND r.id = m.id
+		LEFT JOIN message_meta mm ON mm.chat_jid = m.chat_jid AND mm.id = m.id
 		WHERE m.chat_jid = ? AND m.id = ?`, chatJID, id).
-		Scan(&m.ID, &m.ChatJID, &m.Kind, &m.Text, &m.FromMe, &ts, &m.Read, &m.Mime, &m.Size, &m.FileName, &m.MediaRef)
+		Scan(&m.ID, &m.ChatJID, &m.Kind, &m.Text, &m.FromMe, &ts, &m.Read, &m.Mime, &m.Size, &m.FileName, &m.MediaRef,
+			&m.Sender, &m.ReplyTo)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Message{}, ErrNoMessage
 	}
@@ -194,6 +207,11 @@ func GetMessage(db *sql.DB, chatJID, id string) (Message, error) {
 		return Message{}, fmt.Errorf("cannot read message: %w", err)
 	}
 	m.Timestamp = fromNanos(ts)
+	reactions, err := chatReactions(db, chatJID)
+	if err != nil {
+		return Message{}, err
+	}
+	m.Reactions = reactions[m.ID]
 	return m, nil
 }
 
@@ -236,13 +254,16 @@ func ListChats(db *sql.DB, limit int) ([]Chat, error) {
 // sends of mine to that chat that are queued or not sent, which carry their State and ClientID and
 // the time they were queued. A send that was sent is listed once, as the stored message.
 func ListMessages(db *sql.DB, chatJID string, limit int) ([]Message, error) {
-	rows, err := db.Query(`SELECT id, chat_jid, kind, text, from_me, ts, read,
-			COALESCE(mime, '') AS mime, COALESCE(size, 0) AS size, COALESCE(file_name, '') AS file_name,
-			'' AS state, '' AS client_id, 0 AS pending, seq
-		FROM messages WHERE chat_jid = ?
+	rows, err := db.Query(`SELECT m.id, m.chat_jid, m.kind, m.text, m.from_me, m.ts AS ts, m.read,
+			COALESCE(m.mime, ''), COALESCE(m.size, 0), COALESCE(m.file_name, ''),
+			'', '', 0 AS pending, m.seq AS seq, COALESCE(mm.reply_to, '')
+		FROM messages m LEFT JOIN message_meta mm ON mm.chat_jid = m.chat_jid AND mm.id = m.id
+		WHERE m.chat_jid = ?
 		UNION ALL
-		SELECT o.message_id, o.chat_jid, 'text', o.text, 1, o.created, 1, '', 0, '', o.state, o.client_id, 1, o.seq
-		FROM outbox o WHERE o.chat_jid = ? AND o.state != ?
+		SELECT o.message_id, o.chat_jid, 'text', o.text, 1, o.created, 1, '', 0, '', o.state, o.client_id, 1, o.seq,
+			COALESCE(r.reply_to, '')
+		FROM outbox o LEFT JOIN outbox_replies r ON r.client_id = o.client_id
+		WHERE o.chat_jid = ? AND o.state != ?
 			AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_jid = o.chat_jid AND m.id = o.message_id)
 		ORDER BY ts DESC, pending DESC, seq DESC LIMIT ?`, chatJID, chatJID, OutboxSent, limit)
 	if err != nil {
@@ -254,7 +275,7 @@ func ListMessages(db *sql.DB, chatJID string, limit int) ([]Message, error) {
 		var m Message
 		var ts, pending, seq int64
 		if err := rows.Scan(&m.ID, &m.ChatJID, &m.Kind, &m.Text, &m.FromMe, &ts, &m.Read,
-			&m.Mime, &m.Size, &m.FileName, &m.State, &m.ClientID, &pending, &seq); err != nil {
+			&m.Mime, &m.Size, &m.FileName, &m.State, &m.ClientID, &pending, &seq, &m.ReplyTo); err != nil {
 			return nil, fmt.Errorf("cannot read message: %w", err)
 		}
 		m.Timestamp = fromNanos(ts)
@@ -262,6 +283,13 @@ func ListMessages(db *sql.DB, chatJID string, limit int) ([]Message, error) {
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("cannot list messages: %w", err)
+	}
+	reactions, err := chatReactions(db, chatJID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range msgs {
+		msgs[i].Reactions = reactions[msgs[i].ID]
 	}
 	return msgs, nil
 }

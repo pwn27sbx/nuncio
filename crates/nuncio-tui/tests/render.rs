@@ -207,6 +207,8 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
                 media: None,
                 state: None,
                 client_id: None,
+                reply_to: None,
+                reactions: Vec::new(),
             }),
         }],
     };

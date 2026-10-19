@@ -4,9 +4,12 @@ import (
 	"context"
 	"errors"
 	"log"
+	"strings"
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
 	"github.com/pwn27sbx/nuncio/internal/store"
@@ -26,6 +29,8 @@ var (
 	errNoStore = errors.New("there is no message store, so nothing was sent")
 	// errOutbox: the outbox could not be read or written, so nothing was sent.
 	errOutbox = errors.New("the message could not be saved, so it was not sent")
+	// ErrNoQuote: a reply or a reaction named a message id that is not stored in that chat.
+	ErrNoQuote = errors.New("no message with that id in that chat")
 )
 
 // Send sends one text message to the chat jid, which the caller has checked with ipc.ValidJID,
@@ -37,14 +42,29 @@ var (
 // A clientID already stored answers that send's state and sends nothing: queued, sent (with its
 // id and ack time) or ErrNotSent. Only Retry sends a not-sent message again.
 func (s *Session) Send(jid, text, clientID string) (ipc.Sent, error) {
+	return s.SendReply(jid, text, clientID, "")
+}
+
+// SendReply is Send quoting the message replyTo of the same chat ("" for none, which is Send). The
+// quoted message must be stored in that chat, otherwise it answers ErrNoQuote and stores nothing.
+// The outbox keeps replyTo, so a queued reply still quotes when the drain or a retry sends it.
+func (s *Session) SendReply(jid, text, clientID, replyTo string) (ipc.Sent, error) {
 	if s.client == nil || s.State() == StateUnlinked {
 		return ipc.Sent{}, ipc.ErrNotLinked
 	}
 	if s.db == nil {
 		return ipc.Sent{}, errNoStore
 	}
+	if replyTo != "" {
+		if _, err := store.GetMessage(s.db, jid, replyTo); errors.Is(err, store.ErrNoMessage) {
+			return ipc.Sent{}, ErrNoQuote
+		} else if err != nil {
+			log.Printf("wa: cannot read a quoted message: %v", err)
+			return ipc.Sent{}, errOutbox
+		}
+	}
 	e, inserted, err := store.Enqueue(s.db, store.OutboxEntry{ClientID: clientID, ChatJID: jid, Text: text,
-		MessageID: s.client.NewMessageID(), Created: time.Now().UTC()})
+		MessageID: s.client.NewMessageID(), Created: time.Now().UTC(), ReplyTo: replyTo})
 	if err != nil {
 		log.Printf("wa: cannot queue a send: %v", err)
 		return ipc.Sent{}, errOutbox
@@ -151,7 +171,7 @@ func (s *Session) deliver(clientID string) (ipc.Sent, error) {
 func (s *Session) attempt(e store.OutboxEntry) (ipc.Sent, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
-	ts, err := s.client.SendText(ctx, e.ChatJID, e.Text, e.MessageID)
+	ts, err := s.client.SendMessage(ctx, e.ChatJID, s.textMessage(e), e.MessageID)
 	if err != nil {
 		state, reply := store.OutboxNotSent, ErrNotSent
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, whatsmeow.ErrMessageTimedOut) {
@@ -178,7 +198,8 @@ func (s *Session) attempt(e store.OutboxEntry) (ipc.Sent, error) {
 	if err := store.SetOutboxState(s.db, e.ClientID, store.OutboxSent, ts); err != nil {
 		log.Printf("wa: cannot record a sent message %s: %v", e.MessageID, err)
 	}
-	m := store.Message{ID: e.MessageID, ChatJID: e.ChatJID, Kind: store.KindText, Text: e.Text, FromMe: true, Timestamp: ts}
+	m := store.Message{ID: e.MessageID, ChatJID: e.ChatJID, Kind: store.KindText, Text: e.Text, FromMe: true, Timestamp: ts,
+		ReplyTo: e.ReplyTo}
 	if _, err := store.InsertMessage(s.db, m); err != nil {
 		log.Printf("wa: cannot store sent message %s: %v", m.ID, err)
 	}
@@ -186,11 +207,46 @@ func (s *Session) attempt(e store.OutboxEntry) (ipc.Sent, error) {
 	return ipc.Sent{State: ipc.SendSent, ID: m.ID, Timestamp: ipc.Timestamp(ts)}, nil
 }
 
+// textMessage is the WhatsApp message of send e: a plain conversation, or for a reply an extended
+// text whose ContextInfo quotes the stored message (its id as StanzaID, its sender as Participant,
+// its text as QuotedMessage), which is what WhatsApp shows as a quote. A quoted message that is
+// gone by now sends the text unquoted rather than not at all.
+func (s *Session) textMessage(e store.OutboxEntry) *waE2E.Message {
+	if e.ReplyTo == "" {
+		return &waE2E.Message{Conversation: proto.String(e.Text)}
+	}
+	q, err := store.GetMessage(s.db, e.ChatJID, e.ReplyTo)
+	if err != nil {
+		log.Printf("wa: a reply's quoted message %s cannot be read, so it is sent unquoted: %v", e.ReplyTo, err)
+		return &waE2E.Message{Conversation: proto.String(e.Text)}
+	}
+	ci := &waE2E.ContextInfo{StanzaID: proto.String(q.ID), QuotedMessage: &waE2E.Message{Conversation: proto.String(q.Text)}}
+	if p := s.senderOf(q); p != "" {
+		ci.Participant = proto.String(p)
+	}
+	return &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(e.Text), ContextInfo: ci}}
+}
+
+// senderOf is who sent stored message m: my own JID for mine, its recorded sender otherwise, and
+// for a message stored before senders were recorded the chat itself when it is a direct chat
+// (empty in a group, where it is unknown).
+func (s *Session) senderOf(m store.Message) string {
+	switch {
+	case m.FromMe:
+		return s.client.OwnJID()
+	case m.Sender != "":
+		return m.Sender
+	case !strings.HasSuffix(m.ChatJID, "@g.us"):
+		return m.ChatJID
+	}
+	return ""
+}
+
 // publishEntry publishes a send that is not sent (queued or not_sent) as event_message, with its
 // state and client_id, timestamped when it was queued.
 func (s *Session) publishEntry(e store.OutboxEntry) {
 	m := store.Message{ID: e.MessageID, ChatJID: e.ChatJID, Kind: store.KindText, Text: e.Text, FromMe: true,
-		Timestamp: e.Created, State: e.State, ClientID: e.ClientID}
+		Timestamp: e.Created, State: e.State, ClientID: e.ClientID, ReplyTo: e.ReplyTo}
 	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: e.ChatJID, Message: WireMessage(m)})
 }
 

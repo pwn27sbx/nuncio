@@ -22,6 +22,11 @@ import (
 // the WhatsApp message id chosen when it was queued (every attempt reuses it), its creation time,
 // its state (queued, sent, not_sent, or not_confirmed for an ack that never came) and the ack time of a sent one. Rows are never deleted, so a
 // send that failed stays visible until a manual retry.
+//
+// M2 adds three side tables under the same rule. message_meta holds, per message, who sent it (the
+// sender's JID without device, empty for mine) and the id of the message it quotes, if any;
+// reactions holds the current reaction of each sender on a message (sender empty for mine, no row
+// once removed); outbox_replies holds the quoted id of a queued send, keyed by its client_id.
 const schema = `
 CREATE TABLE IF NOT EXISTS chats (
 	jid      TEXT PRIMARY KEY,
@@ -64,6 +69,25 @@ CREATE TABLE IF NOT EXISTS outbox (
 	created    INTEGER NOT NULL,
 	state      TEXT NOT NULL,
 	sent_at    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS message_meta (
+	chat_jid TEXT NOT NULL,
+	id       TEXT NOT NULL,
+	sender   TEXT NOT NULL DEFAULT '',
+	reply_to TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (chat_jid, id)
+);
+CREATE TABLE IF NOT EXISTS reactions (
+	chat_jid TEXT NOT NULL,
+	id       TEXT NOT NULL,
+	sender   TEXT NOT NULL,
+	from_me  INTEGER NOT NULL,
+	emoji    TEXT NOT NULL,
+	PRIMARY KEY (chat_jid, id, sender)
+);
+CREATE TABLE IF NOT EXISTS outbox_replies (
+	client_id TEXT PRIMARY KEY,
+	reply_to  TEXT NOT NULL
 );
 `
 

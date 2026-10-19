@@ -16,8 +16,8 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
-| U1 | S1 (list, conversation, send, keyboard, palette), S2 (sizes, emoji/RTL, 200 msgs) | delegated writer (context backstop + parallel with U2) | done: 10 app + 9 render tests, 7 mutants killed, clippy clean; parent reran `cargo test -p nuncio-tui` 26/0 | this commit |
-| U2 | S4 (search, reply, react: Go daemon + proto + Rust wire types) | delegated writer (context backstop + parallel with U1) | open | |
+| U1 | S1 (list, conversation, send, keyboard, palette), S2 (sizes, emoji/RTL, 200 msgs) | delegated writer (context backstop + parallel with U2) | done: 10 app + 9 render tests, 7 mutants killed, clippy clean; parent reran `cargo test -p nuncio-tui` 26/0 | 1ff7ec1 |
+| U2 | S4 (search, reply, react: Go daemon + proto + Rust wire types) | delegated writer (context backstop + parallel with U1); Risk items 1 and 3 → independent verifier | done: RED per rule, 19 mutants killed; verifier S4 FAIL (B1) → one correction → recheck FIXED; S5 PASS; parent reran the B1 and outbox-transaction tests green | this commit |
 | U3 | S1 (reply/react/search/media in the TUI over U2's ops) | delegated writer, after U1+U2 | open | |
 | U4 | S6 push + report | inline | open | |
 
@@ -28,3 +28,5 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 - L2b (2026-10-19, owner, supersedes the time box in S6/L2): "nono que terminen el trabajo olvida lo de las 5 pm". Push to `origin` / `feat/m2-tui` when done still stands.
 - L2c (2026-10-19, owner): "pero por ejemplo si son las 4:30 y quieren empzezar una nueva fase ahi si nos detenemos porque no dara tiempo a menos que sea algo muy pequeño". Rule: tasks already running finish; no new task (e.g. U3) starts at or after 16:30 unless it is very small; then commit and push what is done.
 - L3 Wire choice for S4: `search` op {`jid`, `query`, `limit`} → `messages` reply; `send` gains optional `reply_to` (message id); `react` op {`jid`, `id`, `emoji` (empty = remove)} → `reacted`; Message gains optional `reply_to` and `reactions`. Additive, v stays 1.
+- L4 U2 verifier (independent, scratch copy): B1 react on an M1 group row with no recorded sender built a from-me key and answered `reacted` → fixed (refused with "the sender of that message is unknown, so the reaction was not sent"), recheck FIXED. Advisory A7 (outbox + quote not in one transaction) fixed in the same batch. Open advisories for later: a reaction arriving before its target is not in the target's first event; reused client_id with an unknown reply_to answers send_failed; reply/react cannot name my own still-queued send; quoting media sends caption-only text; own-JID participant is the PN even in @lid chats; incoming captioned media replies do not record reply_to; GetMessage loads the whole chat's reactions; emoji search finds nothing (FTS tokenizer).
+- L5 Also in the U2 commit: `nuncio-tui` Message literals gained `reply_to`/`reactions` (mechanical, delegated writer, 10 lines).

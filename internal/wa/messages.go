@@ -29,9 +29,13 @@ func messageRow(evt *waevents.Message) (store.Message, bool) {
 		FromMe:    evt.Info.IsFromMe,
 		Timestamp: evt.Info.Timestamp.UTC(),
 	}
+	if !m.FromMe {
+		m.Sender = evt.Info.Sender.ToNonAD().String()
+	}
 	m.Text = evt.Message.GetConversation()
 	if m.Text == "" {
 		m.Text = evt.Message.GetExtendedTextMessage().GetText()
+		m.ReplyTo = evt.Message.GetExtendedTextMessage().GetContextInfo().GetStanzaID()
 	}
 	if m.Text != "" {
 		return m, true
@@ -55,7 +59,10 @@ func messageRow(evt *waevents.Message) (store.Message, bool) {
 // store's outbox states are the wire's, except not_confirmed, which the wire calls not_sent).
 func WireMessage(m store.Message) ipc.Message {
 	w := ipc.Message{ID: m.ID, Kind: m.Kind, Text: m.Text, FromMe: m.FromMe, Timestamp: ipc.Timestamp(m.Timestamp),
-		State: m.State, ClientID: m.ClientID}
+		State: m.State, ClientID: m.ClientID, ReplyTo: m.ReplyTo}
+	for _, r := range m.Reactions {
+		w.Reactions = append(w.Reactions, ipc.Reaction{Emoji: r.Emoji, FromMe: r.FromMe})
+	}
 	if m.State == store.OutboxNotConfirmed {
 		// Not confirmed is a failure the user retries by hand, like not sent.
 		w.State = ipc.MessageNotSent
@@ -67,9 +74,14 @@ func WireMessage(m store.Message) ipc.Message {
 }
 
 // storeMessage saves one incoming or own message and publishes it, followed by the new unread
-// counts when it is incoming. A repeated event is ignored by the store and publishes nothing. A
+// counts when it is incoming; a reaction is stored on its target instead (see storeReaction). A
+// repeated event is ignored by the store and publishes nothing. A
 // failure is logged without the message text and the session goes on.
 func (s *Session) storeMessage(evt *waevents.Message) {
+	if evt.Message.GetReactionMessage() != nil {
+		s.storeReaction(evt)
+		return
+	}
 	m, ok := messageRow(evt)
 	if !ok {
 		return

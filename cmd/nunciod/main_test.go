@@ -283,6 +283,17 @@ func (s fixedSession) Send(string, string, string) (ipc.Sent, error) {
 	return ipc.Sent{}, errors.New("a fixed session cannot send")
 }
 
+func (s fixedSession) SendReply(string, string, string, string) (ipc.Sent, error) {
+	return ipc.Sent{}, errors.New("a fixed session cannot send")
+}
+
+func (s fixedSession) React(string, string, string) error {
+	if wa.State(s) == wa.StateUnlinked {
+		return ipc.ErrNotLinked
+	}
+	return errors.New("a fixed session cannot react")
+}
+
 func (s fixedSession) Retry(string) (ipc.Sent, error) {
 	return ipc.Sent{}, errors.New("a fixed session cannot retry")
 }
@@ -725,7 +736,7 @@ func TestEmbeddedChatListMatchesContractFixture(t *testing.T) {
 }
 
 // fakeWAClient is a linked whatsmeow stand-in that never opens a socket; emit feeds it events.
-// SendText answers sendTime, or an error while fail is set, and counts the sends; NewMessageID
+// SendMessage answers sendTime, or an error while fail is set, and counts the sends; NewMessageID
 // answers sendID.
 type fakeWAClient struct {
 	handlers []func(any)
@@ -748,7 +759,13 @@ func (f *fakeWAClient) Logout(context.Context) error {
 	return f.logoutErr
 }
 
-func (f *fakeWAClient) SendText(context.Context, string, string, string) (time.Time, error) {
+func (f *fakeWAClient) BuildReaction(_, _, _, emoji string) (*waE2E.Message, error) {
+	return &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{Text: &emoji}}, nil
+}
+
+func (f *fakeWAClient) OwnJID() string { return "15551230009@s.whatsapp.net" }
+
+func (f *fakeWAClient) SendMessage(context.Context, string, *waE2E.Message, string) (time.Time, error) {
 	f.sends.Add(1)
 	if f.fail.Load() {
 		return time.Time{}, errors.New("websocket closed")
@@ -1135,7 +1152,7 @@ func TestDaemonSendWhileLinkedAnswersSentStoresAndPublishes(t *testing.T) {
 		t.Fatalf("Messages: %v", err)
 	}
 	wantMsg := ipc.Message{ID: "3EB0BBB1", Kind: ipc.KindText, Text: "On my way", FromMe: true, Timestamp: "2026-10-18T17:56:10Z"}
-	if len(msgs.Messages) != 1 || msgs.Messages[0] != wantMsg {
+	if len(msgs.Messages) != 1 || !reflect.DeepEqual(msgs.Messages[0], wantMsg) {
 		t.Errorf("Messages after a send = %+v, want only %+v", msgs.Messages, wantMsg)
 	}
 	wantEvent := `{"v":1,"op":"event_message","jid":"15551230001@s.whatsapp.net","message":{"id":"3EB0BBB1","kind":"text","text":"On my way","from_me":true,"timestamp":"2026-10-18T17:56:10Z"}}`
@@ -1170,7 +1187,7 @@ func TestDaemonSendWhileOfflineAnswersQueuedAndDrainsOnReconnect(t *testing.T) {
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		msgs, err = c.Messages(ada, 10)
-		if err == nil && len(msgs.Messages) == 1 && msgs.Messages[0] == want {
+		if err == nil && len(msgs.Messages) == 1 && reflect.DeepEqual(msgs.Messages[0], want) {
 			break
 		}
 		if time.Now().After(deadline) {

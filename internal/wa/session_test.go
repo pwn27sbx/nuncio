@@ -14,8 +14,11 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow/proto/waCommon"
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	waevents "go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 )
 
 // fakeClient stands in for whatsmeow: it never opens a socket. Connect delivers the events a real
@@ -27,7 +30,7 @@ type fakeClient struct {
 	disconnects int
 	markReads   int
 	handlers    []func(any)
-	// sends records every SendText call as "jid text" and sendIDs its WhatsApp message id; it
+	// sends records every SendMessage call as "jid text" and sendIDs its WhatsApp message id; it
 	// answers sendTime, or the next of sendErrs (nil entries succeed), then sendErr. NewMessageID
 	// answers sendID when set, otherwise a fresh id per call. sendMu guards them: a drain sends
 	// from its own goroutine.
@@ -39,7 +42,11 @@ type fakeClient struct {
 	sendTime time.Time
 	sendErr  error
 	sendErrs []error
-	// onSend, when set, runs at the start of every SendText with its text, outside sendMu.
+	// msgs records every message given to SendMessage, builtReactions every BuildReaction call as
+	// "chat sender id emoji".
+	msgs           []*waE2E.Message
+	builtReactions []string
+	// onSend, when set, runs at the start of every SendMessage with its text, outside sendMu.
 	onSend func(text string)
 	// logouts counts Logout calls; Logout answers logoutErr.
 	logouts   int
@@ -55,7 +62,11 @@ func (f *fakeClient) Logout(context.Context) error {
 	return f.logoutErr
 }
 
-func (f *fakeClient) SendText(_ context.Context, jid, text, id string) (time.Time, error) {
+func (f *fakeClient) SendMessage(_ context.Context, jid string, msg *waE2E.Message, id string) (time.Time, error) {
+	text := msg.GetConversation()
+	if text == "" {
+		text = msg.GetExtendedTextMessage().GetText()
+	}
 	if f.onSend != nil {
 		f.onSend(text)
 	}
@@ -63,6 +74,7 @@ func (f *fakeClient) SendText(_ context.Context, jid, text, id string) (time.Tim
 	defer f.sendMu.Unlock()
 	f.sends = append(f.sends, jid+" "+text)
 	f.sendIDs = append(f.sendIDs, id)
+	f.msgs = append(f.msgs, msg)
 	err := f.sendErr
 	if len(f.sendErrs) > 0 {
 		err, f.sendErrs = f.sendErrs[0], f.sendErrs[1:]
@@ -71,6 +83,31 @@ func (f *fakeClient) SendText(_ context.Context, jid, text, id string) (time.Tim
 		return time.Time{}, err
 	}
 	return f.sendTime, nil
+}
+
+// BuildReaction mirrors whatsmeow's BuildReaction and BuildMessageKey for a fake own JID: an empty
+// sender is me; another sender in a group is the key's participant. It records each call.
+func (f *fakeClient) BuildReaction(chat, sender, id, emoji string) (*waE2E.Message, error) {
+	f.sendMu.Lock()
+	f.builtReactions = append(f.builtReactions, chat+" "+sender+" "+id+" "+emoji)
+	f.sendMu.Unlock()
+	key := &waCommon.MessageKey{FromMe: proto.Bool(sender == ""), ID: proto.String(id), RemoteJID: proto.String(chat)}
+	if sender != "" && strings.HasSuffix(chat, "@g.us") {
+		key.Participant = proto.String(sender)
+	}
+	return &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{Key: key, Text: proto.String(emoji)}}, nil
+}
+
+func (f *fakeClient) OwnJID() string { return fakeOwnJID }
+
+// fakeOwnJID is the fake account's own JID.
+const fakeOwnJID = "15551230009@s.whatsapp.net"
+
+// sentMessages returns a copy of every message given to SendMessage.
+func (f *fakeClient) sentMessages() []*waE2E.Message {
+	f.sendMu.Lock()
+	defer f.sendMu.Unlock()
+	return append([]*waE2E.Message(nil), f.msgs...)
 }
 
 func (f *fakeClient) NewMessageID() string {

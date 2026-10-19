@@ -58,6 +58,10 @@ const (
 	OpDownloadMedia = "download_media"
 	OpMediaReady    = "media_ready"
 
+	OpSearch  = "search"
+	OpReact   = "react"
+	OpReacted = "reacted"
+
 	OpEventMessage    = "event_message"
 	OpEventConnection = "event_connection"
 	OpEventUnread     = "event_unread"
@@ -125,6 +129,13 @@ var (
 	ErrWiped = errors.New("ipc: the daemon's data was wiped; it stops serving")
 )
 
+// MaxQueryLen bounds a search query in bytes; MaxEmojiLen bounds a reaction's emoji in bytes (a
+// long ZWJ sequence with skin tones fits easily).
+const (
+	MaxQueryLen = 1024
+	MaxEmojiLen = 64
+)
+
 // Hello is the first frame a client sends. The daemon refuses anything else.
 type Hello struct {
 	V      int    `json:"v"`
@@ -162,6 +173,36 @@ type SendRequest struct {
 	JID      string `json:"jid"`
 	Text     string `json:"text"`
 	ClientID string `json:"client_id"`
+	// ReplyTo, when set, is the id of a message of that chat the send quotes (added in M2).
+	ReplyTo string `json:"reply_to,omitempty"`
+}
+
+// SearchRequest asks for up to Limit stored messages of one chat whose text contains every word of
+// Query, newest first. Limit is MinChatLimit..MaxChatLimit. The answer is a MessagesResponse.
+type SearchRequest struct {
+	V     int    `json:"v"`
+	Op    string `json:"op"`
+	JID   string `json:"jid"`
+	Query string `json:"query"`
+	Limit int    `json:"limit"`
+}
+
+// ReactRequest sets my reaction on message ID of a chat; an empty Emoji removes it.
+type ReactRequest struct {
+	V     int    `json:"v"`
+	Op    string `json:"op"`
+	JID   string `json:"jid"`
+	ID    string `json:"id"`
+	Emoji string `json:"emoji"`
+}
+
+// Reacted answers a ReactRequest that WhatsApp accepted.
+type Reacted struct {
+	V     int    `json:"v"`
+	Op    string `json:"op"`
+	JID   string `json:"jid"`
+	ID    string `json:"id"`
+	Emoji string `json:"emoji"`
 }
 
 // RetryRequest sends again, once, a send of this daemon that ended not sent, under its first
@@ -356,6 +397,16 @@ type Message struct {
 	// ClientID it was sent with (what a retry names); both are absent once it is sent.
 	State    string `json:"state,omitempty"`
 	ClientID string `json:"client_id,omitempty"`
+	// ReplyTo is the id of the message this one quotes; Reactions are the current reactions on it,
+	// mine first. Both are absent when empty (added in M2).
+	ReplyTo   string     `json:"reply_to,omitempty"`
+	Reactions []Reaction `json:"reactions,omitempty"`
+}
+
+// Reaction is one sender's current reaction on a message.
+type Reaction struct {
+	Emoji  string `json:"emoji"`
+	FromMe bool   `json:"from_me"`
 }
 
 // Media describes a message's attachment. The bytes are never on the wire: they are downloaded
@@ -409,6 +460,27 @@ type Handler interface {
 	// answers with not_linked; any other error is an internal error whose message is the error's
 	// text, so it must carry no number and no caption.
 	DownloadMedia(jid, id string) (path, mime string, err error)
+}
+
+// Searcher, Replier and Reactor are the M2 operations. They are separate from Handler so that a
+// Handler written before them still compiles; ServeConn answers search, react and a send with
+// reply_to with bad_frame when its Handler lacks the one needed.
+type Searcher interface {
+	// Search returns up to limit messages of the chat jid whose text contains every word of query,
+	// newest first. ServeConn has already checked jid, query and limit.
+	Search(jid, query string, limit int) ([]Message, error)
+}
+
+// Replier sends a reply: like Handler.Send, quoting the message replyTo of the same chat.
+type Replier interface {
+	SendReply(jid, text, clientID, replyTo string) (Sent, error)
+}
+
+// Reactor sets my reaction on message id of the chat jid (empty emoji removes it). It returns
+// ErrNotLinked when no device is paired, which ServeConn answers with not_linked; any other error is
+// an internal error whose message is the error's text, so it must carry no number and no emoji.
+type Reactor interface {
+	React(jid, id, emoji string) error
 }
 
 // ValidJID reports whether jid names a WhatsApp chat the protocol carries: a user
@@ -667,6 +739,14 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
 			if err := WriteFrame(out, serveSend(line, h)); err != nil {
 				return err
 			}
+		case OpSearch:
+			if err := WriteFrame(out, serveSearch(line, h)); err != nil {
+				return err
+			}
+		case OpReact:
+			if err := WriteFrame(out, serveReact(line, h)); err != nil {
+				return err
+			}
 		case OpRetry:
 			if err := WriteFrame(out, serveRetry(line, h)); err != nil {
 				return err
@@ -741,8 +821,77 @@ func serveSend(line []byte, h Handler) any {
 	case len(req.Text) > MaxTextLen:
 		return badFrame(fmt.Sprintf("text is longer than %d bytes", MaxTextLen))
 	}
+	if req.ReplyTo != "" {
+		r, ok := h.(Replier)
+		if !ok {
+			return badFrame("this daemon cannot send replies")
+		}
+		sent, err := r.SendReply(req.JID, req.Text, req.ClientID, req.ReplyTo)
+		return sendReply(req.ClientID, sent, err)
+	}
 	sent, err := h.Send(req.JID, req.Text, req.ClientID)
 	return sendReply(req.ClientID, sent, err)
+}
+
+// serveSearch checks a search frame and asks h for the matches, returning the reply frame. A
+// refused frame never reaches h.
+func serveSearch(line []byte, h Handler) any {
+	var req SearchRequest
+	if err := json.Unmarshal(line, &req); err != nil {
+		return badFrame("malformed search frame")
+	}
+	s, ok := h.(Searcher)
+	switch {
+	case !ok:
+		return badFrame("this daemon cannot search")
+	case req.Limit < MinChatLimit || req.Limit > MaxChatLimit:
+		return badFrame(fmt.Sprintf("limit must be between %d and %d", MinChatLimit, MaxChatLimit))
+	case !ValidJID(req.JID):
+		return badFrame("jid is not a WhatsApp chat")
+	case strings.TrimSpace(req.Query) == "":
+		return badFrame("search needs a query that is not empty")
+	case len(req.Query) > MaxQueryLen:
+		return badFrame(fmt.Sprintf("query is longer than %d bytes", MaxQueryLen))
+	}
+	msgs, err := s.Search(req.JID, req.Query, req.Limit)
+	if err != nil {
+		return Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()}
+	}
+	if len(msgs) > req.Limit {
+		msgs = msgs[:req.Limit]
+	}
+	if msgs == nil {
+		msgs = []Message{}
+	}
+	return MessagesResponse{V: Version, Op: OpMessages, JID: req.JID, Messages: msgs}
+}
+
+// serveReact checks a react frame and asks h to send the reaction, returning the reply frame. A
+// refused frame never reaches h, so nothing is sent.
+func serveReact(line []byte, h Handler) any {
+	var req ReactRequest
+	if err := json.Unmarshal(line, &req); err != nil {
+		return badFrame("malformed react frame")
+	}
+	r, ok := h.(Reactor)
+	switch {
+	case !ok:
+		return badFrame("this daemon cannot react")
+	case !ValidJID(req.JID):
+		return badFrame("jid is not a WhatsApp chat")
+	case req.ID == "":
+		return badFrame("react needs the id of a message")
+	case len(req.Emoji) > MaxEmojiLen:
+		return badFrame(fmt.Sprintf("emoji is longer than %d bytes", MaxEmojiLen))
+	}
+	err := r.React(req.JID, req.ID, req.Emoji)
+	if errors.Is(err, ErrNotLinked) {
+		return Error{V: Version, Op: OpError, Code: CodeNotLinked, Message: ErrNotLinked.Error()}
+	}
+	if err != nil {
+		return Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()}
+	}
+	return Reacted{V: Version, Op: OpReacted, JID: req.JID, ID: req.ID, Emoji: req.Emoji}
 }
 
 // serveRetry checks a retry frame and asks h to retry it, returning the reply frame.

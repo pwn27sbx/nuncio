@@ -40,6 +40,13 @@ type fakeHandler struct {
 	mediaPath string
 	mediaMime string
 	mediaErr  error
+	// The M2 ops (m2_test.go): Search answers found or searchErr, React answers reactErr.
+	searches  []string
+	found     []Message
+	searchErr error
+	replies   []string
+	reacts    []string
+	reactErr  error
 }
 
 func (f *fakeHandler) DownloadMedia(jid, id string) (string, string, error) {

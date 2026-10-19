@@ -283,6 +283,10 @@ type sessionState interface {
 	// not-sent one again by its client_id.
 	Send(jid, text, clientID string) (ipc.Sent, error)
 	Retry(clientID string) (ipc.Sent, error)
+	// SendReply is Send quoting the message replyTo of that chat; React sets my reaction on a
+	// message (empty emoji removes it), never queued while offline.
+	SendReply(jid, text, clientID, replyTo string) (ipc.Sent, error)
+	React(jid, id, emoji string) error
 	// Logout tells WhatsApp to unlink the device through the daemon's own session.
 	Logout(ctx context.Context) error
 	// Close disconnects the session and closes the store.
@@ -403,6 +407,42 @@ func (d *daemon) Send(jid, text, clientID string) (ipc.Sent, error) {
 		return ipc.Sent{}, errClosed
 	}
 	return d.session.Send(jid, text, clientID)
+}
+
+// SendReply serves a send with reply_to: like Send, quoting that message of the chat.
+func (d *daemon) SendReply(jid, text, clientID, replyTo string) (ipc.Sent, error) {
+	if d.closed.Load() {
+		return ipc.Sent{}, errClosed
+	}
+	return d.session.SendReply(jid, text, clientID, replyTo)
+}
+
+// React serves react: the session sends my reaction once, or answers why it did not.
+func (d *daemon) React(jid, id, emoji string) error {
+	if d.closed.Load() {
+		return errClosed
+	}
+	return d.session.React(jid, id, emoji)
+}
+
+// Search serves search: up to limit stored messages of a chat that contain every word of query,
+// newest first; none without a store.
+func (d *daemon) Search(jid, query string, limit int) ([]ipc.Message, error) {
+	if d.db == nil {
+		return nil, nil
+	}
+	if d.closed.Load() {
+		return nil, errClosed
+	}
+	rows, err := store.SearchChat(d.db, jid, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	msgs := make([]ipc.Message, 0, len(rows))
+	for _, r := range rows {
+		msgs = append(msgs, wa.WireMessage(r))
+	}
+	return msgs, nil
 }
 
 // Retry serves retry: the session sends a not-sent message again, once, under its first WhatsApp

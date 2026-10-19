@@ -41,6 +41,26 @@ pub enum ClientFrame {
         jid: String,
         text: String,
         client_id: String,
+        /// The id of a message of that chat this send quotes (a reply); absent for a plain send,
+        /// and it must stay absent (added in M2).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
+    },
+    /// Up to `limit` stored messages of one chat whose text contains every word of `query`,
+    /// newest first; answered with `messages`. `limit` is 1..200; an empty query is `bad_frame`.
+    Search {
+        v: u8,
+        jid: String,
+        query: String,
+        limit: u16,
+    },
+    /// Set my reaction on message `id` of chat `jid`; an empty `emoji` removes it. Answered with
+    /// `reacted`, or an error: reactions are never queued, so one asked for offline is refused.
+    React {
+        v: u8,
+        jid: String,
+        id: String,
+        emoji: String,
     },
     /// Send again, once, a send of this daemon that ended not sent, by its `client_id` and under
     /// its first WhatsApp message id, so it can never become a second message. A send that is
@@ -114,6 +134,42 @@ impl ClientFrame {
             jid: jid.into(),
             text: text.into(),
             client_id: client_id.into(),
+            reply_to: None,
+        }
+    }
+
+    /// A `send` that quotes message `reply_to` of the same chat.
+    pub fn send_reply(
+        jid: impl Into<String>,
+        text: impl Into<String>,
+        client_id: impl Into<String>,
+        reply_to: impl Into<String>,
+    ) -> Self {
+        Self::Send {
+            v: PROTOCOL_VERSION,
+            jid: jid.into(),
+            text: text.into(),
+            client_id: client_id.into(),
+            reply_to: Some(reply_to.into()),
+        }
+    }
+
+    pub fn search(jid: impl Into<String>, query: impl Into<String>, limit: u16) -> Self {
+        Self::Search {
+            v: PROTOCOL_VERSION,
+            jid: jid.into(),
+            query: query.into(),
+            limit,
+        }
+    }
+
+    /// `emoji` empty removes my reaction.
+    pub fn react(jid: impl Into<String>, id: impl Into<String>, emoji: impl Into<String>) -> Self {
+        Self::React {
+            v: PROTOCOL_VERSION,
+            jid: jid.into(),
+            id: id.into(),
+            emoji: emoji.into(),
         }
     }
 
@@ -226,6 +282,13 @@ pub enum DaemonFrame {
         path: String,
         mime: String,
     },
+    /// WhatsApp accepted my reaction `emoji` (empty: removed) on message `id` of chat `jid`.
+    Reacted {
+        v: u8,
+        jid: String,
+        id: String,
+        emoji: String,
+    },
     EventMessage {
         v: u8,
         jid: String,
@@ -263,6 +326,7 @@ impl DaemonFrame {
             Self::Focused { .. } => "focused",
             Self::Wiped { .. } => "wiped",
             Self::MediaReady { .. } => "media_ready",
+            Self::Reacted { .. } => "reacted",
             Self::EventMessage { .. } => "event_message",
             Self::EventConnection { .. } => "event_connection",
             Self::EventUnread { .. } => "event_unread",
@@ -381,6 +445,19 @@ pub struct Message {
     /// The `client_id` of a send that is not sent yet: what a `retry` names.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
+    /// The id of the message this one quotes; absent when it quotes none (added in M2).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    /// The current reactions on this message, mine first; absent when there are none (M2).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<Reaction>,
+}
+
+/// One sender's current reaction on a message.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reaction {
+    pub emoji: String,
+    pub from_me: bool,
 }
 
 /// The state of a send of mine that is not sent yet. Unknown states become

@@ -331,6 +331,8 @@ impl App {
                 media: None,
                 state: None,
                 client_id: Some(client_id.clone()),
+                reply_to: None,
+                reactions: Vec::new(),
             });
         self.pane = Pane::Messages;
         self.scroll = 0;
@@ -880,6 +882,8 @@ mod tests {
             media: None,
             state: None,
             client_id: None,
+            reply_to: None,
+            reactions: Vec::new(),
         };
         assert_eq!(
             super::sent_by(Some(&chat("Ada", "a@b")), &message),
@@ -898,6 +902,8 @@ mod tests {
             media: None,
             state: Some(nuncio_client::wire::MessageState::NotSent),
             client_id: Some("c-1".to_owned()),
+            reply_to: None,
+            reactions: Vec::new(),
         };
         assert_eq!(super::sent_by(None, &message), "you · 17:56 · not sent");
         message.state = Some(nuncio_client::wire::MessageState::Queued);

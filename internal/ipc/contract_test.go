@@ -272,6 +272,54 @@ func fixtureCases() []fixtureCase {
 			into:  func() any { return &EventFocus{} },
 			build: func() any { return EventFocus{V: 1, Op: OpEventFocus, JID: "15551230002@s.whatsapp.net"} },
 		},
+		{
+			file: "search_request.json",
+			into: func() any { return &SearchRequest{} },
+			build: func() any {
+				return SearchRequest{V: 1, Op: OpSearch, JID: "15551230001@s.whatsapp.net", Query: "venue", Limit: 50}
+			},
+		},
+		{
+			file: "search_response.json",
+			into: func() any { return &MessagesResponse{} },
+			build: func() any {
+				return MessagesResponse{V: 1, Op: OpMessages, JID: "15551230001@s.whatsapp.net", Messages: []Message{
+					{ID: "3EB0AAA2", Kind: "text", Text: "Which venue?", FromMe: true, Timestamp: "2026-10-18T17:56:40Z",
+						ReplyTo: "3EB0AAA0", Reactions: []Reaction{{Emoji: "👍", FromMe: false}}},
+					{ID: "3EB0AAA0", Kind: "image", Text: "the venue", Timestamp: "2026-10-18T17:50:30Z",
+						Media: &Media{Mime: "image/jpeg", Size: 48213}},
+				}}
+			},
+		},
+		{
+			file: "send_reply_request.json",
+			into: func() any { return &SendRequest{} },
+			build: func() any {
+				return SendRequest{V: 1, Op: OpSend, JID: "15551230001@s.whatsapp.net", Text: "Which venue?",
+					ClientID: "c-7f3a9e22", ReplyTo: "3EB0AAA0"}
+			},
+		},
+		{
+			file: "react_request.json",
+			into: func() any { return &ReactRequest{} },
+			build: func() any {
+				return ReactRequest{V: 1, Op: OpReact, JID: "15551230001@s.whatsapp.net", ID: "3EB0AAA1", Emoji: "👍"}
+			},
+		},
+		{
+			file: "react_remove_request.json",
+			into: func() any { return &ReactRequest{} },
+			build: func() any {
+				return ReactRequest{V: 1, Op: OpReact, JID: "15551230001@s.whatsapp.net", ID: "3EB0AAA1"}
+			},
+		},
+		{
+			file: "reacted_response.json",
+			into: func() any { return &Reacted{} },
+			build: func() any {
+				return Reacted{V: 1, Op: OpReacted, JID: "15551230001@s.whatsapp.net", ID: "3EB0AAA1", Emoji: "👍"}
+			},
+		},
 	}
 }
 
@@ -368,7 +416,7 @@ func TestFixturesCarryVersionOne(t *testing.T) {
 		OpMessages: true, OpSend: true, OpSent: true, OpSendFailed: true, OpSubscribe: true,
 		OpSubscribed: true, OpFocus: true, OpFocused: true, OpEventMessage: true,
 		OpEventConnection: true, OpEventUnread: true, OpEventFocus: true, OpWipe: true, OpWiped: true,
-		OpDownloadMedia: true, OpMediaReady: true, OpRetry: true,
+		OpDownloadMedia: true, OpMediaReady: true, OpRetry: true, OpSearch: true, OpReact: true, OpReacted: true,
 	}
 	for _, tc := range fixtureCases() {
 		t.Run(tc.file, func(t *testing.T) {

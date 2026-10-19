@@ -21,6 +21,7 @@ const (
 // OutboxEntry is one send a client asked for, identified by the client's ClientID. MessageID is
 // the WhatsApp message id chosen when the send was queued; every attempt uses it, so a retry of an
 // entry is never a second message. SentAt is WhatsApp's ack time, zero unless State is sent.
+// ReplyTo is the id of the message the send quotes, empty for none; every attempt quotes it.
 type OutboxEntry struct {
 	ClientID  string
 	ChatJID   string
@@ -29,6 +30,7 @@ type OutboxEntry struct {
 	Created   time.Time
 	State     string
 	SentAt    time.Time
+	ReplyTo   string
 }
 
 // ErrNoOutboxEntry: no send with that client_id is stored.
@@ -38,29 +40,58 @@ var ErrNoOutboxEntry = errors.New("no send with that client_id")
 // a send with the same ClientID is already stored, nothing changes and Enqueue returns that stored
 // entry with inserted false.
 func Enqueue(db *sql.DB, e OutboxEntry) (OutboxEntry, bool, error) {
-	if _, err := db.Exec(`INSERT INTO chats (jid) VALUES (?) ON CONFLICT (jid) DO NOTHING`, e.ChatJID); err != nil {
-		return OutboxEntry{}, false, fmt.Errorf("cannot save the send's chat: %w", err)
+	inserted, err := enqueue(db, e)
+	if err != nil {
+		return OutboxEntry{}, false, err
 	}
-	res, err := db.Exec(`INSERT INTO outbox (client_id, chat_jid, text, message_id, created, state)
+	stored, err := GetOutbox(db, e.ClientID)
+	return stored, inserted, err
+}
+
+// enqueue writes the send, its chat and its quoted id in one transaction, so a crash cannot keep
+// the send and lose the quote.
+func enqueue(db *sql.DB, e OutboxEntry) (inserted bool, err error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return false, fmt.Errorf("cannot queue the send: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.Exec(`INSERT INTO chats (jid) VALUES (?) ON CONFLICT (jid) DO NOTHING`, e.ChatJID); err != nil {
+		return false, fmt.Errorf("cannot save the send's chat: %w", err)
+	}
+	res, err := tx.Exec(`INSERT INTO outbox (client_id, chat_jid, text, message_id, created, state)
 		VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (client_id) DO NOTHING`,
 		e.ClientID, e.ChatJID, e.Text, e.MessageID, e.Created.UnixNano(), OutboxQueued)
 	if err != nil {
-		return OutboxEntry{}, false, fmt.Errorf("cannot queue the send: %w", err)
+		return false, fmt.Errorf("cannot queue the send: %w", err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return OutboxEntry{}, false, fmt.Errorf("cannot queue the send: %w", err)
+		return false, fmt.Errorf("cannot queue the send: %w", err)
 	}
-	stored, err := GetOutbox(db, e.ClientID)
-	return stored, n == 1, err
+	if n == 1 && e.ReplyTo != "" {
+		if _, err = tx.Exec(`INSERT INTO outbox_replies (client_id, reply_to) VALUES (?, ?)
+			ON CONFLICT (client_id) DO NOTHING`, e.ClientID, e.ReplyTo); err != nil {
+			return false, fmt.Errorf("cannot queue the send: %w", err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return false, fmt.Errorf("cannot queue the send: %w", err)
+	}
+	return n == 1, nil
 }
 
-const outboxColumns = `client_id, chat_jid, text, message_id, created, state, sent_at`
+const outboxSelect = `SELECT o.client_id, o.chat_jid, o.text, o.message_id, o.created, o.state, o.sent_at,
+	COALESCE(r.reply_to, '') FROM outbox o LEFT JOIN outbox_replies r ON r.client_id = o.client_id`
 
 func scanOutbox(row interface{ Scan(...any) error }) (OutboxEntry, error) {
 	var e OutboxEntry
 	var created, sentAt int64
-	if err := row.Scan(&e.ClientID, &e.ChatJID, &e.Text, &e.MessageID, &created, &e.State, &sentAt); err != nil {
+	if err := row.Scan(&e.ClientID, &e.ChatJID, &e.Text, &e.MessageID, &created, &e.State, &sentAt, &e.ReplyTo); err != nil {
 		return OutboxEntry{}, err
 	}
 	e.Created = fromNanos(created)
@@ -72,7 +103,7 @@ func scanOutbox(row interface{ Scan(...any) error }) (OutboxEntry, error) {
 
 // GetOutbox returns the send stored for clientID, or ErrNoOutboxEntry.
 func GetOutbox(db *sql.DB, clientID string) (OutboxEntry, error) {
-	e, err := scanOutbox(db.QueryRow(`SELECT `+outboxColumns+` FROM outbox WHERE client_id = ?`, clientID))
+	e, err := scanOutbox(db.QueryRow(outboxSelect+` WHERE o.client_id = ?`, clientID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return OutboxEntry{}, ErrNoOutboxEntry
 	}
@@ -84,7 +115,7 @@ func GetOutbox(db *sql.DB, clientID string) (OutboxEntry, error) {
 
 // QueuedOutbox returns every queued send, in the order they were queued.
 func QueuedOutbox(db *sql.DB) ([]OutboxEntry, error) {
-	rows, err := db.Query(`SELECT `+outboxColumns+` FROM outbox WHERE state = ? ORDER BY seq`, OutboxQueued)
+	rows, err := db.Query(outboxSelect+` WHERE o.state = ? ORDER BY o.seq`, OutboxQueued)
 	if err != nil {
 		return nil, fmt.Errorf("cannot list queued sends: %w", err)
 	}

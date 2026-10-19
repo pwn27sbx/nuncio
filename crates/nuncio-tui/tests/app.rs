@@ -32,6 +32,8 @@ fn message(id: &str, text: &str, from_me: bool, minute: u32) -> Message {
         media: None,
         state: None,
         client_id: None,
+        reply_to: None,
+        reactions: Vec::new(),
     }
 }
 

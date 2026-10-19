@@ -37,12 +37,14 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `status` | `v`, `op` | `status_request.json` |
 | `chats` | `v`, `op`, `limit` (int, 1..200) | `chats_request.json` |
 | `messages` | `v`, `op`, `jid`, `limit` (int, 1..200) | `messages_request.json` |
-| `send` | `v`, `op`, `jid`, `text` (string), `client_id` (string, chosen by the client) | `send_request.json` |
+| `send` | `v`, `op`, `jid`, `text` (string), `client_id` (string, chosen by the client), `reply_to` (string or absent: the id of a message of that chat this send quotes; added in M2) | `send_request.json`, `send_reply_request.json` |
 | `retry` | `v`, `op`, `client_id` (of a send that ended not sent) | `retry_request.json` |
 | `subscribe` | `v`, `op` | `subscribe_request.json` |
 | `focus` | `v`, `op`, `jid` | `focus_request.json` |
 | `wipe` | `v`, `op`, `unlink` (bool: first tell WhatsApp to unlink the device) | `wipe_request.json` |
 | `download_media` | `v`, `op`, `jid`, `id` (the message id) | `download_media_request.json` |
+| `search` | `v`, `op`, `jid`, `query` (string, every word must match), `limit` (int, 1..200); answered with `messages` (added in M2) | `search_request.json` |
+| `react` | `v`, `op`, `jid`, `id` (the message id), `emoji` (string; empty removes my reaction) (added in M2) | `react_request.json`, `react_remove_request.json` |
 
 ### daemon → client
 
@@ -52,13 +54,14 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `status` | `v`, `op`, `daemon`, `linked` (bool), `session`, `unread` (int) | `status_response.json` |
 | `chats` | `v`, `op`, `chats` (array of Chat) | `chats_response.json` |
 | `error` | `v`, `op`, `code` (string), `message` (string) | `error_version_mismatch.json`, `error_not_linked.json` |
-| `messages` | `v`, `op`, `jid`, `messages` (array of Message, newest first) | `messages_response.json` |
+| `messages` | `v`, `op`, `jid`, `messages` (array of Message, newest first); answers `messages` and `search` | `messages_response.json`, `search_response.json` |
 | `sent` | `v`, `op`, `client_id`, `state` (`sent` or `queued`), `id` and `timestamp` (only when `sent`); answers `send` and `retry` | `sent_response.json`, `sent_queued_response.json` |
 | `send_failed` | `v`, `op`, `client_id`, `message` (string); answers `send` and `retry` | `send_failed_response.json` |
 | `subscribed` | `v`, `op` | `subscribed_response.json` |
 | `focused` | `v`, `op`, `jid`, `delivered` (int: subscribed UIs that got the event; 0 = none running) | `focused_response.json` |
 | `wiped` | `v`, `op`, `unlinked` (bool: WhatsApp confirmed the unlink) | `wiped_response.json` |
 | `media_ready` | `v`, `op`, `jid`, `id`, `path` (string: the cached file), `mime` (string) | `media_ready_response.json` |
+| `reacted` | `v`, `op`, `jid`, `id`, `emoji` (as asked; empty = removed) (added in M2) | `reacted_response.json` |
 
 ### Events (daemon → subscribed clients)
 
@@ -125,6 +128,13 @@ queued, and every attempt of that send uses it, so it stays the same across stat
 | `media` | object or absent | set for the media kinds, omitted for `text` |
 | `state` | string or absent | only on a send of mine that is not sent yet: `queued` (waiting for the session to reconnect) or `not_sent` (its one attempt failed or was not confirmed; it waits for a manual `retry`). Absent once sent and on every received message. Added in M1; a client reads a missing key as sent, and an unknown value as an unknown state |
 | `client_id` | string or absent | set with `state`: the `client_id` of that send, which `retry` names |
+| `reply_to` | string or absent | the id of the message this one quotes (a reply received, or one of mine sent with `reply_to`). Added in M2; absent means it quotes nothing |
+| `reactions` | array or absent | the current reactions on this message, mine first: `{ "emoji": string, "from_me": bool }`, one per sender. Absent when there are none. Added in M2; a client reads a missing key as no reactions |
+
+A reaction is never a message of its own: an incoming reaction (or one of mine made on another
+device) is stored against the message it targets, replacing that sender's earlier one (an empty
+emoji removes it), and the target is published again as `event_message` with its new `reactions`,
+so a client replaces it. Reactions never change unread counts.
 
 `media` is `{ "mime": string, "size": int (bytes), "file_name": string (may be empty) }`. The
 bytes never travel over the socket: the daemon downloads them only when a client sends
@@ -210,6 +220,26 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `download_media` for a file already cached | `media_ready` with the same `path`; nothing is downloaded again |
 | `download_media` whose bytes do not match the message's SHA-256 | `error` / `internal` with the message `the downloaded media does not match its SHA-256, so nothing was saved`; nothing is cached |
 | `download_media` that WhatsApp does not deliver | `error` / `internal` with the message `WhatsApp did not deliver the media`; nothing is cached |
+
+### M2 corners (search, reply, react; pinned by daemon tests)
+
+| Situation | Behaviour |
+|---|---|
+| `search` with an empty or whitespace-only (or missing) `query` | `bad_frame`; the connection stays usable |
+| `search` with a `query` over 1 024 bytes | `bad_frame` |
+| `search` `limit` outside 1..200, or a `jid` that is not a chat JID | `bad_frame` |
+| `search` with FTS5 syntax in `query` (quotes, `OR`, `NEAR(`, `col:`, `*`) | the words are matched literally; never an error |
+| `search` | `messages` for that chat only, newest first, each message with its `reply_to` and `reactions`; an empty list when nothing matches or there is no store. It never contacts WhatsApp |
+| `send` with `reply_to` naming a message stored in that chat | sent like any `send` (outbox, queue, drain, retry), as a WhatsApp extended text whose context quotes that message (its id, its sender, its text); the queued send keeps `reply_to` through queue, drain and retry, and is listed and published with it |
+| `send` with `reply_to` naming no message stored in that chat | `send_failed` with the message `no message with that id in that chat`; nothing is stored or sent |
+| `send` without `reply_to` | exactly the M1 behaviour: a plain text message |
+| `react` with a `jid` that is not a chat JID, an empty or missing `id`, or an `emoji` over 64 bytes | `bad_frame`; nothing is sent |
+| `react` while `unlinked` | `error` / `not_linked` |
+| `react` while `offline` | `error` / `internal` with the message `the WhatsApp session is offline, so the reaction was not sent`; reactions are never queued, so the user reacts again once linked |
+| `react` on an id not stored in that chat | `error` / `internal` with the message `no message with that id in that chat`; nothing is sent |
+| `react` on someone else's message whose sender is unknown (a group message stored before M2 recorded senders) | `error` / `internal` with the message `the sender of that message is unknown, so the reaction was not sent`; nothing is sent or stored, because a reaction key without its sender would claim the message is mine |
+| `react` that WhatsApp does not accept or acknowledge | `error` / `internal` with the message `WhatsApp did not accept the reaction`; one attempt, never retried |
+| `react` accepted | `reacted`; my reaction is stored on the message and the message is published again as `event_message` |
 
 A WhatsApp chat JID is one of: `digits@s.whatsapp.net` (a user), `digits@lid` (a user addressed by
 its hidden id; WhatsApp uses it for direct chats too) or `digits-digits@g.us` / `digits@g.us` (a

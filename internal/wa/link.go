@@ -120,10 +120,26 @@ func (l *whatsmeowLinker) QR(ctx context.Context) (<-chan Code, error) {
 }
 
 func (l *whatsmeowLinker) Phone(ctx context.Context, number string) (string, error) {
+	// whatsmeow wants the login websocket fully up before PairPhone: subscribe to the QR channel
+	// before connecting and wait for its first item (the QR itself is ignored in this flow).
+	qr, err := l.client.GetQRChannel(ctx)
+	if err != nil {
+		return "", fmt.Errorf("wa: preparing to link: %w", err)
+	}
 	if err := l.client.Connect(); err != nil {
 		return "", fmt.Errorf("wa: connecting to link: %w", err)
 	}
-	code, err := l.client.PairPhone(ctx, number, true, whatsmeow.PairClientChrome, "nuncio")
+	select {
+	case <-qr:
+	case <-time.After(30 * time.Second):
+		return "", errors.New("wa: the login connection did not come up in 30 s")
+	}
+	go func() {
+		for range qr { // keep draining so whatsmeow's QR rotation never blocks
+		}
+	}()
+	// The server validates the display name: it must read "Browser (OS)" with a common browser/OS.
+	code, err := l.client.PairPhone(ctx, number, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
 	if err != nil {
 		return "", fmt.Errorf("wa: requesting a pairing code: %w", err)
 	}

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -11,9 +10,12 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/store/sqlstore"
+	waevents "go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 	_ "modernc.org/sqlite"
 
-	"github.com/pwn27sbx/nuncio/internal/store"
 	"github.com/pwn27sbx/nuncio/internal/wa"
 )
 
@@ -57,35 +59,124 @@ func linkCommand(args []string) int {
 	}
 	defer func() { _ = db.Close() }()
 
-	devices, err := store.NewDeviceStore(db, store.SecretService{})
+	// M0 spike: whatsmeow's own sqlstore keeps the full Signal state (sessions, pre-keys, sender
+	// keys, app state) that a linked device needs. The keyring-backed store proved in S4 replaces it
+	// in M1; until then the keys live in nuncio.db inside the 0700 data directory.
+	container := sqlstore.NewWithDB(db, "sqlite3", nil)
+	if err := container.Upgrade(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "nuncio link: cannot prepare the device store:", err)
+		return 1
+	}
+	device, err := container.GetFirstDevice(ctx)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "nuncio link:", err)
 		return 1
 	}
+	client := whatsmeow.NewClient(device, nil)
+	events := watch(client)
 
-	device, err := devices.LoadDevice(ctx)
-	switch {
-	case errors.Is(err, store.ErrNoDevice):
-		// Unpaired: generate keys for a device that does not exist anywhere until a link succeeds.
-		device = devices.NewDevice()
-		fmt.Println("nuncio: no device linked yet; this run would create one.")
-	case err != nil:
-		fmt.Fprintln(os.Stderr, "nuncio link:", err)
-		return 1
-	default:
-		fmt.Println("nuncio: this machine already holds a linked device.")
+	if device.ID != nil {
+		fmt.Println("nuncio: this machine already holds a linked device:", device.ID.User)
+		if err := client.Connect(); err != nil {
+			fmt.Fprintln(os.Stderr, "nuncio link:", err)
+			return 1
+		}
+		defer client.Disconnect()
+		return listen(ctx, client, events)
 	}
 
-	prepared, err := wa.Prepare(consent, whatsmeow.NewClient(device, nil))
+	prepared, err := wa.Prepare(consent, client)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "nuncio link:", err)
 		return 1
 	}
+	defer client.Disconnect()
 
 	if *qr {
-		return runQRLink(ctx, prepared.Linker)
+		if code := runQRLink(ctx, prepared.Linker); code != 0 {
+			return code
+		}
+	} else {
+		code, err := prepared.Linker.Phone(ctx, *phone)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "nuncio link:", err)
+			return 1
+		}
+		fmt.Printf("\nOn your phone: Settings → Linked devices → Link a device → Link with phone number instead, then enter:\n\n    %s\n\nWaiting up to 5 minutes...\n", code)
+		select {
+		case id := <-events.paired:
+			fmt.Println("nuncio: linked as", id)
+		case <-time.After(5 * time.Minute):
+			fmt.Fprintln(os.Stderr, "nuncio: the code was not entered in time; nothing was linked")
+			return 1
+		}
 	}
-	return runPhoneLink(ctx, prepared.Linker, *phone)
+	return listen(ctx, client, events)
+}
+
+type linkEvents struct {
+	paired    chan string
+	connected chan struct{}
+	messages  chan *waevents.Message
+}
+
+// watch subscribes before Connect, so no pairing or message event can be missed.
+func watch(client *whatsmeow.Client) linkEvents {
+	ev := linkEvents{make(chan string, 1), make(chan struct{}, 1), make(chan *waevents.Message, 8)}
+	client.AddEventHandler(func(e interface{}) {
+		switch v := e.(type) {
+		case *waevents.PairSuccess:
+			select {
+			case ev.paired <- v.ID.User:
+			default:
+			}
+		case *waevents.Connected:
+			select {
+			case ev.connected <- struct{}{}:
+			default:
+			}
+		case *waevents.Message:
+			if !v.Info.IsFromMe {
+				select {
+				case ev.messages <- v:
+				default:
+				}
+			}
+		}
+	})
+	return ev
+}
+
+// listen is the S1 check: wait for the session to come up, then for one incoming message, store it
+// (whatsmeow already persisted the session state) and send one short reply. Nothing is sent
+// unless a message arrives first.
+func listen(ctx context.Context, client *whatsmeow.Client, ev linkEvents) int {
+	select {
+	case <-ev.connected:
+		fmt.Println("nuncio: connected; send one message to this number from another phone (waiting 10 minutes)")
+	case <-time.After(60 * time.Second):
+		fmt.Fprintln(os.Stderr, "nuncio: still not connected after 60 s")
+		return 1
+	}
+	select {
+	case m := <-ev.messages:
+		text := m.Message.GetConversation()
+		if text == "" {
+			text = m.Message.GetExtendedTextMessage().GetText()
+		}
+		fmt.Printf("nuncio: received from %s: %q\n", m.Info.Sender.User, text)
+		reply := &waE2E.Message{Conversation: proto.String("nuncio: mensaje recibido ✓")}
+		if _, err := client.SendMessage(ctx, m.Info.Chat, reply); err != nil {
+			fmt.Fprintln(os.Stderr, "nuncio: reply failed:", err)
+			return 1
+		}
+		fmt.Println("nuncio: reply sent")
+		time.Sleep(3 * time.Second)
+		return 0
+	case <-time.After(10 * time.Minute):
+		fmt.Fprintln(os.Stderr, "nuncio: no message arrived in 10 minutes")
+		return 1
+	}
 }
 
 func runQRLink(ctx context.Context, linker wa.Linker) int {
@@ -115,16 +206,6 @@ func runQRLink(ctx context.Context, linker wa.Linker) int {
 	return 1
 }
 
-func runPhoneLink(ctx context.Context, linker wa.Linker, number string) int {
-	code, err := linker.Phone(ctx, number)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "nuncio link:", err)
-		return 1
-	}
-	fmt.Printf("\nOn your phone: Settings → Linked devices → Link with phone number, then enter: %s\n", code)
-	return 0
-}
-
 // nuncioDataDir is `$XDG_DATA_HOME/nuncio`, created 0700 so the store never sits in a
 // world-readable directory.
 func nuncioDataDir() (string, error) {
@@ -148,7 +229,8 @@ func openStoreDB(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot open %s: %w", path, err)
 	}
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+	db.SetMaxOpenConns(1) // one connection, so per-connection pragmas such as foreign_keys hold
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON`); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("cannot prepare %s: %w", path, err)
 	}

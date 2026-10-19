@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"go.mau.fi/whatsmeow"
@@ -177,5 +178,48 @@ func TestUnsafeIDsCannotEscapeTheCacheDir(t *testing.T) {
 	}
 	if names := entries(t, root); len(names) != 1 || names[0] != "media" {
 		t.Fatalf("data dir holds %v, want only media", names)
+	}
+}
+
+// A cache hit still makes the cache dir private, as every Fetch did before the dir was created
+// lazily.
+func TestACacheHitRestrictsTheCacheDirAgain(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "media")
+	dl := &fakeDownloader{plain: known}
+	c := media.New(dir, dl)
+	if _, err := c.Fetch(context.Background(), request("3EB0EEEE")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Fetch(context.Background(), request("3EB0EEEE")); err != nil {
+		t.Fatal(err)
+	}
+	if dl.calls != 1 {
+		t.Fatalf("downloader called %d times, want 1 (a cache hit)", dl.calls)
+	}
+	if m := mode(t, dir); m != 0o700 {
+		t.Errorf("dir mode after a cache hit %o, want 700", m)
+	}
+}
+
+// A cache dir that cannot be created fails before anything is downloaded, with its own text.
+func TestAnUncreatableCacheDirFailsBeforeTheDownload(t *testing.T) {
+	parent := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	dl := &fakeDownloader{plain: known}
+	_, err := media.New(filepath.Join(parent, "media"), dl).Fetch(context.Background(), request("3EB0FFFF"))
+	if err == nil || !strings.HasPrefix(err.Error(), "media: create cache dir: ") {
+		t.Errorf("Fetch = %v; want a \"media: create cache dir: \" error", err)
+	}
+	if !errors.Is(err, media.ErrCache) {
+		t.Errorf("Fetch = %v; want media.ErrCache", err)
+	}
+	if dl.calls != 0 {
+		t.Errorf("downloader called %d times, want 0", dl.calls)
 	}
 }

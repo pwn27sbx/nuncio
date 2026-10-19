@@ -30,6 +30,9 @@ var (
 	// errReadPrivacy: without the account's read-receipt setting a receipt could show blue ticks the
 	// user turned off, so nothing is sent.
 	errReadPrivacy = errors.New("could not read the read-receipt privacy setting, so the chat was not marked read")
+	// errMarkReadBusy: another mark_read was still running when this one's 4 s bound ended, so
+	// nothing was sent and the store is unchanged.
+	errMarkReadBusy = errors.New("another mark_read is still running, so the chat was not marked read")
 	// errReceiptNotSent: WhatsApp did not take a read receipt.
 	errReceiptNotSent = errors.New("WhatsApp did not accept the read receipt, so the chat was not marked read")
 )
@@ -43,12 +46,18 @@ var (
 // consecutive receipts of at most 50 ids each, oldest first, before the next sender's. They are
 // still one operation: the first receipt WhatsApp does not take ends it, nothing after it is sent,
 // nothing is retried, and the store changes only after every receipt went out; the 4 s bound
-// (markReadTimeout) covers the privacy read and all the receipts together.
+// (markReadTimeout) covers the wait for another mark_read, the privacy read and all the receipts
+// together.
 //
 // The receipt type follows the account's read-receipt privacy: with read receipts off it is
 // read-self, so the user's other devices mark the chat read but the sender sees no blue ticks. A
 // group message stored before senders were recorded (M1 data) has no participant to address, so it
 // gets no receipt, but it is still marked read here.
+//
+// Calls run one at a time: of two UIs opening the same chat at once, the second waits for the
+// first and then finds nothing unread, so the receipts go out once. The 4 s bound starts when the
+// call does, waiting included: one still waiting when it ends answers errMarkReadBusy, having sent
+// and changed nothing.
 //
 // It is one attempt, only while linked, and is never queued or retried: unlinked answers
 // ipc.ErrNotLinked, offline ErrMarkReadOffline, and an unreadable privacy setting or a receipt
@@ -60,6 +69,15 @@ func (s *Session) MarkRead(jid string) (int, error) {
 	}
 	if s.db == nil {
 		return 0, errNoStore
+	}
+	// The bound starts now, so a call waiting behind another still answers within it.
+	ctx, cancel := context.WithTimeout(context.Background(), markReadTimeout)
+	defer cancel()
+	select {
+	case s.markReadSem <- struct{}{}:
+		defer func() { <-s.markReadSem }()
+	case <-ctx.Done():
+		return 0, errMarkReadBusy
 	}
 	unread, err := store.UnreadIncoming(s.db, jid)
 	if err != nil {
@@ -89,8 +107,6 @@ func (s *Session) MarkRead(jid string) (int, error) {
 	}
 
 	if len(senders) > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), markReadTimeout)
-		defer cancel()
 		privacy, err := s.client.ReadReceiptsPrivacy(ctx)
 		if err != nil {
 			log.Printf("wa: cannot read the read-receipt privacy setting (%T)", err)

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -252,5 +253,106 @@ func TestMarkReadAdapterErrorsCarryNoJID(t *testing.T) {
 		if strings.Contains(err.Error(), "1555123000") {
 			t.Errorf("MarkRead(%q, %q) error %q carries the JID", tc.chat, tc.sender, err)
 		}
+	}
+}
+
+// Two UIs opening the same chat at once send its receipts once: the second mark_read waits for
+// the first, then finds nothing unread and sends nothing.
+func TestTwoMarkReadsOfOneChatAtOnceSendItsReceiptsOnce(t *testing.T) {
+	s, fake, _ := subscribedSession(t)
+	storeIncomingFrom(t, fake, ada, ada, "A1", t0)
+	started, gate, second := make(chan struct{}), make(chan struct{}), make(chan struct{}, 1)
+	var calls int
+	fake.onMarkRead = func(context.Context) {
+		calls++
+		if calls == 1 {
+			close(started)
+			<-gate
+			return
+		}
+		second <- struct{}{}
+	}
+	errs := make(chan error, 2)
+	go func() { _, err := s.MarkRead(ada.String()); errs <- err }()
+	<-started // the first receipt is on its way
+	go func() { _, err := s.MarkRead(ada.String()); errs <- err }()
+	select {
+	case <-second: // the second call sent a receipt while the first was still sending
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(gate)
+	for range 2 {
+		if err := <-errs; err != nil {
+			t.Errorf("MarkRead = %v, want nil", err)
+		}
+	}
+	if fake.markReads != 1 {
+		t.Errorf("%d receipts sent (%q), want 1", fake.markReads, fake.markReadCalls)
+	}
+	if n, _ := store.UnreadCount(s.Store(), ada.String()); n != 0 {
+		t.Errorf("unread of ada = %d, want 0", n)
+	}
+}
+
+// A mark_read waiting behind another still answers inside the 4 s bound: the bound starts when the
+// call does, not when the one before it ends.
+func TestASecondMarkReadAnswersWithinTheBoundWhileAnotherIsSlow(t *testing.T) {
+	s, fake, _ := subscribedSession(t)
+	storeIncomingFrom(t, fake, ada, ada, "A1", t0)
+	storeIncomingFrom(t, fake, grace, grace, "G1", t0)
+	var n atomic.Int32
+	started := make(chan struct{})
+	fake.onMarkRead = func(ctx context.Context) {
+		if n.Add(1) == 1 {
+			close(started)
+		}
+		select { // a slow network for every receipt, which gives up when its context ends
+		case <-time.After(3 * time.Second):
+		case <-ctx.Done():
+		}
+	}
+	done := make(chan struct{})
+	go func() { _, _ = s.MarkRead(ada.String()); close(done) }()
+	<-started
+	t1 := time.Now()
+	_, _ = s.MarkRead(grace.String())
+	if d := time.Since(t1); d > markReadTimeout+200*time.Millisecond {
+		t.Errorf("second mark_read answered after %v, want within %v", d, markReadTimeout)
+	}
+	<-done
+}
+
+// A mark_read still waiting for another when its 4 s bound ends answers an error and sends and
+// changes nothing, so a client never sees a failure the daemon later turns into a success.
+func TestAMarkReadThatCannotStartInTimeSendsNothingAndKeepsTheChatUnread(t *testing.T) {
+	s, fake, _ := subscribedSession(t)
+	storeIncomingFrom(t, fake, ada, ada, "A1", t0)
+	storeIncomingFrom(t, fake, grace, grace, "G1", t0)
+	started := make(chan struct{})
+	var n atomic.Int32
+	fake.onMarkRead = func(context.Context) {
+		if n.Add(1) == 1 {
+			close(started)
+			time.Sleep(markReadTimeout + time.Second) // a first receipt that ignores its deadline
+		}
+	}
+	done := make(chan struct{})
+	go func() { _, _ = s.MarkRead(ada.String()); close(done) }()
+	<-started
+	before := readState(t, s.Store())
+	t1 := time.Now()
+	_, err := s.MarkRead(grace.String())
+	if d := time.Since(t1); d > markReadTimeout+200*time.Millisecond {
+		t.Errorf("second mark_read answered after %v, want within %v", d, markReadTimeout)
+	}
+	if err == nil || err.Error() != "another mark_read is still running, so the chat was not marked read" {
+		t.Errorf("second MarkRead = %v; want the still-running error", err)
+	}
+	if after := readState(t, s.Store()); after != before {
+		t.Errorf("store changed by a refused mark_read:\n%s\nwant\n%s", after, before)
+	}
+	<-done
+	if fake.markReads != 1 || strings.Contains(strings.Join(fake.markReadCalls, " "), grace.String()) {
+		t.Errorf("receipts = %q, want only the first chat's", fake.markReadCalls)
 	}
 }

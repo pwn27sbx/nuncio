@@ -133,13 +133,13 @@ queued, and every attempt of that send uses it, so it stays the same across stat
 | `media` | object or absent | set for the media kinds, omitted for `text` |
 | `state` | string or absent | only on a send of mine that is not sent yet: `queued` (waiting for the session to reconnect) or `not_sent` (its one attempt failed or was not confirmed; it waits for a manual `retry`). Absent once sent and on every received message. Added in M1; a client reads a missing key as sent, and an unknown value as an unknown state |
 | `client_id` | string or absent | set with `state`: the `client_id` of that send, which `retry` names |
-| `reply_to` | string or absent | the id of the message this one quotes (a reply received, or one of mine sent with `reply_to`). Added in M2; absent means it quotes nothing |
+| `reply_to` | string or absent | the id of the message this one quotes (a reply received, text or media with or without a caption, or one of mine sent with `reply_to`). Added in M2; absent means it quotes nothing |
 | `reactions` | array or absent | the current reactions on this message, mine first: `{ "emoji": string, "from_me": bool }`, one per sender. Absent when there are none. Added in M2; a client reads a missing key as no reactions |
 
 A reaction is never a message of its own: an incoming reaction (or one of mine made on another
 device) is stored against the message it targets, replacing that sender's earlier one (an empty
 emoji removes it), and the target is published again as `event_message` with its new `reactions`,
-so a client replaces it. Reactions never change unread counts.
+so a client replaces it. Reactions never change unread counts. A reaction that arrives before its target is kept; when the target is stored, its first `event_message` (and every later read) already carries it.
 
 `media` is `{ "mime": string, "size": int (bytes), "file_name": string (may be empty) }`. The
 bytes never travel over the socket: the daemon downloads them only when a client sends
@@ -226,6 +226,8 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `download_media` for a file already cached | `media_ready` with the same `path`; nothing is downloaded again |
 | `download_media` whose bytes do not match the message's SHA-256 | `error` / `internal` with the message `the downloaded media does not match its SHA-256, so nothing was saved`; nothing is cached |
 | `download_media` that WhatsApp does not deliver | `error` / `internal` with the message `WhatsApp did not deliver the media`; nothing is cached |
+| `download_media` when the daemon cannot write its media cache (e.g. the cache dir cannot be created) | `error` / `internal` with the message `nuncio could not write its media cache, so the media was not downloaded`; it fails before anything is downloaded when the dir cannot be created |
+| `download_media` while a `wipe` runs (or after it) | `error` / `internal` with the message `nuncio is wiping its data, so the media was not downloaded`; nothing is downloaded or saved and the media cache is never recreated (the daemon exits right after the wipe) |
 
 ### M2 corners (search, reply, react, mark_read, event_chat, not_confirmed; pinned by daemon tests)
 
@@ -235,9 +237,13 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `search` with a `query` over 1 024 bytes | `bad_frame` |
 | `search` `limit` outside 1..200, or a `jid` that is not a chat JID | `bad_frame` |
 | `search` with FTS5 syntax in `query` (quotes, `OR`, `NEAR(`, `col:`, `*`) | the words are matched literally; never an error |
+| `search` with a `query` the index cannot tokenise (only emoji, symbols or punctuation, e.g. `🎉` or `?!`) | the messages of that chat whose text contains every word as a literal substring, newest first, up to `limit`; a query with any letter or number uses the index as before (whole words, any case) |
 | `search` | `messages` for that chat only, newest first, each message with its `reply_to` and `reactions`; an empty list when nothing matches or there is no store. It never contacts WhatsApp |
-| `send` with `reply_to` naming a message stored in that chat | sent like any `send` (outbox, queue, drain, retry), as a WhatsApp extended text whose context quotes that message (its id, its sender, its text); the queued send keeps `reply_to` through queue, drain and retry, and is listed and published with it |
+| `send` with `reply_to` naming a message stored in that chat | sent like any `send` (outbox, queue, drain, retry), as a WhatsApp extended text whose context quotes that message (its id, its sender, and the message: its text, or for a media message its kind, below); the queued send keeps `reply_to` through queue, drain and retry, and is listed and published with it |
+| `send` with `reply_to` naming a media message (image, video, audio or document) | the quote carries that media kind with its caption, mime type and (for a document) file name, as WhatsApp shows a quoted photo or file; never its media key or path. A media message stored without its reference or mime type is quoted as its text |
+| `send` with `reply_to` naming a message of mine in a chat addressed by LID (`digits@lid`) | the quote names me by my own LID, when the device knows it; in every other chat by my phone-number JID |
 | `send` with `reply_to` naming no message stored in that chat | `send_failed` with the message `no message with that id in that chat`; nothing is stored or sent |
+| `send` with `reply_to` repeating a `client_id` already accepted | the stored state of that send, as for any repeated `client_id`, whatever `reply_to` names (a stored message or none); never a second message |
 | `send` without `reply_to` | exactly the M1 behaviour: a plain text message |
 | `react` with a `jid` that is not a chat JID, an empty or missing `id`, or an `emoji` over 64 bytes | `bad_frame`; nothing is sent |
 | `react` while `unlinked` | `error` / `not_linked` |
@@ -256,10 +262,13 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `mark_read` when the daemon cannot read the read-receipt privacy setting | `error` / `internal` with the message `could not read the read-receipt privacy setting, so the chat was not marked read`; nothing is sent (a receipt could show blue ticks the user turned off) and the chat stays unread |
 | `mark_read` whose receipt WhatsApp does not take | `error` / `internal` with the message `WhatsApp did not accept the read receipt, so the chat was not marked read`; no further receipt is sent, nothing is retried and the chat stays unread here (a later `mark_read` sends its receipts again, which WhatsApp reads as the same read) |
 | `mark_read` timing | the daemon answers within 4 s, inside a client's ordinary 5 s read bound |
+| Two `mark_read` of the same chat at once (two UIs) | they run one after the other: the receipts go out once; the second finds nothing unread, sends nothing and answers `marked_read` with the total |
+| `mark_read` still waiting for another `mark_read` when its 4 s bound ends | `error` / `internal` with the message `another mark_read is still running, so the chat was not marked read`; nothing is sent and the chat stays unread, so a client never sees a failure the daemon later turns into a success |
 | `mark_read` of many unread messages | mark_read sends at most 50 message ids per read receipt, as consecutive receipts; the first failure stops it and the chat stays unread |
 | A pin, archive or mute from app-state sync (the initial full sync included) | stored, then `event_chat` with the chat as `chats` would list it; a chat not stored yet is created and published without `last_message`. A full sync can publish many at once, and a subscriber whose queue fills is dropped and re-reads `chats` as for any event |
 | App-state for a JID that is not a chat JID, or with no action | ignored; nothing is stored or published |
 | A chat marked read (or unread) on another device | no `event_chat`: a read publishes `event_unread` only, an unread nothing |
+| a frame with an `op` this client does not know (a newer daemon) | the Rust client parses it as `DaemonFrame::Unknown`; nuncio-tui ignores an unknown event and shows an unknown reply in the footer (a send answered that way is shown as not confirmed) |
 
 A WhatsApp chat JID is one of: `digits@s.whatsapp.net` (a user), `digits@lid` (a user addressed by
 its hidden id; WhatsApp uses it for direct chats too) or `digits-digits@g.us` / `digits@g.us` (a

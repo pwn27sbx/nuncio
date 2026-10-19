@@ -36,6 +36,8 @@ type fakeClient struct {
 	markReadAt     time.Time
 	markReadErr    error
 	markReadFailAt int
+	// onMarkRead, when set, runs at the start of every MarkRead call with its context.
+	onMarkRead func(ctx context.Context)
 	// readReceipts is the account's read-receipt privacy ("" reads as "all"); ReadReceiptsPrivacy
 	// counts its calls in privacyAsks and answers privacyErr when set.
 	readReceipts string
@@ -111,8 +113,13 @@ func (f *fakeClient) BuildReaction(chat, sender, id, emoji string) (*waE2E.Messa
 
 func (f *fakeClient) OwnJID() string { return fakeOwnJID }
 
-// fakeOwnJID is the fake account's own JID.
-const fakeOwnJID = "15551230009@s.whatsapp.net"
+func (f *fakeClient) OwnLID() string { return fakeOwnLID }
+
+// fakeOwnJID is the fake account's own JID, fakeOwnLID its hidden id (LID).
+const (
+	fakeOwnJID = "15551230009@s.whatsapp.net"
+	fakeOwnLID = "100000000000009@lid"
+)
 
 // sentMessages returns a copy of every message given to SendMessage.
 func (f *fakeClient) sentMessages() []*waE2E.Message {
@@ -152,7 +159,10 @@ func (f *fakeClient) Connect() error {
 func (f *fakeClient) Disconnect() { f.disconnects++ }
 
 // MarkRead records a read receipt, so a test can prove which were sent, or that none was.
-func (f *fakeClient) MarkRead(_ context.Context, chat, sender string, ids []string, at time.Time, receiptType string) error {
+func (f *fakeClient) MarkRead(ctx context.Context, chat, sender string, ids []string, at time.Time, receiptType string) error {
+	if f.onMarkRead != nil {
+		f.onMarkRead(ctx)
+	}
 	f.markReads++
 	f.markReadCalls = append(f.markReadCalls, chat+" "+sender+" "+receiptType+" "+strings.Join(ids, ","))
 	f.markReadAt = at

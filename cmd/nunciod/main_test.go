@@ -775,6 +775,8 @@ func (f *fakeWAClient) BuildReaction(_, _, _, emoji string) (*waE2E.Message, err
 
 func (f *fakeWAClient) OwnJID() string { return "15551230009@s.whatsapp.net" }
 
+func (f *fakeWAClient) OwnLID() string { return "" }
+
 func (f *fakeWAClient) SendMessage(context.Context, string, *waE2E.Message, string) (time.Time, error) {
 	f.sends.Add(1)
 	if f.fail.Load() {

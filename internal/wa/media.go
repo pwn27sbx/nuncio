@@ -33,6 +33,12 @@ var (
 	// ErrMediaNotDownloaded: WhatsApp did not deliver the attachment. whatsmeow's own error is not
 	// passed on, because it can carry a media URL.
 	ErrMediaNotDownloaded = errors.New("WhatsApp did not deliver the media")
+	// ErrMediaCache: nuncio could not write its own media cache (a local disk failure), so nothing
+	// was downloaded or saved.
+	ErrMediaCache = errors.New("nuncio could not write its media cache, so the media was not downloaded")
+	// ErrMediaWiped: a wipe closed the media cache (the daemon exits right after it), so nothing
+	// was downloaded or saved.
+	ErrMediaWiped = errors.New("nuncio is wiping its data, so the media was not downloaded")
 )
 
 // mediaMessage is what the four media sub-messages of whatsmeow have in common.
@@ -110,8 +116,9 @@ func (l linkedOnly) Download(ctx context.Context, m whatsmeow.DownloadableMessag
 // only path to a download: storing a message never fetches anything. While unlinked it returns
 // ipc.ErrNotLinked; an unknown id or a text message is ErrNoMedia; a download needed while offline
 // is ErrMediaOffline (a cached file is still served); a SHA-256 mismatch is ErrMediaCorrupt with
-// nothing cached; any other download failure is ErrMediaNotDownloaded. Logs carry the message id
-// only, never a caption.
+// nothing cached; a cache a wipe closed is ErrMediaWiped, one nuncio cannot write ErrMediaCache;
+// any other download failure is ErrMediaNotDownloaded. Logs carry the message id only, never a
+// caption.
 func (s *Session) DownloadMedia(jid, id string) (string, string, error) {
 	if s.client == nil || s.State() == StateUnlinked {
 		return "", "", ipc.ErrNotLinked
@@ -144,6 +151,12 @@ func (s *Session) DownloadMedia(jid, id string) (string, string, error) {
 		return path, m.Mime, nil
 	case errors.Is(err, ErrMediaOffline):
 		return "", "", ErrMediaOffline
+	case errors.Is(err, media.ErrClosed):
+		return "", "", ErrMediaWiped
+	case errors.Is(err, media.ErrCache):
+		// The error's type only: the path names the data dir.
+		log.Printf("wa: media %s could not be cached (%T)", id, errors.Unwrap(err))
+		return "", "", ErrMediaCache
 	case errors.Is(err, media.ErrSHA256Mismatch):
 		log.Printf("wa: media %s does not match its SHA-256; nothing was cached", id)
 		return "", "", ErrMediaCorrupt

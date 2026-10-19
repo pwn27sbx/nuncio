@@ -54,6 +54,9 @@ type Client interface {
 	BuildReaction(chat, sender, id, emoji string) (*waE2E.Message, error)
 	// OwnJID is this device's account JID without device, empty when nothing is linked.
 	OwnJID() string
+	// OwnLID is this account's hidden id (LID) without device, from whatsmeow's device store; empty
+	// when it is not known.
+	OwnLID() string
 	// ReadReceiptsPrivacy is the account's read-receipt privacy setting ("all" or "none"), from
 	// whatsmeow's TryFetchPrivacySettings (whatsmeow keeps it current from WhatsApp's change
 	// notifications). An error means it is unknown.
@@ -100,6 +103,9 @@ type Session struct {
 
 	// sendMu serialises the outbox's send attempts, so no entry is ever sent twice at once.
 	sendMu sync.Mutex
+	// markReadSem (capacity 1) serialises MarkRead, so two UIs opening a chat at once send its
+	// receipts once; a call waits for it only inside its own 4 s bound.
+	markReadSem chan struct{}
 	// drains counts the running outbox drains; Close waits for them before closing the store.
 	drains sync.WaitGroup
 }
@@ -109,7 +115,7 @@ type Session struct {
 // after the client is disconnected.
 func NewSession(client Client, db *sql.DB, closeStore func() error) *Session {
 	return &Session{client: client, db: db, closeStore: closeStore, state: StateUnlinked,
-		backoff: NewBackoff(), after: afterFunc, logf: log.Printf}
+		backoff: NewBackoff(), after: afterFunc, logf: log.Printf, markReadSem: make(chan struct{}, 1)}
 }
 
 func afterFunc(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
@@ -465,4 +471,12 @@ func (w whatsmeowClient) OwnJID() string {
 		return ""
 	}
 	return w.c.Store.ID.ToNonAD().String()
+}
+
+func (w whatsmeowClient) OwnLID() string {
+	lid := w.c.Store.GetLID()
+	if lid.IsEmpty() {
+		return ""
+	}
+	return lid.ToNonAD().String()
 }

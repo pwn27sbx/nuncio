@@ -252,3 +252,97 @@ func TestBuildReactionErrorsCarryNoJID(t *testing.T) {
 		}
 	}
 }
+
+// A client_id already stored answers that send's state (the M1 rule) even when the repeat names a
+// reply_to that is not stored: the repeat is the same send, not a new one to check.
+func TestARepeatedClientIDWithAnUnknownReplyToAnswersTheStoredSend(t *testing.T) {
+	s, fake, _ := subscribedSession(t)
+	first, err := s.Send(ada.String(), "one", "c-1")
+	if err != nil || first.State != ipc.SendSent {
+		t.Fatalf("Send = %+v, %v; want sent", first, err)
+	}
+	again, err := s.SendReply(ada.String(), "one", "c-1", "NOPE")
+	if err != nil || again != first {
+		t.Errorf("repeated SendReply = %+v, %v; want the stored %+v", again, err, first)
+	}
+	if sends, _ := fake.sent(); len(sends) != 1 {
+		t.Errorf("client sends = %q, want one", sends)
+	}
+}
+
+// A reply to a media message quotes it as that media kind, with its caption and mime type, the way
+// WhatsApp shows a quoted photo or file, instead of as a plain text.
+func TestAReplyToAMediaMessageQuotesItsKindCaptionAndMimeType(t *testing.T) {
+	video := &waE2E.Message{VideoMessage: &waE2E.VideoMessage{Caption: proto.String("the goal"),
+		Mimetype: proto.String("video/mp4"), DirectPath: proto.String("/v/t62.fake/0002"), FileSHA256: sum(mediaBytes)}}
+	audio := &waE2E.Message{AudioMessage: &waE2E.AudioMessage{Mimetype: proto.String("audio/ogg; codecs=opus"),
+		DirectPath: proto.String("/v/t62.fake/0003"), FileSHA256: sum(mediaBytes)}}
+	doc := &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{Caption: proto.String("the menu"),
+		Mimetype: proto.String("application/pdf"), FileName: proto.String("menu.pdf"),
+		DirectPath: proto.String("/v/t62.fake/0004"), FileSHA256: sum(mediaBytes)}}
+	for name, tc := range map[string]struct {
+		msg   *waE2E.Message
+		check func(q *waE2E.Message) bool
+	}{
+		"image": {imageMessage(sum(mediaBytes)), func(q *waE2E.Message) bool {
+			m := q.GetImageMessage()
+			return m.GetCaption() == "the venue" && m.GetMimetype() == "image/jpeg"
+		}},
+		"video": {video, func(q *waE2E.Message) bool {
+			m := q.GetVideoMessage()
+			return m.GetCaption() == "the goal" && m.GetMimetype() == "video/mp4"
+		}},
+		"audio": {audio, func(q *waE2E.Message) bool {
+			return q.GetAudioMessage().GetMimetype() == "audio/ogg; codecs=opus"
+		}},
+		"document": {doc, func(q *waE2E.Message) bool {
+			m := q.GetDocumentMessage()
+			return m.GetCaption() == "the menu" && m.GetMimetype() == "application/pdf" && m.GetFileName() == "menu.pdf"
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s, fake, _ := subscribedSession(t)
+			fake.emit(messageEvent(ada, "MED1", false, t0, tc.msg))
+			if _, err := s.SendReply(ada.String(), "nice", "c-1", "MED1"); err != nil {
+				t.Fatalf("SendReply: %v", err)
+			}
+			ci := fake.sentMessages()[0].GetExtendedTextMessage().GetContextInfo()
+			q := ci.GetQuotedMessage()
+			if ci.GetStanzaID() != "MED1" || !tc.check(q) || q.Conversation != nil {
+				t.Errorf("quoted %v, want the %s with its caption and mime type and no conversation", q, name)
+			}
+		})
+	}
+}
+
+// A media row that keeps neither its reference nor its mime type (not enough to rebuild the kind)
+// is quoted as its text, as before.
+func TestAReplyToAMediaRowWithoutItsDetailsQuotesItsText(t *testing.T) {
+	s, fake, _ := subscribedSession(t)
+	if _, err := store.InsertMessage(s.Store(), store.Message{ID: "MED1", ChatJID: ada.String(), Kind: store.KindImage,
+		Text: "the venue", Timestamp: t0, Sender: ada.String()}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SendReply(ada.String(), "nice", "c-1", "MED1"); err != nil {
+		t.Fatalf("SendReply: %v", err)
+	}
+	q := fake.sentMessages()[0].GetExtendedTextMessage().GetContextInfo().GetQuotedMessage()
+	if q.GetConversation() != "the venue" || q.ImageMessage != nil {
+		t.Errorf("quoted %v, want the conversation \"the venue\"", q)
+	}
+}
+
+// In a chat addressed by LID, a reply to my own message names me by my own LID; elsewhere by my
+// phone-number JID (TestAReplyToMyOwnMessageNamesMeAsTheParticipant).
+func TestAReplyToMyOwnMessageInALIDChatNamesMyLID(t *testing.T) {
+	s, fake, _ := subscribedSession(t)
+	lidChat := types.NewJID("100000000000001", types.HiddenUserServer)
+	fake.emit(textEvent(lidChat, "M1", true, t0, "lunch?"))
+	if _, err := s.SendReply(lidChat.String(), "or dinner", "c-1", "M1"); err != nil {
+		t.Fatalf("SendReply: %v", err)
+	}
+	ci := fake.sentMessages()[0].GetExtendedTextMessage().GetContextInfo()
+	if ci.GetStanzaID() != "M1" || ci.GetParticipant() != fakeOwnLID {
+		t.Errorf("context info = %v, want M1 by my LID %s", ci, fakeOwnLID)
+	}
+}

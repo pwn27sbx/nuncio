@@ -16,6 +16,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
+	"github.com/pwn27sbx/nuncio/internal/media"
 	"github.com/pwn27sbx/nuncio/internal/store"
 )
 
@@ -251,4 +252,43 @@ func TestDownloadMediaCorners(t *testing.T) {
 			t.Errorf("error %q passes whatsmeow's text on", err)
 		}
 	})
+}
+
+// A wipe closes the media cache; a download_media that meets it says so, instead of blaming
+// WhatsApp.
+func TestDownloadMediaDuringAWipeSaysNuncioIsWiping(t *testing.T) {
+	s, fake, dl, dir := mediaSession(t)
+	fake.emit(messageEvent(ada, "IMG1", false, t0, imageMessage(sum(mediaBytes))))
+	media.Close(dir)
+	_, _, err := s.DownloadMedia(ada.String(), "IMG1")
+	if err == nil || err.Error() != "nuncio is wiping its data, so the media was not downloaded" {
+		t.Errorf("DownloadMedia after a wipe = %v; want the wiping message", err)
+	}
+	if !errors.Is(err, ErrMediaWiped) {
+		t.Errorf("DownloadMedia after a wipe = %v; want ErrMediaWiped", err)
+	}
+	if n := dl.calls(); n != 0 {
+		t.Errorf("downloader called %d times, want 0", n)
+	}
+}
+
+// A media cache nuncio cannot write is nuncio's own failure, not WhatsApp's, and is said so;
+// nothing is downloaded.
+func TestDownloadMediaIntoAnUnwritableCacheSaysSo(t *testing.T) {
+	s, fake, _ := startedSession(t)
+	parent := filepath.Join(t.TempDir(), "ro")
+	if err := os.Mkdir(parent, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(parent, 0o700) })
+	dl := &fakeDownloader{plain: mediaBytes}
+	s.SetMedia(filepath.Join(parent, "media"), dl)
+	fake.emit(messageEvent(ada, "IMG1", false, t0, imageMessage(sum(mediaBytes))))
+	_, _, err := s.DownloadMedia(ada.String(), "IMG1")
+	if err == nil || err.Error() != "nuncio could not write its media cache, so the media was not downloaded" {
+		t.Errorf("DownloadMedia = %v; want the media cache message", err)
+	}
+	if n := dl.calls(); n != 0 {
+		t.Errorf("downloader called %d times, want 0", n)
+	}
 }

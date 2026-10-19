@@ -46,7 +46,8 @@ func (s *Session) Send(jid, text, clientID string) (ipc.Sent, error) {
 }
 
 // SendReply is Send quoting the message replyTo of the same chat ("" for none, which is Send). The
-// quoted message must be stored in that chat, otherwise it answers ErrNoQuote and stores nothing.
+// quoted message must be stored in that chat, otherwise it answers ErrNoQuote and stores nothing;
+// a clientID already stored answers that send's state first, as for Send, whatever replyTo names.
 // The outbox keeps replyTo, so a queued reply still quotes when the drain or a retry sends it.
 func (s *Session) SendReply(jid, text, clientID, replyTo string) (ipc.Sent, error) {
 	if s.client == nil || s.State() == StateUnlinked {
@@ -56,6 +57,13 @@ func (s *Session) SendReply(jid, text, clientID, replyTo string) (ipc.Sent, erro
 		return ipc.Sent{}, errNoStore
 	}
 	if replyTo != "" {
+		// A client_id already stored is that send again, answered from its state whatever it quotes.
+		if e, err := store.GetOutbox(s.db, clientID); err == nil {
+			return storedReply(e)
+		} else if !errors.Is(err, store.ErrNoOutboxEntry) {
+			log.Printf("wa: cannot read a send: %v", err)
+			return ipc.Sent{}, errOutbox
+		}
 		if _, err := store.GetMessage(s.db, jid, replyTo); errors.Is(err, store.ErrNoMessage) {
 			return ipc.Sent{}, ErrNoQuote
 		} else if err != nil {
@@ -209,8 +217,8 @@ func (s *Session) attempt(e store.OutboxEntry) (ipc.Sent, error) {
 
 // textMessage is the WhatsApp message of send e: a plain conversation, or for a reply an extended
 // text whose ContextInfo quotes the stored message (its id as StanzaID, its sender as Participant,
-// its text as QuotedMessage), which is what WhatsApp shows as a quote. A quoted message that is
-// gone by now sends the text unquoted rather than not at all.
+// the message itself as QuotedMessage; see quotedOf), which is what WhatsApp shows as a quote. A
+// quoted message that is gone by now sends the text unquoted rather than not at all.
 func (s *Session) textMessage(e store.OutboxEntry) *waE2E.Message {
 	if e.ReplyTo == "" {
 		return &waE2E.Message{Conversation: proto.String(e.Text)}
@@ -220,19 +228,62 @@ func (s *Session) textMessage(e store.OutboxEntry) *waE2E.Message {
 		log.Printf("wa: a reply's quoted message %s cannot be read, so it is sent unquoted: %v", e.ReplyTo, err)
 		return &waE2E.Message{Conversation: proto.String(e.Text)}
 	}
-	ci := &waE2E.ContextInfo{StanzaID: proto.String(q.ID), QuotedMessage: &waE2E.Message{Conversation: proto.String(q.Text)}}
+	ci := &waE2E.ContextInfo{StanzaID: proto.String(q.ID), QuotedMessage: quotedOf(q)}
 	if p := s.senderOf(q); p != "" {
 		ci.Participant = proto.String(p)
 	}
 	return &waE2E.Message{ExtendedTextMessage: &waE2E.ExtendedTextMessage{Text: proto.String(e.Text), ContextInfo: ci}}
 }
 
-// senderOf is who sent stored message m: my own JID for mine, its recorded sender otherwise, and
+// quotedOf is stored message q as a quote carries it: a media message as its own kind (image,
+// video, audio or document) with its caption, mime type and file name, taken from its stored
+// reference when it has one and from the row otherwise, so WhatsApp shows a quoted photo or file;
+// a text, or a media row that keeps neither its reference nor its mime type, as a conversation of
+// its text. The quote carries no media key or path, only what WhatsApp shows of the quoted message.
+func quotedOf(q store.Message) *waE2E.Message {
+	caption, mime, fileName := q.Text, q.Mime, q.FileName
+	if len(q.MediaRef) > 0 {
+		if sub, err := decodeRef(q.Kind, q.MediaRef); err == nil {
+			if v := sub.GetMimetype(); v != "" {
+				mime = v
+			}
+			switch m := sub.(type) {
+			case *waE2E.ImageMessage:
+				caption = m.GetCaption()
+			case *waE2E.VideoMessage:
+				caption = m.GetCaption()
+			case *waE2E.DocumentMessage:
+				caption, fileName = m.GetCaption(), m.GetFileName()
+			}
+		}
+	}
+	if mime == "" {
+		return &waE2E.Message{Conversation: proto.String(q.Text)}
+	}
+	switch q.Kind {
+	case store.KindImage:
+		return &waE2E.Message{ImageMessage: &waE2E.ImageMessage{Caption: proto.String(caption), Mimetype: proto.String(mime)}}
+	case store.KindVideo:
+		return &waE2E.Message{VideoMessage: &waE2E.VideoMessage{Caption: proto.String(caption), Mimetype: proto.String(mime)}}
+	case store.KindAudio:
+		return &waE2E.Message{AudioMessage: &waE2E.AudioMessage{Mimetype: proto.String(mime)}}
+	case store.KindDocument:
+		return &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{Caption: proto.String(caption),
+			Mimetype: proto.String(mime), FileName: proto.String(fileName)}}
+	}
+	return &waE2E.Message{Conversation: proto.String(q.Text)}
+}
+
+// senderOf is who sent stored message m: me for mine (my own LID in a chat addressed by LID, when
+// the device store knows it, my phone-number JID otherwise), its recorded sender otherwise, and
 // for a message stored before senders were recorded the chat itself when it is a direct chat
 // (empty in a group, where it is unknown).
 func (s *Session) senderOf(m store.Message) string {
 	switch {
 	case m.FromMe:
+		if lid := s.client.OwnLID(); lid != "" && strings.HasSuffix(m.ChatJID, "@lid") {
+			return lid
+		}
 		return s.client.OwnJID()
 	case m.Sender != "":
 		return m.Sender

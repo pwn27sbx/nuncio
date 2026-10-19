@@ -36,13 +36,15 @@ Source of record: the office handoff README (2026-10-19, kept outside the repo b
 | T6 | S6 | delegated (opus) | done | see commit (GGA L11); RED: stubbed session (Connect 0 times, constant unlinked, no offline); GREEN 9 tests incl. real binary with temp XDG_DATA_HOME creating no data dir; 7 mutants killed (writer), parent re-ran "connect without a device": killed by TestSessionWithoutDeviceStaysUnlinkedAndNeverConnects; `EnableAutoReconnect = false` (whatsmeow's own silent retry loop) until T10; whatsmeow never sends available presence on connect at this pin; LoggedOut/TemporaryBan/StreamReplaced/ConnectFailure left to T10; GGA round 2 fixed pre-existing M0 issues in `nuncio link`: auto-reconnect off, phone numbers masked to the last 4 digits (`maskPhone`, RED observed), message body no longer printed (length only) |
 | T6a | S6 | delegated (opus) | done | see commit; allow-list `replyable`: direct chats on `s.whatsapp.net` or `lid` only; RED 6/8 cases with a stub returning true; 6 mutants killed, parent re-ran "allow BroadcastServer": killed by status update + broadcast list; the skip-and-keep-waiting loop in `listen` has no test (needs a real client, Risk item 6); approved fix 1: `nuncio link` S1 auto-reply only to direct user chats |
 | T6b | S6 | delegated (opus) | done | see commit; RED 4/4 subtests stayed `linked`; 6 mutants killed, parent re-ran "LoggedOut sets offline": killed by logged_out_reports_unlinked; approved fix 2: LoggedOut → unlinked; TemporaryBan/StreamReplaced/ConnectFailure → offline |
-| T7 | S7 | inline | pending | |
+| T7 | S7 | delegated (opus) | in progress | |
 | T8 | S8 | inline | pending | |
 | T9 | S9 | inline | pending | |
-| T10 | S10 | inline | pending | |
+| T10a | S10 | delegated (opus) | done | see commit; pure policy: base 2 s, ceiling 5 min, stable 1 min, equal jitter in [s/2, s) (full jitter rejected: near-zero delays); RED 5/5 with a constant stub; 6 mutants killed; parent verified on a clean HEAD worktree (T7 had the package mid-edit) |
+| T10 | S10 | delegated | pending | wiring into the Session after T7 (shares `session.go`) |
 | T11 | S11 | inline | pending | |
 | T12 | S12 | inline | pending | |
-| T13 | S13 | inline | pending | |
+| T13a | S13 | delegated (opus) | in progress | pure `internal/media` package |
+| T13 | S13 | delegated | pending | `download_media` frame, store reference and daemon wiring after T7 (shares `wire.go`) |
 | T14 | S14 | inline | pending | |
 
 ## Log
@@ -59,3 +61,4 @@ Source of record: the office handoff README (2026-10-19, kept outside the repo b
 - **L10** GGA findings deferred, not dropped: `nuncio link` connects a second session of the same device when it finds one, even with the daemon running (StreamReplaced between the two processes); it should refuse while `core.sock` answers (candidate: T9/T12). `listen`/`runQRLink` still print to `os.Stdout` instead of the injected writers. `Session.Close` drops the store close error. LoggedOut/StreamReplaced handling belongs to T10.
 - **L11** GGA blocked the T6 commit three times, mostly on code that already existed in M0's `nuncio link`: GGA sends whole staged files (`git show ":$file"`, gga:1298) and its fixed prompt offers only PASSED or FAILED (gga:1315-1326), so old code reads as new. Fix: a `## Review verdict` section in `AGENTS.md` (FAILED only for new or changed lines; pre-existing problems become observations under PASSED). `STRICT_MODE` stays true (it only acts on timeouts, provider errors or ambiguous replies, gga:992-1045). No `--no-verify`. Still awaiting the owner on two pre-existing M0 problems GGA raised: the S1 auto-reply in `nuncio link` answers groups and `status@broadcast`, and the session does not map LoggedOut/TemporaryBan/StreamReplaced/ConnectFailure.
 - **L12** (owner, 2026-10-19, verbatim): "Sebastián aprueba: arregla ahora el 1 (que la respuesta automática de prueba de nuncio link no conteste a grupos, estados ni canales; riesgo de baneo) y el 2 (LoggedOut → unlinked; ban, stream reemplazado o fallo de conexión → offline), cada uno con sus tests. El 3 (segunda sesión de link con un dispositivo ya vinculado) déjalo anotado para T9/T12." Fixes 1 and 2 are T6a and T6b (disjoint surfaces, parallel writers). Item 3 is carried to T9/T12: `nuncio link` must refuse to connect a second session of an already linked device while the daemon answers on `core.sock`.
+- **L13** T7, T10a and T13a run in parallel with disjoint surfaces: T7 owns `internal/wa/{messages,session,events}*`, `cmd/*`, `internal/ipc/*`, `internal/store/messages*`; T10a owns `internal/wa/backoff*.go`; T13a owns `internal/media/*`. The wiring halves of T10 and T13 wait for T7 because they share `session.go` and `wire.go`.

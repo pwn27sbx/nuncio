@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -54,13 +55,32 @@ func shortDir(t *testing.T) string {
 
 func sockPath(runtimeDir string) string { return filepath.Join(runtimeDir, "nuncio", "core.sock") }
 
+// lockedBuffer is the demo's output. os/exec copies the child's output into it from its own
+// goroutine while the test polls String, so every access holds mu.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // startDemo runs the demo with the given environment and arguments; it is killed at cleanup.
-func startDemo(t *testing.T, env []string, args ...string) (*exec.Cmd, *bytes.Buffer) {
+func startDemo(t *testing.T, env []string, args ...string) (*exec.Cmd, *lockedBuffer) {
 	t.Helper()
 	cmd := exec.Command(demoBin, args...)
 	cmd.Env = env
-	var out bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &out
+	out := &lockedBuffer{}
+	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start nuncio-demo: %v", err)
 	}
@@ -68,7 +88,7 @@ func startDemo(t *testing.T, env []string, args ...string) (*exec.Cmd, *bytes.Bu
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	return cmd, &out
+	return cmd, out
 }
 
 // runDemo starts the demo in a fresh runtime dir with no incoming replies and waits for it.

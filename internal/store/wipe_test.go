@@ -1,9 +1,18 @@
 package store
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"errors"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
+
+	"go.mau.fi/whatsmeow"
+
+	"github.com/pwn27sbx/nuncio/internal/media"
 )
 
 // populatedDataDir is a nuncio data dir as a running daemon leaves it: the database with its WAL
@@ -167,4 +176,92 @@ func TestWipeKeepsFilesItDoesNotOwn(t *testing.T) {
 		t.Errorf("%s was deleted: %v", other, err)
 	}
 	assertGone(t, filepath.Join(dir, DBFile))
+}
+
+// wipeMedia stands in for an attachment: only the fields whatsmeow's Download reads.
+type wipeMedia struct{ sum []byte }
+
+func (m wipeMedia) GetDirectPath() string    { return "/v/t62.fake/0000" }
+func (m wipeMedia) GetMediaKey() []byte      { return bytes.Repeat([]byte{7}, 32) }
+func (m wipeMedia) GetFileSHA256() []byte    { return m.sum }
+func (m wipeMedia) GetFileEncSHA256() []byte { return bytes.Repeat([]byte{9}, 32) }
+
+var wipePlain = []byte("fake decrypted attachment bytes")
+
+func wipeRequest(id string) media.Request {
+	sum := sha256.Sum256(wipePlain)
+	return media.Request{ChatJID: "10000000001@s.whatsapp.net", MessageID: id, Ext: "jpg",
+		Media: wipeMedia{sum: sum[:]}}
+}
+
+// gatedDownloader returns the known bytes; when gate is set it first reports the call on started
+// and blocks until gate is closed.
+type gatedDownloader struct {
+	started chan struct{}
+	gate    chan struct{}
+	calls   atomic.Int32
+}
+
+func (g *gatedDownloader) Download(_ context.Context, _ whatsmeow.DownloadableMessage) ([]byte, error) {
+	g.calls.Add(1)
+	if g.gate != nil {
+		close(g.started)
+		<-g.gate
+	}
+	return wipePlain, nil
+}
+
+func TestADownloadStillCachesIntoALiveDataDir(t *testing.T) {
+	dir := populatedDataDir(t)
+	cache := media.New(filepath.Join(dir, MediaDir), &gatedDownloader{})
+	path, err := cache.Fetch(context.Background(), wipeRequest("3EB0FAKE01"))
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, wipePlain) {
+		t.Fatalf("cached file = %q, %v; want the downloaded bytes", got, err)
+	}
+	if filepath.Dir(path) != filepath.Join(dir, MediaDir) {
+		t.Errorf("cached at %s, want inside %s", path, filepath.Join(dir, MediaDir))
+	}
+}
+
+func TestADownloadAfterAWipeRecreatesNothing(t *testing.T) {
+	dir := populatedDataDir(t)
+	dl := &gatedDownloader{}
+	cache := media.New(filepath.Join(dir, MediaDir), dl)
+	if err := Wipe(dir, newFakeKeyring()); err != nil {
+		t.Fatalf("Wipe: %v", err)
+	}
+	if path, err := cache.Fetch(context.Background(), wipeRequest("3EB0FAKE02")); err == nil {
+		t.Errorf("Fetch after Wipe = %s, nil; want an error", path)
+	} else if !errors.Is(err, media.ErrClosed) {
+		t.Errorf("Fetch after Wipe = %v; want media.ErrClosed", err)
+	}
+	if n := dl.calls.Load(); n != 0 {
+		t.Errorf("Fetch after Wipe downloaded %d times, want 0", n)
+	}
+	assertGone(t, dir)
+}
+
+func TestADownloadRacingAWipeLeavesNothingBehind(t *testing.T) {
+	dir := populatedDataDir(t)
+	dl := &gatedDownloader{started: make(chan struct{}), gate: make(chan struct{})}
+	cache := media.New(filepath.Join(dir, MediaDir), dl)
+	done := make(chan error, 1)
+	go func() {
+		_, err := cache.Fetch(context.Background(), wipeRequest("3EB0FAKE03"))
+		done <- err
+	}()
+	<-dl.started // the download is in flight
+	if err := Wipe(dir, newFakeKeyring()); err != nil {
+		t.Fatalf("Wipe: %v", err)
+	}
+	close(dl.gate) // the bytes arrive only after the wipe has run
+	if err := <-done; err == nil {
+		t.Error("Fetch racing a Wipe = nil; want an error")
+	} else if !errors.Is(err, media.ErrClosed) {
+		t.Errorf("Fetch racing a Wipe = %v; want media.ErrClosed", err)
+	}
+	assertGone(t, dir)
 }

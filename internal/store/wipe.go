@@ -6,6 +6,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/pwn27sbx/nuncio/internal/media"
 )
 
 // What nuncio keeps in its data directory ($XDG_DATA_HOME/nuncio).
@@ -25,7 +27,8 @@ var owned = []string{DBFile, DBFile + "-wal", DBFile + "-shm", MediaDir, Exports
 // Wipe deletes everything nuncio keeps on this machine for the device, in this order: the device
 // keys in kr (service KeyringService), then the database with its WAL and SHM files, the media
 // cache and the exports in dataDir, and finally dataDir itself when nothing else is left in it.
-// Close the database before calling it.
+// Close the database before calling it. It first closes the media cache (media.Close): a
+// download still running in this process then fails with media.ErrClosed and creates nothing.
 //
 // It is idempotent: what is already gone is not an error. It never follows a symlink: a symlink
 // inside dataDir is removed as a link, and a dataDir that is itself a symlink is refused before
@@ -42,6 +45,10 @@ func Wipe(dataDir string, kr Keyring) error {
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("store: %w", err)
 	}
+
+	// From here no download in this process writes into the media cache, so none can recreate
+	// it, or dataDir, once it is deleted.
+	media.Close(filepath.Join(dataDir, MediaDir))
 
 	var errs []error
 	for _, name := range keyItems {

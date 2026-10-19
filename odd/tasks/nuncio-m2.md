@@ -13,6 +13,7 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 - S6 Time box (owner, verbatim): "con el limite de tiempo de las 5 pm asi que 5 pm ya no debe haber nada aqui trabajandose y todo debe estar pusheado".
 - S7 (owner, 2026-10-19: "no podemos probar el TUI aqui?" → demo daemon proposal → "dale"): a demo daemon with invented chats, no WhatsApp, that answers sends, reactions, search and downloads, so the whole TUI flow can be tried by hand on the Mac.
 - S8 (owner, 2026-10-19, verbatim): "B porque es un cliente de whatsapp si leo el mensaje en un dispositivo o lugar se lee en todos tal cual funcioan whatsapp ahora". Opening a chat in a UI marks its messages read in nuncio AND on WhatsApp (read receipts, blue ticks), like the official clients; the user's read-receipt privacy setting is respected.
+- S9 (owner "dale" to the follow-up list, 2026-10-19): (1) add M2 to the office report; (2) fix the nuncio-demo data race; (3) cap how many message ids one read receipt carries (ban risk); (4) log failed reconnect attempts; (5) a download_media racing a wipe must not recreate an empty data dir; (6) `event_chat` so UIs learn pin/archive/mute changes from app-state sync; (7) a dedicated `not_confirmed` wire error code; (8) the T2 test's leftover temp dir. Assumption for (3): at most 50 ids per receipt, sent as consecutive receipts with no extra retries.
 
 ## Tasks
 
@@ -25,6 +26,10 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 | U6 | S2, S5 (manual-test bugs: local time, preview cut, ZWJ frame drift, react/reply on not-sent) | delegated writer | done: RED per fix, 5 mutants killed; ZWJ/FE0F/skin tones stripped at render (trade-off in README); `time` (already locked) for the local offset; parent reran `cargo test -p nuncio-tui` | d5e5dda |
 | U7 | S8 daemon + wire (`mark_read`) | delegated writer; Risk items 1 and 3 → verifier | done: 14 mutants killed; verifier PASS S4/S5/S8, no blockers; parent reran the MarkRead tests | 5a53d30 |
 | U8 | S8 TUI + demo (send `mark_read` on open) | delegated writer, after U6 and U7 (started 15:58, before the 16:30 cut) | done: RED per rule, 8 mutants killed, cargo 92/0; final checks in L12 | this commit |
+| U9 | S9 (3), (4) | delegated writer (parallel) | done: RED per rule, 7 mutants killed; parent reran the MarkRead/Reconnect tests | 4fe21e2 |
+| U10 | S9 (6), (7), (8) + TUI handling of event_chat | delegated writer (parallel) | open | |
+| U11 | S9 (2), (5) | delegated writer (parallel); Risk 1 and 4 → verifier | done: RED per rule, 4 mutants killed; verifier PASS, no blockers (1500 race iterations, daemon exits after a wipe so the closed set never blocks a re-link); parent reran the store download tests with -race | this commit |
+| U12 | S9 (1) | after U9-U11 | open | |
 | U4 | S6 push + report | inline | done: final checks green (L8), pushed to origin/feat/m2-tui | this commit |
 
 ## Log
@@ -43,3 +48,5 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 - L10 Manual test in Ghostty (owner screenshots): times in UTC; preview cut the time; ZWJ emoji left stray cells (TestBackend trusts unicode-width, Ghostty draws ZWJ sequences at another width); a not-sent message could be reacted to → U6. Opening a chat did not clear unread → owner chose B (S8) → U7, U8.
 - L11 U7 verifier: PASS, no blockers. Uses TryFetchPrivacySettings first because whatsmeow's GetPrivacySettings returns an empty setting on a failed fetch (would send blue ticks with receipts off). Advisories for later: a later sender's receipt failing leaves earlier receipts sent but the chat unread (next view resends them); two UIs marking at once can send duplicate receipts; no cap on ids per receipt (ban-risk review at home); `cmd/nuncio-demo` has a data race under `-race` in TestPrintsHowToRunTheTUIAndRemovesItsSocketOnSIGTERM (from U5, reproduces at d5e5dda).
 - L12 Final checks on ce876dd (16:04): gofmt empty, go vet ok, CGO_ENABLED=0 build ok, `TMPDIR=/tmp go test -count=1 ./...` all 7 packages ok, cargo fmt ok, clippy clean, cargo test 92 passed / 0 failed, attribution grep empty, pushed. Next at home: the terminal matrix (foot/alacritty/ghostty) incl. the ZWJ normalisation, inline images (L6), a real-account check of mark_read blue ticks and read-self (owner at the phone), the advisories in L4 and L11, the nuncio-demo race.
+- L13 (owner, 2026-10-19): "olvidemos eso de las 4:30 y 5:00 en general las horas restrictivas olvidemoslas, que mas podemos hacer aqui?". No time cut any more (supersedes S6, L2, L2b, L2c).
+- L14 U11 verifier advisories: a cache dir that cannot be written now fails after the download (text changed, nobody consumes it); a cache hit no longer re-applies 0700; an in-flight ErrClosed reaches the client as "WhatsApp did not deliver the media" (daemon exits right after).

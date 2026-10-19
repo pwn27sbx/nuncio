@@ -1350,6 +1350,7 @@ dependencies = [
  "nuncio-client",
  "ratatui",
  "ratatui-image",
+ "serde_json",
 ]
 
 [[package]]

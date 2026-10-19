@@ -1,8 +1,9 @@
 // Command nuncio-demo is a demo daemon for trying the TUI by hand. It serves wire v1
 // (proto/wire.md) on $XDG_RUNTIME_DIR/nuncio/core.sock with invented chats held in memory, and has
 // no WhatsApp code path at all: no network, no database, no keyring. Sends are answered at once (a
-// text starting with "fail" ends not sent, and retry then sends it), reactions, search and media
-// downloads work, and a short while after each send an invented reply arrives in that chat.
+// text starting with "fail" ends not sent, and retry then sends it; until then it cannot be replied
+// or reacted to), reactions, search and media downloads work, and a short while after each send an
+// invented reply arrives in that chat.
 //
 //	XDG_RUNTIME_DIR=/tmp/nuncio-demo go run ./cmd/nuncio-demo [-reply-after 2s]
 //
@@ -251,8 +252,14 @@ func (d *demo) SendReply(jid, text, clientID, replyTo string) (ipc.Sent, error) 
 	if c == nil {
 		return ipc.Sent{}, errors.New("the demo has no such chat")
 	}
-	if replyTo != "" && c.message(replyTo) == nil {
-		return ipc.Sent{}, errors.New("no message with that id in that chat")
+	if replyTo != "" {
+		quoted := c.message(replyTo)
+		if quoted == nil {
+			return ipc.Sent{}, errors.New("no message with that id in that chat")
+		}
+		if quoted.State != "" {
+			return ipc.Sent{}, errNotSent("replied to")
+		}
 	}
 	s := &send{jid: jid, id: d.newID("DEMOS"), failed: strings.HasPrefix(strings.ToLower(strings.TrimSpace(text)), "fail")}
 	d.sends[clientID] = s
@@ -314,6 +321,12 @@ func (d *demo) replyLater(jid string) {
 	})
 }
 
+// errNotSent refuses a reply or reaction aimed at a send of mine that WhatsApp never got (queued
+// or not sent): like nunciod, there is no WhatsApp message to point at.
+func errNotSent(what string) error {
+	return fmt.Errorf("that message was not sent, so it cannot be %s", what)
+}
+
 // React sets (or with an empty emoji removes) my reaction, mine first.
 func (d *demo) React(jid, id, emoji string) error {
 	d.mu.Lock()
@@ -325,6 +338,9 @@ func (d *demo) React(jid, id, emoji string) error {
 	}
 	if m == nil {
 		return errors.New("no message with that id in that chat")
+	}
+	if m.State != "" {
+		return errNotSent("reacted to")
 	}
 	others := []ipc.Reaction{}
 	for _, r := range m.Reactions {

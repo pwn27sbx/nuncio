@@ -503,3 +503,34 @@ func TestAnIncomingReplyFollowsASend(t *testing.T) {
 		t.Errorf("event_unread = %v", ev)
 	}
 }
+
+func TestReactAndReplyRefuseAMessageThatWasNotSent(t *testing.T) {
+	sock, _ := runDemo(t)
+	c := dial(t, sock)
+	if _, err := c.Send(ana, "fail this one", "c-f"); err == nil {
+		t.Fatal("a text starting with fail was sent; want send_failed")
+	}
+	msgs, _ := c.Messages(ana, 1)
+	id := msgs.Messages[0].ID
+	r := dialRaw(t, sock)
+	r.send(t, map[string]any{"v": 1, "op": "react", "jid": ana, "id": id, "emoji": "👍"})
+	if got := r.next(t); got["op"] != "error" || got["message"] != "that message was not sent, so it cannot be reacted to" {
+		t.Errorf("react on my not-sent message answered %v; want the not-sent error", got)
+	}
+	r.send(t, map[string]any{"v": 1, "op": "send", "jid": ana, "text": "yes", "client_id": "c-q", "reply_to": id})
+	if got := r.next(t); got["op"] != "send_failed" || got["message"] != "that message was not sent, so it cannot be replied to" {
+		t.Errorf("reply to my not-sent message answered %v; want the not-sent send_failed", got)
+	}
+	msgs, _ = c.Messages(ana, 1)
+	if msgs.Messages[0].ID != id || len(msgs.Messages[0].Reactions) != 0 {
+		t.Errorf("newest message = %+v; want my not-sent send, unchanged", msgs.Messages[0])
+	}
+	// Once retry sends it, it can be reacted to.
+	if _, err := c.Retry("c-f"); err != nil {
+		t.Fatal(err)
+	}
+	r.send(t, map[string]any{"v": 1, "op": "react", "jid": ana, "id": id, "emoji": "👍"})
+	if got := r.next(t); got["op"] != "reacted" {
+		t.Errorf("react after the retry answered %v; want reacted", got)
+	}
+}

@@ -40,6 +40,9 @@ usage: nuncio-tui [--image <png>]
 ";
 
 fn main() -> ExitCode {
+    // Read before any thread starts: on Unix `time` only reads the local offset while the
+    // process is single-threaded (the theme watcher and the opener start threads).
+    let local_offset = time::UtcOffset::current_local_offset();
     let args = match Args::parse(std::env::args().skip(1)) {
         Ok(Some(args)) => args,
         Ok(None) => {
@@ -82,7 +85,12 @@ fn main() -> ExitCode {
         Some(path) => image_for(path),
         None => (None, None),
     };
-    let mut app = App::new(snapshot, source, palette).with_client_prefix(client_prefix());
+    let mut app = App::new(snapshot, source, palette)
+        .with_client_prefix(client_prefix())
+        .with_utc_offset(local_offset.unwrap_or(time::UtcOffset::UTC));
+    if local_offset.is_err() {
+        app.set_notice("the local time zone is unknown; times are UTC");
+    }
     if let Some(image) = image {
         app = app.with_image(image);
     }

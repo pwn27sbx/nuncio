@@ -83,7 +83,7 @@ pub const KEYS: &[(&str, &str)] = &[
     ("i", "write a message to the selected chat"),
     ("Enter", "in the composer: send"),
     ("K/J", "conversation: select an older / newer message"),
-    ("r", "reply to the selected message (quotes it)"),
+    ("r", "reply to the selected sent or received message"),
     (
         "e",
         "react to it: 1-6 pick an emoji, x remove mine, Esc cancel",
@@ -147,6 +147,7 @@ pub struct App {
     search: Option<Search>,
     /// Ids of media messages whose download was asked for with `o` and not answered yet.
     downloading: HashSet<String>,
+    utc_offset: time::UtcOffset,
 }
 
 /// The in-chat search overlay.
@@ -187,6 +188,7 @@ impl App {
             picking: false,
             search: None,
             downloading: HashSet::new(),
+            utc_offset: time::UtcOffset::UTC,
         };
         let chats = std::mem::take(&mut app.snapshot.chats);
         app.set_chats(chats);
@@ -203,6 +205,14 @@ impl App {
     /// It must differ between runs, so a new send never repeats an old `client_id`.
     pub fn with_client_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.client_prefix = prefix.into();
+        self
+    }
+
+    /// Show message times at this offset from UTC: `main` passes the local one, read once at
+    /// startup (so a message from the other side of a daylight-saving change is an hour off
+    /// until the next start). Without it, times are UTC.
+    pub fn with_utc_offset(mut self, offset: time::UtcOffset) -> Self {
+        self.utc_offset = offset;
         self
     }
 
@@ -315,11 +325,17 @@ impl App {
         self.loaded().get(self.cursor?)
     }
 
-    /// The selected message's id, when it has one (a send not answered yet has none).
-    fn selected_id(&self) -> Option<String> {
-        self.selected_message()
-            .map(|m| m.id.clone())
-            .filter(|id| !id.is_empty())
+    /// The selected message's id, when WhatsApp has that message (received, or a send of mine
+    /// that was sent), so it can be replied or reacted to. A send that is still sending, queued
+    /// or not sent has no WhatsApp message to point at: the footer says so (`what` is the verb,
+    /// e.g. "reacted to") and `None` is returned. No message selected is just `None`.
+    fn target_id(&mut self, what: &str) -> Option<String> {
+        let message = self.selected_message()?;
+        if message.id.is_empty() || message.state.is_some() || self.is_sending(message) {
+            self.notice = Some(format!("that message was not sent, so it cannot be {what}"));
+            return None;
+        }
+        Some(message.id.clone())
     }
 
     /// `K`: select the newest message, then one older each time.
@@ -374,7 +390,7 @@ impl App {
             _ => return None,
         };
         self.picking = false;
-        let id = self.selected_id()?;
+        let id = self.target_id("reacted to")?;
         let jid = self.selected_jid()?.to_owned();
         Some(Action::Request(ClientFrame::react(jid, id, emoji)))
     }
@@ -471,12 +487,14 @@ impl App {
             (Pane::Messages, KeyCode::Char('K')) => self.select_older(),
             (Pane::Messages, KeyCode::Char('J')) => self.select_newer(),
             (Pane::Messages, KeyCode::Char('r')) => {
-                if let Some(id) = self.selected_id() {
+                if let Some(id) = self.target_id("replied to") {
                     self.reply_to = Some(id);
                     self.pane = Pane::Compose;
                 }
             }
-            (Pane::Messages, KeyCode::Char('e')) => self.picking = self.selected_id().is_some(),
+            (Pane::Messages, KeyCode::Char('e')) => {
+                self.picking = self.target_id("reacted to").is_some();
+            }
             (Pane::Messages, KeyCode::Char('R')) => return self.retry_selected(),
             (Pane::Messages, KeyCode::Char('o')) => return self.download_selected(),
             (Pane::Messages, KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left) => {
@@ -787,7 +805,7 @@ impl App {
                 format!(" {} ", n + 1),
                 Style::default().fg(rgb(self.palette.accent)),
             ));
-            spans.push(Span::raw(*emoji));
+            spans.push(Span::raw(plain(emoji)));
         }
         spans.push(Span::styled("  x remove mine", self.muted()));
         let area = popup(area, 48, 4);
@@ -819,7 +837,7 @@ impl App {
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
         let cursor = if search.editing { "▏" } else { "" };
         frame.render_widget(
-            Paragraph::new(format!("Search: {}{cursor}", search.query))
+            Paragraph::new(format!("Search: {}{cursor}", plain(&search.query)))
                 .style(Style::default().fg(rgb(palette.foreground))),
             prompt,
         );
@@ -831,7 +849,10 @@ impl App {
             }
             (Some(found), false) => found
                 .iter()
-                .map(|m| ListItem::new(format!("{} {}", sent_by(chat.as_ref(), m), snippet(m))))
+                .map(|m| {
+                    let by = sent_by(chat.as_ref(), m, self.utc_offset);
+                    ListItem::new(format!("{by} {}", snippet(m)))
+                })
                 .collect(),
         };
         let list = List::new(items)
@@ -924,10 +945,12 @@ impl App {
 
     fn draw_chats(&mut self, frame: &mut Frame, area: Rect) {
         let block = bordered(&self.palette).title(format!(" Chats ({}) ", self.chats().len()));
+        // Inside the border, less the highlight symbol's column (reserved on every row).
+        let width = usize::from(area.width.saturating_sub(4));
         let items: Vec<ListItem> = self
             .chats()
             .iter()
-            .map(|chat| chat_item(chat, &self.palette))
+            .map(|chat| chat_item(chat, &self.palette, width, self.utc_offset))
             .collect();
         let list = List::new(items)
             .block(block)
@@ -1002,7 +1025,7 @@ impl App {
             Line::from(vec![
                 Span::styled("› ", Style::default().fg(rgb(self.palette.accent))),
                 Span::styled(
-                    self.composer.as_str(),
+                    plain(&self.composer),
                     Style::default().fg(rgb(self.palette.foreground)),
                 ),
             ])
@@ -1076,9 +1099,9 @@ impl App {
             let chosen = loaded.is_some() && self.cursor == Some(index);
             let mut header = if chosen {
                 selected = Some(lines.len());
-                format!("› {}", sent_by(Some(chat), message))
+                format!("› {}", sent_by(Some(chat), message, self.utc_offset))
             } else {
-                sent_by(Some(chat), message)
+                sent_by(Some(chat), message, self.utc_offset)
             };
             if self.is_sending(message) {
                 header.push_str(" · sending");
@@ -1108,7 +1131,7 @@ impl App {
             };
             lines.extend(
                 text.lines()
-                    .map(|line| Line::from(Span::styled(line.to_owned(), body))),
+                    .map(|line| Line::from(Span::styled(plain(line), body))),
             );
             if !message.reactions.is_empty() {
                 let mut spans = vec![Span::raw("  ")];
@@ -1118,7 +1141,7 @@ impl App {
                     } else {
                         body
                     };
-                    spans.push(Span::styled(format!("{} ", reaction.emoji), style));
+                    spans.push(Span::styled(format!("{} ", plain(&reaction.emoji)), style));
                 }
                 lines.push(Line::from(spans));
             }
@@ -1147,13 +1170,67 @@ fn popup(area: Rect, width: u16, height: u16) -> Rect {
 
 /// A message as one short line: its first line (or its kind, for media with no caption).
 fn snippet(message: &Message) -> String {
-    let text = message.text.lines().next().unwrap_or_default();
-    let text = if text.is_empty() { &message.kind } else { text };
+    let text = plain(message.text.lines().next().unwrap_or_default());
+    let text = if text.is_empty() {
+        &message.kind
+    } else {
+        &text
+    };
     if text.chars().count() > SNIPPET {
         text.chars().take(SNIPPET).collect::<String>() + "…"
     } else {
         text.to_owned()
     }
+}
+
+/// `text` cut to at most `width` terminal columns, ending in `…` when it was cut.
+fn fit(text: &str, width: usize) -> String {
+    if display_width(text) <= width {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = char_width(c);
+        if used + w + 1 > width {
+            break;
+        }
+        used += w;
+        out.push(c);
+    }
+    if width > 0 {
+        out.push('…');
+    }
+    out
+}
+
+/// Columns `text` takes, as ratatui lays it out (unicode-width).
+fn display_width(text: &str) -> usize {
+    Span::raw(text).width()
+}
+
+fn char_width(c: char) -> usize {
+    display_width(c.encode_utf8(&mut [0; 4]))
+}
+
+/// Text as it is drawn: emoji sequences are taken apart into their plain code points.
+///
+/// ratatui gives a whole grapheme cluster one width (`👨‍👩‍👧‍👦` and `🏳️‍🌈` are 2 columns,
+/// `❤️` with its U+FE0F is 2, `👋🏽` is 2), but terminals disagree: a terminal without grapheme
+/// clustering draws each code point at its own width (`👨‍👩‍👧‍👦` as 8 columns, `❤️` as 1), and
+/// even Ghostty, which clusters, drew `🏳️‍🌈` and the family at a width ratatui did not expect.
+/// The cursor then drifts, cells ratatui believes it cleared keep old characters (a stray `!`,
+/// a stray block). Dropping the joiners (U+200D), the emoji presentation selector (U+FE0F) and
+/// the skin-tone modifiers (U+1F3FB..U+1F3FF) leaves only code points whose width every
+/// terminal agrees on, so the frame stays intact everywhere. The trade-off: a ZWJ sequence
+/// shows as its parts (the family as four people, the rainbow flag as `🏳🌈`), `❤️` may be
+/// drawn in its text style, skin tones are lost, and a ZWJ inside a non-emoji script (some
+/// Indic conjuncts) is dropped too. Only the display changes: sends and reactions keep the
+/// original text.
+fn plain(text: &str) -> String {
+    text.chars()
+        .filter(|c| !matches!(c, '\u{200d}' | '\u{fe0f}' | '\u{1f3fb}'..='\u{1f3ff}'))
+        .collect()
 }
 
 /// A bordered pane in the theme's accent colour.
@@ -1175,13 +1252,13 @@ fn chat_title(chat: &Chat) -> String {
             .unwrap_or(chat.jid.as_str())
             .to_owned()
     } else {
-        chat.name.clone()
+        plain(&chat.name)
     }
 }
 
 /// Who sent the message (us, or the chat) and when; a send of ours that is not sent yet says
 /// so, so a failure stays visible.
-fn sent_by(chat: Option<&Chat>, message: &Message) -> String {
+fn sent_by(chat: Option<&Chat>, message: &Message, offset: time::UtcOffset) -> String {
     let who = match (message.from_me, chat) {
         (true, _) => "you".to_owned(),
         (false, Some(chat)) => chat_title(chat),
@@ -1192,10 +1269,30 @@ fn sent_by(chat: Option<&Chat>, message: &Message) -> String {
         Some(MessageState::NotSent) => " · not sent",
         Some(MessageState::Unknown) | None => "",
     };
-    format!("{who} · {}{state}", message.time_hhmm().unwrap_or("--:--"))
+    format!("{who} · {}{state}", local_hhmm(message, offset))
 }
 
-fn chat_item(chat: &Chat, palette: &Palette) -> ListItem<'static> {
+/// The message's time as `HH:MM` at `offset` from UTC (the wire's timestamps are UTC), or
+/// `--:--` when it has none.
+fn local_hhmm(message: &Message, offset: time::UtcOffset) -> String {
+    let Some(utc) = message.time_hhmm() else {
+        return "--:--".to_owned();
+    };
+    let (Ok(hours), Ok(minutes)) = (utc[..2].parse::<i32>(), utc[3..].parse::<i32>()) else {
+        return "--:--".to_owned();
+    };
+    let local = (hours * 60 + minutes + i32::from(offset.whole_minutes())).rem_euclid(24 * 60);
+    format!("{:02}:{:02}", local / 60, local % 60)
+}
+
+/// A chat in the list: its markers, name and unread badge, then its last message cut to `width`
+/// columns with `…` so the ` · HH:MM` after it is always whole.
+fn chat_item(
+    chat: &Chat,
+    palette: &Palette,
+    width: usize,
+    offset: time::UtcOffset,
+) -> ListItem<'static> {
     let markers = Span::styled(
         format!(
             "{}{}{} ",
@@ -1226,14 +1323,14 @@ fn chat_item(chat: &Chat, palette: &Palette) -> ListItem<'static> {
     }
 
     // A message with no text (a non-text kind) shows its kind instead of an empty row.
-    let snippet = match chat.last_message.as_ref() {
-        Some(message) if message.text.is_empty() => message.kind.clone(),
-        Some(message) => message.text.clone(),
-        None => "(no messages)".to_owned(),
-    };
     let detail = match chat.last_message.as_ref() {
-        Some(message) => format!("{snippet} · {}", message.time_hhmm().unwrap_or("--:--")),
-        None => snippet,
+        Some(message) => {
+            let text = message.text.lines().next().unwrap_or_default();
+            let text = plain(if text.is_empty() { &message.kind } else { text });
+            let time = format!(" · {}", local_hhmm(message, offset));
+            fit(&text, width.saturating_sub(display_width(&time))) + &time
+        }
+        None => "(no messages)".to_owned(),
     };
 
     ListItem::new(vec![
@@ -1251,6 +1348,9 @@ fn chat_item(chat: &Chat, palette: &Palette) -> ListItem<'static> {
 mod tests {
     use super::chat_title;
     use nuncio_client::{Chat, Message};
+    use time::UtcOffset;
+
+    const UTC: UtcOffset = UtcOffset::UTC;
 
     fn chat(name: &str, jid: &str) -> Chat {
         Chat {
@@ -1277,7 +1377,7 @@ mod tests {
     }
 
     #[test]
-    fn message_times_are_shown_as_utc_hh_mm() {
+    fn message_times_are_shown_as_utc_hh_mm_with_no_offset() {
         let message = Message {
             id: "3EB0AAA1".to_owned(),
             kind: "text".to_owned(),
@@ -1291,7 +1391,7 @@ mod tests {
             reactions: Vec::new(),
         };
         assert_eq!(
-            super::sent_by(Some(&chat("Ada", "a@b")), &message),
+            super::sent_by(Some(&chat("Ada", "a@b")), &message, UTC),
             "Ada · 17:55"
         );
     }
@@ -1310,10 +1410,13 @@ mod tests {
             reply_to: None,
             reactions: Vec::new(),
         };
-        assert_eq!(super::sent_by(None, &message), "you · 17:56 · not sent");
+        assert_eq!(
+            super::sent_by(None, &message, UTC),
+            "you · 17:56 · not sent"
+        );
         message.state = Some(nuncio_client::wire::MessageState::Queued);
-        assert_eq!(super::sent_by(None, &message), "you · 17:56 · queued");
+        assert_eq!(super::sent_by(None, &message, UTC), "you · 17:56 · queued");
         message.state = None;
-        assert_eq!(super::sent_by(None, &message), "you · 17:56");
+        assert_eq!(super::sent_by(None, &message, UTC), "you · 17:56");
     }
 }

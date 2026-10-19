@@ -261,8 +261,9 @@ fn emoji_zwj_cjk_and_rtl_text_keep_the_frame_intact() {
         if width >= 80 {
             let text = screen.text();
             assert!(text.contains("Family"), "{text}");
-            assert!(text.contains("👋🏽"), "{text}");
-            assert!(text.contains("> 👨‍👩‍👧‍👦"), "the quote of A1:\n{text}");
+            // Drawn without their joiners and skin tones (see `plain` in lib.rs).
+            assert!(text.contains("👋"), "{text}");
+            assert!(text.contains("> 👨"), "the quote of A1:\n{text}");
             assert!(text.contains('❤'), "the reaction:\n{text}");
         }
     }
@@ -1108,4 +1109,210 @@ fn a_refused_search_ends_searching_shows_the_error_and_stays_open_for_editing() 
     drop(daemon);
     server.join().expect("fake daemon");
     let _ = std::fs::remove_file(&path);
+}
+
+// --- Fixes from the first run against nuncio-demo in a real terminal ----------------------
+
+fn at(id: &str, text: &str, from_me: bool, timestamp: &str) -> Message {
+    let mut m = message(id, text, from_me, 0);
+    m.timestamp = timestamp.to_owned();
+    m
+}
+
+#[test]
+fn message_times_are_shown_in_the_local_time_zone() {
+    let offset = time::UtcOffset::from_hms(-5, 0, 0).expect("a valid offset");
+    let mut ada = chat(ADA, "Ada Lovelace", 0);
+    ada.last_message = Some(at("A2", "late", true, "2026-10-20T03:10:00Z"));
+    let mut app = app_with(vec![ada, chat(GRACE, "Grace Hopper", 0)]).with_utc_offset(offset);
+    let screen = render(&mut app, 80, 24);
+    assert!(screen.chats().contains("late · 22:10"), "{}", screen.text());
+    open_first(
+        &mut app,
+        ADA,
+        vec![
+            at("A1", "Are we still on?", false, "2026-10-19T20:36:00Z"),
+            at("A2", "late", true, "2026-10-20T03:10:00Z"),
+        ],
+    );
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(screen.contains("Ada Lovelace · 15:36"), "{screen}");
+    assert!(screen.contains("you · 22:10"), "{screen}");
+    // With no offset given, times stay UTC (what every other test renders).
+    let mut utc = two_chats();
+    open_first(
+        &mut utc,
+        ADA,
+        vec![at("A1", "Are we still on?", false, "2026-10-19T20:36:00Z")],
+    );
+    let screen = render(&mut utc, 80, 24).conversation();
+    assert!(screen.contains("Ada Lovelace · 20:36"), "{screen}");
+}
+
+#[test]
+fn a_long_preview_is_cut_with_an_ellipsis_and_its_time_stays_whole() {
+    for (width, height) in [(80u16, 24u16), (240, 60)] {
+        let mut ascii = chat(ADA, "", 0);
+        ascii.last_message = Some(message(
+            "A1",
+            &"Is this the right number for the demo? ".repeat(6),
+            false,
+            36,
+        ));
+        let mut wide = chat(GRACE, "Grace Hopper", 0);
+        wide.last_message = Some(message("G1", &"漢字".repeat(80), false, 37));
+        let mut short = chat(FAMILY, "Family", 0);
+        short.last_message = Some(message("F1", "See you", false, 38));
+        let mut app = app_with(vec![ascii, wide, short]);
+        let screen = render(&mut app, width, height);
+        let chats = screen.chats();
+        for (start, end) in [("Is this", "… · 17:36"), ("漢", "… · 17:37")] {
+            let row = chats
+                .lines()
+                .find(|l| l.contains(start))
+                .unwrap_or_else(|| panic!("no {start:?} row at {width}x{height}:\n{chats}"));
+            assert!(
+                row.trim_end_matches([' ', '│']).ends_with(end),
+                "{start:?} at {width}x{height}: {row:?}"
+            );
+        }
+        assert!(chats.contains("See you · 17:38"), "{chats}");
+        assert!(!chats.contains("See you…"), "{chats}");
+    }
+}
+
+#[test]
+fn emoji_sequences_render_as_cells_every_terminal_draws_at_the_same_width() {
+    let family = "👨‍👩‍👧‍👦";
+    let flag = "🏳️‍🌈";
+    let mut named = chat(ADA, &format!("{family} Family"), 0);
+    named.last_message = Some(message("A3", "Hi 👋🏽", false, 3));
+    let mut preview = chat(GRACE, "Grace", 0);
+    preview.last_message = Some(message("G1", &format!("Bring the {flag} flag!"), false, 4));
+    let mut app = app_with(vec![named, preview]);
+    let mut quoting = message("A3", "Hi 👋🏽", false, 3);
+    quoting.reply_to = Some("A1".to_owned());
+    quoting.reactions = vec![
+        nuncio_client::Reaction {
+            emoji: "❤️".to_owned(),
+            from_me: true,
+        },
+        nuncio_client::Reaction {
+            emoji: family.to_owned(),
+            from_me: false,
+        },
+    ];
+    open_first(
+        &mut app,
+        ADA,
+        vec![
+            message("A1", &format!("Bring the {flag} flag!"), false, 1),
+            message(
+                "A2",
+                &format!("the whole family is coming {family}"),
+                true,
+                2,
+            ),
+            quoting,
+        ],
+    );
+    let joiners = [
+        '\u{200d}',
+        '\u{fe0f}',
+        '\u{1f3fb}',
+        '\u{1f3fc}',
+        '\u{1f3fd}',
+        '\u{1f3fe}',
+        '\u{1f3ff}',
+    ];
+    for (width, height) in [(80u16, 24u16), (240, 60)] {
+        let screen = render(&mut app, width, height);
+        for (y, row) in screen.rows.iter().enumerate() {
+            for (x, cell) in row.iter().enumerate() {
+                assert!(
+                    !cell.contains(joiners),
+                    "cell ({x},{y}) {cell:?} keeps a joiner at {width}x{height}:\n{}",
+                    screen.text()
+                );
+                let per_char: usize = cell
+                    .chars()
+                    .map(|c| ratatui::text::Span::raw(c.to_string()).width())
+                    .sum();
+                assert_eq!(
+                    ratatui::text::Span::raw(cell.as_str()).width(),
+                    per_char,
+                    "cell ({x},{y}) {cell:?} at {width}x{height}"
+                );
+            }
+        }
+        let text = screen.text();
+        for needle in ["Family", "flag!", "🌈", "👨", "👋", "> Bring the", "❤"] {
+            assert!(
+                text.contains(needle),
+                "{needle:?} at {width}x{height}:\n{text}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_message_whatsapp_does_not_have_cannot_be_reacted_to_or_replied_to() {
+    let footer = |app: &mut App| {
+        let screen = render(app, 120, 24).text();
+        screen.lines().last().unwrap_or_default().to_owned()
+    };
+    for state in [MessageState::NotSent, MessageState::Queued] {
+        let mut app = two_chats().with_client_prefix("t");
+        let mut failed = message("DEMOS1", "fail this", true, 3);
+        failed.state = Some(state.clone());
+        failed.client_id = Some("t-9".to_owned());
+        open_first(
+            &mut app,
+            ADA,
+            vec![
+                message("A1", "Are we still on?", false, 1),
+                message("A2", "Yes", true, 2),
+                failed,
+            ],
+        );
+        app.handle_key(shift('K'));
+        assert_eq!(app.handle_key(key(KeyCode::Char('e'))), None, "{state:?}");
+        assert!(
+            footer(&mut app).contains("that message was not sent, so it cannot be reacted to"),
+            "{state:?}: {}",
+            footer(&mut app)
+        );
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('1'))),
+            None,
+            "no picker: {state:?}"
+        );
+        assert_eq!(app.handle_key(key(KeyCode::Char('r'))), None);
+        assert_eq!(app.pane(), Pane::Messages, "no reply composer: {state:?}");
+        assert!(
+            footer(&mut app).contains("that message was not sent, so it cannot be replied to"),
+            "{state:?}: {}",
+            footer(&mut app)
+        );
+        // A sent message of mine and a received one still can.
+        app.handle_key(shift('K'));
+        app.handle_key(key(KeyCode::Char('e')));
+        assert_eq!(
+            app.handle_key(key(KeyCode::Char('1'))),
+            Some(Action::Request(ClientFrame::react(ADA, "A2", "👍")))
+        );
+        app.handle_key(shift('K'));
+        app.handle_key(key(KeyCode::Char('r')));
+        assert_eq!(app.pane(), Pane::Compose);
+    }
+    // A send still waiting for the daemon (no id yet) says so too.
+    let mut app = two_chats().with_client_prefix("t");
+    write_and_send(&mut app);
+    app.handle_key(shift('K'));
+    assert_eq!(app.handle_key(key(KeyCode::Char('e'))), None);
+    assert!(
+        footer(&mut app).contains("that message was not sent, so it cannot be reacted to"),
+        "{}",
+        footer(&mut app)
+    );
 }

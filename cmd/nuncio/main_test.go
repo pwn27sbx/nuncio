@@ -10,6 +10,7 @@ import (
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
 	"github.com/pwn27sbx/nuncio/internal/wa"
+	"go.mau.fi/whatsmeow/types"
 )
 
 // fakeDaemon answers the wire protocol with a fixed unlinked state.
@@ -153,4 +154,31 @@ func TestMaskPhoneKeepsOnlyTheLastFourDigits(t *testing.T) {
 			t.Errorf("maskPhone(%q) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
+}
+
+func TestReplyableOnlyAllowsDirectUserChats(t *testing.T) {
+	user := types.NewJID("15550001234", types.DefaultUserServer)
+	cases := []struct {
+		name string
+		info types.MessageInfo
+		want bool
+	}{
+		{"direct user chat", msgInfo(user, user, false, false), true},
+		{"direct chat addressed by lid", msgInfo(types.NewJID("123456789", types.HiddenUserServer), user, false, false), true},
+		{"group", msgInfo(types.NewJID("15550001234-1600000000", types.GroupServer), user, false, true), false},
+		{"group without the IsGroup flag", msgInfo(types.NewJID("15550001234-1600000000", types.GroupServer), user, false, false), false},
+		{"status update", msgInfo(types.StatusBroadcastJID, user, false, false), false},
+		{"broadcast list", msgInfo(types.NewJID("1600000000", types.BroadcastServer), user, false, true), false},
+		{"newsletter", msgInfo(types.NewJID("120363000000000000", types.NewsletterServer), user, false, false), false},
+		{"from me", msgInfo(user, user, true, false), false},
+	}
+	for _, c := range cases {
+		if got := replyable(c.info); got != c.want {
+			t.Errorf("%s: replyable(%s) = %v, want %v", c.name, c.info.Chat, got, c.want)
+		}
+	}
+}
+
+func msgInfo(chat, sender types.JID, fromMe, group bool) types.MessageInfo {
+	return types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: sender, IsFromMe: fromMe, IsGroup: group}}
 }

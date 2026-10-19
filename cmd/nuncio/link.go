@@ -10,6 +10,7 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 	waevents "go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
@@ -143,9 +144,10 @@ func watch(client *whatsmeow.Client) linkEvents {
 	return ev
 }
 
-// listen is the S1 check: wait for the session to come up, then for one incoming message, store it
-// (whatsmeow already persisted the session state) and send one short reply. Nothing is sent
-// unless a message arrives first.
+// listen is the S1 check: wait for the session to come up, then for one incoming message from a
+// one-to-one chat (see replyable), store it (whatsmeow already persisted the session state) and
+// send one short reply. Messages from groups, statuses, broadcast lists and channels are skipped
+// without ending the 10-minute wait. Nothing is sent unless an eligible message arrives first.
 func listen(ctx context.Context, client *whatsmeow.Client, ev linkEvents) int {
 	select {
 	case <-ev.connected:
@@ -154,8 +156,19 @@ func listen(ctx context.Context, client *whatsmeow.Client, ev linkEvents) int {
 		fmt.Fprintln(os.Stderr, "nuncio: still not connected after 60 s")
 		return 1
 	}
-	select {
-	case m := <-ev.messages:
+	deadline := time.After(10 * time.Minute)
+	for {
+		var m *waevents.Message
+		select {
+		case m = <-ev.messages:
+		case <-deadline:
+			fmt.Fprintln(os.Stderr, "nuncio: no message from a one-to-one chat arrived in 10 minutes")
+			return 1
+		}
+		if !replyable(m.Info) {
+			fmt.Println("nuncio: skipped a message that is not from a one-to-one chat; still waiting")
+			continue
+		}
 		text := m.Message.GetConversation()
 		if text == "" {
 			text = m.Message.GetExtendedTextMessage().GetText()
@@ -169,9 +182,6 @@ func listen(ctx context.Context, client *whatsmeow.Client, ev linkEvents) int {
 		fmt.Println("nuncio: reply sent")
 		time.Sleep(3 * time.Second)
 		return 0
-	case <-time.After(10 * time.Minute):
-		fmt.Fprintln(os.Stderr, "nuncio: no message arrived in 10 minutes")
-		return 1
 	}
 }
 
@@ -209,4 +219,18 @@ func maskPhone(number string) string {
 		return "…"
 	}
 	return "…" + number[len(number)-4:]
+}
+
+// replyable is an allow-list: only a one-to-one chat with a user, addressed by phone number or by
+// lid, may get the S1 reply. A group, a status update (status@broadcast), a broadcast list or a
+// channel (newsletter) would carry the reply to many people at once, which is a ban risk.
+func replyable(info types.MessageInfo) bool {
+	if info.IsFromMe {
+		return false
+	}
+	switch info.Chat.Server {
+	case types.DefaultUserServer, types.HiddenUserServer:
+		return true
+	}
+	return false
 }

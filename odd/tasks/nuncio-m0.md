@@ -79,3 +79,8 @@ Source of record: `~/Documents/Plans/2026-10-18-whatsapp-client/README.md`, sect
   contract is not allowed to leave those implicit.
 - **L9** Scratch removed: the workers' temp dirs under `/tmp` and `/tmp/opencode`, and the
   auto-installed `nightly` toolchain (the round-2 `nightly-2026-06-16` pin is left in place).
+- **L10** S1–S3 are prepared, not run. `nuncio link --qr|--phone` carries the whole path — gate,
+  device store, whatsmeow client, both flows, terminal QR renderer — and refuses with exit 2 and
+  zero side effects unless `--consent` is passed. Verified after a refusal: no
+  `~/.local/share/nuncio/`, no `~/.local/state/nuncio/`, no keyring item. **The run that actually
+  links a device is the owner's call and has not happened.**

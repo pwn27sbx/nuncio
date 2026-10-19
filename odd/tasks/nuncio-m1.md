@@ -31,7 +31,7 @@ Source of record: the office handoff README (2026-10-19, kept outside the repo b
 | T1 | S1 | inline | done | `ae22593`; RED: modes 0755/0644 with the old open logic; GREEN 3 tests; mutants: no-chmod-existing, no-chmod-dir, no-WAL killed; create-0644 survives (the chmod pass covers it; the 0600 create only closes a window no test observes); assess medium, under_budget |
 | T2 | S2 | inline | done | see commit; RED: Go test hung until `-timeout 5s`, Rust request hung 8 s; GREEN Go 3 tests + Rust 2 tests; mutants killed: no Go deadline, no Rust `set_read_timeout`, `WouldBlock` not mapped |
 | T3 | S3 | inline | done | see commit; characterization tests (behaviour already existed, so RED does not apply; proof is mutation): 5 tests; mutants killed: data dir before the gate, no ban warning, unknown command exits 1, status format, no flag check. `main` now delegates to `cli(args, stdout, stderr) int` |
-| T4 | S4 | inline | pending | |
+| T4 | S4 | inline | done | see commit; 15 new fixtures (22 total); RED: Go 9 undefined types, Rust missing variants; GREEN Go + Rust contract suites; drift mutants killed: Rust `chat_unread` renamed, Go `client_id` renamed, Go `media` without omitempty; added `subscribed`, `focused`, `event_focus` and `sent` state `queued` beyond the suggested ops (CLI needs honest acks, T9 needs the focus event); corners table in `proto/wire.md` |
 | T5 | S5 | inline | pending | |
 | T6 | S6 | inline | pending | |
 | T7 | S7 | inline | pending | |

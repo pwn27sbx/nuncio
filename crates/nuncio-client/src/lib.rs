@@ -16,5 +16,6 @@ pub use conn::{
 };
 pub use theme::{Mode, Palette, Rgb, ThemeError, ThemeWatcher, default_path_from};
 pub use wire::{
-    Chat, ClientFrame, DaemonFrame, ErrorCode, MAX_FRAME_BYTES, Message, PROTOCOL_VERSION, Session,
+    Chat, ClientFrame, DaemonFrame, ErrorCode, MAX_FRAME_BYTES, Media, Message, PROTOCOL_VERSION,
+    SendState, Session,
 };

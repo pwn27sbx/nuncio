@@ -1,7 +1,7 @@
 //! The nuncio wire types, mirroring `proto/wire.md` exactly.
 //!
 //! Keys are `snake_case` and every frame carries `"v"`. The two directions are separate
-//! enums because `status` and `chats` exist in both, with different fields.
+//! enums because `status`, `chats` and `messages` exist in both, with different fields.
 
 use serde::{Deserialize, Serialize};
 
@@ -28,6 +28,29 @@ pub enum ClientFrame {
         v: u8,
         limit: u16,
     },
+    /// Up to `limit` messages of one chat, newest first; `limit` is 1..200 like `chats`.
+    Messages {
+        v: u8,
+        jid: String,
+        limit: u16,
+    },
+    /// One text message to one chat. `client_id` is chosen by the client and identifies the
+    /// send in the reply, so a retry can never become a duplicate.
+    Send {
+        v: u8,
+        jid: String,
+        text: String,
+        client_id: String,
+    },
+    /// Ask the daemon to push event frames on this connection.
+    Subscribe {
+        v: u8,
+    },
+    /// Ask the running UIs to open one chat.
+    Focus {
+        v: u8,
+        jid: String,
+    },
 }
 
 impl ClientFrame {
@@ -49,6 +72,40 @@ impl ClientFrame {
         Self::Chats {
             v: PROTOCOL_VERSION,
             limit,
+        }
+    }
+
+    pub fn messages(jid: impl Into<String>, limit: u16) -> Self {
+        Self::Messages {
+            v: PROTOCOL_VERSION,
+            jid: jid.into(),
+            limit,
+        }
+    }
+
+    pub fn send(
+        jid: impl Into<String>,
+        text: impl Into<String>,
+        client_id: impl Into<String>,
+    ) -> Self {
+        Self::Send {
+            v: PROTOCOL_VERSION,
+            jid: jid.into(),
+            text: text.into(),
+            client_id: client_id.into(),
+        }
+    }
+
+    pub fn subscribe() -> Self {
+        Self::Subscribe {
+            v: PROTOCOL_VERSION,
+        }
+    }
+
+    pub fn focus(jid: impl Into<String>) -> Self {
+        Self::Focus {
+            v: PROTOCOL_VERSION,
+            jid: jid.into(),
         }
     }
 }
@@ -79,6 +136,58 @@ pub enum DaemonFrame {
         code: ErrorCode,
         message: String,
     },
+    Messages {
+        v: u8,
+        jid: String,
+        messages: Vec<Message>,
+    },
+    /// An accepted send: `Sent` with the WhatsApp id and timestamp, or `Queued` while
+    /// offline, with neither.
+    Sent {
+        v: u8,
+        client_id: String,
+        state: SendState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<String>,
+    },
+    /// A send that did not happen; the message stays visible as not sent.
+    SendFailed {
+        v: u8,
+        client_id: String,
+        message: String,
+    },
+    /// Event frames follow on this connection.
+    Subscribed {
+        v: u8,
+    },
+    /// `delivered` is how many subscribed UIs got the focus event; 0 means none is running.
+    Focused {
+        v: u8,
+        jid: String,
+        delivered: u32,
+    },
+    EventMessage {
+        v: u8,
+        jid: String,
+        message: Message,
+    },
+    EventConnection {
+        v: u8,
+        session: Session,
+    },
+    /// `unread` is the total; `chat_unread` the count of chat `jid`.
+    EventUnread {
+        v: u8,
+        unread: u32,
+        jid: String,
+        chat_unread: u32,
+    },
+    EventFocus {
+        v: u8,
+        jid: String,
+    },
 }
 
 impl DaemonFrame {
@@ -89,6 +198,15 @@ impl DaemonFrame {
             Self::Status { .. } => "status",
             Self::Chats { .. } => "chats",
             Self::Error { .. } => "error",
+            Self::Messages { .. } => "messages",
+            Self::Sent { .. } => "sent",
+            Self::SendFailed { .. } => "send_failed",
+            Self::Subscribed { .. } => "subscribed",
+            Self::Focused { .. } => "focused",
+            Self::EventMessage { .. } => "event_message",
+            Self::EventConnection { .. } => "event_connection",
+            Self::EventUnread { .. } => "event_unread",
+            Self::EventFocus { .. } => "event_focus",
         }
     }
 }
@@ -121,6 +239,19 @@ impl Session {
             Self::Unknown => "unknown",
         }
     }
+}
+
+/// The state of an accepted send. Unknown states become [`SendState::Unknown`] for the same
+/// reason [`Session::Unknown`] exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SendState {
+    /// Stored while offline; sent once on reconnect.
+    Queued,
+    /// Acknowledged by the server.
+    Sent,
+    #[serde(other)]
+    Unknown,
 }
 
 /// A protocol error code. Unknown codes become [`ErrorCode::Unknown`] for the same reason
@@ -164,18 +295,32 @@ pub struct Chat {
     pub last_message: Option<Message>,
 }
 
-/// A message, in the M0 shape.
+/// A chat message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     /// WhatsApp message id.
     pub id: String,
-    /// `text` for M0; media kinds land in M1.
+    /// `text`, `image`, `audio`, `video` or `document`.
     pub kind: String,
-    /// May be empty for non-text kinds.
+    /// May be empty for non-text kinds (a media caption).
     pub text: String,
     pub from_me: bool,
     /// RFC 3339 in UTC with a `Z` suffix.
     pub timestamp: String,
+    /// Set for the media kinds; absent for text, and it must stay absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<Media>,
+}
+
+/// A message's attachment. The bytes are never on the wire: the daemon downloads them on
+/// demand into its media cache.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Media {
+    pub mime: String,
+    /// Bytes.
+    pub size: u64,
+    /// May be empty.
+    pub file_name: String,
 }
 
 impl Message {

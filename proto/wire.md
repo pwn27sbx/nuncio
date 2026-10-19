@@ -36,6 +36,10 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `hello` | `v`, `op`, `client` (string, e.g. `nuncio-tui/0.1.0`) | `hello_client.json` |
 | `status` | `v`, `op` | `status_request.json` |
 | `chats` | `v`, `op`, `limit` (int, 1..200) | `chats_request.json` |
+| `messages` | `v`, `op`, `jid`, `limit` (int, 1..200) | `messages_request.json` |
+| `send` | `v`, `op`, `jid`, `text` (string), `client_id` (string, chosen by the client) | `send_request.json` |
+| `subscribe` | `v`, `op` | `subscribe_request.json` |
+| `focus` | `v`, `op`, `jid` | `focus_request.json` |
 
 ### daemon → client
 
@@ -44,7 +48,24 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `hello_ok` | `v`, `op`, `daemon` (string), `session` (see below), `unread` (int) | `hello_ok_daemon.json` |
 | `status` | `v`, `op`, `daemon`, `linked` (bool), `session`, `unread` (int) | `status_response.json` |
 | `chats` | `v`, `op`, `chats` (array of Chat) | `chats_response.json` |
-| `error` | `v`, `op`, `code` (string), `message` (string) | `error_version_mismatch.json` |
+| `error` | `v`, `op`, `code` (string), `message` (string) | `error_version_mismatch.json`, `error_not_linked.json` |
+| `messages` | `v`, `op`, `jid`, `messages` (array of Message, newest first) | `messages_response.json` |
+| `sent` | `v`, `op`, `client_id`, `state` (`sent` or `queued`), `id` and `timestamp` (only when `sent`) | `sent_response.json`, `sent_queued_response.json` |
+| `send_failed` | `v`, `op`, `client_id`, `message` (string) | `send_failed_response.json` |
+| `subscribed` | `v`, `op` | `subscribed_response.json` |
+| `focused` | `v`, `op`, `jid`, `delivered` (int: subscribed UIs that got the event; 0 = none running) | `focused_response.json` |
+
+### Events (daemon → subscribed clients)
+
+A connection that sent `subscribe` receives these frames, unprompted, interleaved with replies;
+a connection that did not subscribe never receives them.
+
+| `op` | Fields | Fixture |
+|---|---|---|
+| `event_message` | `v`, `op`, `jid`, `message` (Message) | `event_message.json` |
+| `event_connection` | `v`, `op`, `session` | `event_connection.json` |
+| `event_unread` | `v`, `op`, `unread` (int, total), `jid`, `chat_unread` (int) | `event_unread.json` |
+| `event_focus` | `v`, `op`, `jid` | `event_focus.json` |
 
 ### `session`
 
@@ -65,15 +86,19 @@ A string, not a boolean, so it can grow without a protocol break:
 | `pinned` | bool | |
 | `last_message` | object or absent | omitted for a chat with no messages |
 
-### Message (M0 shape)
+### Message
 
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | WhatsApp message id |
-| `kind` | string | `text` for M0; media kinds land in M1 |
-| `text` | string | may be empty for non-text kinds |
+| `kind` | string | `text`, `image`, `audio`, `video` or `document` |
+| `text` | string | the body, or the caption of a media kind; may be empty for media |
 | `from_me` | bool | |
 | `timestamp` | string | RFC 3339 UTC |
+| `media` | object or absent | set for the media kinds, omitted for `text` |
+
+`media` is `{ "mime": string, "size": int (bytes), "file_name": string (may be empty) }`. The
+bytes never travel over the socket: the daemon downloads them on demand into its media cache.
 
 ## Error codes
 
@@ -113,6 +138,23 @@ are part of the contract, not implementation detail:
 | Frame over 1 MiB | `bad_frame`, then close |
 
 A frame of exactly 1 MiB is accepted; one byte more is not.
+
+### M1 corners (specified now, pinned by daemon tests as each op is served)
+
+| Situation | Behaviour |
+|---|---|
+| `messages` `limit` outside 1..200 | `bad_frame`; the connection stays usable |
+| `messages` for a well-formed `jid` with no stored chat | `messages` with an empty list |
+| `jid` that is not a WhatsApp JID (`user@s.whatsapp.net`, `id@g.us`) in any request | `bad_frame`; the connection stays usable |
+| `send` with empty `text` (or only whitespace) | `bad_frame`; nothing is stored or sent |
+| `send` with `text` over 65 536 bytes | `bad_frame`; nothing is stored or sent |
+| `send` with an empty `client_id` | `bad_frame` |
+| `send` while `unlinked` | `error` / `not_linked`; nothing is stored or sent |
+| `send` while `offline` | `sent` with `state: "queued"`; drained once on reconnect |
+| `send` repeating a `client_id` already accepted | the stored state of that send; never a second message |
+| `subscribe` twice on one connection | `subscribed` again; events are still delivered once |
+| `focus` with no subscribed UI | `focused` with `delivered: 0` |
+| A subscriber that stops reading | dropped once its bounded queue is full; never blocks the daemon or other clients |
 
 ## Contract tests
 

@@ -203,6 +203,7 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
                 text: "See you at 18:00".to_owned(),
                 from_me: false,
                 timestamp: "2026-10-18T17:55:04Z".to_owned(),
+                media: None,
             }),
         }],
     };

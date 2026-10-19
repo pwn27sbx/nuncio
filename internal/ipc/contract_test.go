@@ -133,6 +133,105 @@ func fixtureCases() []fixtureCase {
 				return Error{V: 1, Op: OpError, Code: CodeVersionMismatch, Message: "unsupported protocol version"}
 			},
 		},
+		{
+			file: "error_not_linked.json",
+			into: func() any { return &Error{} },
+			build: func() any {
+				return Error{V: 1, Op: OpError, Code: CodeNotLinked, Message: "no WhatsApp device is linked"}
+			},
+		},
+		{
+			file: "messages_request.json",
+			into: func() any { return &MessagesRequest{} },
+			build: func() any {
+				return MessagesRequest{V: 1, Op: OpMessages, JID: "15551230001@s.whatsapp.net", Limit: 50}
+			},
+		},
+		{
+			file: "messages_response.json",
+			into: func() any { return &MessagesResponse{} },
+			build: func() any {
+				return MessagesResponse{V: 1, Op: OpMessages, JID: "15551230001@s.whatsapp.net", Messages: []Message{
+					{ID: "3EB0AAA1", Kind: KindText, Text: "See you at 18:00", Timestamp: "2026-10-18T17:55:04Z"},
+					{
+						ID: "3EB0AAA0", Kind: KindImage, Text: "the venue", Timestamp: "2026-10-18T17:50:30Z",
+						Media: &Media{Mime: "image/jpeg", Size: 48213},
+					},
+				}}
+			},
+		},
+		{
+			file: "send_request.json",
+			into: func() any { return &SendRequest{} },
+			build: func() any {
+				return SendRequest{V: 1, Op: OpSend, JID: "15551230001@s.whatsapp.net", Text: "On my way", ClientID: "c-7f3a9e21"}
+			},
+		},
+		{
+			file: "sent_response.json",
+			into: func() any { return &Sent{} },
+			build: func() any {
+				return Sent{V: 1, Op: OpSent, ClientID: "c-7f3a9e21", State: SendSent, ID: "3EB0BBB1", Timestamp: "2026-10-18T17:56:10Z"}
+			},
+		},
+		{
+			file:  "sent_queued_response.json",
+			into:  func() any { return &Sent{} },
+			build: func() any { return Sent{V: 1, Op: OpSent, ClientID: "c-7f3a9e22", State: SendQueued} },
+		},
+		{
+			file: "send_failed_response.json",
+			into: func() any { return &SendFailed{} },
+			build: func() any {
+				return SendFailed{V: 1, Op: OpSendFailed, ClientID: "c-7f3a9e23", Message: "the server did not acknowledge the message"}
+			},
+		},
+		{
+			file:  "subscribe_request.json",
+			into:  func() any { return &SubscribeRequest{} },
+			build: func() any { return SubscribeRequest{V: 1, Op: OpSubscribe} },
+		},
+		{
+			file:  "subscribed_response.json",
+			into:  func() any { return &Subscribed{} },
+			build: func() any { return Subscribed{V: 1, Op: OpSubscribed} },
+		},
+		{
+			file:  "focus_request.json",
+			into:  func() any { return &FocusRequest{} },
+			build: func() any { return FocusRequest{V: 1, Op: OpFocus, JID: "15551230002@s.whatsapp.net"} },
+		},
+		{
+			file:  "focused_response.json",
+			into:  func() any { return &Focused{} },
+			build: func() any { return Focused{V: 1, Op: OpFocused, JID: "15551230002@s.whatsapp.net", Delivered: 1} },
+		},
+		{
+			file: "event_message.json",
+			into: func() any { return &EventMessage{} },
+			build: func() any {
+				return EventMessage{V: 1, Op: OpEventMessage, JID: "15551230001@s.whatsapp.net", Message: Message{
+					ID: "3EB0AAA3", Kind: KindText, Text: "Running late", Timestamp: "2026-10-18T17:58:00Z",
+				}}
+			},
+		},
+		{
+			file:  "event_connection.json",
+			into:  func() any { return &EventConnection{} },
+			build: func() any { return EventConnection{V: 1, Op: OpEventConnection, Session: SessionOffline} },
+		},
+		{
+			file: "event_unread.json",
+			into: func() any { return &EventUnread{} },
+			build: func() any {
+				return EventUnread{V: 1, Op: OpEventUnread, Unread: 20, JID: "15551230001@s.whatsapp.net", ChatUnread: 3}
+			},
+		},
+		{
+			file:  "event_focus.json",
+			into:  func() any { return &EventFocus{} },
+			build: func() any { return EventFocus{V: 1, Op: OpEventFocus, JID: "15551230002@s.whatsapp.net"} },
+		},
 	}
 }
 
@@ -220,7 +319,12 @@ func TestWireTypesBuildEveryFixture(t *testing.T) {
 }
 
 func TestFixturesCarryVersionOne(t *testing.T) {
-	known := map[string]bool{OpHello: true, OpHelloOK: true, OpStatus: true, OpChats: true, OpError: true}
+	known := map[string]bool{
+		OpHello: true, OpHelloOK: true, OpStatus: true, OpChats: true, OpError: true,
+		OpMessages: true, OpSend: true, OpSent: true, OpSendFailed: true, OpSubscribe: true,
+		OpSubscribed: true, OpFocus: true, OpFocused: true, OpEventMessage: true,
+		OpEventConnection: true, OpEventUnread: true, OpEventFocus: true,
+	}
 	for _, tc := range fixtureCases() {
 		t.Run(tc.file, func(t *testing.T) {
 			raw := decodedJSON(t, readFixture(t, tc.file)).(map[string]any)
@@ -282,5 +386,17 @@ func TestFixtureTimestampsAreRFC3339UTC(t *testing.T) {
 	}
 	if seen != 2 {
 		t.Fatalf("checked %d timestamps, want 2", seen)
+	}
+}
+
+// TestMessageOmitsAbsentMedia keeps text messages free of a media key: absent stays absent, as
+// with last_message.
+func TestMessageOmitsAbsentMedia(t *testing.T) {
+	got, err := json.Marshal(Message{ID: "x", Kind: KindText, Text: "hi", Timestamp: "2026-10-18T17:55:04Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(got, []byte(`"media"`)) {
+		t.Fatalf("a text message carries a media key: %s", got)
 	}
 }

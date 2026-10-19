@@ -385,6 +385,7 @@ mod tests {
             text: "hello".to_owned(),
             from_me: false,
             timestamp: "2026-10-18T17:55:04Z".to_owned(),
+            media: None,
         };
         assert_eq!(
             super::sent_by(Some(&chat("Ada", "a@b")), &message),

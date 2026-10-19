@@ -13,7 +13,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use nuncio_client::{
-    Chat, ClientFrame, DaemonFrame, ErrorCode, MAX_FRAME_BYTES, Message, PROTOCOL_VERSION, Session,
+    Chat, ClientFrame, DaemonFrame, ErrorCode, MAX_FRAME_BYTES, Media, Message, PROTOCOL_VERSION,
+    SendState, Session,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -84,12 +85,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_seven_documented_files() {
+fn fixture_directory_holds_the_twenty_two_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 7, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 22, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -103,6 +104,159 @@ fn constructed_client_frames_match_their_fixtures() {
     );
     assert_frame(&dir.join("status_request.json"), &ClientFrame::status());
     assert_frame(&dir.join("chats_request.json"), &ClientFrame::chats(40));
+    assert_frame(
+        &dir.join("messages_request.json"),
+        &ClientFrame::messages("15551230001@s.whatsapp.net", 50),
+    );
+    assert_frame(
+        &dir.join("send_request.json"),
+        &ClientFrame::send("15551230001@s.whatsapp.net", "On my way", "c-7f3a9e21"),
+    );
+    assert_frame(
+        &dir.join("subscribe_request.json"),
+        &ClientFrame::subscribe(),
+    );
+    assert_frame(
+        &dir.join("focus_request.json"),
+        &ClientFrame::focus("15551230002@s.whatsapp.net"),
+    );
+}
+
+/// The M1 daemon frames, constructed in Rust.
+#[test]
+fn constructed_m1_daemon_frames_match_their_fixtures() {
+    let dir = fixtures_dir();
+    let ada = "15551230001@s.whatsapp.net".to_owned();
+    let grace = "15551230002@s.whatsapp.net".to_owned();
+
+    assert_frame(
+        &dir.join("error_not_linked.json"),
+        &DaemonFrame::Error {
+            v: PROTOCOL_VERSION,
+            code: ErrorCode::NotLinked,
+            message: "no WhatsApp device is linked".to_owned(),
+        },
+    );
+    assert_frame(
+        &dir.join("messages_response.json"),
+        &DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: ada.clone(),
+            messages: vec![
+                Message {
+                    id: "3EB0AAA1".to_owned(),
+                    kind: "text".to_owned(),
+                    text: "See you at 18:00".to_owned(),
+                    from_me: false,
+                    timestamp: "2026-10-18T17:55:04Z".to_owned(),
+                    media: None,
+                },
+                Message {
+                    id: "3EB0AAA0".to_owned(),
+                    kind: "image".to_owned(),
+                    text: "the venue".to_owned(),
+                    from_me: false,
+                    timestamp: "2026-10-18T17:50:30Z".to_owned(),
+                    media: Some(Media {
+                        mime: "image/jpeg".to_owned(),
+                        size: 48213,
+                        file_name: String::new(),
+                    }),
+                },
+            ],
+        },
+    );
+    assert_frame(
+        &dir.join("sent_response.json"),
+        &DaemonFrame::Sent {
+            v: PROTOCOL_VERSION,
+            client_id: "c-7f3a9e21".to_owned(),
+            state: SendState::Sent,
+            id: Some("3EB0BBB1".to_owned()),
+            timestamp: Some("2026-10-18T17:56:10Z".to_owned()),
+        },
+    );
+    assert_frame(
+        &dir.join("sent_queued_response.json"),
+        &DaemonFrame::Sent {
+            v: PROTOCOL_VERSION,
+            client_id: "c-7f3a9e22".to_owned(),
+            state: SendState::Queued,
+            id: None,
+            timestamp: None,
+        },
+    );
+    assert_frame(
+        &dir.join("send_failed_response.json"),
+        &DaemonFrame::SendFailed {
+            v: PROTOCOL_VERSION,
+            client_id: "c-7f3a9e23".to_owned(),
+            message: "the server did not acknowledge the message".to_owned(),
+        },
+    );
+    assert_frame(
+        &dir.join("subscribed_response.json"),
+        &DaemonFrame::Subscribed {
+            v: PROTOCOL_VERSION,
+        },
+    );
+    assert_frame(
+        &dir.join("focused_response.json"),
+        &DaemonFrame::Focused {
+            v: PROTOCOL_VERSION,
+            jid: grace.clone(),
+            delivered: 1,
+        },
+    );
+    assert_frame(
+        &dir.join("event_message.json"),
+        &DaemonFrame::EventMessage {
+            v: PROTOCOL_VERSION,
+            jid: ada.clone(),
+            message: Message {
+                id: "3EB0AAA3".to_owned(),
+                kind: "text".to_owned(),
+                text: "Running late".to_owned(),
+                from_me: false,
+                timestamp: "2026-10-18T17:58:00Z".to_owned(),
+                media: None,
+            },
+        },
+    );
+    assert_frame(
+        &dir.join("event_connection.json"),
+        &DaemonFrame::EventConnection {
+            v: PROTOCOL_VERSION,
+            session: Session::Offline,
+        },
+    );
+    assert_frame(
+        &dir.join("event_unread.json"),
+        &DaemonFrame::EventUnread {
+            v: PROTOCOL_VERSION,
+            unread: 20,
+            jid: ada,
+            chat_unread: 3,
+        },
+    );
+    assert_frame(
+        &dir.join("event_focus.json"),
+        &DaemonFrame::EventFocus {
+            v: PROTOCOL_VERSION,
+            jid: grace,
+        },
+    );
+}
+
+#[test]
+fn a_send_state_this_client_does_not_know_yet_still_parses() {
+    let frame: DaemonFrame =
+        serde_json::from_str(r#"{"v":1,"op":"sent","client_id":"c","state":"delivered"}"#)
+            .expect("an unknown send state parses");
+    let DaemonFrame::Sent { state, .. } = frame else {
+        panic!("a sent frame stays a sent frame");
+    };
+    assert_eq!(state, SendState::Unknown);
 }
 
 /// Constructing the daemon→client fixtures in Rust and comparing them to the files is what
@@ -158,6 +312,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                         text: "See you at 18:00".to_owned(),
                         from_me: false,
                         timestamp: "2026-10-18T17:55:04Z".to_owned(),
+                        media: None,
                     }),
                 },
                 Chat {
@@ -172,6 +327,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                         text: "The compiler is done".to_owned(),
                         from_me: true,
                         timestamp: "2026-10-18T16:02:11Z".to_owned(),
+                        media: None,
                     }),
                 },
                 Chat {

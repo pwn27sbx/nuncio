@@ -24,11 +24,14 @@ const (
 	MaxFrameLen = 1 << 20
 )
 
-// Bounds of the chats request limit.
+// Bounds of the chats and messages request limit.
 const (
 	MinChatLimit = 1
 	MaxChatLimit = 200
 )
+
+// MaxTextLen is the longest text a send frame may carry, in bytes.
+const MaxTextLen = 65536
 
 // Frame ops.
 const (
@@ -37,6 +40,35 @@ const (
 	OpStatus  = "status"
 	OpChats   = "chats"
 	OpError   = "error"
+
+	OpMessages   = "messages"
+	OpSend       = "send"
+	OpSent       = "sent"
+	OpSendFailed = "send_failed"
+	OpSubscribe  = "subscribe"
+	OpSubscribed = "subscribed"
+	OpFocus      = "focus"
+	OpFocused    = "focused"
+
+	OpEventMessage    = "event_message"
+	OpEventConnection = "event_connection"
+	OpEventUnread     = "event_unread"
+	OpEventFocus      = "event_focus"
+)
+
+// Values of the message kind field.
+const (
+	KindText     = "text"
+	KindImage    = "image"
+	KindAudio    = "audio"
+	KindVideo    = "video"
+	KindDocument = "document"
+)
+
+// Values of the sent frame's state field.
+const (
+	SendQueued = "queued"
+	SendSent   = "sent"
 )
 
 // Error codes.
@@ -88,6 +120,38 @@ type ChatsRequest struct {
 	Limit int    `json:"limit"`
 }
 
+// MessagesRequest asks for up to Limit messages of one chat, newest first. Limit is
+// MinChatLimit..MaxChatLimit.
+type MessagesRequest struct {
+	V     int    `json:"v"`
+	Op    string `json:"op"`
+	JID   string `json:"jid"`
+	Limit int    `json:"limit"`
+}
+
+// SendRequest sends one text message to one chat. ClientID is chosen by the client and
+// identifies the send in the reply, so a retry can never become a duplicate.
+type SendRequest struct {
+	V        int    `json:"v"`
+	Op       string `json:"op"`
+	JID      string `json:"jid"`
+	Text     string `json:"text"`
+	ClientID string `json:"client_id"`
+}
+
+// SubscribeRequest asks the daemon to push event frames on this connection.
+type SubscribeRequest struct {
+	V  int    `json:"v"`
+	Op string `json:"op"`
+}
+
+// FocusRequest asks the running UIs to open one chat.
+type FocusRequest struct {
+	V   int    `json:"v"`
+	Op  string `json:"op"`
+	JID string `json:"jid"`
+}
+
 // HelloOK answers a Hello.
 type HelloOK struct {
 	V       int    `json:"v"`
@@ -114,6 +178,80 @@ type ChatsResponse struct {
 	Chats []Chat `json:"chats"`
 }
 
+// MessagesResponse answers a MessagesRequest.
+type MessagesResponse struct {
+	V        int       `json:"v"`
+	Op       string    `json:"op"`
+	JID      string    `json:"jid"`
+	Messages []Message `json:"messages"`
+}
+
+// Sent answers a SendRequest that was accepted: State is SendSent, with the WhatsApp ID and
+// timestamp, or SendQueued while offline, with neither.
+type Sent struct {
+	V         int    `json:"v"`
+	Op        string `json:"op"`
+	ClientID  string `json:"client_id"`
+	State     string `json:"state"`
+	ID        string `json:"id,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
+// SendFailed answers a SendRequest that was not sent. The message stays visible as not sent.
+type SendFailed struct {
+	V        int    `json:"v"`
+	Op       string `json:"op"`
+	ClientID string `json:"client_id"`
+	Message  string `json:"message"`
+}
+
+// Subscribed answers a SubscribeRequest; event frames follow on the same connection.
+type Subscribed struct {
+	V  int    `json:"v"`
+	Op string `json:"op"`
+}
+
+// Focused answers a FocusRequest. Delivered is how many subscribed UIs got the event; 0 means
+// no UI is running.
+type Focused struct {
+	V         int    `json:"v"`
+	Op        string `json:"op"`
+	JID       string `json:"jid"`
+	Delivered int    `json:"delivered"`
+}
+
+// EventMessage is pushed to subscribers when a message is stored.
+type EventMessage struct {
+	V       int     `json:"v"`
+	Op      string  `json:"op"`
+	JID     string  `json:"jid"`
+	Message Message `json:"message"`
+}
+
+// EventConnection is pushed to subscribers when the session state changes.
+type EventConnection struct {
+	V       int    `json:"v"`
+	Op      string `json:"op"`
+	Session string `json:"session"`
+}
+
+// EventUnread is pushed to subscribers when an unread count changes: Unread is the total,
+// ChatUnread the count of the chat JID.
+type EventUnread struct {
+	V          int    `json:"v"`
+	Op         string `json:"op"`
+	Unread     int    `json:"unread"`
+	JID        string `json:"jid"`
+	ChatUnread int    `json:"chat_unread"`
+}
+
+// EventFocus is pushed to subscribers when a client asks to open a chat.
+type EventFocus struct {
+	V   int    `json:"v"`
+	Op  string `json:"op"`
+	JID string `json:"jid"`
+}
+
 // Error reports a protocol or request failure. Code is one of the Code*
 // constants; Message is for logs, not for users.
 type Error struct {
@@ -133,14 +271,23 @@ type Chat struct {
 	LastMessage *Message `json:"last_message,omitempty"`
 }
 
-// Message is the M0 message shape. Kind is "text" in M0; media kinds land in
-// M1.
+// Message is one chat message. Kind is one of the Kind* constants; Media is set for the media
+// kinds and absent for text.
 type Message struct {
 	ID        string `json:"id"`
 	Kind      string `json:"kind"`
 	Text      string `json:"text"`
 	FromMe    bool   `json:"from_me"`
 	Timestamp string `json:"timestamp"`
+	Media     *Media `json:"media,omitempty"`
+}
+
+// Media describes a message's attachment. The bytes are never on the wire: they are downloaded
+// on demand into the daemon's media cache.
+type Media struct {
+	Mime     string `json:"mime"`
+	Size     int64  `json:"size"`
+	FileName string `json:"file_name"`
 }
 
 // Status is the daemon state, reported both over the socket protocol and over

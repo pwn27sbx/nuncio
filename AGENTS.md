@@ -39,3 +39,9 @@ NDJSON protocol (`proto/wire.md`). Review every change against these rules.
 
 - Small Conventional Commits (`type(scope): subject`).
 - No AI attribution and no `Co-Authored-By` trailer, ever.
+
+## Review verdict
+
+STATUS: FAILED only if a new or changed line in this commit breaks a rule in this file. Problems
+that already existed in the file, style suggestions or optional improvements go as observations
+under STATUS: PASSED, in a list titled "Observations". Cite the broken rule in every violation.

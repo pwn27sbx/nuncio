@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -23,32 +24,39 @@ const usage = `usage:
 Nothing links a device without --consent.`
 
 func main() {
-	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "-") {
-		switch os.Args[1] {
+	os.Exit(cli(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// cli runs one command line and returns the process exit code: 0 on success, 1 when the command
+// failed, 2 on a usage error.
+func cli(args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		switch args[0] {
 		case "link":
-			os.Exit(linkCommand(os.Args[2:]))
+			return linkCommand(args[1:], stdout, stderr)
 		case "status":
 			// fall through to the default below
 		case "help":
-			fmt.Println(usage)
-			return
+			fmt.Fprintln(stdout, usage)
+			return 0
 		default:
-			fmt.Fprintf(os.Stderr, "nuncio: unknown command %q\n\n%s\n", os.Args[1], usage)
-			os.Exit(2)
+			fmt.Fprintf(stderr, "nuncio: unknown command %q\n\n%s\n", args[0], usage)
+			return 2
 		}
 	}
-	if len(os.Args) > 1 && (os.Args[1] == "-h" || os.Args[1] == "--help") {
-		fmt.Println(usage)
-		return
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
+		fmt.Fprintln(stdout, usage)
+		return 0
 	}
 
-	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "nuncio:", err)
-		os.Exit(1)
+	if err := run(stdout); err != nil {
+		fmt.Fprintln(stderr, "nuncio:", err)
+		return 1
 	}
+	return 0
 }
 
-func run() error {
+func run(stdout io.Writer) error {
 	c, err := ipc.Connect(ipc.ClientName)
 	if err != nil {
 		return err
@@ -59,6 +67,6 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("linked=%t session=%s unread=%d\n", st.Linked, st.Session, st.Unread)
+	fmt.Fprintf(stdout, "linked=%t session=%s unread=%d\n", st.Linked, st.Session, st.Unread)
 	return nil
 }

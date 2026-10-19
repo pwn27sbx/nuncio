@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"time"
@@ -21,8 +22,9 @@ import (
 // linkCommand is the S1–S3 entry point. It is prepared in full — the gate, the device store, the
 // whatsmeow client, both flows and the QR renderer — and it does nothing at all until --consent is
 // passed. Even then the owner is expected to have said yes out loud first.
-func linkCommand(args []string) int {
+func linkCommand(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("nuncio link", flag.ContinueOnError)
+	fs.SetOutput(stderr)
 	qr := fs.Bool("qr", false, "link by scanning a QR code in the terminal")
 	phone := fs.String("phone", "", "link with an 8-digit pairing code for this E.164 number")
 	consentFlag := fs.Bool("consent", false, "you have read the warning and accept the risk")
@@ -30,7 +32,7 @@ func linkCommand(args []string) int {
 		return 2
 	}
 	if *qr == (*phone != "") {
-		fmt.Fprintln(os.Stderr, "nuncio link: pass exactly one of --qr or --phone <number>")
+		fmt.Fprintln(stderr, "nuncio link: pass exactly one of --qr or --phone <number>")
 		return 2
 	}
 
@@ -39,8 +41,8 @@ func linkCommand(args []string) int {
 	// The gate is checked first — before the store is opened, before a client exists, before any
 	// socket is dialled. Nothing above this line has a side effect.
 	if err := wa.Gate(consent); err != nil {
-		fmt.Fprintln(os.Stderr, wa.LinkWarning)
-		fmt.Fprintln(os.Stderr, "\nnuncio: nothing was linked.")
+		fmt.Fprintln(stderr, wa.LinkWarning)
+		fmt.Fprintln(stderr, "\nnuncio: nothing was linked.")
 		return 2
 	}
 
@@ -48,12 +50,12 @@ func linkCommand(args []string) int {
 
 	dataDir, err := nuncioDataDir()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "nuncio link:", err)
+		fmt.Fprintln(stderr, "nuncio link:", err)
 		return 1
 	}
 	db, err := store.Open(filepath.Join(dataDir, "nuncio.db"))
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "nuncio link:", err)
+		fmt.Fprintln(stderr, "nuncio link:", err)
 		return 1
 	}
 	defer func() { _ = db.Close() }()
@@ -63,21 +65,21 @@ func linkCommand(args []string) int {
 	// in M1; until then the keys live in nuncio.db inside the 0700 data directory.
 	container := sqlstore.NewWithDB(db, "sqlite3", nil)
 	if err := container.Upgrade(ctx); err != nil {
-		fmt.Fprintln(os.Stderr, "nuncio link: cannot prepare the device store:", err)
+		fmt.Fprintln(stderr, "nuncio link: cannot prepare the device store:", err)
 		return 1
 	}
 	device, err := container.GetFirstDevice(ctx)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "nuncio link:", err)
+		fmt.Fprintln(stderr, "nuncio link:", err)
 		return 1
 	}
 	client := whatsmeow.NewClient(device, nil)
 	events := watch(client)
 
 	if device.ID != nil {
-		fmt.Println("nuncio: this machine already holds a linked device:", device.ID.User)
+		fmt.Fprintln(stdout, "nuncio: this machine already holds a linked device:", device.ID.User)
 		if err := client.Connect(); err != nil {
-			fmt.Fprintln(os.Stderr, "nuncio link:", err)
+			fmt.Fprintln(stderr, "nuncio link:", err)
 			return 1
 		}
 		defer client.Disconnect()
@@ -86,7 +88,7 @@ func linkCommand(args []string) int {
 
 	prepared, err := wa.Prepare(consent, client)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "nuncio link:", err)
+		fmt.Fprintln(stderr, "nuncio link:", err)
 		return 1
 	}
 	defer client.Disconnect()
@@ -98,15 +100,15 @@ func linkCommand(args []string) int {
 	} else {
 		code, err := prepared.Linker.Phone(ctx, *phone)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "nuncio link:", err)
+			fmt.Fprintln(stderr, "nuncio link:", err)
 			return 1
 		}
-		fmt.Printf("\nOn your phone: Settings → Linked devices → Link a device → Link with phone number instead, then enter:\n\n    %s\n\nWaiting up to 5 minutes...\n", code)
+		fmt.Fprintf(stdout, "\nOn your phone: Settings → Linked devices → Link a device → Link with phone number instead, then enter:\n\n    %s\n\nWaiting up to 5 minutes...\n", code)
 		select {
 		case id := <-events.paired:
-			fmt.Println("nuncio: linked as", id)
+			fmt.Fprintln(stdout, "nuncio: linked as", id)
 		case <-time.After(5 * time.Minute):
-			fmt.Fprintln(os.Stderr, "nuncio: the code was not entered in time; nothing was linked")
+			fmt.Fprintln(stderr, "nuncio: the code was not entered in time; nothing was linked")
 			return 1
 		}
 	}

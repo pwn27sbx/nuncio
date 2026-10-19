@@ -30,7 +30,7 @@ Source of record: the office handoff README (2026-10-19, kept outside the repo b
 | T0 | S16 | inline | done | baseline below (L3) |
 | T1 | S1 | inline | done | `ae22593`; RED: modes 0755/0644 with the old open logic; GREEN 3 tests; mutants: no-chmod-existing, no-chmod-dir, no-WAL killed; create-0644 survives (the chmod pass covers it; the 0600 create only closes a window no test observes); assess medium, under_budget |
 | T2 | S2 | inline | done | see commit; RED: Go test hung until `-timeout 5s`, Rust request hung 8 s; GREEN Go 3 tests + Rust 2 tests; mutants killed: no Go deadline, no Rust `set_read_timeout`, `WouldBlock` not mapped |
-| T3 | S3 | inline | pending | |
+| T3 | S3 | inline | done | see commit; characterization tests (behaviour already existed, so RED does not apply; proof is mutation): 5 tests; mutants killed: data dir before the gate, no ban warning, unknown command exits 1, status format, no flag check. `main` now delegates to `cli(args, stdout, stderr) int` |
 | T4 | S4 | inline | pending | |
 | T5 | S5 | inline | pending | |
 | T6 | S6 | inline | pending | |

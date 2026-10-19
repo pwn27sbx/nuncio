@@ -1,0 +1,51 @@
+# nuncio — M1 (core daemon), office session on the work Mac
+
+Objective: the Mac-safe part of M1 (tasks T1–T14 of the office handoff). Branch `feat/m1-core` from `ae35fea`.
+Delivery: one work-unit commit per task, no trailers, no push without the owner's OK. Runner: `TMPDIR=/tmp go test ./...` and `cargo test --workspace --exclude nuncio-desktop`.
+Source of record: the office handoff README (2026-10-19, kept outside the repo because it names the test number), sections 7 and 8.
+
+## Specs
+
+- **S1** T1: "after `Open` and one write, `stat` of `nuncio.db`, `nuncio.db-wal`, `nuncio.db-shm` is exactly `0600`; an existing `0644` file is tightened to `0600`; the directory is `0700`." Commit: `fix(store): create nuncio.db and its WAL files with mode 0600`
+- **S2** T2: "a fake server that accepts and never answers makes `Client.Status()` (Go) and `Connection::request` (Rust) return a timeout error within the configured bound (use a short bound in tests); a normal exchange is unaffected." Commit: `fix(ipc): bound every client read with a timeout`
+- **S3** T3: "`status` against a fake daemon prints `linked=false session=unlinked unread=0`; unknown command exits 2 with the usage text; `link` with no flags exits 2; `link --phone N` without `--consent` exits 2, prints the ban warning, and creates **no** `nuncio.db`, data dir or keyring item (use a temp `XDG_DATA_HOME`)." Commit: `test(cli): cover status, usage errors and the link consent gate`
+- **S4** T4: "both suites read every new fixture, round-trip it semantically, and *construct* the daemon-side frames to equal the fixture (the existing contract pattern). Mutate one serde key by hand once to prove the Rust test detects drift, then revert. The behaviour table in `proto/wire.md` gains rows for the new corners (unknown jid, empty text, oversized text, send while unlinked returns `not_linked`)." Ops: `messages` {`jid`, `limit`}, `send` {`jid`, `text`, `client_id`}, `subscribe`, `focus` {`jid`}; daemon frames `messages`, `sent`/`send_failed`, `event_message`, `event_connection`, `event_unread`; Message `kind`/`media` only as far as T13 needs. Commit: `feat(proto): add messages, send, focus and event frames to wire v1`
+- **S5** T5: "insert chats and messages, list newest-first with a limit, search with FTS5 `MATCH`, unread counts per chat and total; re-opening the DB keeps everything; duplicate message ids are ignored (idempotent insert, needed for no duplicates later)." Commit: `feat(store): persist chats and messages with an FTS5 search index`
+- **S6** T6: "with a fake client: no device => `unlinked` and no connect call; device present => connects and reports `linked`; disconnect => `offline`. Existing daemon tests still pass (the fixture chat list stays the answer while `unlinked`, because `TestEmbeddedChatListMatchesContractFixture` pins it). Do **not** connect to WhatsApp in any test." Never start a link as a side effect. Commit: `feat(wa): let nunciod own the whatsmeow session`
+- **S7** T7: "feeding synthetic whatsmeow `events.Message` values (text and extended-text, from-me and not) results in the right rows, unread counts, and `chats`/`messages` responses; marking read clears unread. **Read receipts only on an explicit view**: no automatic `MarkRead`." Commit: `feat(wa): store incoming text messages and track unread counts`
+- **S8** T8: "two subscribed clients both receive a stored message's event; a subscriber that stops reading **cannot block** the daemon or other clients (bounded queue, then drop that subscriber); a non-subscribed connection receives no events; Rust client decodes every event fixture." D-Bus `UnreadChanged` may split into a Linux commit. Commit: `feat(ipc): stream daemon events to subscribed clients`
+- **S9** T9: "against a fake daemon: `status`, `chats` (formatted list), `send` (refuses an empty message, refuses more than one recipient, prints "queued"/"sent"/"not sent" honestly), `focus` (event delivered); `send` while `unlinked` exits non-zero with the `not_linked` message. Help text documents every command." No automation surface. Commit: `feat(cli): add chats, send and focus next to status`
+- **S10** T10: "with a fake clock and a fake client: delays grow, are jittered within bounds, cap at the ceiling, reset after a stable connection; a ban/logout event stops the loop and sets a visible state; no reconnect storm after `Disconnect`." Never send "available" presence on connect; record the whatsmeow call in the commit body. Commit: `feat(wa): reconnect with capped exponential backoff and stop on bans`
+- **S11** T11: "(fake client) offline send => `queued`; reconnect => exactly one send per queued message, ids unique, order preserved; simulated failure mid-send => no duplicate on the next drain (use a client-generated id / whatsmeow message id) and the message ends `not_sent`, never silently dropped; a manual retry works." Open question for the owner: drain semantics (assumption: one drain pass on reconnect, no timed retry loops). Commit: `feat(wa): add an offline outbox that drains once and keeps failures visible`
+- **S12** T12: "with a fake keyring + temp data dir + fake client: after `logout`, the data dir has no DB, media or export files, the fake keyring is empty, the socket is gone; `purge` never calls the network; both refuse to run while a confirmation flag is absent." Commit: `feat(cli): add logout and purge that leave nothing behind`
+- **S13** T13: "with a fake downloader returning known ciphertext: decrypted bytes match, the SHA-256 is verified (mismatch is an error and nothing is cached), modes are `0600`/`0700`, a second request hits the cache, nothing is fetched without an explicit request." Do not copy nchat's patched whatsmeow files. Commit: `feat(media): download, verify and cache media on demand`
+- **S14** T14: (1) app-state sync: "synthetic app-state events change the chat flags", commit `feat(wa): apply app-state sync for pin, archive and mute`; (2) `CREDITS.md`, commit `docs: add CREDITS with the nchat, Sealwax and whatsmeow attributions`; (3) re-run `contrib/bump-drill.sh` (no `--global-clean`), commit `docs: record the bump drill on the M1 code`.
+- **S15** Hard rules: simplest code per acceptance test; tests first; help text and docs for every command change; **no AI attribution or `Co-Authored-By`**; no push, link, unlink, logout, purge or real send; no real-keyring test (`NUNCIO_KEYRING_TESTS`); no `sudo`; no test number or main number in the repo; do not reopen section-2 decisions.
+- **S16** End of day: the report template (handoff section 9) filled and saved as `~/Documents/nuncio-office-report-2026-10-19.md`, and printed in the chat.
+
+## Tasks
+
+| ID | Spec | Route | Status | Evidence |
+|---|---|---|---|---|
+| T0 | S16 | inline | done | baseline below (L3) |
+| T1 | S1 | inline | pending | |
+| T2 | S2 | inline | pending | |
+| T3 | S3 | inline | pending | |
+| T4 | S4 | inline | pending | |
+| T5 | S5 | inline | pending | |
+| T6 | S6 | inline | pending | |
+| T7 | S7 | inline | pending | |
+| T8 | S8 | inline | pending | |
+| T9 | S9 | inline | pending | |
+| T10 | S10 | inline | pending | |
+| T11 | S11 | inline | pending | |
+| T12 | S12 | inline | pending | |
+| T13 | S13 | inline | pending | |
+| T14 | S14 | inline | pending | |
+
+## Log
+
+- **L1** (owner, 2026-10-19, verbatim): "si empieza me vas notificando cada fase, al terminar cada etapa o fase me das una tabla con lo hecho y lo que falta y no olvides usar gentle-orchestrator que igusl es el default para claude entonces no debe haber problema"
+- **L2** Setup: rustup via Homebrew (keg-only, PATH added to `~/.zshrc`, backup `~/.zshrc.bak-rustup-20261019`), stable rustc 1.99.1 + rustfmt + clippy; go 1.27.1 darwin/arm64 already present. Repo cloned from GitHub at `ae35fea`. Work on branch `feat/m1-core` (ODD: branch first off the default branch).
+- **L3** Baseline on `ae35fea` (macOS 27.0.1 arm64): `gofmt -l .` empty; `go vet ./...` ok (first run hit a transient proxy stream error, retried clean); `TMPDIR=/tmp go test -count=1 ./...` 48 top-level passed / 5 skipped (4 D-Bus: no dbus-daemon; 1 real Secret Service) / 0 failed, `cmd/nuncio` has no test files; `CGO_ENABLED=0 go build ./...` ok; `cargo fmt --all --check` ok; `cargo clippy --workspace --exclude nuncio-desktop --all-targets -- -D warnings` ok; `cargo test --workspace --exclude nuncio-desktop` 44 passed / 0 failed.
+- **L4** Receipt-driven review is on (global). Candidate consent for native review is asked per candidate (no pre-granted consent outside Misoku).

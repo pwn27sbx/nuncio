@@ -26,6 +26,7 @@ import (
 	"github.com/godbus/dbus/v5"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waSyncAction"
 	"go.mau.fi/whatsmeow/types"
 	waevents "go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -220,8 +221,8 @@ func assertFixtureChats(t *testing.T, chats []ipc.Chat) {
 		t.Errorf("second chat last message = %+v, want a message from me", chats[1].LastMessage)
 	}
 	third := chats[2]
-	if third.JID != "120363000000000000@g.us" || !third.Archived || third.Unread != 17 || third.LastMessage != nil {
-		t.Errorf("group chat = %+v, want an archived group with 17 unread and no last message", third)
+	if third.JID != "120363000000000000@g.us" || !third.Archived || !third.Muted || third.Unread != 17 || third.LastMessage != nil {
+		t.Errorf("group chat = %+v, want an archived, muted group with 17 unread and no last message", third)
 	}
 }
 
@@ -876,6 +877,52 @@ func TestDaemonServesChatsMessagesAndUnreadFromTheStore(t *testing.T) {
 	}
 	if chats.Chats[0].Unread != 0 || chats.Chats[1].Unread != 1 {
 		t.Errorf("unread after marking ada read = %d and %d, want 0 and 1", chats.Chats[0].Unread, chats.Chats[1].Unread)
+	}
+}
+
+// App-state changes from the phone (pin, archive, mute) show in the next chats reply; a mute
+// that has already ended does not.
+func TestDaemonChatsReplyCarriesTheAppStateFlags(t *testing.T) {
+	db := openTestStore(t)
+	fake := &fakeWAClient{}
+	session := wa.NewSession(fake, db, nil)
+	if err := session.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	grace := types.NewJID("15551230002", types.DefaultUserServer)
+	group := types.NewJID("120363000000000000", types.GroupServer)
+	t0 := time.Date(2026, 10, 18, 17, 50, 0, 0, time.UTC)
+	fake.emit(textMessage(ada, "A1", false, t0.Add(2*time.Minute), "first"))
+	fake.emit(textMessage(grace, "G1", false, t0.Add(time.Minute), "hello"))
+	fake.emit(&waevents.Pin{JID: ada, Action: &waSyncAction.PinAction{Pinned: proto.Bool(true)}})
+	fake.emit(&waevents.Mute{JID: ada, Action: &waSyncAction.MuteAction{
+		Muted: proto.Bool(true), MuteEndTimestamp: proto.Int64(time.Now().Add(time.Hour).UnixMilli())}})
+	fake.emit(&waevents.Archive{JID: grace, Action: &waSyncAction.ArchiveChatAction{Archived: proto.Bool(true)}})
+	fake.emit(&waevents.Mute{JID: grace, Action: &waSyncAction.MuteAction{
+		Muted: proto.Bool(true), MuteEndTimestamp: proto.Int64(time.Now().Add(-time.Hour).UnixMilli())}})
+	fake.emit(&waevents.Mute{JID: group, Action: &waSyncAction.MuteAction{
+		Muted: proto.Bool(true), MuteEndTimestamp: proto.Int64(-1)}})
+
+	d, err := newDaemon(session, db)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	chats, err := serveInProcess(t, d).Chats(40)
+	if err != nil {
+		t.Fatalf("Chats: %v", err)
+	}
+	got := map[string][3]bool{}
+	for _, c := range chats.Chats {
+		got[c.JID] = [3]bool{c.Pinned, c.Archived, c.Muted}
+	}
+	want := map[string][3]bool{
+		ada.String():   {true, false, true},
+		grace.String(): {false, true, false},
+		group.String(): {false, false, true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("chat flags [pinned archived muted] = %v, want %v", got, want)
 	}
 }
 

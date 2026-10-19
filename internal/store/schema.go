@@ -14,7 +14,9 @@ import (
 // media_refs holds, per media message, the serialised whatsmeow media sub-message (key, direct
 // path, hashes) a download on request needs. It is a side table, not a new messages column, so a
 // database created before it existed gains it with CREATE TABLE IF NOT EXISTS and keeps its rows:
-// the schema only ever adds, never drops or rewrites.
+// the schema only ever adds, never drops or rewrites. chat_mutes follows the same rule: one row
+// per muted chat with its end time (Unix nanoseconds, -1 for muted with no end), and no row for a
+// chat that is not muted.
 const schema = `
 CREATE TABLE IF NOT EXISTS chats (
 	jid      TEXT PRIMARY KEY,
@@ -43,6 +45,10 @@ CREATE TABLE IF NOT EXISTS media_refs (
 	id       TEXT NOT NULL,
 	ref      BLOB NOT NULL,
 	PRIMARY KEY (chat_jid, id)
+);
+CREATE TABLE IF NOT EXISTS chat_mutes (
+	jid   TEXT PRIMARY KEY,
+	until INTEGER NOT NULL
 );
 `
 

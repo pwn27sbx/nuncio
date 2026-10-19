@@ -330,6 +330,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                     unread: 2,
                     archived: false,
                     pinned: true,
+                    muted: false,
                     last_message: Some(Message {
                         id: "3EB0AAA1".to_owned(),
                         kind: "text".to_owned(),
@@ -345,6 +346,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                     unread: 0,
                     archived: false,
                     pinned: false,
+                    muted: false,
                     last_message: Some(Message {
                         id: "3EB0AAA2".to_owned(),
                         kind: "text".to_owned(),
@@ -360,6 +362,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                     unread: 17,
                     archived: true,
                     pinned: false,
+                    muted: true,
                     last_message: None,
                 },
             ],
@@ -386,6 +389,16 @@ fn a_chat_with_no_messages_omits_last_message() {
         last.get("last_message").is_none(),
         "an absent last_message must stay absent: {last}"
     );
+}
+
+#[test]
+fn a_chat_from_a_daemon_without_muted_parses_as_not_muted() {
+    let chat: Chat = serde_json::from_str(
+        r#"{"jid":"15551230001@s.whatsapp.net","name":"Ada","unread":0,"archived":false,"pinned":true}"#,
+    )
+    .expect("a chat without muted parses");
+    assert!(!chat.muted);
+    assert!(chat.pinned);
 }
 
 #[test]

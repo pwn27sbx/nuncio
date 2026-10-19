@@ -293,6 +293,7 @@ func fixtureChatList() []Chat {
 			Name:     "Omarchy devs",
 			Unread:   17,
 			Archived: true,
+			Muted:    true,
 		},
 	}
 }

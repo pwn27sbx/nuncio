@@ -325,8 +325,9 @@ func (d *daemon) unread() int {
 }
 
 // Chats lists the stored chats, newest message first, each with its unread
-// count and last message. Without a store it is the fixture list, the answer
-// while unlinked. A store failure, or a store a wipe closed, is logged and answers no chats.
+// count, its flags (muted only while its mute lasts) and last message. Without
+// a store it is the fixture list, the answer while unlinked. A store failure,
+// or a store a wipe closed, is logged and answers no chats.
 func (d *daemon) Chats() []ipc.Chat {
 	if d.db == nil {
 		return d.chats
@@ -341,8 +342,10 @@ func (d *daemon) Chats() []ipc.Chat {
 		return nil
 	}
 	chats := make([]ipc.Chat, 0, len(rows))
+	now := time.Now()
 	for _, r := range rows {
-		c := ipc.Chat{JID: r.JID, Name: r.Name, Unread: r.Unread, Archived: r.Archived, Pinned: r.Pinned}
+		c := ipc.Chat{JID: r.JID, Name: r.Name, Unread: r.Unread, Archived: r.Archived, Pinned: r.Pinned,
+			Muted: r.Muted(now)}
 		last, err := store.ListMessages(d.db, r.JID, 1)
 		if err != nil {
 			log.Print(err)

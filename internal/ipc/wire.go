@@ -315,13 +315,14 @@ type Error struct {
 	Message string `json:"message"`
 }
 
-// Chat is the M0 chat shape.
+// Chat is the M0 chat shape, plus muted (M1, from app-state sync).
 type Chat struct {
 	JID         string   `json:"jid"`
 	Name        string   `json:"name"`
 	Unread      int      `json:"unread"`
 	Archived    bool     `json:"archived"`
 	Pinned      bool     `json:"pinned"`
+	Muted       bool     `json:"muted"`
 	LastMessage *Message `json:"last_message,omitempty"`
 }
 

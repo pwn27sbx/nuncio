@@ -97,7 +97,15 @@ A string, not a boolean, so it can grow without a protocol break:
 | `unread` | int | >= 0 |
 | `archived` | bool | |
 | `pinned` | bool | |
+| `muted` | bool | true while the chat's mute lasts (muted with no end, or its end still ahead). Added in M1; a client reads a missing key as `false` |
 | `last_message` | object or absent | omitted for a chat with no messages |
+
+`archived`, `pinned` and `muted` follow the phone: the daemon applies WhatsApp's app-state sync
+(the initial full sync and every later change) read-only and never sends a change back. A change
+publishes no event yet; a client sees it on its next `chats`. A chat marked read on another device
+is marked read here too (its `event_unread` is published, and no read receipt is sent); a chat
+marked *unread* on another device leaves the counts as they are, since the daemon has no "marked
+unread" flag.
 
 ### Message
 

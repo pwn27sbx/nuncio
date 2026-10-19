@@ -19,6 +19,11 @@ type Events struct {
 	// connect. reason is a short description (codes and expiry only, no personal data).
 	Stopped func(reason string)
 	Message func(*waevents.Message)
+	// The app-state changes made on another device (see appstate.go).
+	Pin            func(*waevents.Pin)
+	Archive        func(*waevents.Archive)
+	Mute           func(*waevents.Mute)
+	MarkChatAsRead func(*waevents.MarkChatAsRead)
 }
 
 // Handle dispatches one raw whatsmeow event.
@@ -62,6 +67,22 @@ func (e Events) Handle(raw any) {
 	case *waevents.Message:
 		if e.Message != nil {
 			e.Message(v)
+		}
+	case *waevents.Pin:
+		if e.Pin != nil {
+			e.Pin(v)
+		}
+	case *waevents.Archive:
+		if e.Archive != nil {
+			e.Archive(v)
+		}
+	case *waevents.Mute:
+		if e.Mute != nil {
+			e.Mute(v)
+		}
+	case *waevents.MarkChatAsRead:
+		if e.MarkChatAsRead != nil {
+			e.MarkChatAsRead(v)
 		}
 	}
 }

@@ -326,7 +326,7 @@ impl ErrorCode {
     }
 }
 
-/// A chat, in the M0 shape.
+/// A chat, in the M0 shape plus `muted`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chat {
     /// WhatsApp JID, e.g. `15551230001@s.whatsapp.net`.
@@ -336,6 +336,10 @@ pub struct Chat {
     pub unread: u32,
     pub archived: bool,
     pub pinned: bool,
+    /// Muted right now (from the phone's app-state sync); absent from an older daemon, which
+    /// reads as not muted.
+    #[serde(default)]
+    pub muted: bool,
     /// Absent for a chat with no messages, and it must stay absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_message: Option<Message>,

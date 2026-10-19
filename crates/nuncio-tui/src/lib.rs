@@ -361,6 +361,7 @@ mod tests {
             unread: 0,
             archived: false,
             pinned: false,
+            muted: false,
             last_message: None,
         }
     }

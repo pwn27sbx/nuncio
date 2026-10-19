@@ -143,6 +143,10 @@ func (s *Session) Start() error {
 	}
 	if s.db != nil {
 		events.Message = s.storeMessage
+		events.Pin = s.applyPin
+		events.Archive = s.applyArchive
+		events.Mute = s.applyMute
+		events.MarkChatAsRead = s.applyMarkChatAsRead
 	}
 	s.client.AddEventHandler(events.Handle)
 	s.set(StateOffline)
@@ -333,6 +337,9 @@ func OpenSession(ctx context.Context, path string) (*Session, error) {
 	// (only an explicit SendPresence does, and Client has no such call), so the account is never
 	// marked online on connect.
 	client.EnableAutoReconnect = false
+	// whatsmeow keeps the pins, archives and mutes of the initial full app-state sync in its own
+	// tables and emits no event for them unless asked; nuncio applies them like any later change.
+	client.EmitAppStateEventsOnFullSync = true
 	s := NewSession(whatsmeowClient{client}, db, db.Close)
 	// Attachments are downloaded only on a download_media request, by whatsmeow's Download
 	// (which fetches, decrypts and checks the hashes), into $XDG_DATA_HOME/nuncio/media.

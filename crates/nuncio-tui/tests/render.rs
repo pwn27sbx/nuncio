@@ -197,6 +197,7 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
             unread: 2,
             archived: false,
             pinned: true,
+            muted: false,
             last_message: Some(Message {
                 id: "3EB0AAA1".to_owned(),
                 kind: "text".to_owned(),

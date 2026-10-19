@@ -519,3 +519,128 @@ func TestADatabaseWithTheT5SchemaOpensAndKeepsItsRows(t *testing.T) {
 		t.Fatalf("GetMessage of the old row = %+v, %v; want it with no reference", got, err)
 	}
 }
+
+func chatOf(t *testing.T, db *sql.DB, jid string) Chat {
+	t.Helper()
+	chats, err := ListChats(db, 200)
+	if err != nil {
+		t.Fatalf("ListChats: %v", err)
+	}
+	for _, c := range chats {
+		if c.JID == jid {
+			return c
+		}
+	}
+	t.Fatalf("chat %s not stored: %+v", jid, chats)
+	return Chat{}
+}
+
+func TestSetChatPinnedAndArchivedChangeOnlyTheirFlag(t *testing.T) {
+	db := newMessagesDB(t)
+	if err := UpsertChat(db, Chat{JID: chatAlice, Name: "Alice"}); err != nil {
+		t.Fatalf("UpsertChat: %v", err)
+	}
+	if err := SetChatPinned(db, chatAlice, true); err != nil {
+		t.Fatalf("SetChatPinned: %v", err)
+	}
+	if err := SetChatArchived(db, chatAlice, true); err != nil {
+		t.Fatalf("SetChatArchived: %v", err)
+	}
+	if c := chatOf(t, db, chatAlice); !c.Pinned || !c.Archived || c.Name != "Alice" {
+		t.Fatalf("after pin and archive = %+v, want pinned, archived, named Alice", c)
+	}
+	if err := SetChatPinned(db, chatAlice, false); err != nil {
+		t.Fatalf("SetChatPinned: %v", err)
+	}
+	if c := chatOf(t, db, chatAlice); c.Pinned || !c.Archived {
+		t.Fatalf("after unpin = %+v, want unpinned and still archived", c)
+	}
+	if err := SetChatArchived(db, chatAlice, false); err != nil {
+		t.Fatalf("SetChatArchived: %v", err)
+	}
+	if c := chatOf(t, db, chatAlice); c.Pinned || c.Archived || c.Name != "Alice" {
+		t.Fatalf("after unarchive = %+v, want no flags, named Alice", c)
+	}
+}
+
+func TestSetChatMutedUntilKeepsForeverAnEndTimeAndUnmute(t *testing.T) {
+	db := newMessagesDB(t)
+	if err := SetChatMutedUntil(db, chatBob, MutedForever); err != nil {
+		t.Fatalf("SetChatMutedUntil forever: %v", err)
+	}
+	if c := chatOf(t, db, chatBob); !c.MutedUntil.Equal(MutedForever) || !c.Muted(t0) {
+		t.Fatalf("muted forever = %+v, want MutedForever", c)
+	}
+	end := t0.Add(8 * time.Hour)
+	if err := SetChatMutedUntil(db, chatBob, end); err != nil {
+		t.Fatalf("SetChatMutedUntil: %v", err)
+	}
+	c := chatOf(t, db, chatBob)
+	if !c.MutedUntil.Equal(end) || !c.Muted(t0) || c.Muted(end) {
+		t.Fatalf("muted until %v = %+v, want muted before and not at the end", end, c)
+	}
+	if err := SetChatMutedUntil(db, chatBob, time.Time{}); err != nil {
+		t.Fatalf("SetChatMutedUntil unmute: %v", err)
+	}
+	if c := chatOf(t, db, chatBob); !c.MutedUntil.IsZero() || c.Muted(t0) {
+		t.Fatalf("after unmute = %+v, want not muted", c)
+	}
+}
+
+// t13Schema is the message schema as T13 shipped it, with media references but before chat mutes.
+const t13Schema = t5Schema + `
+CREATE TABLE media_refs (
+	chat_jid TEXT NOT NULL,
+	id       TEXT NOT NULL,
+	ref      BLOB NOT NULL,
+	PRIMARY KEY (chat_jid, id)
+);
+`
+
+func TestADatabaseWithTheT13SchemaOpensKeepsItsFlagsAndLearnsMutes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nuncio.db")
+	old, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if _, err := old.Exec(t13Schema); err != nil {
+		t.Fatalf("create the T13 schema: %v", err)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	db := openMessagesDB(t, path)
+	c := chatOf(t, db, chatAlice)
+	if c.Name != "Alice" || !c.Pinned || !c.MutedUntil.IsZero() || c.Unread != 1 {
+		t.Fatalf("old chat after the upgrade = %+v, want Alice pinned, unmuted, 1 unread", c)
+	}
+	if err := SetChatMutedUntil(db, chatAlice, MutedForever); err != nil {
+		t.Fatalf("SetChatMutedUntil after the upgrade: %v", err)
+	}
+	if c := chatOf(t, db, chatAlice); !c.Muted(t0) || !c.Pinned || c.Name != "Alice" {
+		t.Fatalf("muted old chat = %+v, want muted, still pinned and named", c)
+	}
+}
+
+func TestChatFlagsOfAnUnknownChatCreateIt(t *testing.T) {
+	db := newMessagesDB(t)
+	if err := SetChatPinned(db, chatAlice, true); err != nil {
+		t.Fatalf("SetChatPinned: %v", err)
+	}
+	if err := SetChatArchived(db, chatBob, true); err != nil {
+		t.Fatalf("SetChatArchived: %v", err)
+	}
+	if err := SetChatMutedUntil(db, chatGroup, MutedForever); err != nil {
+		t.Fatalf("SetChatMutedUntil: %v", err)
+	}
+	if c := chatOf(t, db, chatAlice); !c.Pinned {
+		t.Errorf("new pinned chat = %+v", c)
+	}
+	if c := chatOf(t, db, chatBob); !c.Archived {
+		t.Errorf("new archived chat = %+v", c)
+	}
+	if c := chatOf(t, db, chatGroup); !c.Muted(t0) {
+		t.Errorf("new muted chat = %+v", c)
+	}
+}

@@ -17,7 +17,9 @@ const (
 	KindDocument = "document"
 )
 
-// Chat is one conversation. LastMessageAt and Unread are derived from its messages.
+// Chat is one conversation. LastMessageAt and Unread are derived from its messages. MutedUntil is
+// zero for a chat that is not muted and MutedForever for one muted with no end; UpsertChat leaves
+// it alone, only SetChatMutedUntil changes it.
 type Chat struct {
 	JID           string
 	Name          string
@@ -25,7 +27,17 @@ type Chat struct {
 	Pinned        bool
 	LastMessageAt time.Time
 	Unread        int
+	MutedUntil    time.Time
 }
+
+// MutedForever is the MutedUntil of a chat muted with no end (whatsmeow's store.MutedForever).
+var MutedForever = time.Date(9999, 12, 31, 23, 59, 59, 999999999, time.UTC)
+
+// mutedForeverNanos stands for MutedForever in chat_mutes: year 9999 does not fit Unix nanoseconds.
+const mutedForeverNanos = -1
+
+// Muted reports whether the chat is muted at now.
+func (c Chat) Muted(now time.Time) bool { return c.MutedUntil.After(now) }
 
 // ErrNoMessage: no message with that id is stored in that chat.
 var ErrNoMessage = errors.New("no such message in that chat")
@@ -62,6 +74,50 @@ func UpsertChat(db *sql.DB, c Chat) error {
 		c.JID, c.Name, c.Archived, c.Pinned)
 	if err != nil {
 		return fmt.Errorf("cannot save chat: %w", err)
+	}
+	return nil
+}
+
+// SetChatPinned sets the pinned flag of a chat, creating the chat if it is not stored yet.
+func SetChatPinned(db *sql.DB, jid string, pinned bool) error {
+	_, err := db.Exec(`INSERT INTO chats (jid, pinned) VALUES (?, ?)
+		ON CONFLICT (jid) DO UPDATE SET pinned = excluded.pinned`, jid, pinned)
+	if err != nil {
+		return fmt.Errorf("cannot save chat pin: %w", err)
+	}
+	return nil
+}
+
+// SetChatArchived sets the archived flag of a chat, creating the chat if it is not stored yet.
+func SetChatArchived(db *sql.DB, jid string, archived bool) error {
+	_, err := db.Exec(`INSERT INTO chats (jid, archived) VALUES (?, ?)
+		ON CONFLICT (jid) DO UPDATE SET archived = excluded.archived`, jid, archived)
+	if err != nil {
+		return fmt.Errorf("cannot save chat archive: %w", err)
+	}
+	return nil
+}
+
+// SetChatMutedUntil mutes a chat until the given time (MutedForever for no end) or, with the zero
+// time, unmutes it. The chat is created if it is not stored yet.
+func SetChatMutedUntil(db *sql.DB, jid string, until time.Time) error {
+	if _, err := db.Exec(`INSERT INTO chats (jid) VALUES (?) ON CONFLICT (jid) DO NOTHING`, jid); err != nil {
+		return fmt.Errorf("cannot save chat mute: %w", err)
+	}
+	var err error
+	switch {
+	case until.IsZero():
+		_, err = db.Exec(`DELETE FROM chat_mutes WHERE jid = ?`, jid)
+	default:
+		end := int64(mutedForeverNanos)
+		if !until.Equal(MutedForever) {
+			end = until.UnixNano()
+		}
+		_, err = db.Exec(`INSERT INTO chat_mutes (jid, until) VALUES (?, ?)
+			ON CONFLICT (jid) DO UPDATE SET until = excluded.until`, jid, end)
+	}
+	if err != nil {
+		return fmt.Errorf("cannot save chat mute: %w", err)
 	}
 	return nil
 }
@@ -140,8 +196,8 @@ func GetMessage(db *sql.DB, chatJID, id string) (Message, error) {
 // ListChats returns up to limit chats, the one with the newest message first.
 func ListChats(db *sql.DB, limit int) ([]Chat, error) {
 	rows, err := db.Query(`SELECT c.jid, c.name, c.archived, c.pinned, COALESCE(MAX(m.ts), 0),
-			COUNT(CASE WHEN m.from_me = 0 AND m.read = 0 THEN 1 END)
-		FROM chats c LEFT JOIN messages m ON m.chat_jid = c.jid
+			COUNT(CASE WHEN m.from_me = 0 AND m.read = 0 THEN 1 END), COALESCE(mu.until, 0)
+		FROM chats c LEFT JOIN messages m ON m.chat_jid = c.jid LEFT JOIN chat_mutes mu ON mu.jid = c.jid
 		GROUP BY c.jid ORDER BY COALESCE(MAX(m.ts), 0) DESC, c.jid LIMIT ?`, limit)
 	if err != nil {
 		return nil, fmt.Errorf("cannot list chats: %w", err)
@@ -150,12 +206,19 @@ func ListChats(db *sql.DB, limit int) ([]Chat, error) {
 	var chats []Chat
 	for rows.Next() {
 		var c Chat
-		var last int64
-		if err := rows.Scan(&c.JID, &c.Name, &c.Archived, &c.Pinned, &last, &c.Unread); err != nil {
+		var last, muted int64
+		if err := rows.Scan(&c.JID, &c.Name, &c.Archived, &c.Pinned, &last, &c.Unread, &muted); err != nil {
 			return nil, fmt.Errorf("cannot read chat: %w", err)
 		}
 		if last != 0 {
 			c.LastMessageAt = fromNanos(last)
+		}
+		switch muted {
+		case 0:
+		case mutedForeverNanos:
+			c.MutedUntil = MutedForever
+		default:
+			c.MutedUntil = fromNanos(muted)
 		}
 		chats = append(chats, c)
 	}

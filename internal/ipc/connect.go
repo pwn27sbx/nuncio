@@ -199,6 +199,21 @@ func (c *Client) Chats(limit int) (ChatsResponse, error) {
 	return resp, nil
 }
 
+// Messages asks the daemon for up to limit messages of the chat jid, newest first.
+func (c *Client) Messages(jid string, limit int) (MessagesResponse, error) {
+	if err := WriteFrame(c.conn, MessagesRequest{V: Version, Op: OpMessages, JID: jid, Limit: limit}); err != nil {
+		return MessagesResponse{}, err
+	}
+	var resp MessagesResponse
+	if err := c.readReply(&resp); err != nil {
+		return MessagesResponse{}, err
+	}
+	if resp.Op != OpMessages {
+		return MessagesResponse{}, fmt.Errorf("ipc: expected op %s, got %q", OpMessages, resp.Op)
+	}
+	return resp, nil
+}
+
 // Close closes the connection.
 func (c *Client) Close() error { return c.conn.Close() }
 

@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,8 +21,13 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
+	waevents "go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
+	"github.com/pwn27sbx/nuncio/internal/store"
 	"github.com/pwn27sbx/nuncio/internal/wa"
 )
 
@@ -276,7 +283,7 @@ func TestStatusReportsTheSessionState(t *testing.T) {
 		{wa.StateLinked, true},
 		{wa.StateOffline, true},
 	} {
-		d, err := newDaemon(fixedSession(tc.state))
+		d, err := newDaemon(fixedSession(tc.state), nil)
 		if err != nil {
 			t.Fatalf("newDaemon: %v", err)
 		}
@@ -690,4 +697,184 @@ func TestEmbeddedChatListMatchesContractFixture(t *testing.T) {
 		t.Fatalf("embedded chat list drifted from proto/fixtures/chats_response.json:\n embedded: %+v\n fixture:  %+v",
 			embedded, resp.Chats)
 	}
+}
+
+// fakeWAClient is a linked whatsmeow stand-in that never opens a socket; emit feeds it events.
+type fakeWAClient struct{ handlers []func(any) }
+
+func (f *fakeWAClient) HasDevice() bool             { return true }
+func (f *fakeWAClient) Connect() error              { f.emit(&waevents.Connected{}); return nil }
+func (f *fakeWAClient) Disconnect()                 {}
+func (f *fakeWAClient) AddEventHandler(h func(any)) { f.handlers = append(f.handlers, h) }
+
+func (f *fakeWAClient) emit(e any) {
+	for _, h := range f.handlers {
+		h(e)
+	}
+}
+
+func textMessage(chat types.JID, id string, fromMe bool, ts time.Time, text string) *waevents.Message {
+	return &waevents.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: chat, Sender: chat, IsFromMe: fromMe},
+			ID:            id,
+			Timestamp:     ts,
+		},
+		Message: &waE2E.Message{Conversation: proto.String(text)},
+	}
+}
+
+// serveInProcess serves h on a private socket and returns a connected client.
+func serveInProcess(t *testing.T, h ipc.Handler) *ipc.Client {
+	t.Helper()
+	sock := filepath.Join(t.TempDir(), "core.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen %s: %v", sock, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = serve(ctx, ln, h); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	c, err := ipc.Dial(sock, "test/0.1.0")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func openTestStore(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := store.Open(filepath.Join(t.TempDir(), "nuncio.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := store.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	return db
+}
+
+func TestDaemonServesChatsMessagesAndUnreadFromTheStore(t *testing.T) {
+	db := openTestStore(t)
+	fake := &fakeWAClient{}
+	session := wa.NewSession(fake, db, nil)
+	if err := session.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	group := types.NewJID("120363000000000000", types.GroupServer)
+	t0 := time.Date(2026, 10, 18, 17, 50, 0, 0, time.UTC)
+	fake.emit(textMessage(group, "G1", false, t0, "group hello"))
+	fake.emit(textMessage(ada, "A1", false, t0.Add(time.Minute), "first"))
+	fake.emit(textMessage(ada, "A2", false, t0.Add(2*time.Minute), "second"))
+	fake.emit(textMessage(ada, "A3", true, t0.Add(3*time.Minute), "mine"))
+
+	d, err := newDaemon(session, db)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	c := serveInProcess(t, d)
+
+	st, err := c.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.Unread != 3 || st.Session != ipc.SessionLinked {
+		t.Errorf("Status() = %+v, want linked with 3 unread", st)
+	}
+
+	chats, err := c.Chats(40)
+	if err != nil {
+		t.Fatalf("Chats: %v", err)
+	}
+	wantChats := []ipc.Chat{
+		{JID: ada.String(), Unread: 2, LastMessage: &ipc.Message{
+			ID: "A3", Kind: ipc.KindText, Text: "mine", FromMe: true, Timestamp: "2026-10-18T17:53:00Z"}},
+		{JID: group.String(), Unread: 1, LastMessage: &ipc.Message{
+			ID: "G1", Kind: ipc.KindText, Text: "group hello", Timestamp: "2026-10-18T17:50:00Z"}},
+	}
+	if !reflect.DeepEqual(chats.Chats, wantChats) {
+		t.Errorf("Chats() = %s, want %s", jsonOf(t, chats.Chats), jsonOf(t, wantChats))
+	}
+
+	msgs, err := c.Messages(ada.String(), 2)
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	wantMsgs := ipc.MessagesResponse{V: 1, Op: ipc.OpMessages, JID: ada.String(), Messages: []ipc.Message{
+		{ID: "A3", Kind: ipc.KindText, Text: "mine", FromMe: true, Timestamp: "2026-10-18T17:53:00Z"},
+		{ID: "A2", Kind: ipc.KindText, Text: "second", Timestamp: "2026-10-18T17:52:00Z"},
+	}}
+	if !reflect.DeepEqual(msgs, wantMsgs) {
+		t.Errorf("Messages() = %+v, want %+v", msgs, wantMsgs)
+	}
+
+	// Marking a chat read clears its unread, and the totals follow.
+	if err := session.MarkChatRead(ada.String()); err != nil {
+		t.Fatalf("MarkChatRead: %v", err)
+	}
+	if st, err := c.Status(); err != nil || st.Unread != 1 {
+		t.Errorf("Status() after marking ada read = %+v, %v; want 1 unread", st, err)
+	}
+	chats, err = c.Chats(40)
+	if err != nil {
+		t.Fatalf("Chats: %v", err)
+	}
+	if chats.Chats[0].Unread != 0 || chats.Chats[1].Unread != 1 {
+		t.Errorf("unread after marking ada read = %d and %d, want 0 and 1", chats.Chats[0].Unread, chats.Chats[1].Unread)
+	}
+}
+
+func TestDaemonWithoutStoreServesTheFixtureChatsAndNoMessages(t *testing.T) {
+	d, err := newDaemon(fixedSession(wa.StateUnlinked), nil)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	c := serveInProcess(t, d)
+	chats, err := c.Chats(40)
+	if err != nil {
+		t.Fatalf("Chats: %v", err)
+	}
+	assertFixtureChats(t, chats.Chats)
+	msgs, err := c.Messages("15551230001@s.whatsapp.net", 50)
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	if len(msgs.Messages) != 0 || msgs.Messages == nil {
+		t.Errorf("Messages() while unlinked = %#v, want an empty list", msgs.Messages)
+	}
+}
+
+func TestDaemonAnswersEmptyMessagesForAChatNotInTheStore(t *testing.T) {
+	d, err := newDaemon(fixedSession(wa.StateLinked), openTestStore(t))
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	c := serveInProcess(t, d)
+	msgs, err := c.Messages("15551239999@s.whatsapp.net", 50)
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	if msgs.JID != "15551239999@s.whatsapp.net" || len(msgs.Messages) != 0 {
+		t.Errorf("Messages() = %+v, want an empty list for that jid", msgs)
+	}
+	chats, err := c.Chats(40)
+	if err != nil {
+		t.Fatalf("Chats: %v", err)
+	}
+	if len(chats.Chats) != 0 {
+		t.Errorf("Chats() over an empty store = %+v, want none (not the fixture)", chats.Chats)
+	}
+}
+
+func jsonOf(t *testing.T, v any) string {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(data)
 }

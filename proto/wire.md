@@ -145,7 +145,13 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 |---|---|
 | `messages` `limit` outside 1..200 | `bad_frame`; the connection stays usable |
 | `messages` for a well-formed `jid` with no stored chat | `messages` with an empty list |
-| `jid` that is not a WhatsApp JID (`user@s.whatsapp.net`, `id@g.us`) in any request | `bad_frame`; the connection stays usable |
+| `jid` that is not a WhatsApp chat JID in any request | `bad_frame`; the connection stays usable |
+
+A WhatsApp chat JID is one of: `digits@s.whatsapp.net` (a user), `digits@lid` (a user addressed by
+its hidden id; WhatsApp uses it for direct chats too) or `digits-digits@g.us` / `digits@g.us` (a
+group). Device suffixes (`user:2@...`), `status@broadcast`, broadcast lists and newsletters are not
+chat JIDs.
+
 | `send` with empty `text` (or only whitespace) | `bad_frame`; nothing is stored or sent |
 | `send` with `text` over 65 536 bytes | `bad_frame`; nothing is stored or sent |
 | `send` with an empty `client_id` | `bad_frame` |

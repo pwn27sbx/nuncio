@@ -7,7 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"go.mau.fi/whatsmeow/types"
 	waevents "go.mau.fi/whatsmeow/types/events"
 )
 
@@ -18,6 +20,7 @@ type fakeClient struct {
 	connectErr  error
 	connects    int
 	disconnects int
+	markReads   int
 	handlers    []func(any)
 }
 
@@ -34,6 +37,12 @@ func (f *fakeClient) Connect() error {
 
 func (f *fakeClient) Disconnect() { f.disconnects++ }
 
+// MarkRead mirrors whatsmeow's read receipt call, so a test can prove it is never sent.
+func (f *fakeClient) MarkRead(context.Context, []types.MessageID, time.Time, types.JID, types.JID) error {
+	f.markReads++
+	return nil
+}
+
 func (f *fakeClient) AddEventHandler(h func(any)) { f.handlers = append(f.handlers, h) }
 
 func (f *fakeClient) emit(e any) {
@@ -44,7 +53,7 @@ func (f *fakeClient) emit(e any) {
 
 func TestSessionWithoutDeviceStaysUnlinkedAndNeverConnects(t *testing.T) {
 	fake := &fakeClient{device: false}
-	s := NewSession(fake, nil)
+	s := NewSession(fake, nil, nil)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -62,7 +71,7 @@ func TestSessionWithoutDeviceStaysUnlinkedAndNeverConnects(t *testing.T) {
 
 func TestSessionWithDeviceConnectsOnceAndReportsLinked(t *testing.T) {
 	fake := &fakeClient{device: true}
-	s := NewSession(fake, nil)
+	s := NewSession(fake, nil, nil)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -76,7 +85,7 @@ func TestSessionWithDeviceConnectsOnceAndReportsLinked(t *testing.T) {
 
 func TestSessionDisconnectEventReportsOffline(t *testing.T) {
 	fake := &fakeClient{device: true}
-	s := NewSession(fake, nil)
+	s := NewSession(fake, nil, nil)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -92,7 +101,7 @@ func TestSessionDisconnectEventReportsOffline(t *testing.T) {
 
 func TestSessionFailedConnectReportsOffline(t *testing.T) {
 	fake := &fakeClient{device: true, connectErr: errors.New("no network")}
-	s := NewSession(fake, nil)
+	s := NewSession(fake, nil, nil)
 	if err := s.Start(); err == nil {
 		t.Error("Start returned nil after a failed connect, want the error")
 	}
@@ -104,7 +113,7 @@ func TestSessionFailedConnectReportsOffline(t *testing.T) {
 func TestSessionCloseDisconnectsAndClosesTheStore(t *testing.T) {
 	fake := &fakeClient{device: true}
 	closed := 0
-	s := NewSession(fake, func() error { closed++; return nil })
+	s := NewSession(fake, nil, func() error { closed++; return nil })
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -166,7 +175,7 @@ func TestSessionEndEventsLeaveLinked(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeClient{device: true}
-			s := NewSession(fake, nil)
+			s := NewSession(fake, nil, nil)
 			if err := s.Start(); err != nil {
 				t.Fatalf("Start: %v", err)
 			}

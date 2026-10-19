@@ -21,6 +21,9 @@ func (fakeDaemon) Status() ipc.Status {
 	return ipc.Status{Daemon: "nunciod/0.1.0", Session: ipc.SessionUnlinked}
 }
 func (fakeDaemon) Chats() []ipc.Chat { return nil }
+func (fakeDaemon) Messages(string, int) ([]ipc.Message, error) {
+	return nil, nil
+}
 
 // serveFakeDaemon listens at $XDG_RUNTIME_DIR/nuncio/core.sock, where ipc.Connect looks.
 func serveFakeDaemon(t *testing.T) {

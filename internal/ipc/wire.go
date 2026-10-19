@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -308,6 +309,29 @@ type Handler interface {
 	// Chats returns every known chat, newest first. ServeConn applies the
 	// limit the client asked for.
 	Chats() []Chat
+	// Messages returns up to limit messages of the chat jid, newest first; none for a chat it
+	// does not know. ServeConn has already checked jid and limit.
+	Messages(jid string, limit int) ([]Message, error)
+}
+
+// ValidJID reports whether jid names a WhatsApp chat the protocol carries: a user
+// (`digits@s.whatsapp.net`, or `digits@lid` for a hidden-number user) or a group (`id@g.us`, digits
+// with an optional hyphen in old group ids). Device suffixes, broadcasts and other servers are not
+// chats.
+func ValidJID(jid string) bool {
+	user, server, ok := strings.Cut(jid, "@")
+	if !ok || user == "" {
+		return false
+	}
+	allowed := "0123456789"
+	switch server {
+	case "s.whatsapp.net", "lid":
+	case "g.us":
+		allowed += "-"
+	default:
+		return false
+	}
+	return strings.Trim(user, allowed) == ""
 }
 
 // WriteFrame writes v as one NDJSON frame.
@@ -470,6 +494,43 @@ func ServeConn(conn io.ReadWriteCloser, h Handler) error {
 				chats = []Chat{}
 			}
 			if err := WriteFrame(conn, ChatsResponse{V: Version, Op: OpChats, Chats: chats}); err != nil {
+				return err
+			}
+		case OpMessages:
+			var req MessagesRequest
+			if err := json.Unmarshal(line, &req); err != nil {
+				if err := WriteFrame(conn, badFrame("malformed messages frame")); err != nil {
+					return err
+				}
+				continue
+			}
+			if req.Limit < MinChatLimit || req.Limit > MaxChatLimit {
+				msg := fmt.Sprintf("limit must be between %d and %d", MinChatLimit, MaxChatLimit)
+				if err := WriteFrame(conn, badFrame(msg)); err != nil {
+					return err
+				}
+				continue
+			}
+			if !ValidJID(req.JID) {
+				if err := WriteFrame(conn, badFrame("jid is not a WhatsApp chat")); err != nil {
+					return err
+				}
+				continue
+			}
+			msgs, err := h.Messages(req.JID, req.Limit)
+			if err != nil {
+				if err := WriteFrame(conn, Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()}); err != nil {
+					return err
+				}
+				continue
+			}
+			if len(msgs) > req.Limit {
+				msgs = msgs[:req.Limit]
+			}
+			if msgs == nil {
+				msgs = []Message{}
+			}
+			if err := WriteFrame(conn, MessagesResponse{V: Version, Op: OpMessages, JID: req.JID, Messages: msgs}); err != nil {
 				return err
 			}
 		case OpHello:

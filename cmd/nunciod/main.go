@@ -5,12 +5,14 @@
 // never travel over D-Bus.
 //
 // The daemon, not `nuncio link`, owns the session: if the store holds a linked
-// device it connects; if not it stays unlinked and never starts a link. Until
-// the chat list comes from the store, it answers with the shared fixture list.
+// device it connects; if not it stays unlinked and never starts a link. With a
+// nuncio.db it stores incoming text messages and answers chats, messages and
+// unread counts from it; without one it answers the shared fixture chat list.
 package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -27,6 +29,7 @@ import (
 	"github.com/godbus/dbus/v5/prop"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
+	"github.com/pwn27sbx/nuncio/internal/store"
 	"github.com/pwn27sbx/nuncio/internal/wa"
 )
 
@@ -85,7 +88,7 @@ func run() error {
 		return err
 	}
 	defer session.Close()
-	d, err := newDaemon(session)
+	d, err := newDaemon(session, session.Store())
 	if err != nil {
 		return err
 	}
@@ -185,9 +188,9 @@ func exportDBus(bus *dbus.Conn, d *daemon) error {
 	if err := bus.Export(&dbusFace{d}, dbus.ObjectPath(ipc.ObjectPath), ipc.Interface); err != nil {
 		return fmt.Errorf("export %s on the session bus: %w", ipc.ObjectPath, err)
 	}
-	// UnreadCount is the daemon's only property. The daemon owns the session
-	// now, but it does not store messages yet, so the count stays 0 and the
-	// UnreadChanged signal the contract names is not emitted yet.
+	// UnreadCount is the daemon's only property: the store's total unread at
+	// startup (0 while unlinked). Keeping it current and emitting the
+	// UnreadChanged signal the contract names come with event streaming.
 	if _, err := prop.Export(bus, dbus.ObjectPath(ipc.ObjectPath), map[string]map[string]*prop.Prop{
 		ipc.Interface: {
 			"UnreadCount": {Value: int32(d.Status().Unread), Writable: false, Emit: prop.EmitTrue},
@@ -235,7 +238,9 @@ func serve(ctx context.Context, ln net.Listener, h ipc.Handler) error {
 type daemon struct {
 	version string
 	session sessionState
-	chats   []ipc.Chat
+	// db is the message store, nil while there is no nuncio.db (unlinked).
+	db    *sql.DB
+	chats []ipc.Chat
 }
 
 // sessionState is what the daemon reads from its WhatsApp session.
@@ -243,12 +248,14 @@ type sessionState interface {
 	State() wa.State
 }
 
-func newDaemon(session sessionState) (*daemon, error) {
+// newDaemon serves session and, when db is not nil, the chats, messages and
+// unread counts stored in db.
+func newDaemon(session sessionState, db *sql.DB) (*daemon, error) {
 	chats, err := fixtureChats()
 	if err != nil {
 		return nil, err
 	}
-	return &daemon{version: daemonVersion, session: session, chats: chats}, nil
+	return &daemon{version: daemonVersion, session: session, db: db, chats: chats}, nil
 }
 
 // Hello records the handshake and answers with the session's current state.
@@ -258,12 +265,72 @@ func (d *daemon) Hello(client string) ipc.Status {
 }
 
 // Status is also the D-Bus method of the same name. Linked means paired, so an
-// offline session is still linked.
+// offline session is still linked. Unread is the store's total, 0 without one.
 func (d *daemon) Status() ipc.Status {
 	st := d.session.State()
-	return ipc.Status{Daemon: d.version, Linked: st != wa.StateUnlinked, Session: string(st), Unread: 0}
+	return ipc.Status{Daemon: d.version, Linked: st != wa.StateUnlinked, Session: string(st), Unread: d.unread()}
 }
 
-// Chats is the fixture list until the chat list comes from the store; it is
-// the answer while unlinked.
-func (d *daemon) Chats() []ipc.Chat { return d.chats }
+func (d *daemon) unread() int {
+	if d.db == nil {
+		return 0
+	}
+	n, err := store.TotalUnread(d.db)
+	if err != nil {
+		log.Print(err)
+		return 0
+	}
+	return n
+}
+
+// Chats lists the stored chats, newest message first, each with its unread
+// count and last message. Without a store it is the fixture list, the answer
+// while unlinked. A store failure is logged and answers no chats.
+func (d *daemon) Chats() []ipc.Chat {
+	if d.db == nil {
+		return d.chats
+	}
+	rows, err := store.ListChats(d.db, ipc.MaxChatLimit)
+	if err != nil {
+		log.Print(err)
+		return nil
+	}
+	chats := make([]ipc.Chat, 0, len(rows))
+	for _, r := range rows {
+		c := ipc.Chat{JID: r.JID, Name: r.Name, Unread: r.Unread, Archived: r.Archived, Pinned: r.Pinned}
+		last, err := store.ListMessages(d.db, r.JID, 1)
+		if err != nil {
+			log.Print(err)
+			return nil
+		}
+		if len(last) == 1 {
+			m := wireMessage(last[0])
+			c.LastMessage = &m
+		}
+		chats = append(chats, c)
+	}
+	return chats
+}
+
+// Messages lists up to limit stored messages of a chat, newest first; none
+// without a store or for a chat it has never seen.
+func (d *daemon) Messages(jid string, limit int) ([]ipc.Message, error) {
+	if d.db == nil {
+		return nil, nil
+	}
+	rows, err := store.ListMessages(d.db, jid, limit)
+	if err != nil {
+		return nil, err
+	}
+	msgs := make([]ipc.Message, 0, len(rows))
+	for _, r := range rows {
+		msgs = append(msgs, wireMessage(r))
+	}
+	return msgs, nil
+}
+
+// wireMessage is a stored text message in its wire shape. Media fields are a
+// later task: only text is stored for now.
+func wireMessage(m store.Message) ipc.Message {
+	return ipc.Message{ID: m.ID, Kind: m.Kind, Text: m.Text, FromMe: m.FromMe, Timestamp: ipc.Timestamp(m.Timestamp)}
+}

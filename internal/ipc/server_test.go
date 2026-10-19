@@ -21,6 +21,9 @@ type fakeHandler struct {
 	status Status
 	chats  []Chat
 	hellos []string
+	// messages per chat jid; asked records every Messages call as "jid limit".
+	messages map[string][]Message
+	asked    []string
 }
 
 func (f *fakeHandler) Hello(client string) Status {
@@ -34,6 +37,23 @@ func (f *fakeHandler) Status() Status { return f.status }
 
 func (f *fakeHandler) Chats() []Chat { return f.chats }
 
+func (f *fakeHandler) Messages(jid string, limit int) ([]Message, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.asked = append(f.asked, fmt.Sprintf("%s %d", jid, limit))
+	msgs := f.messages[jid]
+	if len(msgs) > limit {
+		msgs = msgs[:limit]
+	}
+	return msgs, nil
+}
+
+func (f *fakeHandler) askedMessages() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.asked...)
+}
+
 func (f *fakeHandler) clientNames() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -46,9 +66,14 @@ func newFakeHandler(t *testing.T) *fakeHandler {
 	if err := json.Unmarshal(readFixture(t, "chats_response.json"), &resp); err != nil {
 		t.Fatalf("unmarshal chats fixture: %v", err)
 	}
+	var msgs MessagesResponse
+	if err := json.Unmarshal(readFixture(t, "messages_response.json"), &msgs); err != nil {
+		t.Fatalf("unmarshal messages fixture: %v", err)
+	}
 	return &fakeHandler{
-		status: Status{Daemon: "nunciod/0.1.0", Session: SessionUnlinked, Unread: 0},
-		chats:  resp.Chats,
+		status:   Status{Daemon: "nunciod/0.1.0", Session: SessionUnlinked, Unread: 0},
+		chats:    resp.Chats,
+		messages: map[string][]Message{msgs.JID: msgs.Messages},
 	}
 }
 
@@ -295,5 +320,71 @@ func TestServeConnEndsQuietlyOnClientClose(t *testing.T) {
 	conn, _ := rawConn(t, sock)
 	if err := conn.Close(); err != nil {
 		t.Fatalf("close: %v", err)
+	}
+}
+
+func TestServeConnServesMessagesOfAChat(t *testing.T) {
+	h := newFakeHandler(t)
+	sock := startServer(t, h)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+
+	sendRaw(t, conn, string(readFixture(t, "messages_request.json")))
+	assertSameJSON(t, recvRaw(t, br), readFixture(t, "messages_response.json"))
+	if got := h.askedMessages(); len(got) != 1 || got[0] != "15551230001@s.whatsapp.net 50" {
+		t.Fatalf("handler was asked %q, want the request's jid and limit", got)
+	}
+}
+
+func TestServeConnAnswersEmptyMessagesForAnUnknownChat(t *testing.T) {
+	sock := startServer(t, newFakeHandler(t))
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+
+	for _, jid := range []string{"15551239999@s.whatsapp.net", "120363000000000099@g.us", "100000000000001@lid"} {
+		sendRaw(t, conn, `{"v":1,"op":"messages","jid":"`+jid+`","limit":10}`)
+		assertSameJSON(t, recvRaw(t, br), []byte(`{"v":1,"op":"messages","jid":"`+jid+`","messages":[]}`))
+	}
+}
+
+func TestServeConnRejectsOutOfRangeMessagesLimitAndKeepsServing(t *testing.T) {
+	h := newFakeHandler(t)
+	sock := startServer(t, h)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+
+	for _, limit := range []string{"0", "-1", "201"} {
+		sendRaw(t, conn, `{"v":1,"op":"messages","jid":"15551230001@s.whatsapp.net","limit":`+limit+`}`)
+		if got := fieldOf(t, recvRaw(t, br), "code"); got != CodeBadFrame {
+			t.Fatalf("limit %s: code = %v, want %s", limit, got, CodeBadFrame)
+		}
+	}
+	sendRaw(t, conn, `{"v":1,"op":"status"}`)
+	assertSameJSON(t, recvRaw(t, br), readFixture(t, "status_response.json"))
+	if got := h.askedMessages(); len(got) != 0 {
+		t.Fatalf("handler was asked %q for rejected requests, want nothing", got)
+	}
+}
+
+func TestServeConnRejectsAJIDThatIsNotWhatsAppAndKeepsServing(t *testing.T) {
+	h := newFakeHandler(t)
+	sock := startServer(t, h)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+
+	for _, jid := range []string{
+		"", "15551230001", "@s.whatsapp.net", "15551230001@example.org",
+		"status@broadcast", "15551230001:3@s.whatsapp.net", "ada@s.whatsapp.net",
+		"15551230001@s.whatsapp.net@g.us",
+	} {
+		sendRaw(t, conn, `{"v":1,"op":"messages","jid":"`+jid+`","limit":10}`)
+		if got := fieldOf(t, recvRaw(t, br), "code"); got != CodeBadFrame {
+			t.Fatalf("jid %q: code = %v, want %s", jid, got, CodeBadFrame)
+		}
+	}
+	sendRaw(t, conn, `{"v":1,"op":"status"}`)
+	assertSameJSON(t, recvRaw(t, br), readFixture(t, "status_response.json"))
+	if got := h.askedMessages(); len(got) != 0 {
+		t.Fatalf("handler was asked %q for rejected requests, want nothing", got)
 	}
 }

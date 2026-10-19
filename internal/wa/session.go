@@ -44,6 +44,7 @@ type Client interface {
 // and never starts a link: with no device it stays unlinked and Connect is never called.
 type Session struct {
 	client     Client
+	db         *sql.DB
 	closeStore func() error
 
 	mu      sync.Mutex
@@ -51,11 +52,15 @@ type Session struct {
 	started bool
 }
 
-// NewSession wraps client, which may be nil for "no device store at all". closeStore, when not
-// nil, runs on Close after the client is disconnected.
-func NewSession(client Client, closeStore func() error) *Session {
-	return &Session{client: client, closeStore: closeStore, state: StateUnlinked}
+// NewSession wraps client, which may be nil for "no device store at all". db is the message
+// store that incoming messages are saved to, nil for none. closeStore, when not nil, runs on Close
+// after the client is disconnected.
+func NewSession(client Client, db *sql.DB, closeStore func() error) *Session {
+	return &Session{client: client, db: db, closeStore: closeStore, state: StateUnlinked}
 }
+
+// Store is the message store, or nil when there is no database (unlinked).
+func (s *Session) Store() *sql.DB { return s.db }
 
 // Start connects a stored device. It returns the connect error, if any, and leaves the session
 // offline; reconnecting is not its job.
@@ -68,12 +73,16 @@ func (s *Session) Start() error {
 	s.started = true
 	s.mu.Unlock()
 	// Subscribe before Connect, and count as offline until the Connected event arrives.
-	s.client.AddEventHandler(Events{
+	events := Events{
 		Connected:    func() { s.set(StateLinked) },
 		Disconnected: func() { s.set(StateOffline) },
 		LoggedOut:    func() { s.set(StateUnlinked) },
 		Dropped:      func() { s.set(StateOffline) },
-	}.Handle)
+	}
+	if s.db != nil {
+		events.Message = s.storeMessage
+	}
+	s.client.AddEventHandler(events.Handle)
 	s.set(StateOffline)
 	if err := s.client.Connect(); err != nil {
 		s.set(StateOffline)
@@ -145,12 +154,16 @@ func OpenDevice(ctx context.Context, db *sql.DB) (*wastore.Device, error) {
 // unlinked, and nothing is created: merely starting the daemon must leave no data dir behind.
 func OpenSession(ctx context.Context, path string) (*Session, error) {
 	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
-		return NewSession(nil, nil), nil
+		return NewSession(nil, nil, nil), nil
 	} else if err != nil {
 		return nil, fmt.Errorf("wa: %w", err)
 	}
 	db, err := store.Open(path)
 	if err != nil {
+		return nil, err
+	}
+	if err := store.EnsureSchema(db); err != nil {
+		_ = db.Close()
 		return nil, err
 	}
 	device, err := OpenDevice(ctx, db)
@@ -162,7 +175,7 @@ func OpenSession(ctx context.Context, path string) (*Session, error) {
 	// whatsmeow reconnects on its own by default; nuncio's capped backoff replaces that, and until
 	// it exists a dropped session stays offline instead of retrying silently.
 	client.EnableAutoReconnect = false
-	return NewSession(whatsmeowClient{client}, db.Close), nil
+	return NewSession(whatsmeowClient{client}, db, db.Close), nil
 }
 
 // whatsmeowClient adapts *whatsmeow.Client to Client.

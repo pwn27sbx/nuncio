@@ -18,8 +18,8 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 |---|---|---|---|---|
 | U1 | S1 (list, conversation, send, keyboard, palette), S2 (sizes, emoji/RTL, 200 msgs) | delegated writer (context backstop + parallel with U2) | done: 10 app + 9 render tests, 7 mutants killed, clippy clean; parent reran `cargo test -p nuncio-tui` 26/0 | 1ff7ec1 |
 | U2 | S4 (search, reply, react: Go daemon + proto + Rust wire types) | delegated writer (context backstop + parallel with U1); Risk items 1 and 3 → independent verifier | done: RED per rule, 19 mutants killed; verifier S4 FAIL (B1) → one correction → recheck FIXED; S5 PASS; parent reran the B1 and outbox-transaction tests green | this commit |
-| U3 | S1 (reply/react/search/media in the TUI over U2's ops) | delegated writer, after U1+U2 (context backstop) | done except inline images (L6): RED per rule, 11 mutants killed, one correction batch (refused download/search), cargo 82/0; parent reran `cargo test -p nuncio-tui` | this commit |
-| U4 | S6 push + report | inline | open | |
+| U3 | S1 (reply/react/search/media in the TUI over U2's ops) | delegated writer, after U1+U2 (context backstop) | done except inline images (L6): RED per rule, 11 mutants killed, one correction batch (refused download/search), cargo 82/0; parent reran `cargo test -p nuncio-tui` | d866f0d |
+| U4 | S6 push + report | inline | done: final checks green (L8), pushed to origin/feat/m2-tui | this commit |
 
 ## Log
 
@@ -32,3 +32,4 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 - L5 Also in the U2 commit: `nuncio-tui` Message literals gained `reply_to`/`reactions` (mechanical, delegated writer, 10 lines).
 - L6 U3 left out from S1: inline images of downloaded media in Ghostty. The `image` crate is built with `png` only (WhatsApp photos are JPEG) and a startup terminal query is a risk on foot/alacritty that only the Linux matrix can check. Media opens externally (`open`/`xdg-open`). Also: reply/react cannot target my own send that has no id yet.
 - L7 Follow-up commit bc65acf: reaction build errors no longer quote JIDs (GGA observation on 37f406b).
+- L8 Final checks on d866f0d (15:12): gofmt empty, go vet ok, CGO_ENABLED=0 build ok, `TMPDIR=/tmp go test ./...` all 6 packages ok, cargo fmt ok, clippy -D warnings clean, cargo test 82 passed / 0 failed, attribution grep empty. Next at home: the terminal matrix (foot/alacritty/ghostty) for S2/S3, inline images (L6, needs the `jpeg` feature of `image`), the U2 advisories in L4.

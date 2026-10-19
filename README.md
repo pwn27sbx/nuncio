@@ -38,13 +38,14 @@ sides' tests, so the Go daemon and the Rust clients cannot drift apart silently.
 ## CLI
 
 `nuncio` is a thin client of the running daemon. It has no automation surface: `send` takes
-exactly one recipient and one message per invocation and never reads stdin; `chats` and `status`
-only read.
+exactly one recipient and one message per invocation, `retry` exactly one client_id, and neither
+reads stdin; `chats` and `status` only read.
 
 ```
 nuncio status                 print the daemon's session status (also: nuncio alone)
 nuncio chats                  list the chats: name, unread count, pinned/archived, last message time
 nuncio send <jid> <message>   send one message to one chat; quote the message, it is one argument
+nuncio retry <client_id>      send again, once, a message that ended not sent (or not confirmed)
 nuncio focus <jid>            ask the running UI to open that chat
 nuncio link --qr              link by scanning a QR code (needs --consent)
 nuncio link --phone N         link with an 8-digit pairing code (needs --consent)
@@ -56,8 +57,13 @@ nuncio purge --confirm        the same without contacting WhatsApp, for a device
   its number.
 - `send` prints `sent`, `queued`, `not sent: <reason>` or, when WhatsApp did not acknowledge in
   time, `not confirmed: …; it may have been delivered`, and exits 1 unless the message was sent
-  or queued. With no linked device it says so and exits 1. Until the offline outbox lands, a send
-  while the session is offline is `not sent`, never silently dropped.
+  or queued. With no linked device it says so and exits 1. While the session is offline the
+  message is queued and sent once when it reconnects (one pass, oldest first). Nothing is ever
+  retried on its own: a message that ends `not sent` or `not confirmed` stays listed as not sent,
+  and `send` prints its client_id.
+- `retry <client_id>` sends that one message again, once, under the same WhatsApp message id, so it is
+  the same message again, never a second one with a new id; a message that is queued or sent is only
+  reported. It takes exactly one client_id and never reads stdin.
 - `focus` prints how many running UIs got the request; 0 means no UI is running, and that is not
   an error.
 - `link` refuses to connect an already linked device while `nunciod` answers on `core.sock`: the

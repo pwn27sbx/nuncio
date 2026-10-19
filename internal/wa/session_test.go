@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,11 +27,20 @@ type fakeClient struct {
 	disconnects int
 	markReads   int
 	handlers    []func(any)
-	// sends records every SendText call as "jid text"; it answers sendID and sendTime, or sendErr.
+	// sends records every SendText call as "jid text" and sendIDs its WhatsApp message id; it
+	// answers sendTime, or the next of sendErrs (nil entries succeed), then sendErr. NewMessageID
+	// answers sendID when set, otherwise a fresh id per call. sendMu guards them: a drain sends
+	// from its own goroutine.
+	sendMu   sync.Mutex
 	sends    []string
+	sendIDs  []string
+	newIDs   int
 	sendID   string
 	sendTime time.Time
 	sendErr  error
+	sendErrs []error
+	// onSend, when set, runs at the start of every SendText with its text, outside sendMu.
+	onSend func(text string)
 	// logouts counts Logout calls; Logout answers logoutErr.
 	logouts   int
 	logoutErr error
@@ -45,12 +55,39 @@ func (f *fakeClient) Logout(context.Context) error {
 	return f.logoutErr
 }
 
-func (f *fakeClient) SendText(_ context.Context, jid, text string) (string, time.Time, error) {
-	f.sends = append(f.sends, jid+" "+text)
-	if f.sendErr != nil {
-		return "", time.Time{}, f.sendErr
+func (f *fakeClient) SendText(_ context.Context, jid, text, id string) (time.Time, error) {
+	if f.onSend != nil {
+		f.onSend(text)
 	}
-	return f.sendID, f.sendTime, nil
+	f.sendMu.Lock()
+	defer f.sendMu.Unlock()
+	f.sends = append(f.sends, jid+" "+text)
+	f.sendIDs = append(f.sendIDs, id)
+	err := f.sendErr
+	if len(f.sendErrs) > 0 {
+		err, f.sendErrs = f.sendErrs[0], f.sendErrs[1:]
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return f.sendTime, nil
+}
+
+func (f *fakeClient) NewMessageID() string {
+	f.sendMu.Lock()
+	defer f.sendMu.Unlock()
+	if f.sendID != "" {
+		return f.sendID
+	}
+	f.newIDs++
+	return fmt.Sprintf("3EB0%06d", f.newIDs)
+}
+
+// sent returns a copy of the sends and their WhatsApp ids so far.
+func (f *fakeClient) sent() (sends, ids []string) {
+	f.sendMu.Lock()
+	defer f.sendMu.Unlock()
+	return append([]string(nil), f.sends...), append([]string(nil), f.sendIDs...)
 }
 
 func (f *fakeClient) HasDevice() bool { return f.device }

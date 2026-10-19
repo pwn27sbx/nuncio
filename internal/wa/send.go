@@ -17,54 +17,197 @@ import (
 const sendTimeout = 20 * time.Second
 
 var (
-	// ErrOffline: the session is paired but not connected, so nothing was sent. The outbox (T11)
-	// replaces this answer with a queued send that drains once on reconnect.
-	ErrOffline = errors.New("the WhatsApp session is offline, so the message was not sent (nothing is queued)")
-	// ErrNotSent: WhatsApp did not accept the message. whatsmeow's own error is not passed on,
-	// because it can name a number.
+	// ErrNotSent: WhatsApp did not accept the message, or an earlier attempt of this send ended
+	// not sent. whatsmeow's own error is not passed on, because it can name a number.
 	ErrNotSent = errors.New("WhatsApp did not accept the message")
+	// ErrNoSend: a retry named a client_id this daemon never stored.
+	ErrNoSend = errors.New("no send with that client_id")
+	// errNoStore: a linked session without a message store has no outbox to send through.
+	errNoStore = errors.New("there is no message store, so nothing was sent")
+	// errOutbox: the outbox could not be read or written, so nothing was sent.
+	errOutbox = errors.New("the message could not be saved, so it was not sent")
 )
 
-// SendText sends one text message to the chat jid, which the caller has checked with
-// ipc.ValidJID. While unlinked it returns ipc.ErrNotLinked and while offline ErrOffline, sending
-// and storing nothing; an ack that does not arrive in time is ipc.ErrNotConfirmed, storing nothing. Once WhatsApp accepts the message it is stored as mine (never unread) and
-// published as event_message; a store failure after that is logged and the send still counts.
+// Send sends one text message to the chat jid, which the caller has checked with ipc.ValidJID,
+// through the outbox: the send is stored under clientID with a WhatsApp message id chosen now, so
+// it always has a durable state. While unlinked it returns ipc.ErrNotLinked and stores nothing.
+// While offline the send stays queued (published as event_message with state queued) and drains
+// once on the next reconnect. While linked it is attempted once now; see deliver for the outcomes.
 //
-// Each call is one send: a repeated client_id is not recognised yet, because remembering accepted
-// sends belongs to the outbox (T11).
-func (s *Session) SendText(jid, text string) (ipc.Message, error) {
-	switch st := s.State(); {
-	case s.client == nil || st == StateUnlinked:
-		return ipc.Message{}, ipc.ErrNotLinked
-	case st == StateOffline:
-		return ipc.Message{}, ErrOffline
+// A clientID already stored answers that send's state and sends nothing: queued, sent (with its
+// id and ack time) or ErrNotSent. Only Retry sends a not-sent message again.
+func (s *Session) Send(jid, text, clientID string) (ipc.Sent, error) {
+	if s.client == nil || s.State() == StateUnlinked {
+		return ipc.Sent{}, ipc.ErrNotLinked
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
-	defer cancel()
-	id, ts, err := s.client.SendText(ctx, jid, text)
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, whatsmeow.ErrMessageTimedOut) {
-		// whatsmeow writes the frame before it waits for the ack, so the message may have
-		// arrived: report the outcome as unknown, never as not sent, which would invite a
-		// duplicate resend. Nothing is stored; reconciling it belongs to the outbox (T11).
-		log.Print("wa: a send was not acknowledged in time")
-		return ipc.Message{}, ipc.ErrNotConfirmed
+	if s.db == nil {
+		return ipc.Sent{}, errNoStore
+	}
+	e, inserted, err := store.Enqueue(s.db, store.OutboxEntry{ClientID: clientID, ChatJID: jid, Text: text,
+		MessageID: s.client.NewMessageID(), Created: time.Now().UTC()})
+	if err != nil {
+		log.Printf("wa: cannot queue a send: %v", err)
+		return ipc.Sent{}, errOutbox
+	}
+	if !inserted {
+		return storedReply(e)
+	}
+	return s.sendOrQueue(e)
+}
+
+// Retry is the manual retry: the send stored under clientID that ended not sent (or not
+// confirmed) is queued again and, while linked, attempted once now under its first WhatsApp
+// message id, so it can never become a second message; while offline it drains on the next
+// reconnect. A send that is queued or sent answers its state and sends nothing, and of two retries
+// at once only one requeues it; an unknown clientID is ErrNoSend.
+func (s *Session) Retry(clientID string) (ipc.Sent, error) {
+	if s.client == nil || s.State() == StateUnlinked {
+		return ipc.Sent{}, ipc.ErrNotLinked
+	}
+	if s.db == nil {
+		return ipc.Sent{}, errNoStore
+	}
+	requeued, err := store.RequeueFailed(s.db, clientID)
+	if err != nil {
+		log.Printf("wa: cannot queue a retry: %v", err)
+		return ipc.Sent{}, errOutbox
+	}
+	e, err := store.GetOutbox(s.db, clientID)
+	if errors.Is(err, store.ErrNoOutboxEntry) {
+		return ipc.Sent{}, ErrNoSend
 	}
 	if err != nil {
-		// The error's type only: whatsmeow's text can carry a JID.
-		log.Printf("wa: a send failed (%T)", err)
-		return ipc.Message{}, ErrNotSent
+		log.Printf("wa: cannot read a send to retry: %v", err)
+		return ipc.Sent{}, errOutbox
+	}
+	if !requeued {
+		return storedReply(e)
+	}
+	return s.sendOrQueue(e)
+}
+
+// sendOrQueue attempts a queued send now while linked, and otherwise leaves it queued for the
+// next reconnect's drain and publishes it as queued.
+func (s *Session) sendOrQueue(e store.OutboxEntry) (ipc.Sent, error) {
+	if s.State() != StateLinked {
+		s.publishEntry(e)
+		return ipc.Sent{State: ipc.SendQueued}, nil
+	}
+	return s.deliver(e.ClientID)
+}
+
+// storedReply is the answer for a send in its stored state, without sending anything: a send whose
+// ack never came stays ipc.ErrNotConfirmed, one WhatsApp refused stays ErrNotSent.
+func storedReply(e store.OutboxEntry) (ipc.Sent, error) {
+	switch e.State {
+	case store.OutboxSent:
+		return ipc.Sent{State: ipc.SendSent, ID: e.MessageID, Timestamp: ipc.Timestamp(e.SentAt)}, nil
+	case store.OutboxNotSent:
+		return ipc.Sent{}, ErrNotSent
+	case store.OutboxNotConfirmed:
+		return ipc.Sent{}, ipc.ErrNotConfirmed
+	}
+	return ipc.Sent{State: ipc.SendQueued}, nil
+}
+
+// deliver gets the queued send stored under clientID its one attempt, under sendMu, after every
+// send queued before it, so no send overtakes an older one: while linked, each older queued send
+// gets its one attempt first, in order. A send that a drain or another call already attempted is
+// answered from its stored state, never sent twice.
+func (s *Session) deliver(clientID string) (ipc.Sent, error) {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	queued, err := store.QueuedOutbox(s.db)
+	if err != nil {
+		log.Printf("wa: cannot read the outbox: %v", err)
+		return ipc.Sent{}, errOutbox
+	}
+	for _, e := range queued {
+		if e.ClientID == clientID {
+			return s.attempt(e)
+		}
+		if s.State() != StateLinked {
+			break
+		}
+		_, _ = s.attempt(e)
+	}
+	e, err := store.GetOutbox(s.db, clientID)
+	if err != nil {
+		log.Printf("wa: cannot read a queued send: %v", err)
+		return ipc.Sent{}, errOutbox
+	}
+	if e.State == store.OutboxQueued {
+		return s.attempt(e)
+	}
+	return storedReply(e)
+}
+
+// attempt is the one attempt of queued send e; the caller holds sendMu. On success the entry is
+// sent, the message is stored as mine (never unread) and published as event_message; a store
+// failure after that is logged and the send still counts. Any failure is published with the wire
+// state not_sent and stored with its reason: an ack that does not arrive in time is
+// not_confirmed and answers ipc.ErrNotConfirmed (it may have been delivered; a retry reuses its
+// WhatsApp id), anything else is not_sent and answers ErrNotSent. Nothing is retried on its own.
+func (s *Session) attempt(e store.OutboxEntry) (ipc.Sent, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
+	defer cancel()
+	ts, err := s.client.SendText(ctx, e.ChatJID, e.Text, e.MessageID)
+	if err != nil {
+		state, reply := store.OutboxNotSent, ErrNotSent
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, whatsmeow.ErrMessageTimedOut) {
+			// whatsmeow writes the frame before it waits for the ack, so the message may have
+			// arrived: report the outcome as unknown, never as not accepted.
+			state, reply = store.OutboxNotConfirmed, ipc.ErrNotConfirmed
+			log.Print("wa: a send was not acknowledged in time")
+		} else {
+			// The error's type only: whatsmeow's text can carry a JID.
+			log.Printf("wa: a send failed (%T)", err)
+		}
+		if err := store.SetOutboxState(s.db, e.ClientID, state, time.Time{}); err != nil {
+			log.Printf("wa: cannot record a failed send: %v", err)
+		}
+		e.State = state
+		s.publishEntry(e)
+		return ipc.Sent{}, reply
 	}
 	if ts.IsZero() {
 		// An ack without a timestamp; the zero time would overflow the store's nanoseconds.
 		ts = time.Now()
 	}
-	m := store.Message{ID: id, ChatJID: jid, Kind: store.KindText, Text: text, FromMe: true, Timestamp: ts.UTC()}
-	if s.db != nil {
-		if _, err := store.InsertMessage(s.db, m); err != nil {
-			log.Printf("wa: cannot store sent message %s: %v", m.ID, err)
-		}
+	ts = ts.UTC()
+	if err := store.SetOutboxState(s.db, e.ClientID, store.OutboxSent, ts); err != nil {
+		log.Printf("wa: cannot record a sent message %s: %v", e.MessageID, err)
 	}
-	msg := ipc.Message{ID: m.ID, Kind: m.Kind, Text: m.Text, FromMe: true, Timestamp: ipc.Timestamp(m.Timestamp)}
-	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: jid, Message: msg})
-	return msg, nil
+	m := store.Message{ID: e.MessageID, ChatJID: e.ChatJID, Kind: store.KindText, Text: e.Text, FromMe: true, Timestamp: ts}
+	if _, err := store.InsertMessage(s.db, m); err != nil {
+		log.Printf("wa: cannot store sent message %s: %v", m.ID, err)
+	}
+	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: m.ChatJID, Message: WireMessage(m)})
+	return ipc.Sent{State: ipc.SendSent, ID: m.ID, Timestamp: ipc.Timestamp(ts)}, nil
+}
+
+// publishEntry publishes a send that is not sent (queued or not_sent) as event_message, with its
+// state and client_id, timestamped when it was queued.
+func (s *Session) publishEntry(e store.OutboxEntry) {
+	m := store.Message{ID: e.MessageID, ChatJID: e.ChatJID, Kind: store.KindText, Text: e.Text, FromMe: true,
+		Timestamp: e.Created, State: e.State, ClientID: e.ClientID}
+	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: e.ChatJID, Message: WireMessage(m)})
+}
+
+// drain is the one pass a reconnect makes over the outbox: every queued send, oldest first, gets
+// its one attempt. A failed one stays not_sent and no later drain attempts it again; when the
+// connection drops mid-pass the rest stays queued for the next reconnect. Nothing here schedules
+// anything.
+func (s *Session) drain() {
+	queued, err := store.QueuedOutbox(s.db)
+	if err != nil {
+		log.Printf("wa: cannot read the outbox: %v", err)
+		return
+	}
+	for _, e := range queued {
+		if s.State() != StateLinked {
+			return
+		}
+		_, _ = s.deliver(e.ClientID)
+	}
 }

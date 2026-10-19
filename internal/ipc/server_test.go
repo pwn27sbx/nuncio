@@ -29,6 +29,8 @@ type fakeHandler struct {
 	sends   []string
 	sent    Sent
 	sendErr error
+	// retries records every Retry call's client_id; Retry answers sent, or sendErr.
+	retries []string
 	// wipes records every Wipe call's unlink; Wipe answers wipeErr.
 	wipes   []bool
 	wipeErr error
@@ -71,6 +73,19 @@ func (f *fakeHandler) Send(jid, text, clientID string) (Sent, error) {
 	defer f.mu.Unlock()
 	f.sends = append(f.sends, jid+" "+clientID+" "+text)
 	return f.sent, f.sendErr
+}
+
+func (f *fakeHandler) Retry(clientID string) (Sent, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.retries = append(f.retries, clientID)
+	return f.sent, f.sendErr
+}
+
+func (f *fakeHandler) retryCalls() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.retries...)
 }
 
 func (f *fakeHandler) sendCalls() []string {
@@ -781,5 +796,59 @@ func TestClientDownloadMediaReturnsMediaReadyOrTheDaemonError(t *testing.T) {
 	var perr *ProtocolError
 	if !errors.As(err, &perr) || perr.Code != CodeNotLinked {
 		t.Errorf("DownloadMedia while unlinked = %v, want a %s error", err, CodeNotLinked)
+	}
+}
+
+func TestServeConnServesARetryByClientID(t *testing.T) {
+	h := newFakeHandler(t)
+	h.sent = Sent{State: SendSent, ID: "3EB0BBB1", Timestamp: "2026-10-18T17:56:10Z"}
+	sock := startServer(t, h)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+	sendRaw(t, conn, string(readFixture(t, "retry_request.json")))
+	assertSameJSON(t, recvRaw(t, br), []byte(`{"v":1,"op":"sent","client_id":"c-7f3a9e23","state":"sent","id":"3EB0BBB1","timestamp":"2026-10-18T17:56:10Z"}`))
+	if got, want := h.retryCalls(), []string{"c-7f3a9e23"}; !slices.Equal(got, want) {
+		t.Errorf("handler retries = %q, want %q", got, want)
+	}
+	if got := h.sendCalls(); len(got) != 0 {
+		t.Errorf("handler sends = %q, want none: a retry is not a new send", got)
+	}
+}
+
+func TestServeConnAnswersARetryLikeASend(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"not linked", ErrNotLinked, string(readFixture(t, "error_not_linked.json"))},
+		{"not accepted", errors.New("the server did not acknowledge the message"), string(readFixture(t, "send_failed_response.json"))},
+		{"not confirmed", ErrNotConfirmed, `{"v":1,"op":"error","code":"internal","message":"` + ErrNotConfirmed.Error() + `"}`},
+	} {
+		h := newFakeHandler(t)
+		h.sendErr = tc.err
+		sock := startServer(t, h)
+		conn, br := rawConn(t, sock)
+		handshake(t, conn, br)
+		sendRaw(t, conn, string(readFixture(t, "retry_request.json")))
+		if got := recvRaw(t, br); !sameJSON(t, got, []byte(tc.want)) {
+			t.Errorf("%s: reply %s, want %s", tc.name, got, tc.want)
+		}
+	}
+}
+
+func TestServeConnRefusesARetryWithoutAClientID(t *testing.T) {
+	h := newFakeHandler(t)
+	sock := startServer(t, h)
+	conn, br := rawConn(t, sock)
+	handshake(t, conn, br)
+	for _, frame := range []string{`{"v":1,"op":"retry","client_id":""}`, `{"v":1,"op":"retry"}`, `{"v":1,"op":"retry","client_id":7}`} {
+		sendRaw(t, conn, frame)
+		if got := fieldOf(t, recvRaw(t, br), "code"); got != CodeBadFrame {
+			t.Errorf("%s: code = %v, want %s", frame, got, CodeBadFrame)
+		}
+	}
+	if got := h.retryCalls(); len(got) != 0 {
+		t.Errorf("handler retries = %q, want none", got)
 	}
 }

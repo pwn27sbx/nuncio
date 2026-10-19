@@ -12,6 +12,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use nuncio_client::wire::MessageState;
 use nuncio_client::{
     Chat, ClientFrame, DaemonFrame, ErrorCode, MAX_FRAME_BYTES, Media, Message, PROTOCOL_VERSION,
     SendState, Session,
@@ -85,12 +86,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_twenty_six_documented_files() {
+fn fixture_directory_holds_the_twenty_eight_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 26, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 28, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -125,6 +126,10 @@ fn constructed_client_frames_match_their_fixtures() {
         &dir.join("download_media_request.json"),
         &ClientFrame::download_media("15551230001@s.whatsapp.net", "3EB0AAA0"),
     );
+    assert_frame(
+        &dir.join("retry_request.json"),
+        &ClientFrame::retry("c-7f3a9e23"),
+    );
 }
 
 /// The M1 daemon frames, constructed in Rust.
@@ -155,6 +160,8 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                     from_me: false,
                     timestamp: "2026-10-18T17:55:04Z".to_owned(),
                     media: None,
+                    state: None,
+                    client_id: None,
                 },
                 Message {
                     id: "3EB0AAA0".to_owned(),
@@ -167,6 +174,8 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                         size: 48213,
                         file_name: String::new(),
                     }),
+                    state: None,
+                    client_id: None,
                 },
             ],
         },
@@ -225,6 +234,25 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                 from_me: false,
                 timestamp: "2026-10-18T17:58:00Z".to_owned(),
                 media: None,
+                state: None,
+                client_id: None,
+            },
+        },
+    );
+    assert_frame(
+        &dir.join("event_message_not_sent.json"),
+        &DaemonFrame::EventMessage {
+            v: PROTOCOL_VERSION,
+            jid: ada.clone(),
+            message: Message {
+                id: "3EB0BBB3".to_owned(),
+                kind: "text".to_owned(),
+                text: "On my way".to_owned(),
+                from_me: true,
+                timestamp: "2026-10-18T17:56:12Z".to_owned(),
+                media: None,
+                state: Some(MessageState::NotSent),
+                client_id: Some("c-7f3a9e23".to_owned()),
             },
         },
     );
@@ -338,6 +366,8 @@ fn constructed_daemon_frames_match_their_fixtures() {
                         from_me: false,
                         timestamp: "2026-10-18T17:55:04Z".to_owned(),
                         media: None,
+                        state: None,
+                        client_id: None,
                     }),
                 },
                 Chat {
@@ -354,6 +384,8 @@ fn constructed_daemon_frames_match_their_fixtures() {
                         from_me: true,
                         timestamp: "2026-10-18T16:02:11Z".to_owned(),
                         media: None,
+                        state: None,
+                        client_id: None,
                     }),
                 },
                 Chat {
@@ -449,4 +481,23 @@ fn timestamps_expose_their_utc_time_of_day() {
         ..message.clone()
     };
     assert_eq!(odd.time_hhmm(), None);
+}
+
+#[test]
+fn a_message_without_an_outbox_state_parses_as_sent_and_an_unknown_state_still_parses() {
+    let sent: Message = serde_json::from_str(
+        r#"{"id":"x","kind":"text","text":"hi","from_me":true,"timestamp":"2026-10-18T17:55:04Z"}"#,
+    )
+    .unwrap();
+    assert_eq!((sent.state, sent.client_id), (None, None));
+    let later: Message = serde_json::from_str(
+        r#"{"id":"x","kind":"text","text":"hi","from_me":true,"timestamp":"2026-10-18T17:55:04Z","state":"sending","client_id":"c"}"#,
+    )
+    .unwrap();
+    assert_eq!(later.state, Some(MessageState::Unknown));
+    let queued: Message = serde_json::from_str(
+        r#"{"id":"x","kind":"text","text":"hi","from_me":true,"timestamp":"2026-10-18T17:55:04Z","state":"queued","client_id":"c"}"#,
+    )
+    .unwrap();
+    assert_eq!(queued.state, Some(MessageState::Queued));
 }

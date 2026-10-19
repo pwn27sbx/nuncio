@@ -44,9 +44,12 @@ type Client interface {
 	Connect() error
 	Disconnect()
 	AddEventHandler(func(any))
-	// SendText sends one text message to the chat jid and returns WhatsApp's message id and
-	// timestamp.
-	SendText(ctx context.Context, jid, text string) (id string, ts time.Time, err error)
+	// NewMessageID returns a fresh WhatsApp message id. The outbox picks it when a send is queued
+	// and every attempt of that send uses it, so a retry is never a second message.
+	NewMessageID() string
+	// SendText sends one text message to the chat jid under the WhatsApp message id and returns
+	// WhatsApp's timestamp.
+	SendText(ctx context.Context, jid, text, id string) (ts time.Time, err error)
 	// Logout tells WhatsApp to unlink this device, then disconnects. It is the only call that
 	// unlinks, and only `nuncio logout --confirm` reaches it.
 	Logout(ctx context.Context) error
@@ -80,6 +83,11 @@ type Session struct {
 	logf func(format string, args ...any)
 	// media serves DownloadMedia; nil until SetMedia.
 	media *media.Cache
+
+	// sendMu serialises the outbox's send attempts, so no entry is ever sent twice at once.
+	sendMu sync.Mutex
+	// drains counts the running outbox drains; Close waits for them before closing the store.
+	drains sync.WaitGroup
 }
 
 // NewSession wraps client, which may be nil for "no device store at all". db is the message
@@ -158,12 +166,20 @@ func (s *Session) Start() error {
 	return nil
 }
 
-// connected records a connection that came up; one that lasts resets the backoff.
+// connected records a connection that came up; one that lasts resets the backoff. With a store,
+// it starts the outbox's one drain pass for this connection, off whatsmeow's event goroutine.
 func (s *Session) connected() {
 	s.mu.Lock()
 	s.backoff.Connected()
 	s.mu.Unlock()
 	s.set(StateLinked)
+	if s.db != nil {
+		s.drains.Add(1)
+		go func() {
+			defer s.drains.Done()
+			s.drain()
+		}()
+	}
 }
 
 // dropped handles a lost or failed connection: offline, and one reconnect after the backoff
@@ -249,7 +265,8 @@ func (s *Session) set(st State) {
 	}
 }
 
-// Close cancels a pending reconnect, disconnects a started session and closes the device store.
+// Close cancels a pending reconnect, disconnects a started session, waits for a running outbox
+// drain and closes the device store.
 // Nothing reconnects after it, and a linked session reports offline from then on (an unlinked
 // one stays unlinked).
 func (s *Session) Close() {
@@ -273,6 +290,8 @@ func (s *Session) Close() {
 	if linked {
 		s.set(StateOffline)
 	}
+	// A running drain finishes (its sends fail fast once disconnected) before the store closes.
+	s.drains.Wait()
 	if s.closeStore != nil {
 		_ = s.closeStore()
 		s.closeStore = nil
@@ -356,15 +375,19 @@ func (w whatsmeowClient) Disconnect()                      { w.c.Disconnect() }
 func (w whatsmeowClient) AddEventHandler(h func(any))      { w.c.AddEventHandler(h) }
 func (w whatsmeowClient) Logout(ctx context.Context) error { return w.c.Logout(ctx) }
 
-// SendText sends a plain conversation message, the simplest text message whatsmeow has.
-func (w whatsmeowClient) SendText(ctx context.Context, jid, text string) (string, time.Time, error) {
+func (w whatsmeowClient) NewMessageID() string { return w.c.GenerateMessageID() }
+
+// SendText sends a plain conversation message, the simplest text message whatsmeow has, under the
+// message id the outbox chose.
+func (w whatsmeowClient) SendText(ctx context.Context, jid, text, id string) (time.Time, error) {
 	to, err := types.ParseJID(jid)
 	if err != nil {
-		return "", time.Time{}, fmt.Errorf("wa: %w", err)
+		return time.Time{}, fmt.Errorf("wa: %w", err)
 	}
-	resp, err := w.c.SendMessage(ctx, to, &waE2E.Message{Conversation: proto.String(text)})
+	resp, err := w.c.SendMessage(ctx, to, &waE2E.Message{Conversation: proto.String(text)},
+		whatsmeow.SendRequestExtra{ID: id})
 	if err != nil {
-		return "", time.Time{}, err
+		return time.Time{}, err
 	}
-	return resp.ID, resp.Timestamp, nil
+	return resp.Timestamp, nil
 }

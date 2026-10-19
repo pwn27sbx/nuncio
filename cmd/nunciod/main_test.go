@@ -279,8 +279,12 @@ type fixedSession wa.State
 
 func (s fixedSession) State() wa.State { return wa.State(s) }
 
-func (s fixedSession) SendText(string, string) (ipc.Message, error) {
-	return ipc.Message{}, errors.New("a fixed session cannot send")
+func (s fixedSession) Send(string, string, string) (ipc.Sent, error) {
+	return ipc.Sent{}, errors.New("a fixed session cannot send")
+}
+
+func (s fixedSession) Retry(string) (ipc.Sent, error) {
+	return ipc.Sent{}, errors.New("a fixed session cannot retry")
 }
 
 func (s fixedSession) Logout(context.Context) error {
@@ -721,12 +725,14 @@ func TestEmbeddedChatListMatchesContractFixture(t *testing.T) {
 }
 
 // fakeWAClient is a linked whatsmeow stand-in that never opens a socket; emit feeds it events.
-// SendText answers sendID and sendTime and counts the sends.
+// SendText answers sendTime, or an error while fail is set, and counts the sends; NewMessageID
+// answers sendID.
 type fakeWAClient struct {
 	handlers []func(any)
 	sendID   string
 	sendTime time.Time
 	sends    atomic.Int64
+	fail     atomic.Bool
 	// logouts counts Logout calls; onLogout, when set, runs inside each one; Logout answers
 	// logoutErr.
 	logouts   atomic.Int64
@@ -742,10 +748,15 @@ func (f *fakeWAClient) Logout(context.Context) error {
 	return f.logoutErr
 }
 
-func (f *fakeWAClient) SendText(context.Context, string, string) (string, time.Time, error) {
+func (f *fakeWAClient) SendText(context.Context, string, string, string) (time.Time, error) {
 	f.sends.Add(1)
-	return f.sendID, f.sendTime, nil
+	if f.fail.Load() {
+		return time.Time{}, errors.New("websocket closed")
+	}
+	return f.sendTime, nil
 }
+
+func (f *fakeWAClient) NewMessageID() string { return f.sendID }
 
 func (f *fakeWAClient) HasDevice() bool             { return true }
 func (f *fakeWAClient) Connect() error              { f.emit(&waevents.Connected{}); return nil }
@@ -1133,25 +1144,70 @@ func TestDaemonSendWhileLinkedAnswersSentStoresAndPublishes(t *testing.T) {
 	}
 }
 
-// Until the outbox (T11) an offline send answers send_failed, never sent/queued.
-func TestDaemonSendWhileOfflineAnswersNotSent(t *testing.T) {
+func TestDaemonSendWhileOfflineAnswersQueuedAndDrainsOnReconnect(t *testing.T) {
 	_, fake, sock := linkedDaemon(t)
 	fake.emit(&waevents.Disconnected{})
 	c := dial(t, sock)
+	const ada = "15551230001@s.whatsapp.net"
 
-	_, err := c.Send("15551230001@s.whatsapp.net", "On my way", "c-1")
-	var notSent *ipc.NotSentError
-	if !errors.As(err, &notSent) {
-		t.Fatalf("Send while offline = %v, want a send_failed reply", err)
+	sent, err := c.Send(ada, "On my way", "c-7f3a9e22")
+	if err != nil {
+		t.Fatalf("Send while offline: %v", err)
 	}
-	if notSent.ClientID != "c-1" || !strings.Contains(notSent.Reason, "offline") {
-		t.Errorf("send_failed = %+v, want client_id c-1 and an offline reason", notSent)
+	if want := (ipc.Sent{V: 1, Op: ipc.OpSent, ClientID: "c-7f3a9e22", State: ipc.SendQueued}); sent != want {
+		t.Errorf("Send while offline = %+v, want %+v", sent, want)
 	}
 	if n := fake.sends.Load(); n != 0 {
-		t.Errorf("client sends = %d, want 0", n)
+		t.Errorf("client sends = %d, want 0 while offline", n)
 	}
-	if msgs, err := c.Messages("15551230001@s.whatsapp.net", 10); err != nil || len(msgs.Messages) != 0 {
-		t.Errorf("Messages after an offline send = %+v, %v; want none stored", msgs.Messages, err)
+	msgs, err := c.Messages(ada, 10)
+	if err != nil || len(msgs.Messages) != 1 || msgs.Messages[0].State != ipc.MessageQueued || msgs.Messages[0].ClientID != "c-7f3a9e22" {
+		t.Fatalf("Messages while queued = %+v, %v; want the queued message", msgs.Messages, err)
+	}
+
+	fake.emit(&waevents.Connected{})
+	want := ipc.Message{ID: "3EB0BBB1", Kind: ipc.KindText, Text: "On my way", FromMe: true, Timestamp: "2026-10-18T17:56:10Z"}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		msgs, err = c.Messages(ada, 10)
+		if err == nil && len(msgs.Messages) == 1 && msgs.Messages[0] == want {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Messages after reconnect = %+v, %v; want only %+v", msgs.Messages, err, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := fake.sends.Load(); n != 1 {
+		t.Errorf("client sends = %d, want exactly 1", n)
+	}
+}
+
+func TestDaemonRetrySendsANotSentMessageAgain(t *testing.T) {
+	_, fake, sock := linkedDaemon(t)
+	c := dial(t, sock)
+	const ada = "15551230001@s.whatsapp.net"
+	fake.fail.Store(true)
+	_, err := c.Send(ada, "On my way", "c-1")
+	var notSent *ipc.NotSentError
+	if !errors.As(err, &notSent) || notSent.ClientID != "c-1" {
+		t.Fatalf("Send that fails = %v, want send_failed for c-1", err)
+	}
+	if msgs, err := c.Messages(ada, 10); err != nil || len(msgs.Messages) != 1 || msgs.Messages[0].State != ipc.MessageNotSent {
+		t.Fatalf("Messages after a failed send = %+v, %v; want it listed as not sent", msgs.Messages, err)
+	}
+
+	fake.fail.Store(false)
+	sent, err := c.Retry("c-1")
+	want := ipc.Sent{V: 1, Op: ipc.OpSent, ClientID: "c-1", State: ipc.SendSent, ID: "3EB0BBB1", Timestamp: "2026-10-18T17:56:10Z"}
+	if err != nil || sent != want {
+		t.Errorf("Retry = %+v, %v; want %+v", sent, err, want)
+	}
+	if n := fake.sends.Load(); n != 2 {
+		t.Errorf("client sends = %d, want 2 (the failed one and the retry)", n)
+	}
+	if _, err := c.Retry("c-unknown"); !errors.As(err, &notSent) {
+		t.Errorf("Retry of an unknown client_id = %v, want send_failed", err)
 	}
 }
 

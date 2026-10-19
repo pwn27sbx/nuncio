@@ -230,7 +230,18 @@ const SendTimeout = 30 * time.Second
 // or queued), a *NotSentError when the daemon answered send_failed, or a *ProtocolError such as
 // not_linked.
 func (c *Client) Send(jid, text, clientID string) (Sent, error) {
-	if err := WriteFrame(c.conn, SendRequest{V: Version, Op: OpSend, JID: jid, Text: text, ClientID: clientID}); err != nil {
+	return c.sendFrame(SendRequest{V: Version, Op: OpSend, JID: jid, Text: text, ClientID: clientID})
+}
+
+// Retry asks the daemon to send again, once, the send it stored under clientID when it ended not
+// sent; any other send only reports its stored state. The replies are those of Send.
+func (c *Client) Retry(clientID string) (Sent, error) {
+	return c.sendFrame(RetryRequest{V: Version, Op: OpRetry, ClientID: clientID})
+}
+
+// sendFrame writes a send or retry frame and reads its reply.
+func (c *Client) sendFrame(frame any) (Sent, error) {
+	if err := WriteFrame(c.conn, frame); err != nil {
 		return Sent{}, err
 	}
 	// Both replies decode into one value: Sent's fields plus send_failed's message.

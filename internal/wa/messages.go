@@ -51,9 +51,15 @@ func messageRow(evt *waevents.Message) (store.Message, bool) {
 }
 
 // WireMessage is a stored message in its wire shape: the media kinds carry their media object,
-// text carries none.
+// text carries none, and a send of mine that is not sent yet carries its state and client_id (the
+// store's outbox states are the wire's, except not_confirmed, which the wire calls not_sent).
 func WireMessage(m store.Message) ipc.Message {
-	w := ipc.Message{ID: m.ID, Kind: m.Kind, Text: m.Text, FromMe: m.FromMe, Timestamp: ipc.Timestamp(m.Timestamp)}
+	w := ipc.Message{ID: m.ID, Kind: m.Kind, Text: m.Text, FromMe: m.FromMe, Timestamp: ipc.Timestamp(m.Timestamp),
+		State: m.State, ClientID: m.ClientID}
+	if m.State == store.OutboxNotConfirmed {
+		// Not confirmed is a failure the user retries by hand, like not sent.
+		w.State = ipc.MessageNotSent
+	}
 	if m.Kind != store.KindText {
 		w.Media = &ipc.Media{Mime: m.Mime, Size: m.Size, FileName: m.FileName}
 	}

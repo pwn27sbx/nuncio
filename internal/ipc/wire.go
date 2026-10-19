@@ -47,6 +47,7 @@ const (
 	OpSend       = "send"
 	OpSent       = "sent"
 	OpSendFailed = "send_failed"
+	OpRetry      = "retry"
 	OpSubscribe  = "subscribe"
 	OpSubscribed = "subscribed"
 	OpFocus      = "focus"
@@ -76,6 +77,13 @@ const (
 const (
 	SendQueued = "queued"
 	SendSent   = "sent"
+)
+
+// Values of a message's state field: set only on a send of mine that is not sent yet. A message
+// without it was sent (or received).
+const (
+	MessageQueued  = "queued"
+	MessageNotSent = "not_sent"
 )
 
 // Error codes.
@@ -153,6 +161,15 @@ type SendRequest struct {
 	Op       string `json:"op"`
 	JID      string `json:"jid"`
 	Text     string `json:"text"`
+	ClientID string `json:"client_id"`
+}
+
+// RetryRequest sends again, once, a send of this daemon that ended not sent, under its first
+// ClientID and with its first WhatsApp message id, so it can never become a second message. It is
+// the only way a not-sent message is sent again: nothing retries on its own.
+type RetryRequest struct {
+	V        int    `json:"v"`
+	Op       string `json:"op"`
 	ClientID string `json:"client_id"`
 }
 
@@ -335,6 +352,10 @@ type Message struct {
 	FromMe    bool   `json:"from_me"`
 	Timestamp string `json:"timestamp"`
 	Media     *Media `json:"media,omitempty"`
+	// State is MessageQueued or MessageNotSent for a send of mine that is not sent yet, with the
+	// ClientID it was sent with (what a retry names); both are absent once it is sent.
+	State    string `json:"state,omitempty"`
+	ClientID string `json:"client_id,omitempty"`
 }
 
 // Media describes a message's attachment. The bytes are never on the wire: they are downloaded
@@ -372,6 +393,10 @@ type Handler interface {
 	// unknown, which ServeConn answers with an internal error; any other error is a send_failed reply
 	// whose message is the error's text, so it must be short and carry no number or message text.
 	Send(jid, text, clientID string) (Sent, error)
+	// Retry sends again, once, the send stored under clientID when it ended not sent, and answers
+	// its stored state otherwise without sending anything. ServeConn has already checked that
+	// clientID is not empty and answers the result exactly like Send's.
+	Retry(clientID string) (Sent, error)
 	// Wipe deletes everything the daemon keeps for the device and removes its socket; with unlink
 	// it first tells WhatsApp to unlink the device and deletes nothing if that fails. It returns
 	// ErrNotLinked for an unlink with no paired device, which ServeConn answers with not_linked;
@@ -642,6 +667,10 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
 			if err := WriteFrame(out, serveSend(line, h)); err != nil {
 				return err
 			}
+		case OpRetry:
+			if err := WriteFrame(out, serveRetry(line, h)); err != nil {
+				return err
+			}
 		case OpFocus:
 			var req FocusRequest
 			if err := json.Unmarshal(line, &req); err != nil || !ValidJID(req.JID) {
@@ -713,6 +742,21 @@ func serveSend(line []byte, h Handler) any {
 		return badFrame(fmt.Sprintf("text is longer than %d bytes", MaxTextLen))
 	}
 	sent, err := h.Send(req.JID, req.Text, req.ClientID)
+	return sendReply(req.ClientID, sent, err)
+}
+
+// serveRetry checks a retry frame and asks h to retry it, returning the reply frame.
+func serveRetry(line []byte, h Handler) any {
+	var req RetryRequest
+	if err := json.Unmarshal(line, &req); err != nil || req.ClientID == "" {
+		return badFrame("retry needs the client_id of a send")
+	}
+	sent, err := h.Retry(req.ClientID)
+	return sendReply(req.ClientID, sent, err)
+}
+
+// sendReply is the reply frame to a send or a retry of clientID.
+func sendReply(clientID string, sent Sent, err error) any {
 	if errors.Is(err, ErrNotLinked) {
 		return Error{V: Version, Op: OpError, Code: CodeNotLinked, Message: ErrNotLinked.Error()}
 	}
@@ -720,9 +764,9 @@ func serveSend(line []byte, h Handler) any {
 		return Error{V: Version, Op: OpError, Code: CodeInternal, Message: ErrNotConfirmed.Error()}
 	}
 	if err != nil {
-		return SendFailed{V: Version, Op: OpSendFailed, ClientID: req.ClientID, Message: err.Error()}
+		return SendFailed{V: Version, Op: OpSendFailed, ClientID: clientID, Message: err.Error()}
 	}
-	sent.V, sent.Op, sent.ClientID = Version, OpSent, req.ClientID
+	sent.V, sent.Op, sent.ClientID = Version, OpSent, clientID
 	return sent
 }
 

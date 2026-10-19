@@ -205,6 +205,8 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
                 from_me: false,
                 timestamp: "2026-10-18T17:55:04Z".to_owned(),
                 media: None,
+                state: None,
+                client_id: None,
             }),
         }],
     };

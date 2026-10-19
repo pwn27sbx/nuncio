@@ -37,9 +37,24 @@ type fakeDaemon struct {
 	// wipeErr answers every Wipe; wipes records each call's unlink.
 	wipeErr error
 
-	mu    sync.Mutex
-	sends []ipc.SendRequest
-	wipes []bool
+	mu      sync.Mutex
+	sends   []ipc.SendRequest
+	retries []string
+	wipes   []bool
+}
+
+// Retry records the client_id and answers like Send.
+func (d *fakeDaemon) Retry(clientID string) (ipc.Sent, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.retries = append(d.retries, clientID)
+	return d.sent, d.sendErr
+}
+
+func (d *fakeDaemon) retryCalls() []string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]string(nil), d.retries...)
 }
 
 // Wipe records the request only: the fake daemon deletes nothing, so a test can tell what the
@@ -377,8 +392,79 @@ func TestSendPrintsQueuedWhenTheDaemonQueuedIt(t *testing.T) {
 func TestSendPrintsNotSentWithTheReasonAndFails(t *testing.T) {
 	serveFakeDaemon(t, &fakeDaemon{session: ipc.SessionOffline, sendErr: errors.New("the WhatsApp session is offline")})
 	code, out, errOut := runCLI("send", adaJID, "On my way")
-	if code != 1 || out != "" || errOut != "nuncio: not sent: the WhatsApp session is offline\n" {
+	if code != 1 || out != "" || !strings.HasPrefix(errOut, "nuncio: not sent: the WhatsApp session is offline\n") {
 		t.Errorf("exit %d, stdout %q, stderr %q; want 1 and the not-sent line", code, out, errOut)
+	}
+}
+
+// A send that ends queued, not sent or not confirmed prints its client_id, which is what
+// `nuncio retry` takes.
+func TestSendPrintsTheClientIDUnlessItWasSent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		d    *fakeDaemon
+		code int
+		out  func(stdout, stderr string) string
+	}{
+		{"queued", &fakeDaemon{session: ipc.SessionOffline, sent: ipc.Sent{State: ipc.SendQueued}}, 0, func(o, _ string) string { return o }},
+		{"not sent", &fakeDaemon{session: ipc.SessionLinked, sendErr: errors.New("WhatsApp did not accept the message")}, 1, func(_, e string) string { return e }},
+		{"not confirmed", &fakeDaemon{session: ipc.SessionLinked, sendErr: ipc.ErrNotConfirmed}, 1, func(_, e string) string { return e }},
+	} {
+		serveFakeDaemon(t, tc.d)
+		code, out, errOut := runCLI("send", adaJID, "On my way")
+		sends := tc.d.sendCalls()
+		if code != tc.code || len(sends) != 1 {
+			t.Fatalf("%s: exit %d after %d sends, want %d after 1", tc.name, code, len(sends), tc.code)
+		}
+		if got := tc.out(out, errOut); !strings.Contains(got, sends[0].ClientID) {
+			t.Errorf("%s: output %q, want the client_id %s", tc.name, got, sends[0].ClientID)
+		}
+		if tc.name != "queued" && !strings.Contains(errOut, "nuncio retry "+sends[0].ClientID) {
+			t.Errorf("%s: stderr %q, want the retry command", tc.name, errOut)
+		}
+	}
+	d := &fakeDaemon{session: ipc.SessionLinked, sent: ipc.Sent{State: ipc.SendSent, ID: "3EB0BBB1"}}
+	serveFakeDaemon(t, d)
+	if _, out, errOut := runCLI("send", adaJID, "On my way"); out != "sent\n" || errOut != "" {
+		t.Errorf("sent: stdout %q, stderr %q; want only %q", out, errOut, "sent\n")
+	}
+}
+
+func TestRetrySendsOneRetryByClientID(t *testing.T) {
+	d := &fakeDaemon{session: ipc.SessionLinked, sent: ipc.Sent{State: ipc.SendSent, ID: "3EB0BBB1"}}
+	serveFakeDaemon(t, d)
+	code, out, errOut := runCLI("retry", "c-7f3a9e23")
+	if code != 0 || out != "sent\n" || errOut != "" {
+		t.Errorf("exit %d, stdout %q, stderr %q; want 0 and %q", code, out, errOut, "sent\n")
+	}
+	if got := d.retryCalls(); len(got) != 1 || got[0] != "c-7f3a9e23" {
+		t.Errorf("daemon retries = %q, want exactly [c-7f3a9e23]", got)
+	}
+	if got := d.sendCalls(); len(got) != 0 {
+		t.Errorf("daemon sends = %+v, want none: a retry is not a new send", got)
+	}
+}
+
+func TestRetryThatFailsAgainSaysNotSent(t *testing.T) {
+	serveFakeDaemon(t, &fakeDaemon{session: ipc.SessionLinked, sendErr: errors.New("WhatsApp did not accept the message")})
+	code, out, errOut := runCLI("retry", "c-1")
+	if code != 1 || out != "" || !strings.Contains(errOut, "not sent: WhatsApp did not accept the message") || !strings.Contains(errOut, "nuncio retry c-1") {
+		t.Errorf("exit %d, stdout %q, stderr %q; want 1 and the not-sent line with the retry command", code, out, errOut)
+	}
+}
+
+// retry takes exactly one client_id: no list, no stdin, nothing to script a batch with.
+func TestRetryRefusesAnythingButOneClientID(t *testing.T) {
+	d := &fakeDaemon{session: ipc.SessionLinked, sent: ipc.Sent{State: ipc.SendSent}}
+	serveFakeDaemon(t, d)
+	for _, args := range [][]string{{"retry"}, {"retry", "c-1", "c-2"}, {"retry", ""}, {"retry", " "}} {
+		code, out, errOut := runCLI(args...)
+		if code != 2 || out != "" || !strings.Contains(errOut, "nuncio retry <client_id>") {
+			t.Errorf("nuncio %q: exit %d, stdout %q, stderr %q; want 2 and the usage", args, code, out, errOut)
+		}
+	}
+	if got := d.retryCalls(); len(got) != 0 {
+		t.Errorf("daemon retries = %q, want none", got)
 	}
 }
 
@@ -474,7 +560,7 @@ func TestFocusRefusesAJIDThatIsNotAChat(t *testing.T) {
 }
 
 func TestHelpDocumentsEveryCommand(t *testing.T) {
-	for _, cmd := range []string{"nuncio status", "nuncio chats", "nuncio send <jid> <message>", "nuncio focus <jid>", "nuncio link --qr", "nuncio link --phone", "not confirmed", "nuncio logout --confirm", "nuncio purge --confirm"} {
+	for _, cmd := range []string{"nuncio status", "nuncio chats", "nuncio send <jid> <message>", "nuncio focus <jid>", "nuncio link --qr", "nuncio link --phone", "not confirmed", "nuncio logout --confirm", "nuncio purge --confirm", "nuncio retry <client_id>"} {
 		if !strings.Contains(usage, cmd) {
 			t.Errorf("usage does not document %q:\n%s", cmd, usage)
 		}

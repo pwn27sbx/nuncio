@@ -42,6 +42,13 @@ pub enum ClientFrame {
         text: String,
         client_id: String,
     },
+    /// Send again, once, a send of this daemon that ended not sent, by its `client_id` and under
+    /// its first WhatsApp message id, so it can never become a second message. A send that is
+    /// queued or sent is only reported. Nothing retries on its own.
+    Retry {
+        v: u8,
+        client_id: String,
+    },
     /// Ask the daemon to push event frames on this connection.
     Subscribe {
         v: u8,
@@ -106,6 +113,13 @@ impl ClientFrame {
             v: PROTOCOL_VERSION,
             jid: jid.into(),
             text: text.into(),
+            client_id: client_id.into(),
+        }
+    }
+
+    pub fn retry(client_id: impl Into<String>) -> Self {
+        Self::Retry {
+            v: PROTOCOL_VERSION,
             client_id: client_id.into(),
         }
     }
@@ -360,6 +374,26 @@ pub struct Message {
     /// Set for the media kinds; absent for text, and it must stay absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<Media>,
+    /// Set only on a send of mine that is not sent yet; absent once it is sent (and on every
+    /// received message), and it must stay absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<MessageState>,
+    /// The `client_id` of a send that is not sent yet: what a `retry` names.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+}
+
+/// The state of a send of mine that is not sent yet. Unknown states become
+/// [`MessageState::Unknown`] for the same reason [`Session::Unknown`] exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageState {
+    /// Waiting for the session to reconnect; sent once when it does.
+    Queued,
+    /// One attempt failed (or was not confirmed); it stays like this until a manual `retry`.
+    NotSent,
+    #[serde(other)]
+    Unknown,
 }
 
 /// A message's attachment. The bytes are never on the wire: the daemon downloads them on

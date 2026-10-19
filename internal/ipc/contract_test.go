@@ -226,6 +226,21 @@ func fixtureCases() []fixtureCase {
 			},
 		},
 		{
+			file: "event_message_not_sent.json",
+			into: func() any { return &EventMessage{} },
+			build: func() any {
+				return EventMessage{V: 1, Op: OpEventMessage, JID: "15551230001@s.whatsapp.net", Message: Message{
+					ID: "3EB0BBB3", Kind: KindText, Text: "On my way", FromMe: true, Timestamp: "2026-10-18T17:56:12Z",
+					State: MessageNotSent, ClientID: "c-7f3a9e23",
+				}}
+			},
+		},
+		{
+			file:  "retry_request.json",
+			into:  func() any { return &RetryRequest{} },
+			build: func() any { return RetryRequest{V: 1, Op: OpRetry, ClientID: "c-7f3a9e23"} },
+		},
+		{
 			file:  "event_connection.json",
 			into:  func() any { return &EventConnection{} },
 			build: func() any { return EventConnection{V: 1, Op: OpEventConnection, Session: SessionOffline} },
@@ -353,7 +368,7 @@ func TestFixturesCarryVersionOne(t *testing.T) {
 		OpMessages: true, OpSend: true, OpSent: true, OpSendFailed: true, OpSubscribe: true,
 		OpSubscribed: true, OpFocus: true, OpFocused: true, OpEventMessage: true,
 		OpEventConnection: true, OpEventUnread: true, OpEventFocus: true, OpWipe: true, OpWiped: true,
-		OpDownloadMedia: true, OpMediaReady: true,
+		OpDownloadMedia: true, OpMediaReady: true, OpRetry: true,
 	}
 	for _, tc := range fixtureCases() {
 		t.Run(tc.file, func(t *testing.T) {
@@ -428,5 +443,11 @@ func TestMessageOmitsAbsentMedia(t *testing.T) {
 	}
 	if bytes.Contains(got, []byte(`"media"`)) {
 		t.Fatalf("a text message carries a media key: %s", got)
+	}
+	// A sent message carries no outbox state either: absent means sent (or received).
+	for _, key := range []string{`"state"`, `"client_id"`} {
+		if bytes.Contains(got, []byte(key)) {
+			t.Fatalf("a sent message carries %s: %s", key, got)
+		}
 	}
 }

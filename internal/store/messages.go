@@ -45,6 +45,8 @@ var ErrNoMessage = errors.New("no such message in that chat")
 // Message is one stored message. Its identity is (ChatJID, ID). Mime, Size and FileName
 // describe media and stay empty for text. MediaRef is what a later download needs (the
 // serialised media sub-message, with its key, path and hashes); only GetMessage reads it back.
+// State and ClientID are set only on a send of mine that is not sent yet, as ListMessages lists
+// it from the outbox: State is OutboxQueued, OutboxNotSent or OutboxNotConfirmed.
 type Message struct {
 	ID        string
 	ChatJID   string
@@ -57,6 +59,8 @@ type Message struct {
 	Size      int64
 	FileName  string
 	MediaRef  []byte
+	State     string
+	ClientID  string
 }
 
 // SearchHit is one message that matched a search.
@@ -228,11 +232,19 @@ func ListChats(db *sql.DB, limit int) ([]Chat, error) {
 	return chats, nil
 }
 
-// ListMessages returns up to limit messages of a chat, newest first.
+// ListMessages returns up to limit messages of a chat, newest first: the stored messages and the
+// sends of mine to that chat that are queued or not sent, which carry their State and ClientID and
+// the time they were queued. A send that was sent is listed once, as the stored message.
 func ListMessages(db *sql.DB, chatJID string, limit int) ([]Message, error) {
 	rows, err := db.Query(`SELECT id, chat_jid, kind, text, from_me, ts, read,
-			COALESCE(mime, ''), COALESCE(size, 0), COALESCE(file_name, '')
-		FROM messages WHERE chat_jid = ? ORDER BY ts DESC, seq DESC LIMIT ?`, chatJID, limit)
+			COALESCE(mime, '') AS mime, COALESCE(size, 0) AS size, COALESCE(file_name, '') AS file_name,
+			'' AS state, '' AS client_id, 0 AS pending, seq
+		FROM messages WHERE chat_jid = ?
+		UNION ALL
+		SELECT o.message_id, o.chat_jid, 'text', o.text, 1, o.created, 1, '', 0, '', o.state, o.client_id, 1, o.seq
+		FROM outbox o WHERE o.chat_jid = ? AND o.state != ?
+			AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_jid = o.chat_jid AND m.id = o.message_id)
+		ORDER BY ts DESC, pending DESC, seq DESC LIMIT ?`, chatJID, chatJID, OutboxSent, limit)
 	if err != nil {
 		return nil, fmt.Errorf("cannot list messages: %w", err)
 	}
@@ -240,9 +252,9 @@ func ListMessages(db *sql.DB, chatJID string, limit int) ([]Message, error) {
 	var msgs []Message
 	for rows.Next() {
 		var m Message
-		var ts int64
+		var ts, pending, seq int64
 		if err := rows.Scan(&m.ID, &m.ChatJID, &m.Kind, &m.Text, &m.FromMe, &ts, &m.Read,
-			&m.Mime, &m.Size, &m.FileName); err != nil {
+			&m.Mime, &m.Size, &m.FileName, &m.State, &m.ClientID, &pending, &seq); err != nil {
 			return nil, fmt.Errorf("cannot read message: %w", err)
 		}
 		m.Timestamp = fromNanos(ts)

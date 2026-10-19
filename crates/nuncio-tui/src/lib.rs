@@ -6,6 +6,7 @@
 //! Omarchy [`Palette`], and an optional inline image. S9's acceptance test is
 //! `tests/render.rs`: it draws this at 80×24 and at odd sizes and asserts on the buffer.
 
+use nuncio_client::wire::MessageState;
 use nuncio_client::{Chat, Message, Palette, Rgb, Snapshot};
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -288,14 +289,20 @@ fn chat_title(chat: &Chat) -> String {
     }
 }
 
-/// Who sent the message: us, or the chat.
+/// Who sent the message (us, or the chat) and when; a send of ours that is not sent yet says
+/// so, so a failure stays visible.
 fn sent_by(chat: Option<&Chat>, message: &Message) -> String {
     let who = match (message.from_me, chat) {
         (true, _) => "you".to_owned(),
         (false, Some(chat)) => chat_title(chat),
         (false, None) => "them".to_owned(),
     };
-    format!("{who} · {}", message.time_hhmm().unwrap_or("--:--"))
+    let state = match message.state {
+        Some(MessageState::Queued) => " · queued",
+        Some(MessageState::NotSent) => " · not sent",
+        Some(MessageState::Unknown) | None => "",
+    };
+    format!("{who} · {}{state}", message.time_hhmm().unwrap_or("--:--"))
 }
 
 fn chat_item(chat: &Chat, palette: &Palette) -> ListItem<'static> {
@@ -387,10 +394,31 @@ mod tests {
             from_me: false,
             timestamp: "2026-10-18T17:55:04Z".to_owned(),
             media: None,
+            state: None,
+            client_id: None,
         };
         assert_eq!(
             super::sent_by(Some(&chat("Ada", "a@b")), &message),
             "Ada · 17:55"
         );
+    }
+
+    #[test]
+    fn a_send_that_is_not_sent_yet_says_so() {
+        let mut message = Message {
+            id: "3EB0BBB3".to_owned(),
+            kind: "text".to_owned(),
+            text: "On my way".to_owned(),
+            from_me: true,
+            timestamp: "2026-10-18T17:56:12Z".to_owned(),
+            media: None,
+            state: Some(nuncio_client::wire::MessageState::NotSent),
+            client_id: Some("c-1".to_owned()),
+        };
+        assert_eq!(super::sent_by(None, &message), "you · 17:56 · not sent");
+        message.state = Some(nuncio_client::wire::MessageState::Queued);
+        assert_eq!(super::sent_by(None, &message), "you · 17:56 · queued");
+        message.state = None;
+        assert_eq!(super::sent_by(None, &message), "you · 17:56");
     }
 }

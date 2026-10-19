@@ -38,6 +38,7 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `chats` | `v`, `op`, `limit` (int, 1..200) | `chats_request.json` |
 | `messages` | `v`, `op`, `jid`, `limit` (int, 1..200) | `messages_request.json` |
 | `send` | `v`, `op`, `jid`, `text` (string), `client_id` (string, chosen by the client) | `send_request.json` |
+| `retry` | `v`, `op`, `client_id` (of a send that ended not sent) | `retry_request.json` |
 | `subscribe` | `v`, `op` | `subscribe_request.json` |
 | `focus` | `v`, `op`, `jid` | `focus_request.json` |
 | `wipe` | `v`, `op`, `unlink` (bool: first tell WhatsApp to unlink the device) | `wipe_request.json` |
@@ -52,8 +53,8 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `chats` | `v`, `op`, `chats` (array of Chat) | `chats_response.json` |
 | `error` | `v`, `op`, `code` (string), `message` (string) | `error_version_mismatch.json`, `error_not_linked.json` |
 | `messages` | `v`, `op`, `jid`, `messages` (array of Message, newest first) | `messages_response.json` |
-| `sent` | `v`, `op`, `client_id`, `state` (`sent` or `queued`), `id` and `timestamp` (only when `sent`) | `sent_response.json`, `sent_queued_response.json` |
-| `send_failed` | `v`, `op`, `client_id`, `message` (string) | `send_failed_response.json` |
+| `sent` | `v`, `op`, `client_id`, `state` (`sent` or `queued`), `id` and `timestamp` (only when `sent`); answers `send` and `retry` | `sent_response.json`, `sent_queued_response.json` |
+| `send_failed` | `v`, `op`, `client_id`, `message` (string); answers `send` and `retry` | `send_failed_response.json` |
 | `subscribed` | `v`, `op` | `subscribed_response.json` |
 | `focused` | `v`, `op`, `jid`, `delivered` (int: subscribed UIs that got the event; 0 = none running) | `focused_response.json` |
 | `wiped` | `v`, `op`, `unlinked` (bool: WhatsApp confirmed the unlink) | `wiped_response.json` |
@@ -75,7 +76,7 @@ because events were lost; to avoid it, a UI drains every queued event on each ti
 
 | `op` | Fields | Fixture |
 |---|---|---|
-| `event_message` | `v`, `op`, `jid`, `message` (Message) | `event_message.json` |
+| `event_message` | `v`, `op`, `jid`, `message` (Message); also published when a send of mine changes state (queued, sent, not sent): a client replaces the message with the same `id` | `event_message.json`, `event_message_not_sent.json` |
 | `event_connection` | `v`, `op`, `session` | `event_connection.json` |
 | `event_unread` | `v`, `op`, `unread` (int, total), `jid`, `chat_unread` (int) | `event_unread.json` |
 | `event_focus` | `v`, `op`, `jid` | `event_focus.json` |
@@ -109,6 +110,11 @@ unread" flag.
 
 ### Message
 
+`messages` lists a chat's stored messages together with the sends of mine to that chat that are
+queued or not sent (with `state` and `client_id`, timestamped when they were queued); a sent one is
+listed once, without `state`. A send's `id` is the WhatsApp message id the daemon chose when it was
+queued, and every attempt of that send uses it, so it stays the same across states and retries.
+
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | WhatsApp message id |
@@ -117,6 +123,8 @@ unread" flag.
 | `from_me` | bool | |
 | `timestamp` | string | RFC 3339 UTC |
 | `media` | object or absent | set for the media kinds, omitted for `text` |
+| `state` | string or absent | only on a send of mine that is not sent yet: `queued` (waiting for the session to reconnect) or `not_sent` (its one attempt failed or was not confirmed; it waits for a manual `retry`). Absent once sent and on every received message. Added in M1; a client reads a missing key as sent, and an unknown value as an unknown state |
+| `client_id` | string or absent | set with `state`: the `client_id` of that send, which `retry` names |
 
 `media` is `{ "mime": string, "size": int (bytes), "file_name": string (may be empty) }`. The
 bytes never travel over the socket: the daemon downloads them only when a client sends
@@ -175,10 +183,17 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `send` with `text` over 65 536 bytes | `bad_frame`; nothing is stored or sent |
 | `send` with an empty `client_id` | `bad_frame` |
 | `send` while `unlinked` | `error` / `not_linked`; nothing is stored or sent |
-| `send` while `offline` | `sent` with `state: "queued"`; drained once on reconnect. Until the outbox lands (T11) the daemon answers `send_failed` instead, saying the session is offline and nothing was queued; it never answers `queued` without a queue |
-| `send` repeating a `client_id` already accepted | the stored state of that send; never a second message. Not served until the outbox (T11): until then each `send` frame is one send attempt, and `client_id` only labels the reply |
-| `send` that WhatsApp does not accept | `send_failed` with a short reason that names no number and quotes no text; nothing is stored |
-| `send` that WhatsApp does not acknowledge in time | `error` / `internal` with the message `not confirmed: WhatsApp did not acknowledge in time; it may have been delivered`; never `send_failed`, because the frame may have reached WhatsApp. Nothing is stored (reconciling it belongs to the outbox, T11) |
+| `send` while `offline` | `sent` with `state: "queued"`; the send is stored in the outbox (and published as `event_message` with `state: "queued"`) and nothing is sent |
+| The session reconnects | one drain pass: every queued send, oldest first, gets exactly one attempt under the WhatsApp id it was queued with. Each ends `sent` (stored, published as `event_message` without `state`) or `not_sent` (published with `state: "not_sent"`). A second reconnect event, or a later reconnect, never attempts a send again; when the connection drops mid-pass the rest stays queued for the next one. Nothing is retried on a timer, ever |
+| `send` while `linked` | stored in the outbox, then attempted once right away, with the same outcomes as a drained send. It never overtakes an older send: every send queued before it (a drain in progress included) gets its one attempt first, in order |
+| `send` repeating a `client_id` already accepted | the stored state of that send, whatever its `jid` and `text`: `sent` (`queued`, or `sent` with its `id` and `timestamp`), `send_failed` for one WhatsApp did not accept, or the not-confirmed `error` / `internal` for one whose ack never came; never a second message. Only `retry` sends a not-sent message again |
+| `send` that WhatsApp does not accept | `send_failed` with a short reason that names no number and quotes no text; the message stays listed with `state: "not_sent"` until a `retry`; it is never deleted |
+| `send` that WhatsApp does not acknowledge in time | `error` / `internal` with the message `not confirmed: WhatsApp did not acknowledge in time; it may have been delivered`; never `send_failed`, because the frame may have reached WhatsApp. The message stays listed with `state: "not_sent"`; a `retry` reuses its WhatsApp id, so it is the same message again, never a second one with a new id |
+| `retry` of a send that ended not sent (not accepted or not confirmed) | while `linked`, one more attempt under its first WhatsApp id, answered like `send`; while `offline`, it is queued again (`sent` with `state: "queued"`) for the next drain. Two retries at once make one attempt |
+| `retry` of a send that is queued or sent | its stored state, as for a repeated `client_id`; nothing is sent |
+| `retry` with an empty or missing `client_id` | `bad_frame`; the connection stays usable |
+| `retry` of a `client_id` the daemon never stored | `send_failed` with the message `no send with that client_id`; nothing is sent |
+| `retry` while `unlinked` | `error` / `not_linked`; nothing is sent |
 | `subscribe` twice on one connection | `subscribed` again; events are still delivered once |
 | `focus` with no subscribed UI | `focused` with `delivered: 0` |
 | `focus` with subscribed UIs | `event_focus` to every subscriber (the asking connection too, if it subscribed); `focused` with `delivered` = how many got it |

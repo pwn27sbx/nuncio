@@ -279,7 +279,10 @@ var errClosed = errors.New("the local data is being deleted; run nuncio purge --
 // sessionState is what the daemon reads from, and sends through, its WhatsApp session.
 type sessionState interface {
 	State() wa.State
-	SendText(jid, text string) (ipc.Message, error)
+	// Send sends one text message through the outbox under the client's client_id; Retry sends a
+	// not-sent one again by its client_id.
+	Send(jid, text, clientID string) (ipc.Sent, error)
+	Retry(clientID string) (ipc.Sent, error)
 	// Logout tells WhatsApp to unlink the device through the daemon's own session.
 	Logout(ctx context.Context) error
 	// Close disconnects the session and closes the store.
@@ -390,15 +393,25 @@ func (d *daemon) DownloadMedia(jid, id string) (string, string, error) {
 	return d.session.DownloadMedia(jid, id)
 }
 
-// Send sends one text message through the session: sent with WhatsApp's id and timestamp, or the
-// session's error (ipc.ErrNotLinked while unlinked; a short not-sent reason otherwise, offline
-// included until the outbox of T11 queues it). The client_id only labels the reply for now.
-func (d *daemon) Send(jid, text, _ string) (ipc.Sent, error) {
-	m, err := d.session.SendText(jid, text)
-	if err != nil {
-		return ipc.Sent{}, err
+// Send sends one text message through the session's outbox: sent with WhatsApp's id and
+// timestamp, queued while offline, or the session's error (ipc.ErrNotLinked while unlinked,
+// ipc.ErrNotConfirmed without an ack, a short not-sent reason otherwise). A client_id already
+// stored answers that send's state and sends nothing. After a wipe closed the store nothing is
+// sent.
+func (d *daemon) Send(jid, text, clientID string) (ipc.Sent, error) {
+	if d.closed.Load() {
+		return ipc.Sent{}, errClosed
 	}
-	return ipc.Sent{State: ipc.SendSent, ID: m.ID, Timestamp: m.Timestamp}, nil
+	return d.session.Send(jid, text, clientID)
+}
+
+// Retry serves retry: the session sends a not-sent message again, once, under its first WhatsApp
+// id, and answers any other send's stored state.
+func (d *daemon) Retry(clientID string) (ipc.Sent, error) {
+	if d.closed.Load() {
+		return ipc.Sent{}, errClosed
+	}
+	return d.session.Retry(clientID)
 }
 
 // logoutTimeout bounds the wait for WhatsApp to confirm an unlink; the CLI waits ipc.WipeTimeout.

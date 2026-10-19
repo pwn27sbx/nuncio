@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 
+	"go.mau.fi/whatsmeow/proto/waE2E"
 	waevents "go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
@@ -14,8 +15,9 @@ import (
 // messageRow turns a whatsmeow message into a store row: text and extended text as text, and the
 // image, video, audio and document kinds with their caption as text, their mime type, size and file
 // name, and the serialised media sub-message as MediaRef, which is everything a download on request
-// needs later; nothing is downloaded here. Any other kind and any chat the wire protocol does not
-// carry (status updates, broadcasts, newsletters) report false. The row starts unread; the store
+// needs later; nothing is downloaded here. A quoted reply, text or media, records the id it quotes
+// as ReplyTo. Any other kind and any chat the wire protocol does not carry (status updates,
+// broadcasts, newsletters) report false. The row starts unread; the store
 // counts it as unread only when it is not from me.
 func messageRow(evt *waevents.Message) (store.Message, bool) {
 	chat := evt.Info.Chat.String()
@@ -51,6 +53,9 @@ func messageRow(evt *waevents.Message) (store.Message, bool) {
 	}
 	m.Kind, m.Text, m.FileName, m.MediaRef = kind, caption, fileName, ref
 	m.Mime, m.Size = sub.GetMimetype(), int64(sub.GetFileLength())
+	if quoting, ok := sub.(interface{ GetContextInfo() *waE2E.ContextInfo }); ok {
+		m.ReplyTo = quoting.GetContextInfo().GetStanzaID()
+	}
 	return m, true
 }
 
@@ -73,10 +78,10 @@ func WireMessage(m store.Message) ipc.Message {
 	return w
 }
 
-// storeMessage saves one incoming or own message and publishes it, followed by the new unread
-// counts when it is incoming; a reaction is stored on its target instead (see storeReaction). A
-// repeated event is ignored by the store and publishes nothing. A
-// failure is logged without the message text and the session goes on.
+// storeMessage saves one incoming or own message and publishes it with any reactions that arrived
+// before it, followed by the new unread counts when it is incoming; a reaction is stored on its
+// target instead (see storeReaction). A repeated event is ignored by the store and publishes
+// nothing. A failure is logged without the message text and the session goes on.
 func (s *Session) storeMessage(evt *waevents.Message) {
 	if evt.Message.GetReactionMessage() != nil {
 		s.storeReaction(evt)
@@ -93,6 +98,10 @@ func (s *Session) storeMessage(evt *waevents.Message) {
 	}
 	if !inserted {
 		return
+	}
+	// A reaction can arrive before its target; the target's first event already carries it.
+	if m.Reactions, err = store.MessageReactions(s.db, m.ChatJID, m.ID); err != nil {
+		log.Printf("wa: %v", err)
 	}
 	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: m.ChatJID, Message: WireMessage(m)})
 	if !m.FromMe {

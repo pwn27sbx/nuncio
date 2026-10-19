@@ -14,6 +14,7 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 - S7 (owner, 2026-10-19: "no podemos probar el TUI aqui?" → demo daemon proposal → "dale"): a demo daemon with invented chats, no WhatsApp, that answers sends, reactions, search and downloads, so the whole TUI flow can be tried by hand on the Mac.
 - S8 (owner, 2026-10-19, verbatim): "B porque es un cliente de whatsapp si leo el mensaje en un dispositivo o lugar se lee en todos tal cual funcioan whatsapp ahora". Opening a chat in a UI marks its messages read in nuncio AND on WhatsApp (read receipts, blue ticks), like the official clients; the user's read-receipt privacy setting is respected.
 - S9 (owner "dale" to the follow-up list, 2026-10-19): (1) add M2 to the office report; (2) fix the nuncio-demo data race; (3) cap how many message ids one read receipt carries (ban risk); (4) log failed reconnect attempts; (5) a download_media racing a wipe must not recreate an empty data dir; (6) `event_chat` so UIs learn pin/archive/mute changes from app-state sync; (7) a dedicated `not_confirmed` wire error code; (8) the T2 test's leftover temp dir. Assumption for (3): at most 50 ids per receipt, sent as consecutive receipts with no extra retries.
+- S10 (owner "dale" to items 9 and 10, 2026-10-19): (9) fix the verifier advisories that need no product decision (L4, L11, L14, L15); (10) a multi-line composer with cursor movement in the TUI. Left out on purpose because they need a decision or are inherent: reply/react on my own still-queued send (WhatsApp has no such message yet), the partial-receipt design (L11), the not-confirmed message state on the wire (L15).
 
 ## Tasks
 
@@ -30,6 +31,9 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 | U10 | S9 (6), (7), (8) + TUI handling of event_chat | delegated writer (parallel); Risk 3 → verifier | done: RED per rule, 14 mutants killed; verifier B1 (TUI lost the not-confirmed mark on the daemon's not_sent event) → one correction → recheck FIXED; A1 single-chat query, A4, A6 fixed in the same batch; parent reran `cargo test -p nuncio-tui` | b8b48aa |
 | U11 | S9 (2), (5) | delegated writer (parallel); Risk 1 and 4 → verifier | done: RED per rule, 4 mutants killed; verifier PASS, no blockers (1500 race iterations, daemon exits after a wipe so the closed set never blocks a re-link); parent reran the store download tests with -race | 0d826a3 |
 | U12 | S9 (1) | delegated writer, after U9-U11 | done: ~/Documents/nuncio-office-report-2026-10-19.md updated with M2 (outside the repo) | none |
+| U13 | S10 (9) store/incoming side: L4 early reactions in the target's event, incoming captioned media replies record reply_to, GetMessage loads one message's reactions, emoji/no-token search | delegated writer (parallel) → verifier | done: RED per rule, 8 mutants killed; verifier PASS (151 read cases byte-identical to baseline, LIKE fallback ~5 ms on 10k messages); wire.md lines applied with U14 | this commit |
+| U14 | S10 (9) send side: L4 reused client_id with unknown reply_to, quoting media, own LID participant in @lid chats; L11 duplicate receipts from two UIs; L14 cache-dir/ErrClosed texts and 0700 on hit | delegated writer (parallel) | open | |
+| U15 | S10 (9) Rust: L15 unknown-op catch-all, jid tie-break in the TUI sort; S10 (10) multi-line composer | delegated writer (parallel) | open | |
 | U4 | S6 push + report | inline | done: final checks green (L8), pushed to origin/feat/m2-tui | this commit |
 
 ## Log
@@ -51,3 +55,5 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 - L13 (owner, 2026-10-19): "olvidemos eso de las 4:30 y 5:00 en general las horas restrictivas olvidemoslas, que mas podemos hacer aqui?". No time cut any more (supersedes S6, L2, L2b, L2c).
 - L14 U11 verifier advisories: a cache dir that cannot be written now fails after the download (text changed, nobody consumes it); a cache hit no longer re-applies 0700; an in-flight ErrClosed reaches the client as "WhatsApp did not deliver the media" (daemon exits right after).
 - L15 U10 verifier advisories left: a full sync of more than 64 chats drops a subscribed UI (it resubscribes in ~5 s, documented); an older TUI cannot parse `event_chat` (no catch-all variant; it resubscribes); the not-confirmed mark lives only in TUI memory; the TUI sorts by second-precision timestamps while the daemon uses nanoseconds.
+- L16 (owner, 2026-10-19): "dale" to items 9 and 10 → S10, U13–U15.
+- L17 U13 verifier advisories (all at baseline too): a query mixing emoji and words goes through FTS and ignores the emoji; keycap emoji search for their digit; `50%` also matches "50 off".

@@ -207,11 +207,9 @@ func GetMessage(db *sql.DB, chatJID, id string) (Message, error) {
 		return Message{}, fmt.Errorf("cannot read message: %w", err)
 	}
 	m.Timestamp = fromNanos(ts)
-	reactions, err := chatReactions(db, chatJID)
-	if err != nil {
+	if m.Reactions, err = MessageReactions(db, chatJID, id); err != nil {
 		return Message{}, err
 	}
-	m.Reactions = reactions[m.ID]
 	return m, nil
 }
 

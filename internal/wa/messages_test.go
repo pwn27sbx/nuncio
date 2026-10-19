@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
 	waevents "go.mau.fi/whatsmeow/types/events"
@@ -358,4 +359,69 @@ func TestMarkChatReadPublishesTheClearedUnreadOnlyWhenItChanges(t *testing.T) {
 		t.Fatalf("MarkChatRead: %v", err)
 	}
 	assertEvents(t, events())
+}
+
+func TestAReactionThatArrivesBeforeItsTargetIsInTheTargetsFirstEvent(t *testing.T) {
+	s, fake, events := subscribedSession(t)
+	fake.emit(messageEvent(ada, "R1", false, t0, &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{
+		Key:  &waCommon.MessageKey{ID: proto.String("EARLY"), RemoteJID: proto.String(ada.String()), FromMe: proto.Bool(false)},
+		Text: proto.String("🎉"),
+	}}))
+	if ev := events(); len(ev) != 0 {
+		t.Errorf("events = %q, want none while the target is not stored", ev)
+	}
+	fake.emit(textEvent(ada, "EARLY", false, t0.Add(time.Second), "made it"))
+
+	ev := events()
+	if len(ev) != 2 || !jsonHas(ev[0], `"op":"event_message"`, `"id":"EARLY"`, `"reactions":[{"emoji":"🎉","from_me":false}]`) {
+		t.Errorf("events = %q, want EARLY's first event_message with the earlier reaction", ev)
+	}
+	if m := onlyMessage(t, s.Store(), ada.String()); !reflect.DeepEqual(m.Reactions, []store.Reaction{{Emoji: "🎉"}}) {
+		t.Errorf("stored reactions = %+v, want the earlier one", m.Reactions)
+	}
+}
+
+func TestAnIncomingMediaReplyRecordsWhatItQuotes(t *testing.T) {
+	quote := func() *waE2E.ContextInfo {
+		return &waE2E.ContextInfo{StanzaID: proto.String("Q1"), Participant: proto.String(fakeOwnJID)}
+	}
+	cases := []struct {
+		name string
+		msg  *waE2E.Message
+	}{
+		{"captioned image", &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+			Mimetype: proto.String("image/jpeg"), Caption: proto.String("look"), ContextInfo: quote()}}},
+		{"image without caption", &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+			Mimetype: proto.String("image/jpeg"), ContextInfo: quote()}}},
+		{"video", &waE2E.Message{VideoMessage: &waE2E.VideoMessage{
+			Mimetype: proto.String("video/mp4"), Caption: proto.String("clip"), ContextInfo: quote()}}},
+		{"audio", &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+			Mimetype: proto.String("audio/ogg"), ContextInfo: quote()}}},
+		{"document", &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{
+			Mimetype: proto.String("application/pdf"), FileName: proto.String("plan.pdf"), ContextInfo: quote()}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			s, fake, events := subscribedSession(t)
+			fake.emit(messageEvent(ada, "M1", false, t0, c.msg))
+			if m := onlyMessage(t, s.Store(), ada.String()); m.ReplyTo != "Q1" || m.Kind == store.KindText {
+				t.Errorf("stored %+v, want the media message with reply_to Q1", m)
+			}
+			if ev := events(); len(ev) == 0 || !jsonHas(ev[0], `"id":"M1"`, `"reply_to":"Q1"`) {
+				t.Errorf("events = %q, want the message with its reply_to", ev)
+			}
+		})
+	}
+}
+
+func TestAMediaMessageThatQuotesNothingHasNoReplyTo(t *testing.T) {
+	s, fake, events := subscribedSession(t)
+	fake.emit(messageEvent(ada, "M1", false, t0, &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+		Mimetype: proto.String("image/jpeg"), Caption: proto.String("look")}}))
+	if m := onlyMessage(t, s.Store(), ada.String()); m.ReplyTo != "" || m.Text != "look" {
+		t.Errorf("stored %+v, want the captioned image with no reply_to", m)
+	}
+	if ev := events(); len(ev) == 0 || strings.Contains(ev[0], `"reply_to"`) {
+		t.Errorf("events = %q, want the message without reply_to", ev)
+	}
 }

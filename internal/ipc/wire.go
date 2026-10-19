@@ -62,6 +62,9 @@ const (
 	OpReact   = "react"
 	OpReacted = "reacted"
 
+	OpMarkRead   = "mark_read"
+	OpMarkedRead = "marked_read"
+
 	OpEventMessage    = "event_message"
 	OpEventConnection = "event_connection"
 	OpEventUnread     = "event_unread"
@@ -203,6 +206,22 @@ type Reacted struct {
 	JID   string `json:"jid"`
 	ID    string `json:"id"`
 	Emoji string `json:"emoji"`
+}
+
+// MarkReadRequest marks every unread message of chat JID read, here and on WhatsApp. A UI sends it
+// when the user opens the chat: it is the explicit view after which read receipts go out.
+type MarkReadRequest struct {
+	V   int    `json:"v"`
+	Op  string `json:"op"`
+	JID string `json:"jid"`
+}
+
+// MarkedRead answers a MarkReadRequest once the chat is read: Unread is the new total unread count.
+type MarkedRead struct {
+	V      int    `json:"v"`
+	Op     string `json:"op"`
+	JID    string `json:"jid"`
+	Unread int    `json:"unread"`
 }
 
 // RetryRequest sends again, once, a send of this daemon that ended not sent, under its first
@@ -483,6 +502,17 @@ type Reactor interface {
 	React(jid, id, emoji string) error
 }
 
+// MarkReader marks a chat read when a UI opens it, which is the explicit view: it sends WhatsApp the
+// read receipts of the chat's unread incoming messages (respecting the account's read-receipt
+// privacy), then clears them locally and returns the new total unread count. It is separate from
+// Handler, like Searcher, so a Handler written before it still compiles; ServeConn answers mark_read
+// with bad_frame when its Handler lacks it. It returns ErrNotLinked when no device is paired, which
+// ServeConn answers with not_linked; any other error is an internal error whose message is the
+// error's text, so it must carry no number and no message text.
+type MarkReader interface {
+	MarkRead(jid string) (unread int, err error)
+}
+
 // ValidJID reports whether jid names a WhatsApp chat the protocol carries: a user
 // (`digits@s.whatsapp.net`, or `digits@lid` for a hidden-number user) or a group (`digits@g.us`, or
 // `digits-digits@g.us` for an old group id). Device suffixes, broadcasts and other servers are not
@@ -747,6 +777,10 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
 			if err := WriteFrame(out, serveReact(line, h)); err != nil {
 				return err
 			}
+		case OpMarkRead:
+			if err := WriteFrame(out, serveMarkRead(line, h)); err != nil {
+				return err
+			}
 		case OpRetry:
 			if err := WriteFrame(out, serveRetry(line, h)); err != nil {
 				return err
@@ -892,6 +926,30 @@ func serveReact(line []byte, h Handler) any {
 		return Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()}
 	}
 	return Reacted{V: Version, Op: OpReacted, JID: req.JID, ID: req.ID, Emoji: req.Emoji}
+}
+
+// serveMarkRead checks a mark_read frame and asks h to mark the chat read, returning the reply
+// frame. A refused frame never reaches h, so no receipt is sent.
+func serveMarkRead(line []byte, h Handler) any {
+	var req MarkReadRequest
+	if err := json.Unmarshal(line, &req); err != nil {
+		return badFrame("malformed mark_read frame")
+	}
+	m, ok := h.(MarkReader)
+	switch {
+	case !ok:
+		return badFrame("this daemon cannot mark a chat read")
+	case !ValidJID(req.JID):
+		return badFrame("jid is not a WhatsApp chat")
+	}
+	unread, err := m.MarkRead(req.JID)
+	if errors.Is(err, ErrNotLinked) {
+		return Error{V: Version, Op: OpError, Code: CodeNotLinked, Message: ErrNotLinked.Error()}
+	}
+	if err != nil {
+		return Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()}
+	}
+	return MarkedRead{V: Version, Op: OpMarkedRead, JID: req.JID, Unread: unread}
 }
 
 // serveRetry checks a retry frame and asks h to retry it, returning the reply frame.

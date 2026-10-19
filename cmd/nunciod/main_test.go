@@ -294,6 +294,14 @@ func (s fixedSession) React(string, string, string) error {
 	return errors.New("a fixed session cannot react")
 }
 
+// MarkRead answers not linked while unlinked and a total of 7 otherwise.
+func (s fixedSession) MarkRead(string) (int, error) {
+	if wa.State(s) == wa.StateUnlinked {
+		return 0, ipc.ErrNotLinked
+	}
+	return 7, nil
+}
+
 func (s fixedSession) Retry(string) (ipc.Sent, error) {
 	return ipc.Sent{}, errors.New("a fixed session cannot retry")
 }
@@ -749,6 +757,8 @@ type fakeWAClient struct {
 	logouts   atomic.Int64
 	onLogout  func()
 	logoutErr error
+	// receipts counts MarkRead calls.
+	receipts atomic.Int64
 }
 
 func (f *fakeWAClient) Logout(context.Context) error {
@@ -774,6 +784,14 @@ func (f *fakeWAClient) SendMessage(context.Context, string, *waE2E.Message, stri
 }
 
 func (f *fakeWAClient) NewMessageID() string { return f.sendID }
+
+// MarkRead counts read receipts in receipts; ReadReceiptsPrivacy answers "all".
+func (f *fakeWAClient) MarkRead(context.Context, string, string, []string, time.Time, string) error {
+	f.receipts.Add(1)
+	return nil
+}
+
+func (f *fakeWAClient) ReadReceiptsPrivacy(context.Context) (string, error) { return "all", nil }
 
 func (f *fakeWAClient) HasDevice() bool             { return true }
 func (f *fakeWAClient) Connect() error              { f.emit(&waevents.Connected{}); return nil }

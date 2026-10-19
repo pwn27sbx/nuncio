@@ -62,6 +62,14 @@ pub enum ClientFrame {
         id: String,
         emoji: String,
     },
+    /// Mark every unread message of chat `jid` read, here and on WhatsApp. A UI sends it when the
+    /// user opens the chat: that is the explicit view after which the daemon sends read receipts
+    /// (read-self when the user turned read receipts off). Answered with `marked_read`, or an
+    /// error: receipts are never queued, so a chat opened offline stays unread (added in M2).
+    MarkRead {
+        v: u8,
+        jid: String,
+    },
     /// Send again, once, a send of this daemon that ended not sent, by its `client_id` and under
     /// its first WhatsApp message id, so it can never become a second message. A send that is
     /// queued or sent is only reported. Nothing retries on its own.
@@ -170,6 +178,14 @@ impl ClientFrame {
             jid: jid.into(),
             id: id.into(),
             emoji: emoji.into(),
+        }
+    }
+
+    /// The `mark_read` frame a UI sends when the user opens chat `jid`.
+    pub fn mark_read(jid: impl Into<String>) -> Self {
+        Self::MarkRead {
+            v: PROTOCOL_VERSION,
+            jid: jid.into(),
         }
     }
 
@@ -289,6 +305,12 @@ pub enum DaemonFrame {
         id: String,
         emoji: String,
     },
+    /// Chat `jid` is read here and on WhatsApp; `unread` is the new total (added in M2).
+    MarkedRead {
+        v: u8,
+        jid: String,
+        unread: u32,
+    },
     EventMessage {
         v: u8,
         jid: String,
@@ -327,6 +349,7 @@ impl DaemonFrame {
             Self::Wiped { .. } => "wiped",
             Self::MediaReady { .. } => "media_ready",
             Self::Reacted { .. } => "reacted",
+            Self::MarkedRead { .. } => "marked_read",
             Self::EventMessage { .. } => "event_message",
             Self::EventConnection { .. } => "event_connection",
             Self::EventUnread { .. } => "event_unread",

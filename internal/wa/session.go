@@ -54,6 +54,14 @@ type Client interface {
 	BuildReaction(chat, sender, id, emoji string) (*waE2E.Message, error)
 	// OwnJID is this device's account JID without device, empty when nothing is linked.
 	OwnJID() string
+	// ReadReceiptsPrivacy is the account's read-receipt privacy setting ("all" or "none"), from
+	// whatsmeow's TryFetchPrivacySettings (whatsmeow keeps it current from WhatsApp's change
+	// notifications). An error means it is unknown.
+	ReadReceiptsPrivacy(ctx context.Context) (string, error)
+	// MarkRead sends one read receipt of receiptType ("read" or "read-self") for messages ids of
+	// chat, all sent by sender (its JID without device), with whatsmeow's MarkRead. Only
+	// Session.MarkRead, behind a UI's explicit mark_read, calls it.
+	MarkRead(ctx context.Context, chat, sender string, ids []string, at time.Time, receiptType string) error
 	// Logout tells WhatsApp to unlink this device, then disconnects. It is the only call that
 	// unlinks, and only `nuncio logout --confirm` reaches it.
 	Logout(ctx context.Context) error
@@ -409,6 +417,35 @@ func (w whatsmeowClient) BuildReaction(chat, sender, id, emoji string) (*waE2E.M
 		}
 	}
 	return w.c.BuildReaction(c, from, id, emoji), nil
+}
+
+// ReadReceiptsPrivacy uses TryFetchPrivacySettings, not GetPrivacySettings: the latter answers an
+// empty setting when the fetch fails, and whatsmeow's MarkRead would then send blue ticks the user
+// turned off.
+func (w whatsmeowClient) ReadReceiptsPrivacy(ctx context.Context) (string, error) {
+	settings, err := w.c.TryFetchPrivacySettings(ctx, false)
+	if err != nil {
+		return "", err
+	}
+	return string(settings.ReadReceipts), nil
+}
+
+// MarkRead is whatsmeow's MarkRead over parsed JIDs, with the receipt type given explicitly. A JID
+// that does not parse answers a fixed error, which names no JID.
+func (w whatsmeowClient) MarkRead(ctx context.Context, chat, sender string, ids []string, at time.Time, receiptType string) error {
+	c, err := types.ParseJID(chat)
+	if err != nil {
+		return errors.New("wa: the chat JID does not parse")
+	}
+	from, err := types.ParseJID(sender)
+	if err != nil {
+		return errors.New("wa: the sender JID does not parse")
+	}
+	msgIDs := make([]types.MessageID, len(ids))
+	for i, id := range ids {
+		msgIDs[i] = id
+	}
+	return w.c.MarkRead(ctx, msgIDs, at, c, from, types.ReceiptType(receiptType))
 }
 
 func (w whatsmeowClient) OwnJID() string {

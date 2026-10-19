@@ -320,6 +320,20 @@ func fixtureCases() []fixtureCase {
 				return Reacted{V: 1, Op: OpReacted, JID: "15551230001@s.whatsapp.net", ID: "3EB0AAA1", Emoji: "👍"}
 			},
 		},
+		{
+			file: "mark_read_request.json",
+			into: func() any { return &MarkReadRequest{} },
+			build: func() any {
+				return MarkReadRequest{V: 1, Op: OpMarkRead, JID: "15551230001@s.whatsapp.net"}
+			},
+		},
+		{
+			file: "marked_read_response.json",
+			into: func() any { return &MarkedRead{} },
+			build: func() any {
+				return MarkedRead{V: 1, Op: OpMarkedRead, JID: "15551230001@s.whatsapp.net", Unread: 17}
+			},
+		},
 	}
 }
 
@@ -417,6 +431,7 @@ func TestFixturesCarryVersionOne(t *testing.T) {
 		OpSubscribed: true, OpFocus: true, OpFocused: true, OpEventMessage: true,
 		OpEventConnection: true, OpEventUnread: true, OpEventFocus: true, OpWipe: true, OpWiped: true,
 		OpDownloadMedia: true, OpMediaReady: true, OpRetry: true, OpSearch: true, OpReact: true, OpReacted: true,
+		OpMarkRead: true, OpMarkedRead: true,
 	}
 	for _, tc := range fixtureCases() {
 		t.Run(tc.file, func(t *testing.T) {

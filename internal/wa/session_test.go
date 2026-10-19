@@ -16,7 +16,6 @@ import (
 
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/types"
 	waevents "go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 )
@@ -28,8 +27,18 @@ type fakeClient struct {
 	connectErr  error
 	connects    int
 	disconnects int
-	markReads   int
 	handlers    []func(any)
+	// markReads counts MarkRead calls; markReadCalls records each as "chat sender type id,id" and
+	// markReadAt the time of the last one. MarkRead answers markReadErr.
+	markReads     int
+	markReadCalls []string
+	markReadAt    time.Time
+	markReadErr   error
+	// readReceipts is the account's read-receipt privacy ("" reads as "all"); ReadReceiptsPrivacy
+	// counts its calls in privacyAsks and answers privacyErr when set.
+	readReceipts string
+	privacyErr   error
+	privacyAsks  int
 	// sends records every SendMessage call as "jid text" and sendIDs its WhatsApp message id; it
 	// answers sendTime, or the next of sendErrs (nil entries succeed), then sendErr. NewMessageID
 	// answers sendID when set, otherwise a fresh id per call. sendMu guards them: a drain sends
@@ -140,10 +149,23 @@ func (f *fakeClient) Connect() error {
 
 func (f *fakeClient) Disconnect() { f.disconnects++ }
 
-// MarkRead mirrors whatsmeow's read receipt call, so a test can prove it is never sent.
-func (f *fakeClient) MarkRead(context.Context, []types.MessageID, time.Time, types.JID, types.JID) error {
+// MarkRead records a read receipt, so a test can prove which were sent, or that none was.
+func (f *fakeClient) MarkRead(_ context.Context, chat, sender string, ids []string, at time.Time, receiptType string) error {
 	f.markReads++
-	return nil
+	f.markReadCalls = append(f.markReadCalls, chat+" "+sender+" "+receiptType+" "+strings.Join(ids, ","))
+	f.markReadAt = at
+	return f.markReadErr
+}
+
+func (f *fakeClient) ReadReceiptsPrivacy(context.Context) (string, error) {
+	f.privacyAsks++
+	if f.privacyErr != nil {
+		return "", f.privacyErr
+	}
+	if f.readReceipts == "" {
+		return "all", nil
+	}
+	return f.readReceipts, nil
 }
 
 func (f *fakeClient) AddEventHandler(h func(any)) { f.handlers = append(f.handlers, h) }

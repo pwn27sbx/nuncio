@@ -47,6 +47,10 @@ type fakeHandler struct {
 	replies   []string
 	reacts    []string
 	reactErr  error
+	// mark_read (mark_read_test.go): MarkRead answers markReadTotal or markReadErr.
+	markReads     []string
+	markReadTotal int
+	markReadErr   error
 }
 
 func (f *fakeHandler) DownloadMedia(jid, id string) (string, string, error) {

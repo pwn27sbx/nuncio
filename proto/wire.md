@@ -45,6 +45,7 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `download_media` | `v`, `op`, `jid`, `id` (the message id) | `download_media_request.json` |
 | `search` | `v`, `op`, `jid`, `query` (string, every word must match), `limit` (int, 1..200); answered with `messages` (added in M2) | `search_request.json` |
 | `react` | `v`, `op`, `jid`, `id` (the message id), `emoji` (string; empty removes my reaction) (added in M2) | `react_request.json`, `react_remove_request.json` |
+| `mark_read` | `v`, `op`, `jid`; a UI sends it when the user opens the chat, which marks the chat read here and on WhatsApp (added in M2) | `mark_read_request.json` |
 
 ### daemon → client
 
@@ -62,6 +63,7 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `wiped` | `v`, `op`, `unlinked` (bool: WhatsApp confirmed the unlink) | `wiped_response.json` |
 | `media_ready` | `v`, `op`, `jid`, `id`, `path` (string: the cached file), `mime` (string) | `media_ready_response.json` |
 | `reacted` | `v`, `op`, `jid`, `id`, `emoji` (as asked; empty = removed) (added in M2) | `reacted_response.json` |
+| `marked_read` | `v`, `op`, `jid`, `unread` (int: the new total unread count) (added in M2) | `marked_read_response.json` |
 
 ### Events (daemon → subscribed clients)
 
@@ -107,7 +109,8 @@ A string, not a boolean, so it can grow without a protocol break:
 `archived`, `pinned` and `muted` follow the phone: the daemon applies WhatsApp's app-state sync
 (the initial full sync and every later change) read-only and never sends a change back. A change
 publishes no event yet; a client sees it on its next `chats`. A chat marked read on another device
-is marked read here too (its `event_unread` is published, and no read receipt is sent); a chat
+is marked read here too (its `event_unread` is published, and no read receipt is sent: only
+`mark_read` sends one); a chat
 marked *unread* on another device leaves the counts as they are, since the daemon has no "marked
 unread" flag.
 
@@ -221,7 +224,7 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `download_media` whose bytes do not match the message's SHA-256 | `error` / `internal` with the message `the downloaded media does not match its SHA-256, so nothing was saved`; nothing is cached |
 | `download_media` that WhatsApp does not deliver | `error` / `internal` with the message `WhatsApp did not deliver the media`; nothing is cached |
 
-### M2 corners (search, reply, react; pinned by daemon tests)
+### M2 corners (search, reply, react, mark_read; pinned by daemon tests)
 
 | Situation | Behaviour |
 |---|---|
@@ -240,6 +243,16 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `react` on someone else's message whose sender is unknown (a group message stored before M2 recorded senders) | `error` / `internal` with the message `the sender of that message is unknown, so the reaction was not sent`; nothing is sent or stored, because a reaction key without its sender would claim the message is mine |
 | `react` that WhatsApp does not accept or acknowledge | `error` / `internal` with the message `WhatsApp did not accept the reaction`; one attempt, never retried |
 | `react` accepted | `reacted`; my reaction is stored on the message and the message is published again as `event_message` |
+| `mark_read` | the explicit view of AGENTS.md ("read receipts only on an explicit view"): a UI sends it when the user opens the chat, and it is the only thing that sends read receipts. The daemon sends WhatsApp one read receipt per sender for the chat's unread messages that are not mine (as the official clients do, so every device and the sender see them read), then marks them read in its store, publishes `event_unread` (the total and `chat_unread`, 0 unless a message arrived meanwhile) and answers `marked_read` with the new total |
+| `mark_read` while the user turned read receipts off in WhatsApp's privacy settings | the receipts are `read-self`: the user's other devices mark the chat read, the sender sees no blue ticks |
+| `mark_read` of a group message stored before M2 recorded senders | no receipt for it, since a group receipt must name the sender; it is still marked read in the store |
+| `mark_read` of a chat with nothing unread (or no stored chat) | `marked_read` with the total; nothing is sent and nothing is published, while offline too |
+| `mark_read` with a `jid` that is not a chat JID | `bad_frame`; nothing is sent |
+| `mark_read` while `unlinked` | `error` / `not_linked`; the chat stays unread |
+| `mark_read` while `offline` | `error` / `internal` with the message `the WhatsApp session is offline, so the chat was not marked read`; receipts are never queued, so the chat stays unread and the next view marks it read |
+| `mark_read` when the daemon cannot read the read-receipt privacy setting | `error` / `internal` with the message `could not read the read-receipt privacy setting, so the chat was not marked read`; nothing is sent (a receipt could show blue ticks the user turned off) and the chat stays unread |
+| `mark_read` whose receipt WhatsApp does not take | `error` / `internal` with the message `WhatsApp did not accept the read receipt, so the chat was not marked read`; no further receipt is sent, nothing is retried and the chat stays unread here (a later `mark_read` sends its receipts again, which WhatsApp reads as the same read) |
+| `mark_read` timing | the daemon answers within 4 s, inside a client's ordinary 5 s read bound |
 
 A WhatsApp chat JID is one of: `digits@s.whatsapp.net` (a user), `digits@lid` (a user addressed by
 its hidden id; WhatsApp uses it for direct chats too) or `digits-digits@g.us` / `digits@g.us` (a

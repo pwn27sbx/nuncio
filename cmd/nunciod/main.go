@@ -289,6 +289,9 @@ type sessionState interface {
 	// message (empty emoji removes it), never queued while offline.
 	SendReply(jid, text, clientID, replyTo string) (ipc.Sent, error)
 	React(jid, id, emoji string) error
+	// MarkRead marks a chat read when a UI opened it (the explicit view): read receipts to WhatsApp,
+	// then the store; it answers the new total unread count.
+	MarkRead(jid string) (int, error)
 	// Logout tells WhatsApp to unlink the device through the daemon's own session.
 	Logout(ctx context.Context) error
 	// Close disconnects the session and closes the store.
@@ -425,6 +428,17 @@ func (d *daemon) React(jid, id, emoji string) error {
 		return errClosed
 	}
 	return d.session.React(jid, id, emoji)
+}
+
+// MarkRead serves mark_read, which a UI sends when the user opens a chat: that is the explicit view
+// after which the session sends WhatsApp the read receipts of the chat's unread messages (read-self
+// when the user turned read receipts off), then clears them in the store and answers the new total.
+// Nothing else sends a read receipt. After a wipe closed the store nothing is sent.
+func (d *daemon) MarkRead(jid string) (int, error) {
+	if d.closed.Load() {
+		return 0, errClosed
+	}
+	return d.session.MarkRead(jid)
 }
 
 // Search serves search: up to limit stored messages of a chat that contain every word of query,

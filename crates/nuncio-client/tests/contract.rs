@@ -86,12 +86,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_thirty_four_documented_files() {
+fn fixture_directory_holds_the_thirty_six_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 34, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 36, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -584,6 +584,24 @@ fn constructed_m2_frames_match_their_fixtures() {
             ],
         },
     );
+}
+
+/// `mark_read` (a UI opened a chat) and its `marked_read` answer, constructed in Rust.
+#[test]
+fn constructed_mark_read_frames_match_their_fixtures() {
+    let dir = fixtures_dir();
+    let ada = "15551230001@s.whatsapp.net";
+    assert_frame(
+        &dir.join("mark_read_request.json"),
+        &ClientFrame::mark_read(ada),
+    );
+    let marked = DaemonFrame::MarkedRead {
+        v: PROTOCOL_VERSION,
+        jid: ada.to_owned(),
+        unread: 17,
+    };
+    assert_eq!(marked.op(), "marked_read");
+    assert_frame(&dir.join("marked_read_response.json"), &marked);
 }
 
 /// A message from an M1 daemon (no `reply_to`, no `reactions`) still parses, as quoting nothing

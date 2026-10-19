@@ -18,6 +18,19 @@ nuncio-tui [--image <png>]
 - **Composer**: the last row of the conversation. A send shows `sending` until the daemon
   answers, then `queued` (offline, waiting for the reconnect), nothing (sent) or `not sent`
   (it waits for a manual retry).
+- **Selected message**: `K`/`J` select a message (`›`); `r` replies to it, `e` reacts, `R`
+  retries a send of mine that is `not sent` (one attempt per key press; nothing is ever retried
+  on its own), `o` downloads its media.
+- **Quotes and reactions**: a reply shows `> ` and the start of the message it quotes (or
+  `(a message not loaded)`); reactions show on the line under the message, mine in the accent
+  colour. A reaction the daemon refuses (offline, unknown sender, ...) shows its error in the
+  footer and changes nothing. Reactions are never queued: react again once linked.
+- **Search** (`/`): searches the open chat through the daemon; the results are listed newest
+  first, and `Enter` on one closes the search and selects that message in the conversation
+  (scrolled into view) when it is among the loaded messages; otherwise the footer says so.
+- **Media**: image, audio, video and document messages show `[kind]` before their caption. `o`
+  asks the daemon to download it and opens the file with `xdg-open` (`open` on macOS). Inline
+  images are only the `--image` check for now: downloaded media is not drawn in the terminal.
 - Live updates: new messages, a send's state changes, unread counts, the connection state, and a
   focus request (`nuncio focus <jid>`) selects and opens that chat.
 - Colours follow the Omarchy theme live (the shared `ThemeWatcher`).
@@ -32,7 +45,13 @@ Everything works from the keyboard. `?` shows this list on screen.
 | `Enter`, `l`, `→` | open the selected chat |
 | `i` | write a message to the selected chat |
 | `Enter` | in the composer: send |
-| `Esc` | composer → conversation → chats; quit from the chats |
+| `K`/`J` | conversation: select an older / newer message |
+| `r` | reply to the selected message (the composer quotes it) |
+| `e` | react to it: `1`-`6` 👍 ❤️ 😂 😮 😢 🙏, `x` removes mine, `Esc` cancels |
+| `R` | retry the selected send that is not sent |
+| `o` | download the selected media and open it externally |
+| `/` | search this chat: type, `Enter` search, `j`/`k` move, `Enter` select, `/` edit, `Esc` close |
+| `Esc` | unselect the message; composer → conversation → chats; quit from the chats |
 | `PgUp`/`PgDn` | scroll a page |
 | `g`/`G`, `Home`/`End` | scroll to the oldest / newest message |
 | `Tab` | switch between chats and conversation |

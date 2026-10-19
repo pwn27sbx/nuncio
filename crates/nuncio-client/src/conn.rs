@@ -183,6 +183,25 @@ impl Connection {
         }
     }
 
+    /// [`Connection::request`] with this one reply allowed up to `wait` instead of the
+    /// connection's read bound: a `download_media` reply can take far longer than an ordinary
+    /// read (the Go client waits 90 s). Later reads are bounded as before.
+    pub fn request_within(
+        &mut self,
+        frame: &ClientFrame,
+        wait: Duration,
+    ) -> Result<DaemonFrame, ClientError> {
+        let bound = self.timeout;
+        self.stream
+            .get_ref()
+            .set_read_timeout(Some(wait.max(Duration::from_millis(1))))?;
+        self.timeout = wait;
+        let reply = self.request(frame);
+        self.timeout = bound;
+        let _ = self.stream.get_ref().set_read_timeout(Some(bound));
+        reply
+    }
+
     /// Send `subscribe` and check the daemon's `subscribed`. From then on the daemon pushes
     /// event frames on this connection; read them with [`Connection::next_event`]. Subscribing
     /// again is harmless: each event still arrives once.
@@ -326,5 +345,44 @@ mod tests {
                 got: "hello_ok"
             }
         ));
+    }
+
+    #[test]
+    fn request_within_waits_longer_than_the_read_bound_for_one_reply_only() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::time::Duration;
+
+        let path = std::path::PathBuf::from(format!("/tmp/ncl-within-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).expect("bind");
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("accept");
+            let mut writer = stream.try_clone().expect("clone");
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            for _ in 0..2 {
+                line.clear();
+                reader.read_line(&mut line).expect("request");
+                std::thread::sleep(Duration::from_millis(300));
+                writer
+                    .write_all(b"{\"v\":1,\"op\":\"subscribed\"}\n")
+                    .expect("reply");
+            }
+        });
+        let mut conn = super::Connection::connect_with_timeout(&path, Duration::from_millis(100))
+            .expect("connect");
+        let frame = crate::wire::ClientFrame::subscribe();
+        let reply = conn.request_within(&frame, Duration::from_secs(2));
+        assert!(
+            matches!(reply, Ok(crate::wire::DaemonFrame::Subscribed { .. })),
+            "{reply:?}"
+        );
+        // The longer wait was for that reply only.
+        assert!(matches!(
+            conn.request(&frame),
+            Err(super::ClientError::Timeout(_))
+        ));
+        server.join().expect("server");
+        let _ = std::fs::remove_file(&path);
     }
 }

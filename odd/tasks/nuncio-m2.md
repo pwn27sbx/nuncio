@@ -18,7 +18,7 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 |---|---|---|---|---|
 | U1 | S1 (list, conversation, send, keyboard, palette), S2 (sizes, emoji/RTL, 200 msgs) | delegated writer (context backstop + parallel with U2) | done: 10 app + 9 render tests, 7 mutants killed, clippy clean; parent reran `cargo test -p nuncio-tui` 26/0 | 1ff7ec1 |
 | U2 | S4 (search, reply, react: Go daemon + proto + Rust wire types) | delegated writer (context backstop + parallel with U1); Risk items 1 and 3 → independent verifier | done: RED per rule, 19 mutants killed; verifier S4 FAIL (B1) → one correction → recheck FIXED; S5 PASS; parent reran the B1 and outbox-transaction tests green | this commit |
-| U3 | S1 (reply/react/search/media in the TUI over U2's ops) | delegated writer, after U1+U2 | open | |
+| U3 | S1 (reply/react/search/media in the TUI over U2's ops) | delegated writer, after U1+U2 (context backstop) | done except inline images (L6): RED per rule, 11 mutants killed, one correction batch (refused download/search), cargo 82/0; parent reran `cargo test -p nuncio-tui` | this commit |
 | U4 | S6 push + report | inline | open | |
 
 ## Log
@@ -30,3 +30,5 @@ Branch: `feat/m2-tui` (from `feat/m1-core` at `87e4d9e`). Delivery: `single-pr`.
 - L3 Wire choice for S4: `search` op {`jid`, `query`, `limit`} → `messages` reply; `send` gains optional `reply_to` (message id); `react` op {`jid`, `id`, `emoji` (empty = remove)} → `reacted`; Message gains optional `reply_to` and `reactions`. Additive, v stays 1.
 - L4 U2 verifier (independent, scratch copy): B1 react on an M1 group row with no recorded sender built a from-me key and answered `reacted` → fixed (refused with "the sender of that message is unknown, so the reaction was not sent"), recheck FIXED. Advisory A7 (outbox + quote not in one transaction) fixed in the same batch. Open advisories for later: a reaction arriving before its target is not in the target's first event; reused client_id with an unknown reply_to answers send_failed; reply/react cannot name my own still-queued send; quoting media sends caption-only text; own-JID participant is the PN even in @lid chats; incoming captioned media replies do not record reply_to; GetMessage loads the whole chat's reactions; emoji search finds nothing (FTS tokenizer).
 - L5 Also in the U2 commit: `nuncio-tui` Message literals gained `reply_to`/`reactions` (mechanical, delegated writer, 10 lines).
+- L6 U3 left out from S1: inline images of downloaded media in Ghostty. The `image` crate is built with `png` only (WhatsApp photos are JPEG) and a startup terminal query is a risk on foot/alacritty that only the Linux matrix can check. Media opens externally (`open`/`xdg-open`). Also: reply/react cannot target my own send that has no id yet.
+- L7 Follow-up commit bc65acf: reaction build errors no longer quote JIDs (GGA observation on 37f406b).

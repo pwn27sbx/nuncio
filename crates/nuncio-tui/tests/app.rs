@@ -233,7 +233,7 @@ fn emoji_zwj_cjk_and_rtl_text_keep_the_frame_intact() {
         vec![
             message("A1", &long, false, 1),
             message("A2", "مرحبا 👋🏽 שלום", true, 2),
-            message("A3", "🏳️‍🌈 漢字", false, 3),
+            quoting_with_reactions("A3", "🏳️‍🌈 漢字", "A1"),
         ],
     );
     for (width, height) in [(80u16, 24u16), (240, 60), (37, 11)] {
@@ -262,8 +262,27 @@ fn emoji_zwj_cjk_and_rtl_text_keep_the_frame_intact() {
             let text = screen.text();
             assert!(text.contains("Family"), "{text}");
             assert!(text.contains("👋🏽"), "{text}");
+            assert!(text.contains("> 👨‍👩‍👧‍👦"), "the quote of A1:\n{text}");
+            assert!(text.contains('❤'), "the reaction:\n{text}");
         }
     }
+}
+
+/// A message quoting `reply_to`, with my ❤️ and their family-emoji reaction on it.
+fn quoting_with_reactions(id: &str, text: &str, reply_to: &str) -> Message {
+    let mut quoting = message(id, text, false, 3);
+    quoting.reply_to = Some(reply_to.to_owned());
+    quoting.reactions = vec![
+        nuncio_client::Reaction {
+            emoji: "❤️".to_owned(),
+            from_me: true,
+        },
+        nuncio_client::Reaction {
+            emoji: "👨‍👩‍👧‍👦".to_owned(),
+            from_me: false,
+        },
+    ];
+    quoting
 }
 
 fn two_hundred() -> Vec<Message> {
@@ -638,5 +657,455 @@ fn the_daemon_driver_sends_and_follows_events() {
         );
     }
     server.join().expect("the fake daemon ran its script");
+    let _ = std::fs::remove_file(&path);
+}
+
+// --- U3: select a message, reply, react, retry, search, media ----------------------------
+
+fn shift(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT)
+}
+
+fn ada_conversation(app: &mut App) {
+    open_first(
+        app,
+        ADA,
+        vec![
+            message("A1", "Are we still on?", false, 1),
+            message("A2", "Yes, see you at 18:00", true, 2),
+        ],
+    );
+}
+
+#[test]
+fn a_reply_quotes_the_selected_message_and_the_transcript_shows_the_quote() {
+    let mut app = two_chats().with_client_prefix("t");
+    ada_conversation(&mut app);
+    // K selects the newest message, then one older each time.
+    assert_eq!(app.handle_key(shift('K')), None);
+    assert_eq!(app.handle_key(shift('K')), None);
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(screen.contains("› Ada Lovelace · 17:01"), "{screen}");
+    assert_eq!(app.handle_key(key(KeyCode::Char('r'))), None);
+    assert_eq!(app.pane(), Pane::Compose);
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(screen.contains("replying to: Are we still on?"), "{screen}");
+    type_text(&mut app, "yes");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Some(Action::Request(ClientFrame::send_reply(
+            ADA, "yes", "t-1", "A1"
+        )))
+    );
+    // The next message is a plain one again.
+    app.handle_key(key(KeyCode::Char('i')));
+    type_text(&mut app, "and");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Some(Action::Request(ClientFrame::send(ADA, "and", "t-2")))
+    );
+
+    // The daemon sends it, and its event carries the quote too.
+    app.apply(&DaemonFrame::Sent {
+        v: 1,
+        client_id: "t-1".to_owned(),
+        state: SendState::Sent,
+        id: Some("3EB0R".to_owned()),
+        timestamp: Some("2026-10-18T17:03:00Z".to_owned()),
+    });
+    let mut reply = message("3EB0R", "yes", true, 3);
+    reply.reply_to = Some("A1".to_owned());
+    app.apply(&DaemonFrame::EventMessage {
+        v: 1,
+        jid: ADA.to_owned(),
+        message: reply,
+    });
+    let screen = render(&mut app, 80, 24).conversation();
+    let row_of = |needle: &str| screen.lines().position(|l| l.contains(needle));
+    let quote = row_of("> Are we still on?").unwrap_or_else(|| panic!("the quote:\n{screen}"));
+    assert_eq!(row_of("you · 17:03"), Some(quote - 1), "{screen}");
+    assert_eq!(
+        screen.matches("> ").count(),
+        1,
+        "only the reply quotes:\n{screen}"
+    );
+}
+
+#[test]
+fn react_sends_the_chosen_emoji_and_reactions_render_under_the_message() {
+    let mut app = two_chats();
+    ada_conversation(&mut app);
+    app.handle_key(shift('K'));
+    app.handle_key(shift('K'));
+    assert_eq!(app.handle_key(key(KeyCode::Char('e'))), None);
+    let screen = render(&mut app, 80, 24).text();
+    assert!(screen.contains("👍") && screen.contains("🙏"), "{screen}");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Char('1'))),
+        Some(Action::Request(ClientFrame::react(ADA, "A1", "👍")))
+    );
+    app.apply(&DaemonFrame::Reacted {
+        v: 1,
+        jid: ADA.to_owned(),
+        id: "A1".to_owned(),
+        emoji: "👍".to_owned(),
+    });
+    let screen = render(&mut app, 80, 24).conversation();
+    let row_of = |needle: &str| screen.lines().position(|l| l.contains(needle));
+    assert_eq!(
+        row_of("👍"),
+        Some(row_of("Are we still on?").expect("A1") + 1),
+        "{screen}"
+    );
+
+    // Their reaction arrives with the message published again; x removes mine.
+    let mut again = message("A1", "Are we still on?", false, 1);
+    again.reactions = vec![nuncio_client::Reaction {
+        emoji: "😮".to_owned(),
+        from_me: false,
+    }];
+    app.apply(&DaemonFrame::EventMessage {
+        v: 1,
+        jid: ADA.to_owned(),
+        message: again,
+    });
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(screen.contains("😮") && !screen.contains("👍"), "{screen}");
+    app.handle_key(key(KeyCode::Char('e')));
+    assert_eq!(
+        app.handle_key(key(KeyCode::Char('x'))),
+        Some(Action::Request(ClientFrame::react(ADA, "A1", "")))
+    );
+    // Esc closes the picker without sending.
+    app.handle_key(key(KeyCode::Char('e')));
+    assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
+    assert!(!render(&mut app, 80, 24).text().contains("🙏"));
+}
+
+#[test]
+fn retry_sends_retry_with_the_client_id_of_a_send_that_is_not_sent() {
+    let mut app = two_chats().with_client_prefix("t");
+    let client_id = write_and_send(&mut app);
+    // While it is queued, R does nothing: only a send that ended not sent is retried.
+    app.apply(&DaemonFrame::Sent {
+        v: 1,
+        client_id: client_id.clone(),
+        state: SendState::Queued,
+        id: None,
+        timestamp: None,
+    });
+    app.handle_key(shift('K'));
+    assert_eq!(app.handle_key(shift('R')), None);
+    app.handle_key(key(KeyCode::Esc));
+    app.apply(&DaemonFrame::SendFailed {
+        v: 1,
+        client_id: client_id.clone(),
+        message: "not accepted".to_owned(),
+    });
+    // R on a message that was received does nothing.
+    app.handle_key(shift('K'));
+    app.handle_key(shift('K'));
+    assert_eq!(app.handle_key(shift('R')), None);
+    app.handle_key(shift('J'));
+    assert_eq!(
+        app.handle_key(shift('R')),
+        Some(Action::Request(ClientFrame::retry(client_id)))
+    );
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(screen.contains("sending"), "{screen}");
+}
+
+#[test]
+fn search_sends_search_lists_results_newest_first_and_esc_closes() {
+    let mut app = two_chats();
+    ada_conversation(&mut app);
+    assert_eq!(app.handle_key(key(KeyCode::Char('/'))), None);
+    type_text(&mut app, "on");
+    assert!(render(&mut app, 80, 24).text().contains("Search: on"));
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Some(Action::Request(ClientFrame::search(ADA, "on", 50)))
+    );
+    // The reply comes newest first, as on the wire.
+    app.apply(&DaemonFrame::Messages {
+        v: 1,
+        jid: ADA.to_owned(),
+        messages: vec![
+            message("A2", "Yes, see you at 18:00", true, 2),
+            message("A1", "Are we still on?", false, 1),
+        ],
+    });
+    let screen = render(&mut app, 80, 24).text();
+    let row_of = |needle: &str| screen.lines().position(|l| l.contains(needle));
+    let newest = row_of("› you · 17:02 Yes, see").unwrap_or_else(|| panic!("{screen}"));
+    assert_eq!(
+        row_of("Ada Lovelace · 17:01 Are we"),
+        Some(newest + 1),
+        "{screen}"
+    );
+    // Enter on a result selects that message in the conversation.
+    app.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(app.handle_key(key(KeyCode::Enter)), None);
+    let screen = render(&mut app, 80, 24).text();
+    assert!(!screen.contains("Search"), "{screen}");
+    assert!(screen.contains("› Ada Lovelace · 17:01"), "{screen}");
+    assert_eq!(app.pane(), Pane::Messages);
+    // The conversation was not replaced by the results.
+    app.handle_key(key(KeyCode::Char('/')));
+    type_text(&mut app, "zzz");
+    app.handle_key(key(KeyCode::Enter));
+    app.apply(&DaemonFrame::Messages {
+        v: 1,
+        jid: ADA.to_owned(),
+        messages: Vec::new(),
+    });
+    let screen = render(&mut app, 80, 24).text();
+    assert!(screen.contains("no matches"), "{screen}");
+    assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
+    let screen = render(&mut app, 80, 24).text();
+    assert!(!screen.contains("Search"), "{screen}");
+    assert!(
+        screen.contains("Are we still on?") && screen.contains("Yes, see you"),
+        "{screen}"
+    );
+}
+
+/// A fake daemon: both handshakes and the subscribe, then each request line on the request
+/// connection is answered by `answer`, until the client hangs up.
+fn fake_daemon(
+    path: PathBuf,
+    mut answer: impl FnMut(serde_json::Value) -> serde_json::Value + Send + 'static,
+) -> thread::JoinHandle<Vec<String>> {
+    let listener = UnixListener::bind(&path).expect("bind");
+    thread::spawn(move || {
+        let hello_ok = frame_line(serde_json::json!(
+            {"v":1,"op":"hello_ok","daemon":"fake","session":"linked","unread":0}
+        ));
+        let mut line = String::new();
+        let (requests, _) = listener.accept().expect("request connection");
+        let mut writer = requests.try_clone().expect("clone");
+        let mut reader = BufReader::new(requests);
+        reader.read_line(&mut line).expect("hello");
+        writer.write_all(hello_ok.as_bytes()).expect("w");
+        let (events, _) = listener.accept().expect("event connection");
+        let mut events_writer = events.try_clone().expect("clone");
+        let mut events_reader = BufReader::new(events);
+        line.clear();
+        events_reader.read_line(&mut line).expect("hello");
+        events_writer.write_all(hello_ok.as_bytes()).expect("w");
+        line.clear();
+        events_reader.read_line(&mut line).expect("subscribe");
+        events_writer
+            .write_all(frame_line(serde_json::json!({"v":1,"op":"subscribed"})).as_bytes())
+            .expect("w");
+        let mut ops = Vec::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                return ops;
+            }
+            let request: serde_json::Value = serde_json::from_str(&line).expect("json");
+            ops.push(request["op"].as_str().unwrap_or_default().to_owned());
+            writer
+                .write_all(frame_line(answer(request)).as_bytes())
+                .expect("w");
+        }
+    })
+}
+
+#[test]
+fn a_refused_reaction_shows_the_daemons_error_and_changes_nothing() {
+    let path = socket_path();
+    let server = fake_daemon(path.clone(), |request| {
+        assert_eq!(request["op"], "react");
+        serde_json::json!({"v":1,"op":"error","code":"internal",
+            "message":"the WhatsApp session is offline, so the reaction was not sent"})
+    });
+    let mut daemon = Daemon::connect(&path, "nuncio-tui/test").expect("connect");
+    let mut app = two_chats();
+    ada_conversation(&mut app);
+    let before = render(&mut app, 120, 24).conversation();
+    app.handle_key(shift('K'));
+    app.handle_key(key(KeyCode::Char('e')));
+    let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Char('2'))) else {
+        panic!("2 reacts");
+    };
+    daemon.perform(&mut app, &frame).expect("perform");
+    app.handle_key(shift('J'));
+    app.handle_key(key(KeyCode::Esc));
+    let screen = render(&mut app, 120, 24);
+    let footer = screen.text().lines().last().unwrap_or_default().to_owned();
+    assert!(footer.contains("reaction was not sent"), "{footer}");
+    let body = |conversation: String| conversation.lines().take(23).collect::<Vec<_>>().join("\n");
+    assert_eq!(body(screen.conversation()), body(before));
+    drop(daemon);
+    assert_eq!(server.join().expect("fake daemon"), ["react"]);
+    let _ = std::fs::remove_file(&path);
+}
+
+fn media_message(id: &str) -> Message {
+    let mut photo = message(id, "the view", false, 4);
+    photo.kind = "image".to_owned();
+    photo.media = Some(nuncio_client::Media {
+        mime: "image/png".to_owned(),
+        size: 2048,
+        file_name: String::new(),
+    });
+    photo
+}
+
+#[test]
+fn o_downloads_the_media_and_opens_it_exactly_once_and_nothing_opens_without_it() {
+    let path = socket_path();
+    let server = fake_daemon(path.clone(), |request| match request["op"].as_str() {
+        Some("download_media") => {
+            assert_eq!(request["id"], "IMG1");
+            serde_json::json!({"v":1,"op":"media_ready","jid":ADA,"id":"IMG1",
+                "path":"/nonexistent/nuncio-media/IMG1.png","mime":"image/png"})
+        }
+        _ => serde_json::json!({"v":1,"op":"messages","jid":ADA,"messages":[]}),
+    });
+    let opened = std::sync::Arc::new(std::sync::Mutex::new(Vec::<PathBuf>::new()));
+    let record = opened.clone();
+    let mut daemon = Daemon::connect(&path, "nuncio-tui/test")
+        .expect("connect")
+        .with_opener(move |file: &std::path::Path| {
+            record.lock().expect("lock").push(file.to_owned());
+            Ok(())
+        });
+    let mut app = two_chats();
+    open_first(&mut app, ADA, vec![media_message("IMG1")]);
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(screen.contains("[image] the view"), "{screen}");
+
+    // Other requests, events and a stray media_ready open nothing.
+    daemon
+        .perform(&mut app, &ClientFrame::messages(ADA, 200))
+        .expect("perform");
+    daemon.drain_events(&mut app).expect("drain");
+    let stray = DaemonFrame::MediaReady {
+        v: 1,
+        jid: ADA.to_owned(),
+        id: "IMG1".to_owned(),
+        path: "/nonexistent/x.png".to_owned(),
+        mime: "image/png".to_owned(),
+    };
+    assert_eq!(app.apply(&stray), None);
+    assert!(opened.lock().expect("lock").is_empty());
+
+    app.apply(&messages_reply(ADA, vec![media_message("IMG1")]));
+    app.handle_key(shift('K'));
+    let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Char('o'))) else {
+        panic!("o downloads");
+    };
+    assert_eq!(frame, ClientFrame::download_media(ADA, "IMG1"));
+    daemon.perform(&mut app, &frame).expect("perform");
+    assert_eq!(
+        *opened.lock().expect("lock"),
+        [PathBuf::from("/nonexistent/nuncio-media/IMG1.png")]
+    );
+    // The same reply again (no new key) opens nothing more.
+    assert_eq!(app.apply(&stray), None);
+    assert_eq!(opened.lock().expect("lock").len(), 1);
+    drop(daemon);
+    assert_eq!(
+        server.join().expect("fake daemon"),
+        ["messages", "download_media"]
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_search_result_far_up_the_conversation_is_scrolled_into_view() {
+    let mut app = two_chats();
+    open_first(&mut app, ADA, two_hundred());
+    app.handle_key(key(KeyCode::Char('/')));
+    type_text(&mut app, "005");
+    app.handle_key(key(KeyCode::Enter));
+    app.apply(&DaemonFrame::Messages {
+        v: 1,
+        jid: ADA.to_owned(),
+        messages: vec![message("M005", "message 005", false, 5)],
+    });
+    app.handle_key(key(KeyCode::Enter));
+    let screen = render(&mut app, 80, 24).conversation();
+    assert!(screen.contains("› Ada Lovelace · 17:05"), "{screen}");
+    assert!(screen.contains("message 005"), "{screen}");
+    assert!(!screen.contains("message 199"), "{screen}");
+}
+
+#[test]
+fn a_refused_download_shows_the_error_and_a_later_media_ready_opens_nothing() {
+    let path = socket_path();
+    let server = fake_daemon(path.clone(), |request| {
+        assert_eq!(request["op"], "download_media");
+        serde_json::json!({"v":1,"op":"error","code":"internal",
+            "message":"the WhatsApp session is offline, so the media was not downloaded"})
+    });
+    let opened = std::sync::Arc::new(std::sync::Mutex::new(0u32));
+    let record = opened.clone();
+    let mut daemon = Daemon::connect(&path, "nuncio-tui/test")
+        .expect("connect")
+        .with_opener(move |_: &std::path::Path| {
+            *record.lock().expect("lock") += 1;
+            Ok(())
+        });
+    let mut app = two_chats();
+    open_first(&mut app, ADA, vec![media_message("IMG1")]);
+    app.handle_key(shift('K'));
+    let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Char('o'))) else {
+        panic!("o downloads");
+    };
+    daemon.perform(&mut app, &frame).expect("perform");
+    let screen = render(&mut app, 120, 24).text();
+    let footer = screen.lines().last().unwrap_or_default();
+    assert!(footer.contains("media was not downloaded"), "{footer}");
+    let unsolicited = DaemonFrame::MediaReady {
+        v: 1,
+        jid: ADA.to_owned(),
+        id: "IMG1".to_owned(),
+        path: "/nonexistent/IMG1.png".to_owned(),
+        mime: "image/png".to_owned(),
+    };
+    assert_eq!(app.apply(&unsolicited), None);
+    drop(daemon);
+    server.join().expect("fake daemon");
+    assert_eq!(*opened.lock().expect("lock"), 0);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn a_refused_search_ends_searching_shows_the_error_and_stays_open_for_editing() {
+    let path = socket_path();
+    let server = fake_daemon(path.clone(), |request| {
+        assert_eq!(request["op"], "search");
+        serde_json::json!({"v":1,"op":"error","code":"bad_frame",
+            "message":"query over 1024 bytes"})
+    });
+    let mut daemon = Daemon::connect(&path, "nuncio-tui/test").expect("connect");
+    let mut app = two_chats();
+    ada_conversation(&mut app);
+    app.handle_key(key(KeyCode::Char('/')));
+    type_text(&mut app, "on");
+    let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Enter)) else {
+        panic!("Enter searches");
+    };
+    daemon.perform(&mut app, &frame).expect("perform");
+    let screen = render(&mut app, 120, 24).text();
+    assert!(!screen.contains("searching"), "{screen}");
+    assert!(
+        screen.contains("Search: on"),
+        "the overlay stays open:\n{screen}"
+    );
+    let footer = screen.lines().last().unwrap_or_default();
+    assert!(footer.contains("query over 1024 bytes"), "{footer}");
+    // The query can be edited again, and a later chat load is not taken as results.
+    type_text(&mut app, "e");
+    assert!(render(&mut app, 120, 24).text().contains("Search: one"));
+    assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
+    app.apply(&messages_reply(ADA, vec![message("A9", "fresh", false, 9)]));
+    assert!(render(&mut app, 120, 24).conversation().contains("fresh"));
+    drop(daemon);
+    server.join().expect("fake daemon");
     let _ = std::fs::remove_file(&path);
 }

@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use nuncio_client::{
     ClientFrame, DaemonFrame, PROTOCOL_VERSION, Palette, Snapshot, ThemeWatcher, fetch, socket_path,
 };
-use nuncio_tui::{Action, App, Daemon, Source, fixture_snapshot};
+use nuncio_tui::{Action, App, Daemon, Source, fixture_snapshot, open_externally};
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
@@ -31,7 +31,8 @@ const USAGE: &str = "\
 usage: nuncio-tui [--image <png>]
 
   Keys: j/k move or scroll, Enter open, i write, Enter send, Esc back, g/G oldest/newest,
-  PgUp/PgDn page, Tab pane, ? help, q quit.
+  PgUp/PgDn page, K/J select a message, r reply, e react, R retry, o open media,
+  / search, Tab pane, ? help, q quit.
 
   --image <png>   render a local PNG inline, next to the chat list (S9's ratatui-image
                   check; nothing in M0 serves images, so this points at any file)
@@ -126,6 +127,12 @@ impl Io {
         let frame = match action {
             Action::Quit => return false,
             Action::Request(frame) => frame,
+            Action::Open(path) => {
+                if let Err(error) = open_externally(&path) {
+                    app.set_notice(format!("cannot open the media: {error}"));
+                }
+                return true;
+            }
         };
         match self.daemon.as_mut() {
             Some(daemon) => {
@@ -136,7 +143,9 @@ impl Io {
             }
             // With no daemon a send cannot happen, and it says so.
             None => {
-                if let ClientFrame::Send { client_id, .. } = frame {
+                if let ClientFrame::Send { client_id, .. } | ClientFrame::Retry { client_id, .. } =
+                    frame
+                {
                     app.apply(&DaemonFrame::SendFailed {
                         v: PROTOCOL_VERSION,
                         client_id,

@@ -1,7 +1,9 @@
 //! The TUI's I/O: one connection for requests and one subscribed connection for events, as
-//! `nuncio_client::conn` recommends. Everything it reads goes through [`App::apply`].
+//! `nuncio_client::conn` recommends. Everything it reads goes through [`App::apply`]; an
+//! [`Action::Open`] it gets back goes to the opener (the desktop's by default).
 
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use nuncio_client::{ClientError, ClientFrame, Connection, DaemonFrame};
@@ -14,6 +16,29 @@ const EVENT_WAIT: Duration = Duration::from_millis(1);
 const RESUBSCRIBE_AFTER: Duration = Duration::from_secs(5);
 /// How many chats a resync asks for.
 const CHAT_LIMIT: u16 = 200;
+/// How long a `download_media` reply may take (the Go client's bound too).
+const MEDIA_WAIT: Duration = Duration::from_secs(90);
+
+/// Opens a downloaded media file outside the terminal.
+type Opener = Box<dyn FnMut(&Path) -> std::io::Result<()>>;
+
+/// The production opener: `open` on macOS, `xdg-open` elsewhere, detached from the terminal.
+/// It is reaped on a thread so it never lingers as a zombie.
+pub fn open_externally(path: &Path) -> std::io::Result<()> {
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let mut child = Command::new(program)
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
 
 /// The connections to `nunciod`.
 pub struct Daemon {
@@ -22,6 +47,7 @@ pub struct Daemon {
     requests: Connection,
     events: Option<Connection>,
     resubscribe_at: Instant,
+    opener: Opener,
 }
 
 impl Daemon {
@@ -36,17 +62,40 @@ impl Daemon {
             requests,
             events: Some(events),
             resubscribe_at: Instant::now(),
+            opener: Box::new(open_externally),
         })
+    }
+
+    /// Open downloaded media with `opener` instead of [`open_externally`] (tests record it).
+    pub fn with_opener(
+        mut self,
+        opener: impl FnMut(&Path) -> std::io::Result<()> + 'static,
+    ) -> Self {
+        self.opener = Box::new(opener);
+        self
+    }
+
+    /// Open a file the user asked to download; a failure becomes the footer notice.
+    fn open(&mut self, app: &mut App, path: &Path) {
+        if let Err(error) = (self.opener)(path) {
+            app.set_notice(format!("cannot open the media: {error}"));
+        }
     }
 
     /// Send `frame`, then fold the reply into `app`. A send the daemon refuses with an `error`
     /// (as `not_linked`, or a send that was not confirmed) is shown as not sent; any other
     /// `error` becomes the footer notice. A broken connection is returned as the error, after a
-    /// send it carried is marked not sent.
+    /// send (or retry) it carried is marked not sent. A `media_ready` the user asked for is
+    /// opened.
     pub fn perform(&mut self, app: &mut App, frame: &ClientFrame) -> Result<(), ClientError> {
-        let result = self.requests.request(frame);
+        let result = match frame {
+            ClientFrame::DownloadMedia { .. } => self.requests.request_within(frame, MEDIA_WAIT),
+            _ => self.requests.request(frame),
+        };
         let failed_send = |app: &mut App, message: String| {
-            if let ClientFrame::Send { client_id, .. } = frame {
+            if let ClientFrame::Send { client_id, .. } | ClientFrame::Retry { client_id, .. } =
+                frame
+            {
                 app.apply(&DaemonFrame::SendFailed {
                     v: nuncio_client::PROTOCOL_VERSION,
                     client_id: client_id.clone(),
@@ -56,12 +105,14 @@ impl Daemon {
         };
         match result {
             Ok(reply) => {
-                app.apply(&reply);
+                if let Some(Action::Open(path)) = app.apply(&reply) {
+                    self.open(app, &path);
+                }
                 Ok(())
             }
             Err(ClientError::Daemon { code, message }) => {
                 failed_send(app, message.clone());
-                app.set_notice(format!("daemon: {code}: {message}"));
+                app.request_failed(frame, format!("daemon: {code}: {message}"));
                 Ok(())
             }
             Err(error) => {
@@ -84,11 +135,11 @@ impl Daemon {
         }
         while let Some(events) = self.events.as_mut() {
             match events.next_event(EVENT_WAIT) {
-                Ok(Some(frame)) => {
-                    if let Some(Action::Request(next)) = app.apply(&frame) {
-                        self.perform(app, &next)?;
-                    }
-                }
+                Ok(Some(frame)) => match app.apply(&frame) {
+                    Some(Action::Request(next)) => self.perform(app, &next)?,
+                    Some(Action::Open(path)) => self.open(app, &path),
+                    Some(Action::Quit) | None => {}
+                },
                 Ok(None) => break,
                 Err(_) => {
                     self.events = None;

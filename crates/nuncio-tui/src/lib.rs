@@ -8,9 +8,12 @@
 //! event connection to `nunciod`. The keys are listed in [`KEYS`] and in `README.md`.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use nuncio_client::wire::MessageState;
-use nuncio_client::{Chat, ClientFrame, DaemonFrame, Message, Palette, Rgb, SendState, Snapshot};
+use nuncio_client::{
+    Chat, ClientFrame, DaemonFrame, Message, Palette, Reaction, Rgb, SendState, Snapshot,
+};
 use ratatui::Frame;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -22,7 +25,7 @@ use ratatui_image::protocol::StatefulProtocol;
 
 mod daemon;
 
-pub use daemon::Daemon;
+pub use daemon::{Daemon, open_externally};
 
 /// Where the chat list came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +54,8 @@ pub enum Action {
     Quit,
     /// Send this frame on the request connection and [`App::apply`] the reply.
     Request(ClientFrame),
+    /// Open this downloaded media file with the desktop's opener (it was asked for with `o`).
+    Open(PathBuf),
 }
 
 /// Marks a pinned chat.
@@ -64,6 +69,12 @@ const ARCHIVED: char = '▤';
 const MESSAGE_LIMIT: u16 = 200;
 /// How many lines PageUp/PageDown scroll.
 const PAGE: usize = 10;
+/// How many results an in-chat search asks for.
+const SEARCH_LIMIT: u16 = 50;
+/// The reactions the picker offers, on keys `1`..`6`; `x` removes mine.
+pub const REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+/// How many characters of a quoted message are shown.
+const SNIPPET: usize = 40;
 
 /// Every key, by pane; drawn by the `?` help screen and documented in the crate README.
 pub const KEYS: &[(&str, &str)] = &[
@@ -71,9 +82,21 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Enter l →", "open the selected chat"),
     ("i", "write a message to the selected chat"),
     ("Enter", "in the composer: send"),
+    ("K/J", "conversation: select an older / newer message"),
+    ("r", "reply to the selected message (quotes it)"),
+    (
+        "e",
+        "react to it: 1-6 pick an emoji, x remove mine, Esc cancel",
+    ),
+    ("R", "retry the selected send that is not sent"),
+    ("o", "download the selected media and open it externally"),
+    (
+        "/",
+        "search this chat; Enter search, j/k move, Enter select",
+    ),
     (
         "Esc",
-        "composer → conversation → chats; quit from the chats",
+        "unselect · composer → conversation → chats; quit from the chats",
     ),
     ("PgUp/PgDn", "scroll a page"),
     ("g/G Home/End", "scroll to the oldest / newest message"),
@@ -113,6 +136,30 @@ pub struct App {
     sends: u64,
     help: bool,
     notice: Option<String>,
+    /// The selected message: an index into the open chat's loaded conversation.
+    cursor: Option<usize>,
+    /// Scroll the selected message into view on the next draw.
+    reveal: bool,
+    /// The id of the message the composer's text will quote.
+    reply_to: Option<String>,
+    /// The reaction picker is open on the selected message.
+    picking: bool,
+    search: Option<Search>,
+    /// Ids of media messages whose download was asked for with `o` and not answered yet.
+    downloading: HashSet<String>,
+}
+
+/// The in-chat search overlay.
+#[derive(Default)]
+struct Search {
+    query: String,
+    /// The query is being typed (otherwise j/k move through the results).
+    editing: bool,
+    /// A `search` was sent; the next `messages` reply for the chat is its results.
+    awaiting: bool,
+    /// Newest first, as the daemon answers.
+    results: Option<Vec<Message>>,
+    list: ListState,
 }
 
 impl App {
@@ -134,6 +181,12 @@ impl App {
             sends: 0,
             help: false,
             notice: None,
+            cursor: None,
+            reveal: false,
+            reply_to: None,
+            picking: false,
+            search: None,
+            downloading: HashSet::new(),
         };
         let chats = std::mem::take(&mut app.snapshot.chats);
         app.set_chats(chats);
@@ -210,6 +263,7 @@ impl App {
         let index = index.min(self.snapshot.chats.len().saturating_sub(1));
         if index != self.selected {
             self.scroll = 0;
+            self.cursor = None;
         }
         self.selected = index;
         self.list.select(if self.snapshot.chats.is_empty() {
@@ -232,6 +286,7 @@ impl App {
             selected.and_then(|jid| self.snapshot.chats.iter().position(|chat| chat.jid == jid));
         if kept.is_none() {
             self.scroll = 0;
+            self.cursor = None;
         }
         self.selected = kept.unwrap_or(0);
         self.list.select(if self.snapshot.chats.is_empty() {
@@ -245,7 +300,132 @@ impl App {
     fn open_selected(&mut self) -> Option<Action> {
         let jid = self.selected_jid()?.to_owned();
         self.pane = Pane::Messages;
+        self.search = None;
         Some(Action::Request(ClientFrame::messages(jid, MESSAGE_LIMIT)))
+    }
+
+    /// The open chat's loaded conversation, oldest first.
+    fn loaded(&self) -> &[Message] {
+        self.selected_jid()
+            .and_then(|jid| self.conversations.get(jid))
+            .map_or(&[], Vec::as_slice)
+    }
+
+    fn selected_message(&self) -> Option<&Message> {
+        self.loaded().get(self.cursor?)
+    }
+
+    /// The selected message's id, when it has one (a send not answered yet has none).
+    fn selected_id(&self) -> Option<String> {
+        self.selected_message()
+            .map(|m| m.id.clone())
+            .filter(|id| !id.is_empty())
+    }
+
+    /// `K`: select the newest message, then one older each time.
+    fn select_older(&mut self) {
+        let len = self.loaded().len();
+        if len > 0 {
+            self.cursor = Some(self.cursor.map_or(len - 1, |i| i.saturating_sub(1)));
+            self.reveal = true;
+        }
+    }
+
+    /// `J`: select one newer message, stopping at the newest.
+    fn select_newer(&mut self) {
+        let len = self.loaded().len();
+        if let Some(i) = self.cursor {
+            self.cursor = Some((i + 1).min(len.saturating_sub(1)));
+            self.reveal = true;
+        }
+    }
+
+    /// `R`: one more attempt of the selected send that ended not sent. Never automatic.
+    fn retry_selected(&mut self) -> Option<Action> {
+        let message = self.selected_message()?;
+        if message.state != Some(MessageState::NotSent) {
+            return None;
+        }
+        let client_id = message.client_id.clone()?;
+        self.sending.insert(client_id.clone());
+        Some(Action::Request(ClientFrame::retry(client_id)))
+    }
+
+    /// `o`: ask the daemon for the selected media message's file.
+    fn download_selected(&mut self) -> Option<Action> {
+        let message = self.selected_message()?;
+        if message.kind == "text" || message.id.is_empty() {
+            return None;
+        }
+        let id = message.id.clone();
+        let jid = self.selected_jid()?.to_owned();
+        self.downloading.insert(id.clone());
+        Some(Action::Request(ClientFrame::download_media(jid, id)))
+    }
+
+    fn picker_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let emoji = match key.code {
+            KeyCode::Esc => {
+                self.picking = false;
+                return None;
+            }
+            KeyCode::Char('x') => "",
+            KeyCode::Char(c @ '1'..='6') => REACTIONS[usize::from(c as u8 - b'1')],
+            _ => return None,
+        };
+        self.picking = false;
+        let id = self.selected_id()?;
+        let jid = self.selected_jid()?.to_owned();
+        Some(Action::Request(ClientFrame::react(jid, id, emoji)))
+    }
+
+    fn search_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let jid = self.selected_jid()?.to_owned();
+        let search = self.search.as_mut()?;
+        match key.code {
+            KeyCode::Esc => self.search = None,
+            KeyCode::Backspace if search.editing => {
+                search.query.pop();
+            }
+            KeyCode::Enter if search.editing => {
+                let query = search.query.trim();
+                if !query.is_empty() {
+                    search.editing = false;
+                    search.awaiting = true;
+                    return Some(Action::Request(ClientFrame::search(
+                        jid,
+                        query,
+                        SEARCH_LIMIT,
+                    )));
+                }
+            }
+            KeyCode::Char(c) if search.editing => search.query.push(c),
+            KeyCode::Char('/') => search.editing = true,
+            KeyCode::Char('j') | KeyCode::Down => search.list.select_next(),
+            KeyCode::Char('k') | KeyCode::Up => search.list.select_previous(),
+            KeyCode::Enter => self.jump_to_result(),
+            _ => {}
+        }
+        None
+    }
+
+    /// Close the search and select the chosen result in the conversation, if it is loaded.
+    fn jump_to_result(&mut self) {
+        let Some(search) = self.search.take() else {
+            return;
+        };
+        let results = search.results.unwrap_or_default();
+        let Some(result) = search.list.selected().and_then(|i| results.get(i)) else {
+            return;
+        };
+        match self.loaded().iter().position(|m| m.id == result.id) {
+            Some(index) => {
+                self.cursor = Some(index);
+                self.reveal = true;
+                self.pane = Pane::Messages;
+            }
+            None => self.notice = Some("that message is older than the loaded ones".to_owned()),
+        }
     }
 
     /// One key press. Returns what the I/O loop must do, if anything.
@@ -255,6 +435,12 @@ impl App {
         }
         if self.pane == Pane::Compose {
             return self.compose_key(key);
+        }
+        if self.search.is_some() {
+            return self.search_key(key);
+        }
+        if self.picking {
+            return self.picker_key(key);
         }
         if self.help {
             if matches!(key.code, KeyCode::Char('?') | KeyCode::Esc) {
@@ -266,12 +452,33 @@ impl App {
             (_, KeyCode::Char('?')) => self.help = true,
             (_, KeyCode::Char('q')) | (Pane::Chats, KeyCode::Esc) => return Some(Action::Quit),
             (_, KeyCode::Tab) => self.toggle_pane(),
-            (_, KeyCode::Char('i')) if self.selected_chat().is_some() => self.pane = Pane::Compose,
+            (_, KeyCode::Char('i')) if self.selected_chat().is_some() => {
+                self.reply_to = None;
+                self.pane = Pane::Compose;
+            }
+            (_, KeyCode::Char('/')) if self.selected_chat().is_some() => {
+                self.search = Some(Search {
+                    editing: true,
+                    ..Search::default()
+                });
+            }
             (Pane::Chats, KeyCode::Char('j') | KeyCode::Down) => self.select_next(),
             (Pane::Chats, KeyCode::Char('k') | KeyCode::Up) => self.select_previous(),
             (Pane::Chats, KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right) => {
                 return self.open_selected();
             }
+            (Pane::Messages, KeyCode::Esc) if self.cursor.is_some() => self.cursor = None,
+            (Pane::Messages, KeyCode::Char('K')) => self.select_older(),
+            (Pane::Messages, KeyCode::Char('J')) => self.select_newer(),
+            (Pane::Messages, KeyCode::Char('r')) => {
+                if let Some(id) = self.selected_id() {
+                    self.reply_to = Some(id);
+                    self.pane = Pane::Compose;
+                }
+            }
+            (Pane::Messages, KeyCode::Char('e')) => self.picking = self.selected_id().is_some(),
+            (Pane::Messages, KeyCode::Char('R')) => return self.retry_selected(),
+            (Pane::Messages, KeyCode::Char('o')) => return self.download_selected(),
             (Pane::Messages, KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left) => {
                 self.pane = Pane::Chats;
             }
@@ -297,7 +504,10 @@ impl App {
 
     fn compose_key(&mut self, key: KeyEvent) -> Option<Action> {
         match key.code {
-            KeyCode::Esc => self.pane = Pane::Messages,
+            KeyCode::Esc => {
+                self.reply_to = None;
+                self.pane = Pane::Messages;
+            }
             KeyCode::Backspace => {
                 self.composer.pop();
             }
@@ -331,12 +541,15 @@ impl App {
                 media: None,
                 state: None,
                 client_id: Some(client_id.clone()),
-                reply_to: None,
+                reply_to: self.reply_to.clone(),
                 reactions: Vec::new(),
             });
         self.pane = Pane::Messages;
         self.scroll = 0;
-        Some(Action::Request(ClientFrame::send(jid, text, client_id)))
+        Some(Action::Request(match self.reply_to.take() {
+            Some(quoted) => ClientFrame::send_reply(jid, text, client_id, quoted),
+            None => ClientFrame::send(jid, text, client_id),
+        }))
     }
 
     /// Fold one daemon frame (a reply or an event) into the model. An `event_focus` asks for
@@ -356,7 +569,20 @@ impl App {
                 self.snapshot.unread = *unread;
             }
             DaemonFrame::Chats { chats, .. } => self.set_chats(chats.clone()),
+            DaemonFrame::Messages { jid, messages, .. }
+                if self.selected_jid() == Some(jid.as_str())
+                    && self.search.as_ref().is_some_and(|s| s.awaiting) =>
+            {
+                if let Some(search) = self.search.as_mut() {
+                    search.awaiting = false;
+                    search.list.select((!messages.is_empty()).then_some(0));
+                    search.results = Some(messages.clone());
+                }
+            }
             DaemonFrame::Messages { jid, messages, .. } => {
+                if self.selected_jid() == Some(jid.as_str()) {
+                    self.cursor = None;
+                }
                 let mut loaded: Vec<Message> = messages.iter().rev().cloned().collect();
                 // Sends still waiting for a reply are not stored yet; keep them visible.
                 if let Some(old) = self.conversations.get(jid) {
@@ -381,6 +607,25 @@ impl App {
                 }
             }
             DaemonFrame::Error { message, .. } => self.notice = Some(message.clone()),
+            DaemonFrame::Reacted { jid, id, emoji, .. } => {
+                let target = self
+                    .conversations
+                    .get_mut(jid)
+                    .and_then(|messages| messages.iter_mut().find(|m| &m.id == id));
+                if let Some(message) = target {
+                    message.reactions.retain(|r| !r.from_me);
+                    if !emoji.is_empty() {
+                        let mine = Reaction {
+                            emoji: emoji.clone(),
+                            from_me: true,
+                        };
+                        message.reactions.insert(0, mine);
+                    }
+                }
+            }
+            DaemonFrame::MediaReady { id, path, .. } if self.downloading.remove(id) => {
+                return Some(Action::Open(PathBuf::from(path)));
+            }
             DaemonFrame::EventMessage { jid, message, .. } => self.message_event(jid, message),
             DaemonFrame::EventUnread {
                 unread,
@@ -405,6 +650,24 @@ impl App {
             _ => {}
         }
         None
+    }
+
+    /// The daemon refused `frame` with an `error`: show it in the footer and end what the
+    /// request left waiting (a download's pending open, a search's "searching…").
+    pub fn request_failed(&mut self, frame: &ClientFrame, message: impl Into<String>) {
+        self.notice = Some(message.into());
+        match frame {
+            ClientFrame::DownloadMedia { id, .. } => {
+                self.downloading.remove(id);
+            }
+            ClientFrame::Search { .. } => {
+                if let Some(search) = self.search.as_mut() {
+                    search.awaiting = false;
+                    search.editing = true;
+                }
+            }
+            _ => {}
+        }
     }
 
     fn is_sending(&self, message: &Message) -> bool {
@@ -509,6 +772,73 @@ impl App {
         if self.help {
             self.draw_help(frame, body);
         }
+        if self.picking {
+            self.draw_picker(frame, body);
+        }
+        if self.search.is_some() {
+            self.draw_search(frame, body);
+        }
+    }
+
+    fn draw_picker(&self, frame: &mut Frame, area: Rect) {
+        let mut spans = Vec::new();
+        for (n, emoji) in REACTIONS.iter().enumerate() {
+            spans.push(Span::styled(
+                format!(" {} ", n + 1),
+                Style::default().fg(rgb(self.palette.accent)),
+            ));
+            spans.push(Span::raw(*emoji));
+        }
+        spans.push(Span::styled("  x remove mine", self.muted()));
+        let area = popup(area, 48, 4);
+        frame.render_widget(Clear, area);
+        frame.render_widget(
+            Paragraph::new(Line::from(spans))
+                .wrap(Wrap { trim: false })
+                .style(Style::default().bg(rgb(self.palette.background)))
+                .block(bordered(&self.palette).title(" React ")),
+            area,
+        );
+    }
+
+    fn draw_search(&mut self, frame: &mut Frame, area: Rect) {
+        let chat = self.selected_chat().cloned();
+        let palette = self.palette.clone();
+        let muted = self.muted();
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        let area = popup(area, 72, area.height);
+        frame.render_widget(Clear, area);
+        let block = bordered(&palette)
+            .title(" Search ")
+            .style(Style::default().bg(rgb(palette.background)));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+        let [prompt, results] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
+        let cursor = if search.editing { "▏" } else { "" };
+        frame.render_widget(
+            Paragraph::new(format!("Search: {}{cursor}", search.query))
+                .style(Style::default().fg(rgb(palette.foreground))),
+            prompt,
+        );
+        let items: Vec<ListItem> = match (&search.results, search.awaiting) {
+            (_, true) => vec![ListItem::new(Span::styled("searching…", muted))],
+            (None, false) => vec![ListItem::new(Span::styled("Enter to search", muted))],
+            (Some(found), false) if found.is_empty() => {
+                vec![ListItem::new(Span::styled("no matches", muted))]
+            }
+            (Some(found), false) => found
+                .iter()
+                .map(|m| ListItem::new(format!("{} {}", sent_by(chat.as_ref(), m), snippet(m))))
+                .collect(),
+        };
+        let list = List::new(items)
+            .style(Style::default().fg(rgb(palette.foreground)))
+            .highlight_symbol("› ")
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        frame.render_stateful_widget(list, results, &mut search.list);
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
@@ -546,17 +876,25 @@ impl App {
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
         let keys = match self.pane {
-            Pane::Chats => " q quit · j/k move · Enter open · i write · Tab pane · ? help ",
-            Pane::Messages => " Esc chats · j/k scroll · g/G top/bottom · i write · ? help ",
+            _ if self.search.is_some() => " Enter search/select · j/k move · / edit · Esc close ",
+            _ if self.picking => " 1-6 react · x remove mine · Esc cancel ",
+            Pane::Chats => " q quit · j/k move · Enter open · i write · / search · ? help ",
+            Pane::Messages if self.cursor.is_some() => {
+                " r reply · e react · R retry · o open media · J/K select · Esc unselect "
+            }
+            Pane::Messages => " Esc chats · j/k scroll · K select · i write · / search · ? help ",
+            Pane::Compose if self.reply_to.is_some() => " Enter send reply · Esc cancel ",
             Pane::Compose => " Enter send · Esc cancel ",
         };
-        let mut spans = vec![Span::styled(keys, self.muted())];
+        // The notice comes first, so a narrow terminal still shows it.
+        let mut spans = Vec::new();
         if let Some(notice) = &self.notice {
             spans.push(Span::styled(
-                format!(" {notice}"),
+                format!(" {notice} ·"),
                 Style::default().fg(rgb(self.palette.red)),
             ));
         }
+        spans.push(Span::styled(keys, self.muted()));
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
@@ -573,14 +911,7 @@ impl App {
                 ])
             })
             .collect();
-        let height = (lines.len() as u16 + 2).min(area.height);
-        let width = area.width.min(72);
-        let popup = Rect {
-            x: area.x + (area.width - width) / 2,
-            y: area.y + (area.height - height) / 2,
-            width,
-            height,
-        };
+        let popup = popup(area, 72, lines.len() as u16 + 2);
         frame.render_widget(Clear, popup);
         frame.render_widget(
             Paragraph::new(lines)
@@ -650,10 +981,16 @@ impl App {
         ])
         .areas(rest);
         self.draw_conversation(frame, text_area);
-        frame.render_widget(
-            Paragraph::new("─".repeat(usize::from(rule.width))).style(self.muted()),
-            rule,
-        );
+        let quoted = self
+            .reply_to
+            .as_ref()
+            .filter(|_| self.pane == Pane::Compose)
+            .map(|id| match self.loaded().iter().find(|m| &m.id == id) {
+                Some(message) => format!("── replying to: {} ", snippet(message)),
+                None => "── replying ".to_owned(),
+            });
+        let rule_text = quoted.unwrap_or_default() + &"─".repeat(usize::from(rule.width));
+        frame.render_widget(Paragraph::new(rule_text).style(self.muted()), rule);
         self.draw_composer(frame, composer);
     }
 
@@ -685,10 +1022,20 @@ impl App {
         if area.is_empty() {
             return;
         }
-        let lines = self.conversation_lines();
+        let (lines, selected) = self.conversation_lines();
+        let visible = usize::from(area.height);
+        if let Some(start) = selected.filter(|_| self.reveal) {
+            // Scroll so the selected message's header is on screen.
+            let below = Paragraph::new(lines[start..].to_vec())
+                .wrap(Wrap { trim: false })
+                .line_count(area.width);
+            self.scroll = self
+                .scroll
+                .clamp(below.saturating_sub(visible), below.saturating_sub(1));
+        }
+        self.reveal = false;
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
         let total = paragraph.line_count(area.width);
-        let visible = usize::from(area.height);
         let top = total.saturating_sub(visible);
         self.scroll = self.scroll.min(top);
         if total < visible {
@@ -706,9 +1053,10 @@ impl App {
     }
 
     /// The selected chat's conversation, oldest first; before it is loaded, its last message.
-    fn conversation_lines(&self) -> Vec<Line<'static>> {
+    /// Also the index of the selected message's header line.
+    fn conversation_lines(&self) -> (Vec<Line<'static>>, Option<usize>) {
         let Some(chat) = self.selected_chat() else {
-            return Vec::new();
+            return (Vec::new(), None);
         };
         let loaded = self.conversations.get(&chat.jid);
         let messages: Vec<&Message> = match loaded {
@@ -716,12 +1064,22 @@ impl App {
             None => chat.last_message.iter().collect(),
         };
         if messages.is_empty() {
-            return vec![Line::from(Span::styled("(no messages)", self.muted()))];
+            return (
+                vec![Line::from(Span::styled("(no messages)", self.muted()))],
+                None,
+            );
         }
         let body = Style::default().fg(rgb(self.palette.foreground));
         let mut lines = Vec::with_capacity(messages.len() * 2);
-        for message in messages {
-            let mut header = sent_by(Some(chat), message);
+        let mut selected = None;
+        for (index, message) in messages.iter().enumerate() {
+            let chosen = loaded.is_some() && self.cursor == Some(index);
+            let mut header = if chosen {
+                selected = Some(lines.len());
+                format!("› {}", sent_by(Some(chat), message))
+            } else {
+                sent_by(Some(chat), message)
+            };
             if self.is_sending(message) {
                 header.push_str(" · sending");
             }
@@ -730,7 +1088,19 @@ impl App {
                 _ if message.from_me => Style::default().fg(rgb(self.palette.accent)),
                 _ => self.muted(),
             };
+            let header_style = if chosen {
+                header_style.add_modifier(Modifier::REVERSED)
+            } else {
+                header_style
+            };
             lines.push(Line::from(Span::styled(header, header_style)));
+            if let Some(quoted) = &message.reply_to {
+                let quote = match messages.iter().find(|m| &m.id == quoted) {
+                    Some(original) => snippet(original),
+                    None => "(a message not loaded)".to_owned(),
+                };
+                lines.push(Line::from(Span::styled(format!("> {quote}"), self.muted())));
+            }
             let text = if message.kind == "text" {
                 message.text.clone()
             } else {
@@ -740,14 +1110,49 @@ impl App {
                 text.lines()
                     .map(|line| Line::from(Span::styled(line.to_owned(), body))),
             );
+            if !message.reactions.is_empty() {
+                let mut spans = vec![Span::raw("  ")];
+                for reaction in &message.reactions {
+                    let style = if reaction.from_me {
+                        Style::default().fg(rgb(self.palette.accent))
+                    } else {
+                        body
+                    };
+                    spans.push(Span::styled(format!("{} ", reaction.emoji), style));
+                }
+                lines.push(Line::from(spans));
+            }
         }
-        lines
+        (lines, selected)
     }
 
     fn muted(&self) -> Style {
         Style::default()
             .fg(rgb(self.palette.foreground))
             .add_modifier(Modifier::DIM)
+    }
+}
+
+/// A centred overlay at most `width` by `height`, inside `area`.
+fn popup(area: Rect, width: u16, height: u16) -> Rect {
+    let width = area.width.min(width);
+    let height = area.height.min(height);
+    Rect {
+        x: area.x + (area.width - width) / 2,
+        y: area.y + (area.height - height) / 2,
+        width,
+        height,
+    }
+}
+
+/// A message as one short line: its first line (or its kind, for media with no caption).
+fn snippet(message: &Message) -> String {
+    let text = message.text.lines().next().unwrap_or_default();
+    let text = if text.is_empty() { &message.kind } else { text };
+    if text.chars().count() > SNIPPET {
+        text.chars().take(SNIPPET).collect::<String>() + "…"
+    } else {
+        text.to_owned()
     }
 }
 

@@ -124,6 +124,9 @@ type Session struct {
 	markReadSem chan struct{}
 	// drains counts the running outbox drains; Close waits for them before closing the store.
 	drains sync.WaitGroup
+	// mergeFailed holds, under mu, the phone-number chats whose merge into their LID chat failed in
+	// this session; they are not tried (or logged) again until the next start.
+	mergeFailed map[string]bool
 }
 
 // NewSession wraps client, which may be nil for "no device store at all". db is the message
@@ -187,6 +190,8 @@ func (s *Session) Start() error {
 		Stopped: func(reason string) { s.stop(reason, StateOffline) },
 	}
 	if s.db != nil {
+		// A store split before ADR 0001 is merged before anything is served or received.
+		s.mergeKnownAliases()
 		events.Message = s.storeMessage
 		events.Pin = s.applyPin
 		events.Archive = s.applyArchive
@@ -531,6 +536,33 @@ func (w whatsmeowClient) OwnJID() string {
 		return ""
 	}
 	return w.c.Store.ID.ToNonAD().String()
+}
+
+// LIDForPN and PNForLID read whatsmeow's LID map (Store.LIDs: GetLIDForPN, GetPNForLID), which
+// whatsmeow fills from incoming messages, usync answers and notifications and keeps in
+// whatsmeow_lid_map. An empty JID means the pair is not known.
+func (w whatsmeowClient) LIDForPN(ctx context.Context, pn string) (string, error) {
+	jid, err := types.ParseJID(pn)
+	if err != nil {
+		return "", errors.New("wa: the chat JID does not parse")
+	}
+	lid, err := w.c.Store.LIDs.GetLIDForPN(ctx, jid.ToNonAD())
+	if err != nil || lid.IsEmpty() {
+		return "", err
+	}
+	return lid.ToNonAD().String(), nil
+}
+
+func (w whatsmeowClient) PNForLID(ctx context.Context, lid string) (string, error) {
+	jid, err := types.ParseJID(lid)
+	if err != nil {
+		return "", errors.New("wa: the chat JID does not parse")
+	}
+	pn, err := w.c.Store.LIDs.GetPNForLID(ctx, jid.ToNonAD())
+	if err != nil || pn.IsEmpty() {
+		return "", err
+	}
+	return pn.ToNonAD().String(), nil
 }
 
 func (w whatsmeowClient) OwnLID() string {

@@ -129,6 +129,7 @@ func (s *Session) DownloadMedia(jid, id string) (string, string, error) {
 	if s.db == nil || cache == nil {
 		return "", "", ErrNoMedia
 	}
+	jid = s.CanonicalJID(jid)
 	m, err := store.GetMessage(s.db, jid, id)
 	if errors.Is(err, store.ErrNoMessage) {
 		return "", "", ErrNoMedia

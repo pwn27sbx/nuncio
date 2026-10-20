@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -269,6 +270,19 @@ func fixtureCases() []fixtureCase {
 			},
 		},
 		{
+			// ADR 0001: the LID chat with the phone number merged into it.
+			file: "event_chat_aliases.json",
+			into: func() any { return &EventChat{} },
+			build: func() any {
+				return EventChat{V: 1, Op: OpEventChat, Chat: Chat{
+					JID: "100000000000001@lid", Name: "Ada Lovelace", Unread: 1,
+					Aliases: []string{"15551230001@s.whatsapp.net"},
+					LastMessage: &Message{ID: "3EB0AAA3", Kind: "text", Text: "reply from ada",
+						Timestamp: "2026-10-18T18:01:00Z"},
+				}}
+			},
+		},
+		{
 			file: "download_media_request.json",
 			into: func() any { return &DownloadMediaRequest{} },
 			build: func() any {
@@ -528,5 +542,18 @@ func TestMessageOmitsAbsentMedia(t *testing.T) {
 		if bytes.Contains(got, []byte(key)) {
 			t.Fatalf("a sent message carries %s: %s", key, got)
 		}
+	}
+}
+
+// A chat with no aliases is encoded exactly as before `aliases` existed: chats_response.json byte for
+// byte (ADR 0001 adds the key only when there are aliases).
+func TestAChatWithoutAliasesEncodesByteForByteAsBefore(t *testing.T) {
+	want := strings.TrimSuffix(string(readFixture(t, "chats_response.json")), "\n")
+	got, err := json.Marshal(ChatsResponse{V: 1, Op: OpChats, Chats: fixtureChatList()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != want {
+		t.Errorf("chats =\n %s\nwant\n %s", got, want)
 	}
 }

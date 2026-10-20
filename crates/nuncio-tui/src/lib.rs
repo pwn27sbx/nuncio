@@ -178,6 +178,21 @@ pub struct App {
     /// selected message and the sends the daemon never stored (as one not sent while
     /// disconnected).
     resyncing: Option<String>,
+    /// Phone-number JIDs the daemon merged into another chat (its LID chat, ADR 0001), from a
+    /// chat's `aliases` or a reply to a request naming them, with that canonical JID.
+    aliases: HashMap<String, String>,
+    /// The open chat that a new chat list no longer has (the daemon merged it): it stays the
+    /// selected chat, in the pane the user was in, and nothing is sent to it until the user
+    /// chooses a chat again or a reply to a request about it names the chat it became.
+    orphan: Option<Chat>,
+}
+
+/// The notice when the open chat vanished from the chat list (the daemon merged it).
+const MERGED_NOTICE: &str = "that chat was merged; choose it again before sending";
+
+/// A phone-number chat JID and a LID chat JID: the only pair the daemon merges (ADR 0001).
+fn is_alias_pair(alias: &str, canonical: &str) -> bool {
+    alias.ends_with("@s.whatsapp.net") && canonical.ends_with("@lid")
 }
 
 /// The in-chat search overlay.
@@ -225,6 +240,8 @@ impl App {
             utc_offset: time::UtcOffset::UTC,
             connected: true,
             resyncing: None,
+            aliases: HashMap::new(),
+            orphan: None,
         };
         let chats = std::mem::take(&mut app.snapshot.chats);
         app.set_chats(chats);
@@ -283,6 +300,12 @@ impl App {
     /// the header says `reconnecting…` instead of the session.
     pub fn set_connected(&mut self, connected: bool) {
         self.connected = connected;
+        if !connected {
+            // Nothing sent on the lost connection will be answered.
+            self.opening = None;
+            self.resyncing = None;
+            self.marking.clear();
+        }
     }
 
     /// What to ask the daemon again after a reconnect, since events were missed: the status,
@@ -330,6 +353,8 @@ impl App {
 
     fn select(&mut self, index: usize) {
         let index = index.min(self.snapshot.chats.len().saturating_sub(1));
+        // The user chose a chat: a vanished chat no longer reclaims the selection.
+        self.orphan = None;
         if index != self.selected {
             self.scroll = 0;
             self.cursor = None;
@@ -343,16 +368,50 @@ impl App {
     }
 
     fn selected_chat(&self) -> Option<&Chat> {
-        self.snapshot.chats.get(self.selected)
+        self.orphan
+            .as_ref()
+            .or_else(|| self.snapshot.chats.get(self.selected))
     }
 
-    /// Replace the chat list, archived chats last, keeping the selection on the same chat.
+    /// Replace the chat list, archived chats last, keeping the selection on the same chat. Aliases
+    /// the list names are adopted first ([`App::adopt_listed`]). When the selected chat is gone
+    /// (the daemon merged it into its LID chat), the selection follows it to the chat an alias or
+    /// a reply named; otherwise, outside the chat list or with a draft written, it stays on the
+    /// vanished chat (`orphan`), in the same pane with the draft intact, and nothing is sent until
+    /// the user chooses a chat again: a draft never changes recipient.
     fn set_chats(&mut self, mut chats: Vec<Chat>) {
+        self.adopt_listed(&chats);
         let selected = self.selected_jid().map(str::to_owned);
+        let previous = self.selected_chat().cloned();
+        self.orphan = None;
         chats.sort_by_key(|chat| chat.archived);
         self.snapshot.chats = chats;
-        let kept =
-            selected.and_then(|jid| self.snapshot.chats.iter().position(|chat| chat.jid == jid));
+        let position = |chats: &[Chat], jid: &str| chats.iter().position(|chat| chat.jid == jid);
+        let mut kept = selected
+            .as_deref()
+            .and_then(|jid| position(&self.snapshot.chats, jid));
+        if kept.is_none()
+            && let Some(jid) = selected.as_deref()
+        {
+            let canonical = self.aliases.get(jid).cloned();
+            match canonical.and_then(|c| position(&self.snapshot.chats, &c).map(|i| (c, i))) {
+                Some((canonical, index)) => {
+                    self.rename_keys(jid, &canonical);
+                    if self.notice.as_deref() == Some(MERGED_NOTICE) {
+                        self.notice = None;
+                    }
+                    kept = Some(index);
+                }
+                // A draft never changes recipient, even from the chat list.
+                None if self.pane != Pane::Chats || !self.composer.is_empty() => {
+                    self.orphan = previous;
+                    self.notice = Some(MERGED_NOTICE.to_owned());
+                    self.list.select(None);
+                    return;
+                }
+                None => {}
+            }
+        }
         if kept.is_none() {
             self.scroll = 0;
             self.cursor = None;
@@ -363,6 +422,167 @@ impl App {
         } else {
             Some(self.selected)
         });
+    }
+
+    /// The daemon names in a chat's `aliases` the phone-number chats it merged into it (ADR 0001),
+    /// in `chats` and in every `event_chat`. Each one this app holds anywhere (a list entry, the
+    /// selected or vanished chat, a loaded conversation, a pending request) is adopted: its state
+    /// moves to that chat, and [`App::set_chats`] then keeps the selection on it. A number the same
+    /// list also lists as its own chat is never adopted (a recycled number), and an earlier
+    /// adoption of it is forgotten.
+    fn adopt_listed(&mut self, chats: &[Chat]) {
+        let listed = |jid: &str| chats.iter().any(|c| c.jid == jid);
+        self.aliases.retain(|alias, _| !listed(alias));
+        let pairs: Vec<(String, String)> = chats
+            .iter()
+            .flat_map(|chat| {
+                chat.aliases
+                    .iter()
+                    .filter(|alias| is_alias_pair(alias, &chat.jid) && !listed(alias))
+                    .map(|alias| (alias.clone(), chat.jid.clone()))
+            })
+            .collect();
+        for (alias, canonical) in pairs {
+            if self.holds(&alias) {
+                self.aliases.insert(alias.clone(), canonical.clone());
+                self.rename_keys(&alias, &canonical);
+            }
+        }
+    }
+
+    /// Whether the app holds anything keyed by the chat `jid`.
+    fn holds(&self, jid: &str) -> bool {
+        self.snapshot.chats.iter().any(|c| c.jid == jid)
+            || self.selected_jid() == Some(jid)
+            || self.conversations.contains_key(jid)
+            || self.marking.contains(jid)
+            || self.opening.as_deref() == Some(jid)
+            || self.resyncing.as_deref() == Some(jid)
+    }
+
+    /// The daemon answered a request about the phone-number chat `alias` with its own reply naming
+    /// the chat `canonical` (ADR 0001): from now on the app keys that conversation by `canonical`.
+    /// Its list entry is renamed (or dropped when `canonical` is already listed), its loaded
+    /// messages, pending `mark_read` and requests move, and a selection on it, or on the vanished
+    /// open chat, follows it. When `canonical` is not listed (more chats than the list holds, or a
+    /// number recycled after the merge), the vanished open chat stays vanished, renamed
+    /// `canonical`, and nothing is sent until the user chooses a chat: the selection never falls
+    /// to another list index.
+    /// Only a phone-number JID answered as a LID JID is adopted. The driver calls it through
+    /// [`App::apply_reply`], which pairs a request with its own reply.
+    pub fn adopt(&mut self, alias: &str, canonical: &str) {
+        if !is_alias_pair(alias, canonical) {
+            return;
+        }
+        self.aliases.insert(alias.to_owned(), canonical.to_owned());
+        let selected = self.selected_jid() == Some(alias);
+        let current = self.selected_jid().map(str::to_owned);
+        let vanished = self.orphan.as_ref().is_some_and(|c| c.jid == alias);
+        let previous = self.selected_chat().cloned();
+        if vanished {
+            self.orphan = None;
+        }
+        self.rename_keys(alias, canonical);
+        let chats = &mut self.snapshot.chats;
+        if chats.iter().any(|c| c.jid == canonical) {
+            chats.retain(|c| c.jid != alias);
+        } else if let Some(entry) = chats.iter_mut().find(|c| c.jid == alias) {
+            entry.jid = canonical.to_owned();
+        }
+        let target = if selected {
+            Some(canonical.to_owned())
+        } else {
+            current
+        };
+        // Keep the selection on the chat it was on; removing an entry can shift it.
+        if self.orphan.is_none() {
+            let index =
+                target.and_then(|jid| self.snapshot.chats.iter().position(|c| c.jid == jid));
+            // A listed selection on `alias` was renamed above, so only the vanished chat can
+            // miss: the chat it became is not listed and the old index is now another contact.
+            if index.is_none() && vanished {
+                self.orphan = previous.map(|chat| Chat {
+                    jid: canonical.to_owned(),
+                    ..chat
+                });
+                self.notice = Some(MERGED_NOTICE.to_owned());
+                self.list.select(None);
+                return;
+            }
+            if vanished && self.notice.as_deref() == Some(MERGED_NOTICE) {
+                self.notice = None;
+            }
+            self.selected = index.unwrap_or_else(|| {
+                self.selected
+                    .min(self.snapshot.chats.len().saturating_sub(1))
+            });
+            self.list
+                .select((!self.snapshot.chats.is_empty()).then_some(self.selected));
+        }
+    }
+
+    /// Fold the daemon's `reply` to `request` into the model, as [`App::apply`] does. When the
+    /// request named a phone-number chat and its own reply names a LID chat, the daemon served it
+    /// as that contact's LID chat (ADR 0001), and the app adopts the LID JID first. Nothing else
+    /// adopts a chat: a reply is paired with the request it answers, never guessed.
+    pub fn apply_reply(&mut self, request: &ClientFrame, reply: &DaemonFrame) -> Option<Action> {
+        let asked = match request {
+            ClientFrame::Messages { jid, .. }
+            | ClientFrame::Search { jid, .. }
+            | ClientFrame::React { jid, .. }
+            | ClientFrame::MarkRead { jid, .. }
+            | ClientFrame::DownloadMedia { jid, .. }
+            | ClientFrame::Focus { jid, .. } => Some(jid),
+            _ => None,
+        };
+        let answered = match reply {
+            DaemonFrame::Messages { jid, .. }
+            | DaemonFrame::Reacted { jid, .. }
+            | DaemonFrame::MarkedRead { jid, .. }
+            | DaemonFrame::MediaReady { jid, .. }
+            | DaemonFrame::Focused { jid, .. } => Some(jid),
+            _ => None,
+        };
+        if let (Some(asked), Some(answered)) = (asked, answered)
+            && asked != answered
+        {
+            self.adopt(asked, answered);
+        }
+        self.apply(reply)
+    }
+
+    /// Move everything keyed by the chat `alias` to `canonical`.
+    fn rename_keys(&mut self, alias: &str, canonical: &str) {
+        if let Some(moved) = self.conversations.remove(alias) {
+            let into = self.conversations.entry(canonical.to_owned()).or_default();
+            for message in moved {
+                let same = |m: &Message| {
+                    (!message.id.is_empty() && m.id == message.id)
+                        || (message.client_id.is_some() && m.client_id == message.client_id)
+                };
+                if !into.iter().any(same) {
+                    into.push(message);
+                }
+            }
+        }
+        if self.marking.remove(alias) {
+            self.marking.insert(canonical.to_owned());
+        }
+        for pending in [&mut self.opening, &mut self.resyncing] {
+            if pending.as_deref() == Some(alias) {
+                *pending = Some(canonical.to_owned());
+            }
+        }
+    }
+
+    /// The phone-number chat that `event_message` about `jid` answers: a send of mine (its exact
+    /// `client_id`) that this app made to that chat, published by the daemon under its LID chat.
+    fn send_answered(&self, frame: &DaemonFrame) -> Option<(String, String)> {
+        let DaemonFrame::EventMessage { jid, message, .. } = frame else {
+            return None;
+        };
+        let (alias, _) = self.locate_send(message.client_id.as_deref()?)?;
+        (alias != *jid).then(|| (alias, jid.clone()))
     }
 
     /// Open the selected chat: show its conversation and ask the daemon for its messages.
@@ -655,6 +875,10 @@ impl App {
         if self.composer.trim().is_empty() {
             return None;
         }
+        if self.orphan.is_some() {
+            self.notice = Some(MERGED_NOTICE.to_owned());
+            return None;
+        }
         let jid = self.selected_jid()?.to_owned();
         let text = std::mem::take(&mut self.composer);
         self.caret = 0;
@@ -688,6 +912,9 @@ impl App {
     /// the focused chat's messages; the messages of a chat just opened with unread messages, or
     /// a new message in the open chat, ask for a `mark_read` (one in flight per chat).
     pub fn apply(&mut self, frame: &DaemonFrame) -> Option<Action> {
+        if let Some((alias, canonical)) = self.send_answered(frame) {
+            self.adopt(&alias, &canonical);
+        }
         match frame {
             DaemonFrame::Status {
                 daemon,
@@ -827,6 +1054,10 @@ impl App {
             // chat goes back to its place; archived chats last), keeping the selection.
             DaemonFrame::EventChat { chat, .. } => {
                 let mut chats = self.snapshot.chats.clone();
+                // The numbers merged into it are no longer chats of their own (ADR 0001).
+                chats.retain(|c| {
+                    !chat.aliases.contains(&c.jid) || !is_alias_pair(&c.jid, &chat.jid)
+                });
                 match chats.iter_mut().find(|c| c.jid == chat.jid) {
                     Some(shown) => *shown = chat.clone(),
                     None => chats.push(chat.clone()),
@@ -859,6 +1090,15 @@ impl App {
                 if let Some(search) = self.search.as_mut() {
                     search.awaiting = false;
                     search.editing = true;
+                }
+            }
+            // A chat whose messages never came is not being opened or resynced any more.
+            ClientFrame::Messages { jid, .. } => {
+                if self.opening.as_ref() == Some(jid) {
+                    self.opening = None;
+                }
+                if self.resyncing.as_ref() == Some(jid) {
+                    self.resyncing = None;
                 }
             }
             // The chat stays unread; nothing retries it (the next open does).
@@ -961,6 +1201,7 @@ impl App {
                 archived: false,
                 pinned: false,
                 muted: false,
+                aliases: Vec::new(),
                 last_message: Some(message.clone()),
             });
             self.set_chats(chats);
@@ -1716,6 +1957,7 @@ mod tests {
             archived: false,
             pinned: false,
             muted: false,
+            aliases: Vec::new(),
             last_message: None,
         }
     }

@@ -13,6 +13,21 @@ messages, keeping the draft, the selected chat and message and the open pane. A 
 disconnected is shown as `not sent` and the footer says `not connected to nunciod`; nothing
 retries it by itself (`R` does, once reconnected).
 
+One chat per contact (ADR 0001): the daemon names the phone-number chats it merged into a
+contact's LID chat (`…@lid`) in that chat's `aliases`, in the chat list and in the `event_chat` it
+publishes after a merge. Whatever the TUI holds under such a number (its list entry, the open or
+selected chat with its draft, loaded messages, pending requests) moves to the LID chat: the
+duplicate entry goes, and the selection and draft follow. A number the same chat list also lists as
+a chat of its own (a recycled number) is never moved. The reply to a request about the number that
+names her LID chat is a second source. If a new chat list no longer has the selected chat and
+nothing explains it, the TUI never moves a draft to another chat: in the conversation or the
+composer, or in the chat list with a draft written, it keeps the vanished chat selected (no chat
+highlighted), Enter sends nothing and the footer says `that chat was merged; choose it again before
+sending`, until the user chooses a chat again or the daemon names the chat it became. When the chat
+it became is not in the list either (more chats than the list holds, or a number recycled after
+the merge), the vanished chat takes its LID JID and stays blocked the same way: the selection never
+falls to another chat in the list.
+
 ```
 nuncio-tui [--image <png>]
 ```

@@ -22,13 +22,16 @@ import (
 // failure is logged without the chat JID and the session goes on.
 
 // appStateChat is the chat JID of an app-state event, or false when it is not a chat JID.
-func appStateChat(jid types.JID) (string, bool) {
+func (s *Session) appStateChat(jid types.JID) (string, bool) {
 	chat := jid.String()
-	return chat, ipc.ValidJID(chat)
+	if !ipc.ValidJID(chat) {
+		return "", false
+	}
+	return s.CanonicalJID(chat), true
 }
 
 func (s *Session) applyPin(evt *waevents.Pin) {
-	chat, ok := appStateChat(evt.JID)
+	chat, ok := s.appStateChat(evt.JID)
 	if !ok || evt.Action == nil {
 		return
 	}
@@ -40,7 +43,7 @@ func (s *Session) applyPin(evt *waevents.Pin) {
 }
 
 func (s *Session) applyArchive(evt *waevents.Archive) {
-	chat, ok := appStateChat(evt.JID)
+	chat, ok := s.appStateChat(evt.JID)
 	if !ok || evt.Action == nil {
 		return
 	}
@@ -54,7 +57,7 @@ func (s *Session) applyArchive(evt *waevents.Archive) {
 // applyMute stores the mute end the way whatsmeow reads it: a negative end is no end, otherwise
 // it is Unix milliseconds; unmuted clears it.
 func (s *Session) applyMute(evt *waevents.Mute) {
-	chat, ok := appStateChat(evt.JID)
+	chat, ok := s.appStateChat(evt.JID)
 	if !ok || evt.Action == nil {
 		return
 	}
@@ -76,7 +79,7 @@ func (s *Session) applyMute(evt *waevents.Mute) {
 // count clears and is published, and no read receipt is sent). A chat marked unread on the phone
 // changes nothing: nuncio has no "marked unread" flag and does not invent unread messages.
 func (s *Session) applyMarkChatAsRead(evt *waevents.MarkChatAsRead) {
-	chat, ok := appStateChat(evt.JID)
+	chat, ok := s.appStateChat(evt.JID)
 	if !ok || evt.Action == nil || !evt.Action.GetRead() {
 		return
 	}
@@ -85,13 +88,15 @@ func (s *Session) applyMarkChatAsRead(evt *waevents.MarkChatAsRead) {
 	}
 }
 
-// publishChat publishes chat jid as event_chat, as it is stored now.
+// publishChat publishes chat jid as event_chat, as it is stored now, with the phone-number chats
+// merged into it (ChatAliases).
 func (s *Session) publishChat(jid string) {
 	c, err := StoredChat(s.db, jid, time.Now())
 	if err != nil {
 		log.Printf("wa: cannot publish a chat changed by app state: %v", err)
 		return
 	}
+	c.Aliases = s.ChatAliases(jid)
 	s.publish(ipc.EventChat{V: ipc.Version, Op: ipc.OpEventChat, Chat: c})
 }
 

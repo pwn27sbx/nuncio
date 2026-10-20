@@ -85,7 +85,7 @@ because events were lost; to avoid it, a UI drains every queued event on each ti
 | `event_connection` | `v`, `op`, `session` | `event_connection.json` |
 | `event_unread` | `v`, `op`, `unread` (int, total), `jid`, `chat_unread` (int) | `event_unread.json` |
 | `event_focus` | `v`, `op`, `jid` | `event_focus.json` |
-| `event_chat` | `v`, `op`, `chat` (Chat): published when app-state sync from another device changes a chat's pin, archive or mute; `chat` is the chat as it now is, as `chats` would list it (its unread count and `last_message` included), so a client replaces the chat with the same `jid` or adds it (added in M2) | `event_chat.json` |
+| `event_chat` | `v`, `op`, `chat` (Chat): published when app-state sync from another device changes a chat's pin, archive or mute; `chat` is the chat as it now is, as `chats` would list it (its unread count and `last_message` included), so a client replaces the chat with the same `jid` or adds it (added in M2). Also published after every merge of a contact's phone-number chat into her LID chat, with `aliases` (T15, see "One chat per contact"): a client then drops or renames the entries named in `aliases` | `event_chat.json`, `event_chat_aliases.json` |
 
 ### `session`
 
@@ -105,6 +105,7 @@ A string, not a boolean, so it can grow without a protocol break:
 | `archived` | bool | |
 | `pinned` | bool | |
 | `muted` | bool | true while the chat's mute lasts (muted with no end, or its end still ahead). Added in M1; a client reads a missing key as `false` |
+| `aliases` | array of string or absent | the phone-number JIDs (`digits@s.whatsapp.net`) the daemon merged into this chat, its contact's LID chat (T15, ADR 0001; see "One chat per contact"). Listed only while WhatsApp's LID mapping still points each number to this chat, so a recycled number is never listed on the old contact's chat; omitted when there are none, and absent from an older daemon. Served in `chats` and in every `event_chat` |
 | `last_message` | object or absent | omitted for a chat with no messages |
 
 `archived`, `pinned` and `muted` follow the phone: the daemon applies WhatsApp's app-state sync
@@ -270,6 +271,25 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | A chat marked read (or unread) on another device | no `event_chat`: a read publishes `event_unread` only, an unread nothing |
 | The WhatsApp connection dies silently while `linked` (a NAT timeout or a network change, no socket error) | once WhatsApp keepalive pings have failed for more than 3 minutes (whatsmeow's own threshold), `event_connection` with `session: "offline"`; the daemon drops the dead connection and reconnects with its usual backoff, then publishes `linked` again. A shorter keepalive blip changes nothing |
 | a frame with an `op` this client does not know (a newer daemon) | the Rust client parses it as `DaemonFrame::Unknown`; nuncio-tui ignores an unknown event and shows an unknown reply in the footer (a send answered that way is shown as not confirmed) |
+
+### One chat per contact (T15; ADR `docs/adr/0001-one-chat-per-contact.md`)
+
+WhatsApp addresses a direct contact two ways: by phone number (`digits@s.whatsapp.net`) and by
+hidden id (`digits@lid`), and it delivers her messages in the LID chat. The daemon stores and serves
+**one chat per contact**: when WhatsApp's LID mapping for a phone number is known to the daemon, the
+LID JID is the contact's chat (the *canonical* JID) and the phone-number JID is an alias of it.
+
+| Situation | Behaviour |
+|---|---|
+| A request names a phone-number JID whose LID is known (`messages`, `send`, `search`, `react`, `mark_read`, `focus`, `download_media`) | served as the LID chat: the reply carries the LID JID in `jid` (`messages`, `reacted`, `marked_read`, `media_ready`, `focused`, `event_focus`), and every event about it (`event_message`, `event_unread`, `event_chat`) names the LID JID. A client that sent the phone-number JID treats the reply's `jid` as the chat it asked for: it replaces the phone-number JID it holds with the reply's, keys the conversation by it from then on, and re-reads `chats`, where the alias is no longer listed as a chat of its own |
+| `send` to a phone-number JID whose LID is known | sent to, stored in and published for the LID chat; `retry` of it acts there too |
+| `send` to a phone-number JID whose LID is not known yet | as before, except that WhatsApp's routing teaches the daemon the LID during the send: the sent message is then stored in the LID chat and anything stored under the number moves there (see the merge below) |
+| `reply_to` across the two JIDs | resolves: a quote of a message sent to the phone number, or of one received in the LID chat, finds it in the one chat |
+| A chat stored under a phone number whose LID becomes known (at daemon start, or when a message, a send or WhatsApp itself teaches the mapping) | merged into the LID chat in one transaction: its messages (an id stored in both kept once, read if either copy was read), reactions, outbox entries, media references and search index move; pinned if either was pinned, archived only if both were, muted until the later end, the LID chat's name or else the alias's. Then `event_chat` with the merged chat and the number in its `aliases`. A merge that fails changes nothing and leaves both chats listed; until the daemon restarts, the phone-number JID is then served as its own chat, as when its LID is not known |
+| A chat merged into its LID chat, as clients see it | the LID chat lists the phone-number JID in `aliases`, in `chats` and in the `event_chat` published after the merge (at daemon start too, so a client that reconnects learns it from `chats`). A client holding that phone-number JID anywhere (a list entry, the open or selected chat, a draft's chat, loaded messages, pending requests) moves it to the LID chat: it drops the phone-number entry (or renames it when the LID chat is not listed), keys everything by the LID JID, and a selection or draft on the number follows it. It never adopts a number that the same `chats` list also lists as a chat of its own. The reply to a request naming the number (its `jid`) is a second source. When a `chats` list no longer has the chat a client has open and neither `aliases` nor a reply explains it, the client never moves a draft to another chat (nuncio-tui keeps the vanished chat selected and blocks sending until the user chooses a chat again) |
+| A phone number whatsmeow remaps to another LID (a recycled number), or a merge that failed | not listed in `aliases` of the old chat; the number is served as its own chat |
+| The LID of a phone number is not known | exactly the behaviour before T15: the phone-number chat is its own chat; nothing is guessed, and no chat lists `aliases` |
+| Groups, and a chat named by its LID | unchanged |
 
 A WhatsApp chat JID is one of: `digits@s.whatsapp.net` (a user), `digits@lid` (a user addressed by
 its hidden id; WhatsApp uses it for direct chats too) or `digits-digits@g.us` / `digits@g.us` (a

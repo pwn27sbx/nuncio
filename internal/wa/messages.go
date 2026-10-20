@@ -91,6 +91,13 @@ func (s *Session) storeMessage(evt *waevents.Message) {
 	if !ok {
 		return
 	}
+	// One chat per contact: a message addressed by phone number goes to her LID chat when whatsmeow
+	// knows it, and a message in a LID chat brings along what is still stored under her number.
+	m.ChatJID = s.CanonicalJID(m.ChatJID)
+	if m.Sender == evt.Info.Chat.ToNonAD().String() && m.Sender != m.ChatJID && !evt.Info.IsGroup {
+		m.Sender = m.ChatJID
+	}
+	s.mergeAliasOf(m.ChatJID)
 	inserted, err := store.InsertMessage(s.db, m)
 	if err != nil {
 		log.Printf("wa: cannot store message %s: %v", m.ID, err)
@@ -132,6 +139,7 @@ func (s *Session) MarkChatRead(jid string) error {
 	if s.db == nil {
 		return nil
 	}
+	jid = s.CanonicalJID(jid)
 	before, err := store.UnreadCount(s.db, jid)
 	if err != nil {
 		return fmt.Errorf("wa: %w", err)

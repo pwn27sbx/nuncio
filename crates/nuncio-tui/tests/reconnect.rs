@@ -210,6 +210,7 @@ fn chat(jid: &str, name: &str) -> Chat {
         archived: false,
         pinned: false,
         muted: false,
+        aliases: Vec::new(),
         last_message: None,
     }
 }

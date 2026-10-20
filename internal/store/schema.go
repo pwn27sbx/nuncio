@@ -27,6 +27,12 @@ import (
 // sender's JID without device, empty for mine) and the id of the message it quotes, if any;
 // reactions holds the current reaction of each sender on a message (sender empty for mine, no row
 // once removed); outbox_replies holds the quoted id of a queued send, keyed by its client_id.
+//
+// chat_aliases (T15, ADR 0001) follows it too: one row per phone-number chat JID whose rows were
+// merged into the chat of the same contact addressed by LID, with that canonical JID and the time of
+// the merge (Unix nanoseconds). It records what MergeChat did; nothing resolves a JID through it,
+// because whatsmeow's LID map is the one source of the mapping (the wire lists a recorded alias only
+// while that map confirms it, see wa.Session.ChatAliases). A binary from before it ignores it.
 const schema = `
 CREATE TABLE IF NOT EXISTS chats (
 	jid      TEXT PRIMARY KEY,
@@ -88,6 +94,11 @@ CREATE TABLE IF NOT EXISTS reactions (
 CREATE TABLE IF NOT EXISTS outbox_replies (
 	client_id TEXT PRIMARY KEY,
 	reply_to  TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS chat_aliases (
+	alias     TEXT PRIMARY KEY,
+	canonical TEXT NOT NULL,
+	merged_at INTEGER NOT NULL
 );
 `
 

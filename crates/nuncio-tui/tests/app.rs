@@ -45,6 +45,7 @@ fn chat(jid: &str, name: &str, unread: u32) -> Chat {
         archived: false,
         pinned: false,
         muted: false,
+        aliases: Vec::new(),
         last_message: None,
     }
 }
@@ -2090,4 +2091,410 @@ fn the_help_footer_and_keys_name_the_composer_keys() {
     let screen = render(&mut app, 80, 24).text();
     assert!(screen.contains("q Ctrl-C quit"), "{screen}");
     assert!(screen.contains("Alt-Enter C-j"), "{screen}");
+}
+
+// One chat per contact (ADR 0001): the daemon answers a request naming a contact's phone-number
+// JID with her LID chat. Fake numbers and LIDs.
+const ADA_PN: &str = "15551230001@s.whatsapp.net";
+const ADA_LID: &str = "100000000000001@lid";
+
+#[test]
+fn a_messages_reply_with_the_canonical_jid_fills_the_open_alias_chat() {
+    let mut a = app_with(vec![chat(ADA_PN, "Ada", 0)]);
+    let Some(Action::Request(request)) = a.handle_key(key(KeyCode::Enter)) else {
+        panic!("Enter asks for the messages");
+    };
+    // The reply to that very request names her LID chat.
+    a.apply_reply(
+        &request,
+        &messages_reply(ADA_LID, vec![message("A1", "hello from ada", false, 1)]),
+    );
+    assert!(render(&mut a, 80, 24).text().contains("hello from ada"));
+    assert_eq!(a.selected_jid(), Some(ADA_LID));
+    assert_eq!(a.chats().len(), 1, "the alias is renamed, not duplicated");
+}
+
+#[test]
+fn a_resync_that_drops_the_open_alias_chat_never_sends_the_draft_elsewhere() {
+    let mut a = app_with(vec![chat(GRACE, "Grace", 0), chat(ADA_PN, "Ada", 0)]);
+    a.select_next();
+    a.handle_key(key(KeyCode::Enter));
+    a.handle_key(key(KeyCode::Char('i')));
+    type_text(&mut a, "for ada only");
+    a.set_connected(false);
+    a.set_connected(true);
+    let resync = a.resync();
+    a.apply(&DaemonFrame::Chats {
+        v: 1,
+        chats: vec![chat(GRACE, "Grace", 0), chat(ADA_LID, "Ada", 0)],
+    });
+    // Until the daemon says which chat it became, nothing can be sent from the vanished chat.
+    assert_eq!(a.pane(), Pane::Compose, "the user stays where they were");
+    assert_eq!(
+        a.handle_key(key(KeyCode::Enter)),
+        None,
+        "Enter sends nothing"
+    );
+    assert!(render(&mut a, 80, 24).text().contains("merged"));
+    assert_eq!(a.composer(), "for ada only", "the draft is kept unsent");
+    let request = resync
+        .iter()
+        .find(|f| matches!(f, ClientFrame::Messages { .. }))
+        .expect("the resync asks for the open chat's messages");
+    a.apply_reply(request, &messages_reply(ADA_LID, vec![]));
+    let sent = a.handle_key(key(KeyCode::Enter));
+    if let Some(Action::Request(f)) = &sent {
+        assert!(
+            !format!("{f:?}").contains(GRACE),
+            "the draft went to Grace: {f:?}"
+        );
+    }
+    // The reply named the chat it became, so the draft is sent there, and only there.
+    assert!(
+        matches!(&sent, Some(Action::Request(ClientFrame::Send { jid, text, .. }))
+            if jid == ADA_LID && text == "for ada only"),
+        "Enter = {sent:?}"
+    );
+}
+
+#[test]
+fn a_chat_dropped_with_no_reply_yet_keeps_the_draft_and_sends_nothing() {
+    let mut a = app_with(vec![chat(GRACE, "Grace", 0), chat(ADA_PN, "Ada", 0)]);
+    a.select_next();
+    a.handle_key(key(KeyCode::Char('i')));
+    type_text(&mut a, "for ada only");
+    a.apply(&DaemonFrame::Chats {
+        v: 1,
+        chats: vec![chat(GRACE, "Grace", 0), chat(ADA_LID, "Ada", 0)],
+    });
+    assert_eq!(a.pane(), Pane::Compose);
+    assert_eq!(a.handle_key(key(KeyCode::Enter)), None);
+    assert_eq!(a.composer(), "for ada only");
+    // Esc leaves the composer, and choosing a chat again is what lets the draft go out.
+    a.handle_key(key(KeyCode::Esc));
+    a.handle_key(key(KeyCode::Esc));
+    a.select_next();
+    assert_eq!(a.selected_jid(), Some(ADA_LID));
+}
+
+#[test]
+fn after_a_live_merge_the_open_alias_chat_follows_its_lid_chat() {
+    let mut a = app_with(vec![chat(ADA_PN, "Ada", 1)]);
+    open_first(
+        &mut a,
+        ADA_PN,
+        vec![message("A1", "before the merge", false, 1)],
+    );
+    // The daemon merged the chat while mark_read(PN) was in flight.
+    a.apply(&DaemonFrame::EventChat {
+        v: 1,
+        chat: chat(ADA_LID, "Ada", 1),
+    });
+    // The reply to mark_read(PN) names her LID chat.
+    a.apply_reply(
+        &ClientFrame::mark_read(ADA_PN),
+        &DaemonFrame::MarkedRead {
+            v: 1,
+            jid: ADA_LID.to_owned(),
+            unread: 0,
+        },
+    );
+    assert_eq!(a.selected_jid(), Some(ADA_LID));
+    assert_eq!(
+        a.chats().len(),
+        1,
+        "the ghost phone-number entry is dropped"
+    );
+    let next = a.apply(&DaemonFrame::EventMessage {
+        v: 1,
+        jid: ADA_LID.to_owned(),
+        message: message("A2", "after the merge", false, 2),
+    });
+    // marking cleared: the new message in the open chat is marked read again.
+    assert_eq!(next, Some(Action::Request(ClientFrame::mark_read(ADA_LID))));
+    let screen = render(&mut a, 80, 24).text();
+    assert!(screen.contains("before the merge") && screen.contains("after the merge"));
+}
+
+#[test]
+fn a_send_published_under_the_lid_lands_in_the_open_alias_chat() {
+    let mut a = app_with(vec![chat(ADA_PN, "Ada", 0)]);
+    open_first(&mut a, ADA_PN, vec![]);
+    a.handle_key(key(KeyCode::Enter));
+    type_text(&mut a, "hi");
+    let Some(Action::Request(ClientFrame::Send { client_id, .. })) =
+        a.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("Enter sends");
+    };
+    let mut sent = message("S1", "hi", true, 3);
+    sent.client_id = Some(client_id);
+    sent.state = Some(MessageState::Queued);
+    a.apply(&DaemonFrame::EventMessage {
+        v: 1,
+        jid: ADA_LID.to_owned(),
+        message: sent,
+    });
+    assert_eq!(a.selected_jid(), Some(ADA_LID));
+    let screen = render(&mut a, 80, 24).text();
+    assert!(
+        screen.contains("queued"),
+        "the send shows its queued state: {screen}"
+    );
+    assert_eq!(a.chats().len(), 1);
+}
+
+#[test]
+fn a_mark_read_in_flight_for_the_alias_counts_for_its_lid_chat() {
+    let mut a = app_with(vec![chat(ADA_PN, "Ada", 1)]);
+    open_first(&mut a, ADA_PN, vec![message("A1", "hello", false, 1)]);
+    a.resync();
+    a.apply_reply(
+        &ClientFrame::messages(ADA_PN, 200),
+        &messages_reply(ADA_LID, vec![message("A1", "hello", false, 1)]),
+    );
+    // mark_read(PN) is still unanswered: a new message must not send a second one.
+    let next = a.apply(&DaemonFrame::EventMessage {
+        v: 1,
+        jid: ADA_LID.to_owned(),
+        message: message("A2", "again", false, 2),
+    });
+    assert_eq!(next, None);
+    a.apply(&DaemonFrame::MarkedRead {
+        v: 1,
+        jid: ADA_LID.to_owned(),
+        unread: 0,
+    });
+    let next = a.apply(&DaemonFrame::EventMessage {
+        v: 1,
+        jid: ADA_LID.to_owned(),
+        message: message("A3", "and again", false, 3),
+    });
+    assert_eq!(next, Some(Action::Request(ClientFrame::mark_read(ADA_LID))));
+}
+
+const BOB_LID: &str = "100000000000002@lid";
+
+/// The chat list, as JIDs.
+fn chat_jids(app: &App) -> Vec<String> {
+    app.chats().iter().map(|c| c.jid.clone()).collect()
+}
+
+// R1: a request that failed leaves nothing pending, so a later reply about another chat is never
+// taken as an answer for it.
+#[test]
+fn a_stale_open_request_never_pairs_with_another_chats_reply() {
+    let mut a = app_with(vec![chat(BOB_LID, "Bob", 0), chat(ADA_PN, "Ada", 0)]);
+    a.select_next();
+    a.handle_key(key(KeyCode::Enter)); // messages(Ada) ...
+    a.request_failed(&ClientFrame::messages(ADA_PN, 200), "not connected"); // ... never answered
+    a.handle_key(key(KeyCode::Esc));
+    a.select_previous(); // Bob, selected only
+    a.set_connected(false);
+    a.set_connected(true);
+    a.resync();
+    a.apply(&messages_reply(
+        BOB_LID,
+        vec![message("B1", "from bob", false, 1)],
+    ));
+    assert_eq!(chat_jids(&a), vec![BOB_LID.to_owned(), ADA_PN.to_owned()]);
+    a.select_next();
+    a.handle_key(key(KeyCode::Enter));
+    assert!(!render(&mut a, 80, 24).conversation().contains("from bob"));
+}
+
+// R2: a reply about Bob while Ada's request is pending is Bob's, never Ada's.
+#[test]
+fn a_reply_about_another_chat_never_renames_the_pending_one() {
+    let mut a = app_with(vec![chat(BOB_LID, "Bob", 0), chat(ADA_PN, "Ada", 0)]);
+    a.handle_key(key(KeyCode::Enter)); // messages(Bob)
+    a.handle_key(key(KeyCode::Esc));
+    a.select_next();
+    a.handle_key(key(KeyCode::Enter)); // messages(Ada), before Bob's reply
+    a.apply(&messages_reply(
+        BOB_LID,
+        vec![message("B1", "from bob", false, 1)],
+    ));
+    assert_eq!(chat_jids(&a), vec![BOB_LID.to_owned(), ADA_PN.to_owned()]);
+    assert_eq!(a.selected_jid(), Some(ADA_PN));
+    assert!(!render(&mut a, 80, 24).conversation().contains("from bob"));
+}
+
+#[test]
+fn a_reacted_reply_about_another_chat_never_renames_the_pending_one() {
+    let mut a = app_with(vec![chat(BOB_LID, "Bob", 0), chat(ADA_PN, "Ada", 0)]);
+    a.select_next();
+    a.handle_key(key(KeyCode::Enter));
+    a.apply(&messages_reply(
+        ADA_PN,
+        vec![message("A1", "hello", false, 1)],
+    ));
+    a.handle_key(shift('K'));
+    a.handle_key(key(KeyCode::Char('e')));
+    assert!(matches!(
+        a.handle_key(key(KeyCode::Char('1'))),
+        Some(Action::Request(ClientFrame::React { .. }))
+    ));
+    a.apply(&DaemonFrame::Reacted {
+        v: 1,
+        jid: BOB_LID.to_owned(),
+        id: "B1".to_owned(),
+        emoji: "👍".to_owned(),
+    });
+    assert_eq!(chat_jids(&a), vec![BOB_LID.to_owned(), ADA_PN.to_owned()]);
+    assert_eq!(a.selected_jid(), Some(ADA_PN));
+}
+
+#[test]
+fn a_late_reply_after_the_user_chose_another_chat_never_renames_that_chat() {
+    let mut a = app_with(vec![chat(GRACE, "Grace", 0), chat(ADA_PN, "Ada", 0)]);
+    a.select_next();
+    a.handle_key(key(KeyCode::Enter));
+    a.apply(&messages_reply(
+        ADA_PN,
+        vec![message("A1", "hello", false, 1)],
+    ));
+    a.apply(&DaemonFrame::Chats {
+        v: 1,
+        chats: vec![chat(GRACE, "Grace", 0), chat(ADA_LID, "Ada", 0)],
+    });
+    a.handle_key(key(KeyCode::Esc));
+    a.select_previous();
+    a.handle_key(key(KeyCode::Enter)); // opens Grace
+    a.apply(&messages_reply(
+        ADA_LID,
+        vec![message("A1", "hello", false, 1)],
+    ));
+    assert_eq!(chat_jids(&a), vec![GRACE.to_owned(), ADA_LID.to_owned()]);
+    assert_eq!(a.selected_jid(), Some(GRACE));
+    assert_eq!(a.chats()[0].name, "Grace");
+}
+
+// R3: the open chat vanishes while the user types; every key keeps editing the draft, and Enter
+// sends nothing until the user chooses the chat again.
+#[test]
+fn typing_through_a_merge_never_sends_the_draft_to_another_chat() {
+    let mut a = app_with(vec![chat(GRACE, "Grace", 0), chat(ADA_PN, "Ada", 0)]);
+    a.select_next();
+    a.handle_key(key(KeyCode::Enter));
+    a.apply(&messages_reply(ADA_PN, vec![]));
+    a.handle_key(key(KeyCode::Char('i')));
+    type_text(&mut a, "for ada");
+    a.apply(&DaemonFrame::Chats {
+        v: 1,
+        chats: vec![chat(GRACE, "Grace", 0), chat(ADA_LID, "Ada", 0)],
+    });
+    for c in " is it".chars() {
+        let action = a.handle_key(key(KeyCode::Char(c)));
+        assert!(
+            !matches!(action, Some(Action::Request(_)) | Some(Action::Quit)),
+            "typing {c:?} did {action:?}"
+        );
+    }
+    let enter = a.handle_key(key(KeyCode::Enter));
+    assert!(
+        !format!("{enter:?}").contains(GRACE) && !matches!(enter, Some(Action::Request(_))),
+        "Enter = {enter:?}"
+    );
+    assert_eq!(a.pane(), Pane::Compose);
+    assert_eq!(a.composer(), "for ada is it");
+    assert!(render(&mut a, 80, 24).text().contains("choose it again"));
+}
+
+// The driver pairs a request with its own reply: messages(PN) answered with the LID chat adopts it.
+#[test]
+fn the_daemon_driver_adopts_the_chat_its_own_reply_names() {
+    let path = socket_path();
+    let listener = UnixListener::bind(&path).expect("bind");
+    let server = thread::spawn(move || {
+        let hello_ok = frame_line(serde_json::json!(
+            {"v":1,"op":"hello_ok","daemon":"fake","session":"linked","unread":0}
+        ));
+        let mut line = String::new();
+        let (requests, _) = listener.accept().expect("request connection");
+        let mut writer = requests.try_clone().expect("clone");
+        let mut reader = BufReader::new(requests);
+        reader.read_line(&mut line).expect("hello");
+        writer.write_all(hello_ok.as_bytes()).expect("w");
+        let (events, _) = listener.accept().expect("event connection");
+        let mut events_writer = events.try_clone().expect("clone");
+        let mut events_reader = BufReader::new(events);
+        line.clear();
+        events_reader.read_line(&mut line).expect("hello");
+        events_writer.write_all(hello_ok.as_bytes()).expect("w");
+        line.clear();
+        events_reader.read_line(&mut line).expect("subscribe");
+        events_writer
+            .write_all(frame_line(serde_json::json!({"v":1,"op":"subscribed"})).as_bytes())
+            .expect("w");
+        line.clear();
+        reader.read_line(&mut line).expect("messages");
+        let asked: serde_json::Value = serde_json::from_str(&line).expect("json");
+        assert_eq!(asked["op"], "messages");
+        assert_eq!(asked["jid"], ADA_PN);
+        writer
+            .write_all(
+                frame_line(
+                    serde_json::json!({"v":1,"op":"messages","jid":ADA_LID,"messages":[
+                    {"id":"A1","kind":"text","text":"served as her lid chat","from_me":false,
+                     "timestamp":"2026-10-18T17:30:00Z"}]}),
+                )
+                .as_bytes(),
+            )
+            .expect("w");
+        thread::sleep(Duration::from_millis(200));
+    });
+
+    let mut daemon = Daemon::connect(&path, "nuncio-tui/test").expect("connect");
+    let mut app = app_with(vec![chat(ADA_PN, "Ada", 0)]);
+    let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Enter)) else {
+        panic!("Enter asks for the messages");
+    };
+    daemon.perform(&mut app, &frame).expect("perform");
+    assert_eq!(app.selected_jid(), Some(ADA_LID));
+    assert_eq!(chat_jids(&app), vec![ADA_LID.to_owned()]);
+    assert!(
+        render(&mut app, 80, 24)
+            .text()
+            .contains("served as her lid chat")
+    );
+    server.join().expect("the fake daemon ran its script");
+    let _ = std::fs::remove_file(&path);
+}
+
+// A mark_read lost with the connection is never answered: it must not block the next one.
+#[test]
+fn a_mark_read_lost_with_the_connection_does_not_block_the_next_one() {
+    let mut a = two_chats();
+    open_first(&mut a, ADA, vec![message("A1", "hi", false, 1)]);
+    a.set_connected(false);
+    a.set_connected(true);
+    let next = a.apply(&DaemonFrame::EventMessage {
+        v: 1,
+        jid: ADA.to_owned(),
+        message: message("A2", "still there?", false, 2),
+    });
+    assert_eq!(next, Some(Action::Request(ClientFrame::mark_read(ADA))));
+}
+
+#[test]
+fn a_reacted_reply_to_my_own_react_adopts_the_lid_chat() {
+    let mut a = app_with(vec![chat(ADA_PN, "Ada", 0)]);
+    open_first(&mut a, ADA_PN, vec![message("A1", "hello", false, 1)]);
+    a.handle_key(shift('K'));
+    a.handle_key(key(KeyCode::Char('e')));
+    let Some(Action::Request(request)) = a.handle_key(key(KeyCode::Char('1'))) else {
+        panic!("1 reacts");
+    };
+    a.apply_reply(
+        &request,
+        &DaemonFrame::Reacted {
+            v: 1,
+            jid: ADA_LID.to_owned(),
+            id: "A1".to_owned(),
+            emoji: "👍".to_owned(),
+        },
+    );
+    assert_eq!(chat_jids(&a), vec![ADA_LID.to_owned()]);
+    assert!(render(&mut a, 80, 24).conversation().contains("👍"));
 }

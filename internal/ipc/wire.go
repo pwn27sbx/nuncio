@@ -404,7 +404,9 @@ type Error struct {
 	Message string `json:"message"`
 }
 
-// Chat is the M0 chat shape, plus muted (M1, from app-state sync).
+// Chat is the M0 chat shape, plus muted (M1, from app-state sync) and aliases (T15, ADR 0001): the
+// phone-number chat JIDs merged into this chat, listed only while WhatsApp's LID mapping still
+// points them here, and absent when there are none.
 type Chat struct {
 	JID         string   `json:"jid"`
 	Name        string   `json:"name"`
@@ -412,6 +414,7 @@ type Chat struct {
 	Archived    bool     `json:"archived"`
 	Pinned      bool     `json:"pinned"`
 	Muted       bool     `json:"muted"`
+	Aliases     []string `json:"aliases,omitempty"`
 	LastMessage *Message `json:"last_message,omitempty"`
 }
 
@@ -523,6 +526,28 @@ type Reactor interface {
 // error's text, so it must carry no number and no message text.
 type MarkReader interface {
 	MarkRead(jid string) (unread int, err error)
+}
+
+// ChatResolver names the chat a request's jid stands for (ADR 0001, one chat per contact): a
+// contact's phone-number JID is an alias of her LID chat once the daemon knows the pair. ServeConn
+// asks it for the jid of every request that names a chat (messages, send, search, react, mark_read,
+// focus, download_media), after checking that jid, and then serves and answers the request with
+// the chat it returns, so a reply carries that jid. It is optional, like Searcher: without it, or
+// when it returns something that is not a chat JID, the jid is served as the client named it.
+type ChatResolver interface {
+	CanonicalJID(jid string) string
+}
+
+// canonical is jid as h's ChatResolver resolves it, or jid itself.
+func canonical(h Handler, jid string) string {
+	r, ok := h.(ChatResolver)
+	if !ok {
+		return jid
+	}
+	if c := r.CanonicalJID(jid); ValidJID(c) {
+		return c
+	}
+	return jid
 }
 
 // ValidJID reports whether jid names a WhatsApp chat the protocol carries: a user
@@ -747,6 +772,7 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
 				}
 				continue
 			}
+			req.JID = canonical(h, req.JID)
 			msgs, err := h.Messages(req.JID, req.Limit)
 			if err != nil {
 				if err := WriteFrame(out, Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()}); err != nil {
@@ -805,6 +831,7 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
 				}
 				continue
 			}
+			req.JID = canonical(h, req.JID)
 			// Every subscribed UI gets the event, this connection included if it subscribed.
 			delivered := events.Publish(EventFocus{V: Version, Op: OpEventFocus, JID: req.JID})
 			if err := WriteFrame(out, Focused{V: Version, Op: OpFocused, JID: req.JID, Delivered: delivered}); err != nil {
@@ -867,6 +894,7 @@ func serveSend(line []byte, h Handler) any {
 	case len(req.Text) > MaxTextLen:
 		return badFrame(fmt.Sprintf("text is longer than %d bytes", MaxTextLen))
 	}
+	req.JID = canonical(h, req.JID)
 	if req.ReplyTo != "" {
 		r, ok := h.(Replier)
 		if !ok {
@@ -899,6 +927,7 @@ func serveSearch(line []byte, h Handler) any {
 	case len(req.Query) > MaxQueryLen:
 		return badFrame(fmt.Sprintf("query is longer than %d bytes", MaxQueryLen))
 	}
+	req.JID = canonical(h, req.JID)
 	msgs, err := s.Search(req.JID, req.Query, req.Limit)
 	if err != nil {
 		return Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()}
@@ -930,6 +959,7 @@ func serveReact(line []byte, h Handler) any {
 	case len(req.Emoji) > MaxEmojiLen:
 		return badFrame(fmt.Sprintf("emoji is longer than %d bytes", MaxEmojiLen))
 	}
+	req.JID = canonical(h, req.JID)
 	err := r.React(req.JID, req.ID, req.Emoji)
 	if errors.Is(err, ErrNotLinked) {
 		return Error{V: Version, Op: OpError, Code: CodeNotLinked, Message: ErrNotLinked.Error()}
@@ -954,6 +984,7 @@ func serveMarkRead(line []byte, h Handler) any {
 	case !ValidJID(req.JID):
 		return badFrame("jid is not a WhatsApp chat")
 	}
+	req.JID = canonical(h, req.JID)
 	unread, err := m.MarkRead(req.JID)
 	if errors.Is(err, ErrNotLinked) {
 		return Error{V: Version, Op: OpError, Code: CodeNotLinked, Message: ErrNotLinked.Error()}
@@ -1002,6 +1033,7 @@ func serveDownloadMedia(line []byte, h Handler) any {
 	case req.ID == "":
 		return badFrame("download_media needs the id of a message")
 	}
+	req.JID = canonical(h, req.JID)
 	path, mime, err := h.DownloadMedia(req.JID, req.ID)
 	if errors.Is(err, ErrNotLinked) {
 		return Error{V: Version, Op: OpError, Code: CodeNotLinked, Message: ErrNotLinked.Error()}

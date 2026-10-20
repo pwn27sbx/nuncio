@@ -355,11 +355,15 @@ func (d *daemon) Chats() []ipc.Chat {
 	}
 	chats := make([]ipc.Chat, 0, len(rows))
 	now := time.Now()
+	aliases, _ := d.session.(interface{ ChatAliases(string) []string })
 	for _, r := range rows {
 		c, err := wa.WireChat(d.db, r, now)
 		if err != nil {
 			log.Print(err)
 			return nil
+		}
+		if aliases != nil {
+			c.Aliases = aliases.ChatAliases(c.JID)
 		}
 		chats = append(chats, c)
 	}
@@ -462,6 +466,17 @@ func (d *daemon) Retry(clientID string) (ipc.Sent, error) {
 		return ipc.Sent{}, errClosed
 	}
 	return d.session.Retry(clientID)
+}
+
+// CanonicalJID serves ipc.ChatResolver: the chat a request naming jid is served and answered as,
+// which is the contact's LID chat for a phone-number JID whose LID the session knows (ADR 0001),
+// and jid itself otherwise, after a wipe too.
+func (d *daemon) CanonicalJID(jid string) string {
+	r, ok := d.session.(interface{ CanonicalJID(string) string })
+	if !ok || d.closed.Load() {
+		return jid
+	}
+	return r.CanonicalJID(jid)
 }
 
 // logoutTimeout bounds the wait for WhatsApp to confirm an unlink; the CLI waits ipc.WipeTimeout.

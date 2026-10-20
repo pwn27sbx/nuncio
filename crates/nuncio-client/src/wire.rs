@@ -512,6 +512,11 @@ pub struct Chat {
     /// reads as not muted.
     #[serde(default)]
     pub muted: bool,
+    /// The phone-number chat JIDs the daemon merged into this chat (ADR 0001, one chat per
+    /// contact), listed only while WhatsApp's mapping still points them here; absent when there
+    /// are none, and absent from an older daemon. A client holding one of them adopts this chat.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
     /// Absent for a chat with no messages, and it must stay absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_message: Option<Message>,

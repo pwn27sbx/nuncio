@@ -86,12 +86,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_thirty_eight_documented_files() {
+fn fixture_directory_holds_the_thirty_nine_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 38, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 39, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -367,6 +367,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                     archived: false,
                     pinned: true,
                     muted: false,
+                    aliases: Vec::new(),
                     last_message: Some(Message {
                         id: "3EB0AAA1".to_owned(),
                         kind: "text".to_owned(),
@@ -387,6 +388,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                     archived: false,
                     pinned: false,
                     muted: false,
+                    aliases: Vec::new(),
                     last_message: Some(Message {
                         id: "3EB0AAA2".to_owned(),
                         kind: "text".to_owned(),
@@ -407,6 +409,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                     archived: true,
                     pinned: false,
                     muted: true,
+                    aliases: Vec::new(),
                     last_message: None,
                 },
             ],
@@ -632,6 +635,7 @@ fn constructed_event_chat_and_not_confirmed_frames_match_their_fixtures() {
             archived: false,
             pinned: true,
             muted: true,
+            aliases: Vec::new(),
             last_message: Some(Message {
                 id: "3EB0AAA1".to_owned(),
                 kind: "text".to_owned(),
@@ -720,5 +724,63 @@ fn every_daemon_fixture_parses_to_its_own_variant_not_the_catch_all() {
             Err(_) => assert!(is_client, "{name}: a daemon fixture does not parse"),
         }
     }
-    assert_eq!(daemon_fixtures, 23, "every daemon fixture was checked");
+    assert_eq!(daemon_fixtures, 24, "every daemon fixture was checked");
+}
+
+/// ADR 0001: `event_chat` (and `chats`) name the phone-number chats merged into a chat in
+/// `aliases`, constructed in Rust.
+#[test]
+fn a_constructed_event_chat_with_aliases_matches_its_fixture() {
+    let event = DaemonFrame::EventChat {
+        v: PROTOCOL_VERSION,
+        chat: Chat {
+            jid: "100000000000001@lid".to_owned(),
+            name: "Ada Lovelace".to_owned(),
+            unread: 1,
+            archived: false,
+            pinned: false,
+            muted: false,
+            aliases: vec!["15551230001@s.whatsapp.net".to_owned()],
+            last_message: Some(Message {
+                id: "3EB0AAA3".to_owned(),
+                kind: "text".to_owned(),
+                text: "reply from ada".to_owned(),
+                from_me: false,
+                timestamp: "2026-10-18T18:01:00Z".to_owned(),
+                media: None,
+                state: None,
+                client_id: None,
+                reply_to: None,
+                reactions: Vec::new(),
+            }),
+        },
+    };
+    assert_frame(&fixtures_dir().join("event_chat_aliases.json"), &event);
+}
+
+/// A chat with no aliases serialises exactly as before `aliases` existed: the chats of the
+/// `chats` and `event_chat` fixtures, byte for byte.
+#[test]
+fn chats_without_aliases_are_byte_identical_to_before() {
+    let text = fs::read_to_string(fixtures_dir().join("chats_response.json")).unwrap();
+    let DaemonFrame::Chats { chats, .. } = serde_json::from_str(&text).unwrap() else {
+        panic!("chats_response.json is a chats frame");
+    };
+    let want = text
+        .trim_end()
+        .strip_prefix(r#"{"v":1,"op":"chats","chats":"#)
+        .and_then(|rest| rest.strip_suffix('}'))
+        .expect("the fixture's shape");
+    assert_eq!(serde_json::to_string(&chats).unwrap(), want);
+
+    let text = fs::read_to_string(fixtures_dir().join("event_chat.json")).unwrap();
+    let DaemonFrame::EventChat { chat, .. } = serde_json::from_str(&text).unwrap() else {
+        panic!("event_chat.json is an event_chat frame");
+    };
+    let want = text
+        .trim_end()
+        .strip_prefix(r#"{"v":1,"op":"event_chat","chat":"#)
+        .and_then(|rest| rest.strip_suffix('}'))
+        .expect("the fixture's shape");
+    assert_eq!(serde_json::to_string(&chat).unwrap(), want);
 }

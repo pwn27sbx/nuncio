@@ -40,6 +40,7 @@ func (s *Session) React(jid, id, emoji string) error {
 	if s.State() != StateLinked {
 		return ErrReactOffline
 	}
+	jid = s.CanonicalJID(jid)
 	m, err := store.GetMessage(s.db, jid, id)
 	if errors.Is(err, store.ErrNoMessage) {
 		return ErrNoQuote
@@ -80,6 +81,7 @@ func (s *Session) storeReaction(evt *waevents.Message) {
 	if !ipc.ValidJID(chat) {
 		return
 	}
+	chat = s.CanonicalJID(chat)
 	rm := evt.Message.GetReactionMessage()
 	target := rm.GetKey().GetID()
 	if target == "" {
@@ -88,6 +90,9 @@ func (s *Session) storeReaction(evt *waevents.Message) {
 	sender := ""
 	if !evt.Info.IsFromMe {
 		sender = evt.Info.Sender.ToNonAD().String()
+		if sender == evt.Info.Chat.ToNonAD().String() && !evt.Info.IsGroup {
+			sender = chat
+		}
 	}
 	if err := store.SetReaction(s.db, chat, target, sender, evt.Info.IsFromMe, rm.GetText()); err != nil {
 		log.Printf("wa: cannot store a reaction on %s: %v", target, err)

@@ -56,6 +56,7 @@ func (s *Session) SendReply(jid, text, clientID, replyTo string) (ipc.Sent, erro
 	if s.db == nil {
 		return ipc.Sent{}, errNoStore
 	}
+	jid = s.CanonicalJID(jid)
 	if replyTo != "" {
 		// A client_id already stored is that send again, answered from its state whatever it quotes.
 		if e, err := store.GetOutbox(s.db, clientID); err == nil {
@@ -110,6 +111,9 @@ func (s *Session) Retry(clientID string) (ipc.Sent, error) {
 	}
 	if !requeued {
 		return storedReply(e)
+	}
+	if c := s.CanonicalJID(e.ChatJID); c != e.ChatJID {
+		e.ChatJID = c // the merge moved the entry there
 	}
 	return s.sendOrQueue(e)
 }
@@ -177,6 +181,9 @@ func (s *Session) deliver(clientID string) (ipc.Sent, error) {
 // not_confirmed and answers ipc.ErrNotConfirmed (it may have been delivered; a retry reuses its
 // WhatsApp id), anything else is not_sent and answers ErrNotSent. Nothing is retried on its own.
 func (s *Session) attempt(e store.OutboxEntry) (ipc.Sent, error) {
+	// An entry queued under a phone number before its LID was known is sent, and kept, in the LID
+	// chat once it is (the merge moves the entry there).
+	e.ChatJID = s.CanonicalJID(e.ChatJID)
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
 	ts, err := s.client.SendMessage(ctx, e.ChatJID, s.textMessage(e), e.MessageID)
@@ -206,6 +213,9 @@ func (s *Session) attempt(e store.OutboxEntry) (ipc.Sent, error) {
 	if err := store.SetOutboxState(s.db, e.ClientID, store.OutboxSent, ts); err != nil {
 		log.Printf("wa: cannot record a sent message %s: %v", e.MessageID, err)
 	}
+	// whatsmeow may have learnt the LID during this very send (GetUserInfo, user.go:265-276): the
+	// message is then stored in the LID chat and the entry, with anything else, moves there.
+	e.ChatJID = s.CanonicalJID(e.ChatJID)
 	m := store.Message{ID: e.MessageID, ChatJID: e.ChatJID, Kind: store.KindText, Text: e.Text, FromMe: true, Timestamp: ts,
 		ReplyTo: e.ReplyTo}
 	if _, err := store.InsertMessage(s.db, m); err != nil {

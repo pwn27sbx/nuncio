@@ -200,7 +200,9 @@ impl Daemon {
                 );
                 Ok(())
             }
-            Ok(reply) => match app.apply(&reply) {
+            // The reply to this very request: a different chat in it is the one the daemon served
+            // (ADR 0001), which `apply_reply` adopts.
+            Ok(reply) => match app.apply_reply(frame, &reply) {
                 Some(Action::Open(path)) => {
                     self.open(app, &path);
                     Ok(())

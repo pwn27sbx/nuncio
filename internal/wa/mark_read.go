@@ -79,6 +79,7 @@ func (s *Session) MarkRead(jid string) (int, error) {
 	case <-ctx.Done():
 		return 0, errMarkReadBusy
 	}
+	jid = s.CanonicalJID(jid)
 	unread, err := store.UnreadIncoming(s.db, jid)
 	if err != nil {
 		return 0, fmt.Errorf("wa: %w", err)

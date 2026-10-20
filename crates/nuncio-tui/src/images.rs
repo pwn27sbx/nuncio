@@ -19,7 +19,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use image::{DynamicImage, ImageFormat, ImageReader, Limits};
+use image::{DynamicImage, ImageFormat, ImageReader, Limits, Rgba, RgbaImage, imageops};
 use ratatui::layout::Size;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::sliced::SlicedProtocol;
@@ -288,6 +288,8 @@ struct Job {
     origin: Origin,
     /// The box; `None` for a picture whose message states no size (taken from the decoded one).
     size: Option<Size>,
+    /// The colour behind the picture, for a protocol that cannot draw transparency.
+    backdrop: Option<[u8; 3]>,
 }
 
 struct Encoded {
@@ -322,6 +324,11 @@ pub(crate) struct Images {
     pixels: HashMap<(String, String), (u32, u32)>,
     /// The transcript width the cache holds pictures for.
     columns: Option<u16>,
+    /// Half blocks paint every cell, so a transparent pixel is drawn in the conversation's
+    /// background colour, which the cache's pictures are encoded on; `None` for the protocols
+    /// that keep the alpha (kitty, sixel, iTerm2).
+    backdrop: Option<[u8; 3]>,
+    halfblocks: bool,
     encodes: u64,
     /// Bumped by every resize; a worker skips a job queued before it.
     generation: Arc<AtomicU64>,
@@ -365,6 +372,8 @@ impl Images {
             failed: HashMap::new(),
             pixels: HashMap::new(),
             columns: None,
+            backdrop: None,
+            halfblocks: graphics.picker.protocol_type() == ProtocolType::Halfblocks,
             encodes: 0,
             generation,
             jobs_run,
@@ -395,6 +404,19 @@ impl Images {
         if self.columns != Some(columns) {
             self.columns = Some(columns);
             // Everything queued for the old width is dropped by the workers unencoded.
+            self.generation.fetch_add(1, Ordering::SeqCst);
+            self.cache.clear();
+            self.bytes = 0;
+            self.pending.clear();
+        }
+    }
+
+    /// The conversation's background is `colour` now. With half blocks a different one drops every
+    /// encoded picture, like a resize, since their transparent pixels were painted in the old one;
+    /// the other protocols keep the alpha and ignore it.
+    pub(crate) fn backdrop(&mut self, colour: [u8; 3]) {
+        if self.halfblocks && self.backdrop != Some(colour) {
+            self.backdrop = Some(colour);
             self.generation.fetch_add(1, Ordering::SeqCst);
             self.cache.clear();
             self.bytes = 0;
@@ -452,6 +474,7 @@ impl Images {
             key,
             origin,
             size,
+            backdrop: self.backdrop,
         };
         if self.jobs.send(job).is_err() {
             self.pending.clear();
@@ -569,7 +592,11 @@ impl Worker {
             }
             self.jobs_run.fetch_add(1, Ordering::SeqCst);
             let Job {
-                key, origin, size, ..
+                key,
+                origin,
+                size,
+                backdrop,
+                ..
             } = job;
             let columns = key.columns;
             let bounds = match key.variant {
@@ -579,7 +606,7 @@ impl Worker {
             // The decoders are meant never to panic on bad input; if one does, this worker
             // survives and the picture keeps its label.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                encode(&self.picker, origin, size, columns, bounds)
+                encode(&self.picker, origin, size, columns, bounds, backdrop)
             }))
             .unwrap_or_else(|_| Err("the picture could not be decoded".to_owned()));
             if self.report.send(Done { key, outcome }).is_err() {
@@ -589,13 +616,16 @@ impl Worker {
     }
 }
 
-/// Decode a picture and encode it for the terminal, scaled to fit its box.
+/// Decode a picture and encode it for the terminal, scaled to fit its box. With a `backdrop` the
+/// picture is laid on that colour first (half blocks would paint a transparent pixel black), and
+/// so is any margin the box leaves around it.
 fn encode(
     picker: &Picker,
     origin: Origin,
     size: Option<Size>,
     columns: u16,
     bounds: Bounds,
+    backdrop: Option<[u8; 3]>,
 ) -> Result<Encoded, String> {
     let bytes = match origin {
         Origin::Base64(text) => base64::engine::general_purpose::STANDARD
@@ -617,8 +647,21 @@ fn encode(
     } else {
         picture
     };
+    let mut on_backdrop = None;
+    let picture = match backdrop {
+        Some([r, g, b]) => {
+            let colour = Rgba([r, g, b, 255]);
+            let mut base = RgbaImage::from_pixel(picture.width(), picture.height(), colour);
+            imageops::overlay(&mut base, &picture.to_rgba8(), 0, 0);
+            let mut picker = picker.clone();
+            picker.set_background_color(Some(colour));
+            on_backdrop = Some(picker);
+            DynamicImage::ImageRgba8(base)
+        }
+        None => picture,
+    };
     let protocol = SlicedProtocol::new_with_resize(
-        picker,
+        on_backdrop.as_ref().unwrap_or(picker),
         picture,
         size,
         Resize::Scale(Some(FilterType::Triangle)),

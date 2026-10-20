@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"image/color"
+	"image/png"
 	"io"
 	"net"
 	"os"
@@ -493,6 +495,69 @@ func TestDownloadMediaWritesAPrivateFileWithItsMime(t *testing.T) {
 	}
 	if _, err := c.DownloadMedia(ana, "NOPE"); err == nil {
 		t.Error("download of an unknown id succeeded")
+	}
+}
+
+// Each sticker downloads its own file, a disc of the colour its thumbnail shows (the sticker without
+// a thumbnail a third colour), so pressing o on a sticker never draws another sticker's picture.
+func TestEachStickerDownloadsTheFileOfItsOwnColour(t *testing.T) {
+	sock, _ := runDemo(t)
+	c := dial(t, sock)
+	want := map[string]struct {
+		file []byte
+		fill color.RGBA
+	}{
+		"DEMOG0007": {stickerYellowWebP, stickerYellow},
+		"DEMOG0008": {stickerPinkWebP, stickerPink},
+		"DEMOG0009": {stickerBlueWebP, stickerBlue},
+	}
+	msgs, err := c.Messages(group, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{}
+	for _, m := range msgs.Messages {
+		if m.Kind != ipc.KindSticker {
+			continue
+		}
+		w, ok := want[m.ID]
+		if !ok {
+			t.Errorf("unexpected sticker %s", m.ID)
+			continue
+		}
+		ready, err := c.DownloadMedia(group, m.ID)
+		if err != nil {
+			t.Fatalf("download %s: %v", m.ID, err)
+		}
+		got, err := os.ReadFile(ready.Path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, w.file) {
+			t.Errorf("sticker %s downloaded %d bytes that are not its own %v disc", m.ID, len(got), w.fill)
+		}
+		if m.Media == nil || m.Media.Size != int64(len(got)) {
+			t.Errorf("sticker %s announces media %+v; want the size of its file, %d", m.ID, m.Media, len(got))
+		}
+		files[m.ID] = string(got)
+		if len(m.Thumb) == 0 {
+			continue
+		}
+		thumb, err := png.Decode(bytes.NewReader(m.Thumb))
+		if err != nil {
+			t.Fatalf("thumbnail of %s: %v", m.ID, err)
+		}
+		b := thumb.Bounds()
+		if centre := color.RGBAModel.Convert(thumb.At(b.Dx()/2, b.Dy()/2)); centre != w.fill {
+			t.Errorf("thumbnail of %s is %v at the centre; want its file's colour %v", m.ID, centre, w.fill)
+		}
+	}
+	if len(files) != len(want) {
+		t.Fatalf("downloaded stickers %v; want %d", len(files), len(want))
+	}
+	if files["DEMOG0007"] == files["DEMOG0008"] || files["DEMOG0007"] == files["DEMOG0009"] ||
+		files["DEMOG0008"] == files["DEMOG0009"] {
+		t.Error("two stickers downloaded the same file")
 	}
 }
 

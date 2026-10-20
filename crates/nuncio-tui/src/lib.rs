@@ -1828,6 +1828,8 @@ impl App {
         }
         if let Some(images) = self.images.as_mut() {
             images.resized(area.width);
+            let background = self.palette.background;
+            images.backdrop([background.r, background.g, background.b]);
         }
         let (lines, selected, owners, boxes) = self.conversation_lines(area.width);
         let visible = usize::from(area.height);
@@ -1894,8 +1896,9 @@ impl App {
 
     /// Draw each picture box that is at least partly on screen, over the blank rows reserved for
     /// it: the full picture when it is encoded, else the thumbnail (encoded on a worker the first
-    /// time it shows; the box stays blank meanwhile), else the `[image]` or `[sticker]` label (no
-    /// thumbnail, or one that does not decode). A box cut by the top or the bottom of the area is
+    /// time it shows; the box stays blank meanwhile), else, for a thumbnail that does not decode,
+    /// the `[image]` or `[sticker]` label; with no thumbnail the box stays empty, since the caption
+    /// line already names the kind. A box cut by the top or the bottom of the area is
     /// drawn cut. A full picture asked for with `o` is encoded whether it is on screen or not.
     fn draw_pictures(
         &mut self,
@@ -1987,7 +1990,9 @@ impl App {
                 }
                 continue;
             }
-            if (0..visible).contains(&y) {
+            // Without a thumbnail the box stays empty until `o` fetches the picture: the caption
+            // above already says `[sticker]` or `[image]`. One that does not decode keeps a label.
+            if message.thumb.is_some() && (0..visible).contains(&y) {
                 let label = Rect {
                     y: area.y + y as u16,
                     height: 1,

@@ -170,9 +170,13 @@ Nothing moves when the picture arrives in it.
   thumbnail. If the daemon refuses (offline, not linked) or the file does not decode, the footer
   says why and the thumbnail stays; `o` tries again. **Nothing is downloaded without a key.** `O`
   opens the picture with the desktop's viewer instead.
-- **Stickers** are drawn like photos, from their PNG thumbnail; a sticker without one shows
-  `[sticker]` in its box until `o` fetches it (a WebP; an animated one gives its first frame). An
-  animated sticker is marked `▶` and shows its first frame: no animation yet.
+- **Stickers** are drawn like photos, from their PNG thumbnail; for a sticker without one (or an
+  image without one) the caption's `[sticker]` (`[image]`) is the only label and the box stays
+  empty until `o` fetches it (a WebP; an animated one gives its first frame). An animated sticker
+  is marked `▶` and shows its first frame: no animation yet.
+- **Transparency.** With half blocks every cell is painted, so a transparent pixel (a sticker's
+  corners, the margin a picture leaves in its box) takes the theme's background colour, and a
+  theme switch draws the pictures again on the new one. Kitty and sixel keep the transparency.
 - **Scrolling** draws a picture cut at the top or the bottom of the conversation when it is only
   partly in view.
 - **Untrusted bytes.** Only JPEG, PNG and WebP are decoded. The size a picture's header declares
@@ -254,7 +258,9 @@ What it gives you to try:
 - `e` reacts, `/` searches the open chat (every word, case-insensitive).
 - Pictures, in "Travel group (demo)": a photo with its JPEG thumbnail (`o` fetches a 480x320
   gradient into its box), a sticker and an animated sticker (`▶`) with PNG thumbnails, and a
-  sticker with none (`[sticker]` until `o` fetches its WebP). On the document in "Shop bot
+  sticker with none (an empty box until `o` fetches its WebP). Each sticker's WebP is a disc of its
+  own colour (yellow, pink, and blue for the one without a thumbnail), so `o` on a sticker draws
+  that sticker. On the document in "Shop bot
   (demo)", `o` writes a small text file under the runtime dir and opens it; `O` opens any of them.
 - Opening an unread chat clears its unread count (`mark_read`; the demo sends no receipts, since
   there is no WhatsApp).

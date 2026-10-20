@@ -13,7 +13,9 @@ use std::thread;
 use std::time::Duration;
 
 use base64::Engine;
-use nuncio_client::{Chat, ClientFrame, DaemonFrame, Media, Message, Palette, Session, Snapshot};
+use nuncio_client::{
+    Chat, ClientFrame, DaemonFrame, Media, Message, Palette, Rgb, Session, Snapshot,
+};
 use nuncio_tui::images::{
     CACHE_ENTRIES, Graphics, IMAGE_ROWS, Plan, ProtocolChoice, box_size, parse_protocol, plan,
     query_left_stdin_unsafe, zellij_protocol,
@@ -796,6 +798,137 @@ fn a_sticker_with_no_thumbnail_shows_its_label_until_o_fetches_it() {
     assert!(opened.lock().expect("lock").is_empty());
     drop(daemon);
     server.join().expect("fake daemon");
+}
+
+/// A 32x32 PNG with a disc of `colour` in the middle and transparent corners, like a real sticker.
+fn transparent_disc(colour: [u8; 3]) -> Vec<u8> {
+    let image = image::RgbaImage::from_fn(32, 32, |x, y| {
+        let (dx, dy) = (x as f32 - 15.5, y as f32 - 15.5);
+        if dx * dx + dy * dy < 10.0 * 10.0 {
+            image::Rgba([colour[0], colour[1], colour[2], 255])
+        } else {
+            image::Rgba([0, 0, 0, 0])
+        }
+    });
+    let mut bytes = Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image)
+        .write_to(&mut bytes, image::ImageFormat::Png)
+        .expect("encode a test picture");
+    bytes.into_inner()
+}
+
+fn palette_on(background: Rgb) -> Palette {
+    Palette {
+        background,
+        ..Palette::default()
+    }
+}
+
+#[test]
+fn half_blocks_draw_a_transparent_corner_in_the_conversation_background() {
+    let first = Rgb::new(90, 60, 120);
+    let mut app = App::new(snapshot(), Source::Daemon, palette_on(first))
+        .with_graphics(Graphics::halfblocks());
+    let mut disc = sticker("STK1", 1, true, false);
+    disc.thumb = Some(base64(&transparent_disc(GREEN)));
+    open_ada(&mut app, vec![disc]);
+    let corner = |app: &mut App| {
+        draw(app, 80, 24);
+        assert!(app.wait_for_images(WAIT));
+        let buffer = draw(app, 80, 24);
+        let top = row_of(&buffer, "[sticker]").expect("the caption") + 1;
+        let cell = buffer
+            .cell((COLUMNS.start, top))
+            .expect("the corner")
+            .clone();
+        let green = is(GREEN);
+        assert!(
+            buffer.content().iter().any(|c| green(c.fg) || green(c.bg)),
+            "the disc is drawn:\n{}",
+            screen(&buffer)
+        );
+        (cell.fg, cell.bg)
+    };
+    let pane = |c: Rgb| Color::Rgb(c.r, c.g, c.b);
+    assert_eq!(corner(&mut app), (pane(first), pane(first)));
+    // A theme switch redraws the corner in the new background.
+    let second = Rgb::new(200, 210, 190);
+    app.set_palette(palette_on(second));
+    assert_eq!(corner(&mut app), (pane(second), pane(second)));
+}
+
+#[test]
+fn half_blocks_draw_the_margin_a_picture_leaves_in_its_box_in_the_conversation_background() {
+    let background = Rgb::new(90, 60, 120);
+    let mut app = App::new(snapshot(), Source::Daemon, palette_on(background))
+        .with_graphics(Graphics::halfblocks());
+    // An odd aspect ratio: the picture, scaled to fit its box, leaves a margin of pixels.
+    let mut wide = photo("IMG1", 1);
+    wide.thumb = Some(base64(&picture(RED, 37, 23, image::ImageFormat::Png)));
+    wide.width = Some(333);
+    wide.height = Some(207);
+    open_ada(&mut app, vec![wide]);
+    draw(&mut app, 80, 24);
+    assert!(app.wait_for_images(WAIT));
+    let buffer = draw(&mut app, 80, 24);
+    // Red and the background both have some blue; a margin blended with black would have less.
+    let darkened = |c: Color| matches!(c, Color::Rgb(_, _, b) if b < RED[2]);
+    let dark: Vec<_> = buffer
+        .content()
+        .iter()
+        .filter(|c| darkened(c.fg) || darkened(c.bg))
+        .map(|c| (c.fg, c.bg))
+        .collect();
+    assert!(
+        dark.is_empty(),
+        "darkened cells {dark:?}:\n{}",
+        screen(&buffer)
+    );
+    assert!(!rows_in(&buffer, RED).is_empty(), "the photo is drawn");
+}
+
+/// How many times `needle` shows on the screen.
+fn count(buffer: &Buffer, needle: &str) -> usize {
+    screen(buffer).matches(needle).count()
+}
+
+#[test]
+fn a_picture_with_no_thumbnail_says_its_label_once_and_its_box_stays_empty() {
+    let mut app = pictures_app();
+    let mut bare_photo = photo("IMG1", 3);
+    bare_photo.thumb = None;
+    bare_photo.thumb_mime = None;
+    open_ada(
+        &mut app,
+        vec![
+            sticker("STK1", 1, false, false),
+            sticker("STK2", 2, false, true),
+            bare_photo,
+        ],
+    );
+    draw(&mut app, 120, 60);
+    assert!(app.wait_for_images(WAIT));
+    let buffer = draw(&mut app, 120, 60);
+    let text = screen(&buffer);
+    assert_eq!(count(&buffer, "[sticker]"), 2, "one per sticker:\n{text}");
+    assert_eq!(count(&buffer, "[sticker] ▶"), 1, "{text}");
+    assert_eq!(count(&buffer, "[image]"), 1, "{text}");
+    // Each label is the caption under its header; the 12 rows below it are blank.
+    let lines: Vec<&str> = text.lines().collect();
+    for minute in 1..=3 {
+        let header = lines
+            .iter()
+            .position(|l| l.contains(&format!("Ada Lovelace · 17:0{minute}")))
+            .expect("the header");
+        assert!(
+            lines[header + 1].contains("[sticker]") || lines[header + 1].contains("[image]"),
+            "{text}"
+        );
+        for row in &lines[header + 2..header + 2 + usize::from(IMAGE_ROWS)] {
+            let inside = row.split('┃').nth(1).unwrap_or_default();
+            assert!(inside.trim().is_empty(), "the box is empty:\n{text}");
+        }
+    }
 }
 
 // --- frames ----------------------------------------------------------------------------------

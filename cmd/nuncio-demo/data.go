@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"image/color"
 	"time"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
@@ -12,6 +11,8 @@ import (
 type chat struct {
 	info ipc.Chat
 	msgs []ipc.Message
+	// files holds what a sticker download serves, by message id: each sticker its own picture.
+	files map[string][]byte
 }
 
 // seed builds the invented chats, timestamped relative to now so they look recent. Every number is
@@ -44,10 +45,12 @@ func seed(now time.Time) []*chat {
 		Timestamp: at(30 * time.Minute), Media: &ipc.Media{Mime: "image/png", Size: 4096, FileName: ""},
 		Thumb: photoThumb(), ThumbMime: "image/jpeg", Width: photoWidth, Height: photoHeight,
 	}
-	sticker := func(id string, ago time.Duration, thumb []byte, animated bool) ipc.Message {
+	stickerFiles := map[string][]byte{}
+	sticker := func(id string, ago time.Duration, thumb, file []byte, animated bool) ipc.Message {
+		stickerFiles[id] = file
 		m := ipc.Message{
 			ID: id, Kind: ipc.KindSticker, Timestamp: at(ago), Width: 512, Height: 512, Animated: animated,
-			Media: &ipc.Media{Mime: "image/webp", Size: int64(len(stickerWebP))},
+			Media: &ipc.Media{Mime: "image/webp", Size: int64(len(file))},
 		}
 		if thumb != nil {
 			m.Thumb, m.ThumbMime = thumb, "image/png"
@@ -61,12 +64,13 @@ func seed(now time.Time) []*chat {
 			text("DEMOG0002", "مرحبا، كيف حالك؟", false, 4*time.Hour),
 			text("DEMOG0003", "שלום לכולם", false, 3*time.Hour),
 			photo,
-			sticker("DEMOG0007", 25*time.Minute, stickerThumb(color.RGBA{R: 250, G: 200, B: 40, A: 255}), false),
-			sticker("DEMOG0008", 23*time.Minute, stickerThumb(color.RGBA{R: 230, G: 80, B: 160, A: 255}), true),
-			sticker("DEMOG0009", 22*time.Minute, nil, false),
+			sticker("DEMOG0007", 25*time.Minute, stickerThumb(stickerYellow), stickerYellowWebP, false),
+			sticker("DEMOG0008", 23*time.Minute, stickerThumb(stickerPink), stickerPinkWebP, true),
+			sticker("DEMOG0009", 22*time.Minute, nil, stickerBlueWebP, false),
 			text("DEMOG0005", "Wow 😮", true, 20*time.Minute),
 			text("DEMOG0006", "東京タワー 🗼 は最高でした", false, 10*time.Minute),
 		},
+		files: stickerFiles,
 	}
 
 	long := &chat{info: ipc.Chat{JID: "15551230002@s.whatsapp.net", Name: "Long thread (demo)", Unread: 1}}

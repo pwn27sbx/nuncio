@@ -4,7 +4,8 @@
 //! one subscribed event connection), renders the chat list and conversations, sends one message
 //! at a time from the (multi-line) composer, and follows the daemon's events and the Omarchy theme. **If the
 //! daemon is not reachable it still runs**, rendering `proto/fixtures/chats_response.json`
-//! instead and saying so on screen; sends are then shown as not sent.
+//! instead and saying so on screen; sends are then shown as not sent. A connection lost later (a
+//! daemon restart) is retried on a capped backoff while the header says `reconnecting…`.
 //!
 //! It never links a WhatsApp device and never shows a QR code. The keys are in `README.md`.
 
@@ -64,11 +65,14 @@ fn main() -> ExitCode {
         .as_deref()
         .and_then(|path| ThemeWatcher::start(path).ok());
     let (snapshot, source) = load_snapshot();
+    // The daemon answered `fetch`: if this connect fails anyway, the driver keeps retrying.
     let daemon = match source {
-        Source::Daemon => socket_path()
-            .and_then(|path| Daemon::connect(&path, CLIENT_NAME))
-            .map_err(|error| eprintln!("nuncio-tui: no daemon connection ({error})"))
-            .ok(),
+        Source::Daemon => socket_path().ok().map(|path| {
+            Daemon::connect(&path, CLIENT_NAME).unwrap_or_else(|error| {
+                eprintln!("nuncio-tui: no daemon connection yet ({error}); reconnecting");
+                Daemon::disconnected(&path, CLIENT_NAME)
+            })
+        }),
         Source::Fixture => None,
     };
 
@@ -94,6 +98,9 @@ fn main() -> ExitCode {
     }
     if let Some(image) = image {
         app = app.with_image(image);
+    }
+    if daemon.as_ref().is_some_and(|daemon| !daemon.is_connected()) {
+        app.set_connected(false);
     }
 
     let mut io = Io { daemon, theme };
@@ -144,13 +151,11 @@ impl Io {
             }
         };
         match self.daemon.as_mut() {
+            // A lost connection is shown and reconnected by the driver itself.
             Some(daemon) => {
-                if let Err(error) = daemon.perform(app, &frame) {
-                    app.set_notice(format!("daemon connection lost: {error}"));
-                    self.daemon = None;
-                }
+                let _ = daemon.perform(app, &frame);
             }
-            // With no daemon a send cannot happen, and it says so.
+            // With no daemon (fixture data) a send cannot happen, and it says so.
             None => {
                 if let ClientFrame::Send { client_id, .. } | ClientFrame::Retry { client_id, .. } =
                     frame
@@ -168,11 +173,9 @@ impl Io {
 
     /// Everything that happened since the last tick: daemon events and theme switches.
     fn tick(&mut self, app: &mut App) {
-        if let Some(daemon) = self.daemon.as_mut()
-            && let Err(error) = daemon.drain_events(app)
-        {
-            app.set_notice(format!("daemon connection lost: {error}"));
-            self.daemon = None;
+        // Also reconnects when the connection was lost and the backoff is due.
+        if let Some(daemon) = self.daemon.as_mut() {
+            let _ = daemon.drain_events(app);
         }
         if let Some(palette) = self
             .theme

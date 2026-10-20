@@ -19,8 +19,8 @@ Source: `~/Downloads/handoff-2026-10-19-home-t15-fixes.md` (home Claude, owner-a
 
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
-| F1 | S1, S2 (B1 + B2: internal/wa session/events) | delegated writer (context backstop), parallel with F3; Risk 4 → verifier | done: RED per rule, 10 mutants killed (3 equivalent, explained); verifier PASS S1/S2, no blockers (whatsmeow sendActiveReceipts only picks the receipt type; -race x50 concurrency probes); advisory A1 (late old-connection keepalive timeout) fixed; parent reran the keepalive tests | this commit |
-| F3 | S3 (B3: TUI reconnect) | delegated writer, parallel with F1 | open | |
+| F1 | S1, S2 (B1 + B2: internal/wa session/events) | delegated writer (context backstop), parallel with F3; Risk 4 → verifier | done: RED per rule, 10 mutants killed (3 equivalent, explained); verifier PASS S1/S2, no blockers (whatsmeow sendActiveReceipts only picks the receipt type; -race x50 concurrency probes); advisory A1 (late old-connection keepalive timeout) fixed; parent reran the keepalive tests | 8dcad27 |
+| F3 | S3 (B3: TUI reconnect) | delegated writer, parallel with F1 | done: 6 tests RED→GREEN (daemon restart on the same socket, backoff 0.5 s→5 s cap, draft/selection kept, send while disconnected not retried), 10 mutants killed; parent reran `cargo test -p nuncio-tui` | this commit |
 | F4 | S4 (Q2 PN↔LID: store merge + ADR) | delegated writer after F1 (shares internal/wa/session.go); Risk 1 → verifier | open | |
 | F5 | S6 handoff | delegated writer | open | |
 
@@ -28,3 +28,4 @@ Source: `~/Downloads/handoff-2026-10-19-home-t15-fixes.md` (home Claude, owner-a
 
 - L1 (2026-10-20, owner): "mi claude de mi omarchy te manda esto (/Users/sebastian/Downloads/handoff-2026-10-19-home-t15-fixes.md)". The handoff says the owner approved B1, B2, B3 and Q2 option 2.
 - L2 F1 evidence: whatsmeow receipt.go:255-264/287 (SetForceActiveDeliveryReceipts only stores 2; read solely to choose the delivery receipt type; no presence); keepalive.go:26-63 (KeepAliveMaxFailTime 3 min; forced reconnect only with EnableAutoReconnect). Verifier advisories left: A2 a theoretical second reconnect if Disconnected races a slow Disconnect (whatsmeow would answer ErrAlreadyConnected and it is rescheduled); A3 a logout/ban landing between offline and publish leaves subscribers' last frame offline.
+- L3 F3 open point: a send whose socket read timed out or whose connection broke after writing is shown as "not sent" though the daemon may have queued it; "not confirmed" would be more honest (safe either way: R retries under the same client_id).

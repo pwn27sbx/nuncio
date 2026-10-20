@@ -1772,7 +1772,7 @@ fn an_event_this_tui_does_not_know_is_ignored_and_the_event_connection_stays() {
         daemon.drain_events(&mut app).expect("drain");
         let screen = render(&mut app, 80, 24).text();
         assert!(
-            !screen.contains("lost the event connection"),
+            !screen.contains("connection lost") && !screen.contains("reconnecting"),
             "an unknown event dropped the event connection:\n{screen}"
         );
         if screen.contains("after the unknown one") {

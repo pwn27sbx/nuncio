@@ -5,6 +5,14 @@ The ratatui terminal client. It talks to `nunciod` over `$XDG_RUNTIME_DIR/nuncio
 events. With no daemon it still starts, shows `proto/fixtures/chats_response.json` and says
 `FIXTURE DATA`; a send then shows as not sent.
 
+If the daemon goes away later (it restarted, a read hit the 5 s bound), the header says
+`reconnecting…` instead of the session and the footer says `daemon connection lost: …`. The TUI
+tries again after 0.5 s, doubling up to every 5 s; once back it says `reconnected to nunciod`,
+says hello and subscribes again, and reloads the status, the chat list and the selected chat's
+messages, keeping the draft, the selected chat and message and the open pane. A send made while
+disconnected is shown as `not sent` and the footer says `not connected to nunciod`; nothing
+retries it by itself (`R` does, once reconnected).
+
 ```
 nuncio-tui [--image <png>]
 ```

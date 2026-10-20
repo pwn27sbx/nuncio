@@ -25,8 +25,10 @@ use ratatui_image::protocol::StatefulProtocol;
 use unicode_segmentation::UnicodeSegmentation;
 
 mod daemon;
+mod reconnect;
 
 pub use daemon::{Daemon, open_externally};
+pub use reconnect::{Backoff, Reconnect};
 
 /// Where the chat list came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +70,8 @@ const ARCHIVED: char = '▤';
 
 /// How many messages a conversation loads (the wire maximum).
 const MESSAGE_LIMIT: u16 = 200;
+/// How many chats a resync asks for (the wire contract allows 1..200).
+const CHAT_LIMIT: u16 = 200;
 /// How many lines PageUp/PageDown scroll.
 const PAGE: usize = 10;
 /// How many results an in-chat search asks for.
@@ -168,6 +172,12 @@ pub struct App {
     /// been delivered, so they are shown as not confirmed rather than not sent.
     unconfirmed: HashSet<String>,
     utc_offset: time::UtcOffset,
+    /// The driver's daemon connection is up (it is `false` while the driver reconnects).
+    connected: bool,
+    /// The chat whose `messages` were asked for again after a reconnect: its reply keeps the
+    /// selected message and the sends the daemon never stored (as one not sent while
+    /// disconnected).
+    resyncing: Option<String>,
 }
 
 /// The in-chat search overlay.
@@ -213,6 +223,8 @@ impl App {
             marking: HashSet::new(),
             unconfirmed: HashSet::new(),
             utc_offset: time::UtcOffset::UTC,
+            connected: true,
+            resyncing: None,
         };
         let chats = std::mem::take(&mut app.snapshot.chats);
         app.set_chats(chats);
@@ -260,6 +272,29 @@ impl App {
 
     pub fn pane(&self) -> Pane {
         self.pane
+    }
+
+    /// Whether the driver is connected to the daemon (`false` while it reconnects).
+    pub fn connected(&self) -> bool {
+        self.connected
+    }
+
+    /// The driver lost (`false`) or regained (`true`) its daemon connection. While it is lost
+    /// the header says `reconnecting…` instead of the session.
+    pub fn set_connected(&mut self, connected: bool) {
+        self.connected = connected;
+    }
+
+    /// What to ask the daemon again after a reconnect, since events were missed: the status,
+    /// the chat list and the selected chat's messages. The draft, the selected chat, the open
+    /// pane and the selected message are kept.
+    pub fn resync(&mut self) -> Vec<ClientFrame> {
+        let mut frames = vec![ClientFrame::status(), ClientFrame::chats(CHAT_LIMIT)];
+        self.resyncing = self.selected_jid().map(str::to_owned);
+        if let Some(jid) = &self.resyncing {
+            frames.push(ClientFrame::messages(jid.clone(), MESSAGE_LIMIT));
+        }
+        frames
     }
 
     pub fn source(&self) -> Source {
@@ -678,13 +713,39 @@ impl App {
                 }
             }
             DaemonFrame::Messages { jid, messages, .. } => {
-                if self.selected_jid() == Some(jid.as_str()) {
-                    self.cursor = None;
+                let resynced = self.resyncing.as_deref() == Some(jid.as_str());
+                if resynced {
+                    self.resyncing = None;
                 }
+                let selected_id = self
+                    .cursor
+                    .and_then(|i| self.conversations.get(jid)?.get(i))
+                    .map(|m| m.id.clone());
                 let mut loaded: Vec<Message> = messages.iter().rev().cloned().collect();
-                // Sends still waiting for a reply are not stored yet; keep them visible.
+                // Sends still waiting for a reply are not stored yet; keep them visible. After a
+                // reconnect, so are sends that never reached the daemon (not sent): a failure
+                // stays on screen until the user retries it.
                 if let Some(old) = self.conversations.get(jid) {
-                    loaded.extend(old.iter().filter(|m| self.is_sending(m)).cloned());
+                    let unstored = |m: &Message| {
+                        resynced
+                            && m.id.is_empty()
+                            && m.client_id.as_ref().is_some_and(|id| {
+                                !loaded.iter().any(|l| l.client_id.as_ref() == Some(id))
+                            })
+                    };
+                    let kept: Vec<Message> = old
+                        .iter()
+                        .filter(|m| self.is_sending(m) || unstored(m))
+                        .cloned()
+                        .collect();
+                    loaded.extend(kept);
+                }
+                if self.selected_jid() == Some(jid.as_str()) {
+                    // A resync keeps the selected message where it still is; anything else
+                    // starts with none selected.
+                    self.cursor = selected_id
+                        .filter(|id| resynced && !id.is_empty())
+                        .and_then(|id| loaded.iter().position(|m| m.id == id));
                 }
                 self.conversations.insert(jid.clone(), loaded);
                 // The chat the user opened is read once its messages are shown (S8).
@@ -1016,6 +1077,15 @@ impl App {
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
         let status = match self.source {
+            Source::Daemon if !self.connected => Span::styled(
+                format!(
+                    " · {} · reconnecting… · {} unread",
+                    self.snapshot.daemon, self.snapshot.unread
+                ),
+                Style::default()
+                    .fg(rgb(self.palette.yellow))
+                    .add_modifier(Modifier::BOLD),
+            ),
             Source::Daemon => Span::styled(
                 format!(
                     " · {} · {} · {} unread",

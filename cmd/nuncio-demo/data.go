@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"image/color"
 	"time"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
@@ -41,6 +42,17 @@ func seed(now time.Time) []*chat {
 	photo := ipc.Message{
 		ID: "DEMOG0004", Kind: ipc.KindImage, Text: "The view from the hotel", FromMe: false,
 		Timestamp: at(30 * time.Minute), Media: &ipc.Media{Mime: "image/png", Size: 4096, FileName: ""},
+		Thumb: photoThumb(), ThumbMime: "image/jpeg", Width: photoWidth, Height: photoHeight,
+	}
+	sticker := func(id string, ago time.Duration, thumb []byte, animated bool) ipc.Message {
+		m := ipc.Message{
+			ID: id, Kind: ipc.KindSticker, Timestamp: at(ago), Width: 512, Height: 512, Animated: animated,
+			Media: &ipc.Media{Mime: "image/webp", Size: int64(len(stickerWebP))},
+		}
+		if thumb != nil {
+			m.Thumb, m.ThumbMime = thumb, "image/png"
+		}
+		return m
 	}
 	group := &chat{
 		info: ipc.Chat{JID: "120363000000000001@g.us", Name: "Travel group (demo)", Unread: 4},
@@ -49,6 +61,9 @@ func seed(now time.Time) []*chat {
 			text("DEMOG0002", "مرحبا، كيف حالك؟", false, 4*time.Hour),
 			text("DEMOG0003", "שלום לכולם", false, 3*time.Hour),
 			photo,
+			sticker("DEMOG0007", 25*time.Minute, stickerThumb(color.RGBA{R: 250, G: 200, B: 40, A: 255}), false),
+			sticker("DEMOG0008", 23*time.Minute, stickerThumb(color.RGBA{R: 230, G: 80, B: 160, A: 255}), true),
+			sticker("DEMOG0009", 22*time.Minute, nil, false),
 			text("DEMOG0005", "Wow 😮", true, 20*time.Minute),
 			text("DEMOG0006", "東京タワー 🗼 は最高でした", false, 10*time.Minute),
 		},

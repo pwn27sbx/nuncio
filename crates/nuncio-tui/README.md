@@ -13,6 +13,10 @@ messages, keeping the draft, the selected chat and message and the open pane. A 
 disconnected is shown as `not sent` and the footer says `not connected to nunciod`; nothing
 retries it by itself (`R` does, once reconnected).
 
+Pictures are drawn in the conversation (see [Pictures](#pictures)): from the thumbnail each image
+or sticker message carries, with the full picture only when you press `o`. Nothing is ever
+downloaded on its own.
+
 One chat per contact (ADR 0001): the daemon names the phone-number chats it merged into a
 contact's LID chat (`…@lid`) in that chat's `aliases`, in the chat list and in the `event_chat` it
 publishes after a merge. Whatever the TUI holds under such a number (its list entry, the open or
@@ -84,7 +88,8 @@ nuncio-tui [--image <png>]
   then older) and `j`/`↓` a newer one; `r` replies to it, `e` reacts, `R`
   retries a send of mine that is `not sent` or `not confirmed` (one attempt per key press, under
   the same WhatsApp message id, so a send that did arrive is never sent as a second message;
-  nothing is ever retried on its own), `o` downloads its media. Only a message WhatsApp has (received, or a send of mine
+  nothing is ever retried on its own), `o` shows a picture in full (other media: downloads and
+  opens it), `O` downloads any media and opens it externally. Only a message WhatsApp has (received, or a send of mine
   that was sent) can be replied or reacted to: on one still `sending`, `queued` or `not sent`,
   `r`/`e` send nothing and the footer says `that message was not sent, so it cannot be replied
   to` (or `reacted to`).
@@ -95,9 +100,10 @@ nuncio-tui [--image <png>]
 - **Search** (`/`): searches the open chat through the daemon; the results are listed newest
   first, and `Enter` on one closes the search and selects that message in the conversation
   (scrolled into view) when it is among the loaded messages; otherwise the footer says so.
-- **Media**: image, audio, video and document messages show `[kind]` before their caption. `o`
-  asks the daemon to download it and opens the file with `xdg-open` (`open` on macOS). Inline
-  images are only the `--image` check for now: downloaded media is not drawn in the terminal.
+- **Media**: image, sticker, audio, video and document messages show `[kind]` before their
+  caption (`[sticker] ▶` for an animated sticker). Pictures are drawn under it (see
+  [Pictures](#pictures)). On audio, video and documents `o` asks the daemon to download the file
+  and opens it with `xdg-open` (`open` on macOS); `O` does the same for a picture.
 - Live updates: new messages, a send's state changes, unread counts, the connection state, and a
   focus request (`nuncio focus <jid>`) selects and opens that chat.
 - **A newer daemon**: an event this TUI does not know is ignored (the event connection stays
@@ -133,7 +139,8 @@ does; `Esc` goes back one step: composer → conversation → chat list.
 | Conversation | `r` | reply to the selected message (the composer quotes it); only a sent or received one |
 | Conversation | `e` | react to it (see Reactions); only a sent or received one |
 | Conversation | `R` | retry the selected send that is not sent or not confirmed (same message, never a second) |
-| Conversation | `o` | download the selected media and open it externally |
+| Conversation | `o` | on a picture: fetch the full picture into its box; on other media: download it and open it externally |
+| Conversation | `O` | download the selected media and open it externally (pictures too) |
 | Conversation | `Enter`, `i` | write (focus the composer) |
 | Conversation | `PgUp`/`PgDn` | scroll a page |
 | Conversation | `g`/`G`, `Home`/`End` | scroll to the oldest / newest message |
@@ -147,6 +154,66 @@ does; `Esc` goes back one step: composer → conversation → chat list.
 | Reactions | `1`-`6` | 👍 ❤️ 😂 😮 😢 🙏; `x` removes mine, `Esc` cancels |
 | Everywhere | `?` | show or hide the key help (outside the composer, where `?` is text) |
 | Everywhere | `Ctrl-C` | quit (`q` quits outside the composer) |
+
+## Pictures
+
+An image or sticker message whose size the daemon states (`width`, `height`) gets a box under its
+caption as soon as the conversation is drawn, before anything is decoded: as wide as the picture
+in cells but no wider than the conversation, as tall as that keeps its shape, at most 12 rows.
+Nothing moves when the picture arrives in it.
+
+- **Thumbnail first.** The box shows the thumbnail WhatsApp embeds in the message (the wire's
+  `thumb`: a JPEG for a photo, a PNG for a sticker), scaled to the box. It costs no network: the
+  daemon already has it.
+- **Full picture on demand.** `o` on the selected picture asks the daemon for it
+  (`download_media`); the caption says `Downloading…` until it is drawn, in the same box, over the
+  thumbnail. If the daemon refuses (offline, not linked) or the file does not decode, the footer
+  says why and the thumbnail stays; `o` tries again. **Nothing is downloaded without a key.** `O`
+  opens the picture with the desktop's viewer instead.
+- **Stickers** are drawn like photos, from their PNG thumbnail; a sticker without one shows
+  `[sticker]` in its box until `o` fetches it (a WebP; an animated one gives its first frame). An
+  animated sticker is marked `▶` and shows its first frame: no animation yet.
+- **Scrolling** draws a picture cut at the top or the bottom of the conversation when it is only
+  partly in view.
+- **Untrusted bytes.** Only JPEG, PNG and WebP are decoded. The size a picture's header declares
+  is checked before decoding: a thumbnail may declare at most 1024 pixels a side and 16 MiB of
+  pixels, a full picture 16384 a side and 160 MiB (a 64 MiB file at most). Anything else keeps
+  the box with its `[image]` or `[sticker]` label (a full picture says why in the footer). A
+  decoded picture is shrunk to its box before it is encoded.
+- A picture whose message states no size gets no box and no thumbnail; `o` draws the full picture
+  in a box sized from the file.
+- Encoded pictures are cached (48 of them, about 96 MiB) and encoded on two worker threads, so
+  scrolling stays smooth; resizing the terminal encodes the visible ones again, and work queued
+  for an earlier width is dropped unencoded. The caption's `Downloading…` is cut with `…` rather
+  than wrap to a new row, so the box never moves.
+
+### Which protocol
+
+The TUI asks the terminal once at startup, before reading any key, and says the choice once in
+the footer (`pictures: kitty (detected)`):
+
+| Terminal | Protocol |
+|---|---|
+| Ghostty, kitty | kitty graphics with Unicode placeholders |
+| foot | sixel |
+| iTerm2, WezTerm | iTerm2 inline images |
+| alacritty and anything that answers neither | half blocks (`▀` in colour) |
+| herdr | kitty, re-rendered by herdr (0.6.0 and later); foot inside herdr is unverified (it may announce kitty and show nothing: set the variable below) |
+| zellij (`ZELLIJ` set) | sixel when the terminal announces it, else half blocks (zellij rejects kitty's placeholders) |
+
+`NUNCIO_IMAGE_PROTOCOL` chooses it without asking: `kitty`, `sixel`, `iterm2`, `halfblocks`, or
+`off` (no pictures: `[image]` labels only, and `o` opens every media externally; `?` says so).
+Another value is
+named in the footer and ignored.
+
+The query is ratatui-image 11.1's, which reads the terminal's answer on a thread that it does not
+stop when no answer comes (upstream issue #202). So the TUI queries only when stdin and stdout are
+both a terminal (otherwise half blocks), waits at most 1 s, and when it timed out with no answer it
+uses half blocks and makes stdin safe before the first key is read: it asks for a status report
+once more and holds Rust's stdin lock for the rest of the run, so that thread can never read
+again; if the terminal still does not answer, the screen asks for one key first. 100 ms later,
+whatever is left of a late answer is thrown away (`tcflush`), so it never reaches the composer as
+keys. Setting the variable skips the query.
 
 ## Mouse
 
@@ -179,13 +246,16 @@ What it gives you to try:
 
 - Six chats with fake `555` numbers: one pinned, one muted, one archived, one group, one without a
   name, several unread, and one with 240 messages; emoji/ZWJ, CJK and RTL text, a quoted reply, a
-  reaction, an image and a document.
+  reaction, a photo, three stickers and a document.
 - A send is answered `sent` at once, and about 2 s later an invented reply arrives in that chat
   (a live `event_message` and `event_unread`; `-reply-after 0` turns it off).
 - A text starting with `fail` ends `not sent`; `R` on it then sends it. Until then the demo, like
   `nunciod`, refuses a reply to it or a reaction on it.
-- `e` reacts, `/` searches the open chat (every word, case-insensitive), `o` writes a small PNG or
-  text file under the runtime dir and opens it.
+- `e` reacts, `/` searches the open chat (every word, case-insensitive).
+- Pictures, in "Travel group (demo)": a photo with its JPEG thumbnail (`o` fetches a 480x320
+  gradient into its box), a sticker and an animated sticker (`▶`) with PNG thumbnails, and a
+  sticker with none (`[sticker]` until `o` fetches its WebP). On the document in "Shop bot
+  (demo)", `o` writes a small text file under the runtime dir and opens it; `O` opens any of them.
 - Opening an unread chat clears its unread count (`mark_read`; the demo sends no receipts, since
   there is no WhatsApp).
 - `wipe` (`nuncio logout`/`purge`) is refused.

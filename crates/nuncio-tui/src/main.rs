@@ -9,19 +9,24 @@
 //!
 //! It never links a WhatsApp device and never shows a QR code. The keys are in `README.md`.
 
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nuncio_client::{
     ClientFrame, DaemonFrame, PROTOCOL_VERSION, Palette, Snapshot, ThemeWatcher, fetch, socket_path,
 };
+use nuncio_tui::images::{self, Graphics, Plan, ProtocolChoice};
 use nuncio_tui::{Action, App, Daemon, Source, fixture_snapshot, open_externally};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
 };
 use ratatui::crossterm::execute;
-use ratatui_image::picker::Picker;
+use ratatui::widgets::{Paragraph, Wrap};
+use ratatui_image::FontSize;
+use ratatui_image::picker::cap_parser::QueryStdioOptions;
+use ratatui_image::picker::{Capability, Picker, ProtocolType};
 use ratatui_image::protocol::StatefulProtocol;
 
 /// Announced in the `hello` frame, e.g. `nuncio-tui/0.1.0`.
@@ -30,6 +35,12 @@ const CLIENT_NAME: &str = concat!("nuncio-tui/", env!("CARGO_PKG_VERSION"));
 const CHAT_LIMIT: u16 = 200;
 /// How long one loop iteration waits for a key before it drains events and redraws.
 const TICK: Duration = Duration::from_millis(100);
+/// How long the terminal has to answer the picture query.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a late answer to the query may take before the TUI asks for a key instead.
+const LATE_ANSWER: Duration = Duration::from_millis(500);
+/// How long the rest of a late answer may take to arrive before it is thrown away.
+const LATE_TAIL: Duration = Duration::from_millis(100);
 
 const USAGE: &str = "\
 usage: nuncio-tui [--image <png>]
@@ -37,12 +48,19 @@ usage: nuncio-tui [--image <png>]
   Keys: Tab switches between the chat list and the conversation; j/k or the arrows move in
   the focused pane (chats, or the selected message); Enter opens a chat ready to write,
   Enter sends, Alt-Enter or Ctrl-J new line, Esc composer -> conversation -> chats;
-  r reply, e react, R retry, o open media, / search, ? help, q quit (Ctrl-C anywhere).
+  r reply, e react, R retry, o show a picture in full (other media, and every media with
+  pictures off, open externally), O open media externally, / search, ? help, q quit
+  (Ctrl-C anywhere).
   Mouse: click a chat to open it, click a message to select it, the wheel scrolls the pane
   under the pointer; hold Shift to select text.
 
+  Pictures are drawn in the conversation from the thumbnail in each message; nothing is
+  downloaded until o. The protocol is asked from the terminal once at startup (kitty, sixel,
+  iTerm2, else half blocks; sixel or half blocks under zellij). NUNCIO_IMAGE_PROTOCOL=kitty,
+  sixel, iterm2, halfblocks or off chooses it without asking.
+
   --image <png>   render a local PNG inline, next to the chat list (S9's ratatui-image
-                  check; nothing in M0 serves images, so this points at any file)
+                  check; this points at any file)
   -h, --help      show this message
 ";
 
@@ -88,6 +106,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // The picture protocol is asked from the terminal once, after entering the alternate screen
+    // and before mouse reports are turned on or any event is read.
+    let (graphics, picture_notice) = choose_graphics(&mut terminal);
+
     // Clicks and the wheel. A panic turns it off before ratatui's own hook restores the rest,
     // so the shell is not left receiving mouse reports.
     let _ = execute!(std::io::stdout(), EnableMouseCapture);
@@ -97,15 +119,22 @@ fn main() -> ExitCode {
         hook(info);
     }));
 
-    // The ratatui-image picker queries the terminal, so it must run after entering the
-    // alternate screen and before reading events.
     let (image, image_notice) = match args.image.as_deref() {
-        Some(path) => image_for(path),
+        Some(path) => image_for(
+            path,
+            graphics
+                .as_ref()
+                .map_or(&Picker::halfblocks(), Graphics::picker),
+        ),
         None => (None, None),
     };
     let mut app = App::new(snapshot, source, palette)
         .with_client_prefix(client_prefix())
         .with_utc_offset(local_offset.unwrap_or(time::UtcOffset::UTC));
+    if let Some(graphics) = graphics {
+        app = app.with_graphics(graphics);
+    }
+    app.set_notice(picture_notice);
     if local_offset.is_err() {
         app.set_notice("the local time zone is unknown; times are UTC");
     }
@@ -217,6 +246,10 @@ fn event_loop(
             Event::Mouse(mouse) => app.handle_mouse(mouse),
             _ => None,
         };
+        // A download waits for the daemon's answer: show `Downloading…` before it does.
+        if let Some(Action::Request(ClientFrame::DownloadMedia { .. })) = &action {
+            terminal.draw(|frame| app.draw(frame))?;
+        }
         if let Some(action) = action
             && !io.act(app, action)
         {
@@ -233,10 +266,143 @@ fn client_prefix() -> String {
     format!("tui-{}-{seconds}", std::process::id())
 }
 
-/// Load `path` and prepare it for the terminal the client is running in.
+/// Choose how pictures are drawn, once: [`images::plan`] from `NUNCIO_IMAGE_PROTOCOL`, `ZELLIJ`
+/// and whether stdin and stdout are a terminal, then either that choice or ratatui-image's query.
+/// Returns the protocol (`None` for `off`) and the footer's one-time line naming it.
+fn choose_graphics(terminal: &mut ratatui::DefaultTerminal) -> (Option<Graphics>, String) {
+    let value = std::env::var(images::OVERRIDE).ok();
+    let zellij = std::env::var_os("ZELLIJ").is_some();
+    let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+    let (plan, warning) = images::plan(value.as_deref(), zellij, tty);
+    let (graphics, notice) = match plan {
+        Plan::Fixed { choice, why } => fixed_graphics(choice, why),
+        Plan::Query { zellij } => queried_graphics(terminal, zellij),
+    };
+    match warning {
+        Some(warning) => (graphics, format!("{warning}; {notice}")),
+        None => (graphics, notice),
+    }
+}
+
+/// The protocol named in `NUNCIO_IMAGE_PROTOCOL` (or half blocks when the terminal cannot be
+/// asked), with the cell size from the terminal's window size, without querying anything.
+fn fixed_graphics(choice: ProtocolChoice, why: &str) -> (Option<Graphics>, String) {
+    let protocol = match choice {
+        ProtocolChoice::Off => return (None, format!("pictures: off ({why})")),
+        ProtocolChoice::Kitty => ProtocolType::Kitty,
+        ProtocolChoice::Sixel => ProtocolType::Sixel,
+        ProtocolChoice::Iterm2 => ProtocolType::Iterm2,
+        ProtocolChoice::Halfblocks => ProtocolType::Halfblocks,
+    };
+    let picker = if protocol == ProtocolType::Halfblocks {
+        Picker::halfblocks()
+    } else {
+        // ratatui-image 11 builds a picker from a cell size only through this deprecated call.
+        #[allow(deprecated)]
+        let mut picker = Picker::from_fontsize(cell_size());
+        picker.set_protocol_type(protocol);
+        picker
+    };
+    let graphics = Graphics::new(picker, why);
+    let notice = graphics.notice();
+    (Some(graphics), notice)
+}
+
+/// The terminal's cell size in pixels from its window size, or 10x20 when it reports none.
+fn cell_size() -> FontSize {
+    match ratatui::crossterm::terminal::window_size() {
+        Ok(size) if size.columns > 0 && size.rows > 0 && size.width > 0 && size.height > 0 => {
+            FontSize::new(size.width / size.columns, size.height / size.rows)
+        }
+        _ => FontSize::new(10, 20),
+    }
+}
+
+/// Ask the terminal which protocol it speaks. ratatui-image 11.1 reads the answer on a thread it
+/// never stops when the answer does not come in time (issue #202); that thread would take the
+/// next input. So when the query ran out its timeout without an answer, the TUI uses half blocks
+/// and makes stdin safe before any event is read ([`guard_stdin`]).
+fn queried_graphics(
+    terminal: &mut ratatui::DefaultTerminal,
+    zellij: bool,
+) -> (Option<Graphics>, String) {
+    let started = Instant::now();
+    let result = Picker::from_query_stdio_with_options(QueryStdioOptions {
+        timeout: QUERY_TIMEOUT,
+        ..QueryStdioOptions::default()
+    });
+    let answered = result
+        .as_ref()
+        .is_ok_and(|picker| !picker.capabilities().is_empty());
+    if images::query_left_stdin_unsafe(started.elapsed(), QUERY_TIMEOUT, answered) {
+        guard_stdin(terminal);
+        let graphics = Graphics::new(
+            Picker::halfblocks(),
+            format!(
+                "the terminal did not answer; {} chooses another",
+                images::OVERRIDE
+            ),
+        );
+        let notice = graphics.notice();
+        return (Some(graphics), notice);
+    }
+    let Ok(mut picker) = result else {
+        let graphics = Graphics::new(Picker::halfblocks(), "the terminal query failed");
+        let notice = graphics.notice();
+        return (Some(graphics), notice);
+    };
+    let how = if zellij {
+        let sixel = picker.capabilities().contains(&Capability::Sixel);
+        picker.set_protocol_type(images::zellij_protocol(picker.protocol_type(), sixel));
+        "zellij"
+    } else {
+        "detected"
+    };
+    let graphics = Graphics::new(picker, how);
+    let notice = graphics.notice();
+    (Some(graphics), notice)
+}
+
+/// Make stdin safe after a query that timed out: ask the terminal for a status report once more
+/// (its answer ends the read ratatui-image's thread is blocked in, and that thread then stops),
+/// and take Rust's stdin lock for good, so that thread can never read again. The event loop starts
+/// only once the lock is taken; when no answer comes, the screen asks for a key, which that last
+/// read takes. Whatever is left of the answer is then thrown away.
+fn guard_stdin(terminal: &mut ratatui::DefaultTerminal) {
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(b"\x1b[5n");
+    let _ = stdout.flush();
+    let taken = images::hold_stdin();
+    if taken.recv_timeout(LATE_ANSWER).is_ok() {
+        drop_late_answer();
+        return;
+    }
+    let text = format!(
+        "The terminal did not answer nuncio's picture query.\n\nPress any key to continue \
+         (set {}=halfblocks, or another protocol, to skip the query).",
+        images::OVERRIDE
+    );
+    let _ = terminal.draw(|frame| {
+        frame.render_widget(
+            Paragraph::new(text.as_str()).wrap(Wrap { trim: false }),
+            frame.area(),
+        );
+    });
+    let _ = taken.recv();
+    drop_late_answer();
+}
+
+/// What is left of the terminal's late answer (its tail can arrive after the read that took its
+/// head) is thrown away before the first key is read.
+fn drop_late_answer() {
+    std::thread::sleep(LATE_TAIL);
+    images::discard_pending_input();
+}
+
+/// Load `path` and prepare it for the terminal the client is running in, with `picker`.
 ///
 /// Returns the image state plus a line to print once the terminal is given back.
-fn image_for(path: &Path) -> (Option<StatefulProtocol>, Option<String>) {
+fn image_for(path: &Path, picker: &Picker) -> (Option<StatefulProtocol>, Option<String>) {
     let image = match image::open(path) {
         Ok(image) => image,
         Err(error) => {
@@ -247,20 +413,6 @@ fn image_for(path: &Path) -> (Option<StatefulProtocol>, Option<String>) {
                     path.display()
                 )),
             );
-        }
-    };
-
-    let picker = match Picker::from_query_stdio() {
-        Ok(picker) => picker,
-        Err(error) => {
-            let picker = Picker::halfblocks();
-            let notice = format!(
-                "nuncio-tui: this terminal did not answer the image query ({error}); \
-                 drawing {} with half blocks instead of the {:?} protocol",
-                path.display(),
-                picker.protocol_type()
-            );
-            return (Some(picker.new_resize_protocol(image)), Some(notice));
         }
     };
 

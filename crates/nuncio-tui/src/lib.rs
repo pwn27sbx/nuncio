@@ -27,9 +27,11 @@ use ratatui::widgets::{
 };
 use ratatui_image::StatefulImage;
 use ratatui_image::protocol::StatefulProtocol;
+use ratatui_image::sliced::{SignedPosition, SlicedImage};
 use unicode_segmentation::UnicodeSegmentation;
 
 mod daemon;
+pub mod images;
 mod reconnect;
 
 pub use daemon::{Daemon, open_externally};
@@ -174,7 +176,8 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
             ("r", "reply to it"),
             ("e", "react to it"),
             ("R", "retry a not sent or not confirmed send"),
-            ("o", "open its media externally"),
+            ("o", "show the picture in full, or open other media"),
+            ("O", "open its media externally"),
             ("Enter i", "write"),
             ("PgUp/PgDn", "scroll a page"),
             ("g/G Home/End", "oldest / newest"),
@@ -263,8 +266,14 @@ pub struct App {
     /// The reaction picker is open on the selected message.
     picking: bool,
     search: Option<Search>,
-    /// Ids of media messages whose download was asked for with `o` and not answered yet.
+    /// Ids of media messages whose download was asked for to open externally, not answered yet.
     downloading: HashSet<String>,
+    /// The inline pictures, when the terminal draws them.
+    images: Option<images::Images>,
+    /// Ids of pictures whose full file was asked for with `o`, to draw inline, not answered yet.
+    showing: HashSet<String>,
+    /// The full file of a picture fetched with `o`, by chat JID and message id.
+    full: HashMap<(String, String), PathBuf>,
     /// The chat opened with Enter whose `messages` reply has not come yet.
     opening: Option<String>,
     /// JIDs of chats with a `mark_read` sent and not answered yet (at most one per chat).
@@ -337,6 +346,9 @@ impl App {
             picking: false,
             search: None,
             downloading: HashSet::new(),
+            images: None,
+            showing: HashSet::new(),
+            full: HashMap::new(),
             opening: None,
             marking: HashSet::new(),
             unconfirmed: HashSet::new(),
@@ -356,6 +368,49 @@ impl App {
     pub fn with_image(mut self, image: StatefulProtocol) -> Self {
         self.image = Some(image);
         self
+    }
+
+    /// Draw pictures in the transcript with this protocol: an image or sticker message that states
+    /// its size gets a box, its thumbnail is drawn in it, and `o` fetches the full picture into the
+    /// same box. Without it (the `off` choice, or tests of everything else) messages show their
+    /// `[image]` label only and `o` opens media externally.
+    pub fn with_graphics(mut self, graphics: images::Graphics) -> Self {
+        self.images = Some(images::Images::new(&graphics));
+        self
+    }
+
+    /// Wait until every picture asked for by the last draw is encoded (the workers run off the UI
+    /// thread), or `timeout`; `true` when none is left. The loop never needs it: it redraws every
+    /// tick and draws what is ready.
+    pub fn wait_for_images(&mut self, timeout: std::time::Duration) -> bool {
+        let Some(images) = self.images.as_mut() else {
+            return true;
+        };
+        let (settled, failures) = images.wait(timeout);
+        self.picture_failures(failures);
+        settled
+    }
+
+    /// How many pictures were encoded so far (a cache hit encodes none).
+    pub fn image_encodes(&self) -> u64 {
+        self.images.as_ref().map_or(0, images::Images::encodes)
+    }
+
+    /// How many encodes the workers ran, kept or dropped (a job for an old width is skipped).
+    pub fn image_jobs_run(&self) -> u64 {
+        self.images.as_ref().map_or(0, images::Images::jobs_run)
+    }
+
+    /// How many encoded pictures the cache holds.
+    pub fn image_cache_len(&self) -> usize {
+        self.images.as_ref().map_or(0, images::Images::len)
+    }
+
+    /// A full picture that cannot be shown says why in the footer; its thumbnail stays.
+    fn picture_failures(&mut self, failures: Vec<String>) {
+        if let Some(why) = failures.into_iter().last() {
+            self.notice = Some(format!("cannot show the picture: {why}"));
+        }
     }
 
     /// The prefix of the `client_id`s this app chooses: `<prefix>-1`, `<prefix>-2`, ...
@@ -409,6 +464,7 @@ impl App {
             self.opening = None;
             self.resyncing = None;
             self.marking.clear();
+            self.showing.clear();
         }
     }
 
@@ -672,6 +728,17 @@ impl App {
         if self.marking.remove(alias) {
             self.marking.insert(canonical.to_owned());
         }
+        let moved: Vec<(String, String)> = self
+            .full
+            .keys()
+            .filter(|(jid, _)| jid == alias)
+            .cloned()
+            .collect();
+        for key in moved {
+            if let Some(path) = self.full.remove(&key) {
+                self.full.insert((canonical.to_owned(), key.1), path);
+            }
+        }
         for pending in [&mut self.opening, &mut self.resyncing] {
             if pending.as_deref() == Some(alias) {
                 *pending = Some(canonical.to_owned());
@@ -771,15 +838,28 @@ impl App {
         Some(Action::Request(ClientFrame::retry(client_id)))
     }
 
-    /// `o`: ask the daemon for the selected media message's file.
-    fn download_selected(&mut self) -> Option<Action> {
+    /// `o` (`external` false) and `O` (true): ask the daemon for the selected media message's
+    /// file. With pictures drawn, `o` on an image or sticker shows the full picture in its box;
+    /// everything else (and `O`) opens the file externally once it is downloaded.
+    fn download_selected(&mut self, external: bool) -> Option<Action> {
         let message = self.selected_message()?;
         if message.kind == "text" || message.id.is_empty() {
             return None;
         }
+        let inline = !external && self.images.is_some() && is_picture(&message.kind);
         let id = message.id.clone();
         let jid = self.selected_jid()?.to_owned();
-        self.downloading.insert(id.clone());
+        if inline {
+            if !self.showing.insert(id.clone()) {
+                return None;
+            }
+            if let Some(images) = self.images.as_mut() {
+                images.retry_full(&jid, &id);
+            }
+            self.full.remove(&(jid.clone(), id.clone()));
+        } else {
+            self.downloading.insert(id.clone());
+        }
         Some(Action::Request(ClientFrame::download_media(jid, id)))
     }
 
@@ -898,7 +978,8 @@ impl App {
                 self.picking = self.target_id("reacted to").is_some();
             }
             (Pane::Messages, KeyCode::Char('R')) => return self.retry_selected(),
-            (Pane::Messages, KeyCode::Char('o')) => return self.download_selected(),
+            (Pane::Messages, KeyCode::Char('o')) => return self.download_selected(false),
+            (Pane::Messages, KeyCode::Char('O')) => return self.download_selected(true),
             (Pane::Messages, KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left) => {
                 self.pane = Pane::Chats;
             }
@@ -1184,6 +1265,11 @@ impl App {
                     }
                 }
             }
+            // The full picture asked for with `o`: drawn in its box from the next draw on.
+            DaemonFrame::MediaReady { jid, id, path, .. } if self.showing.remove(id) => {
+                self.full
+                    .insert((jid.clone(), id.clone()), PathBuf::from(path));
+            }
             DaemonFrame::MediaReady { id, path, .. } if self.downloading.remove(id) => {
                 return Some(Action::Open(PathBuf::from(path)));
             }
@@ -1243,6 +1329,7 @@ impl App {
         match frame {
             ClientFrame::DownloadMedia { id, .. } => {
                 self.downloading.remove(id);
+                self.showing.remove(id);
             }
             ClientFrame::Search { .. } => {
                 if let Some(search) = self.search.as_mut() {
@@ -1386,6 +1473,10 @@ impl App {
 
     /// Draw the whole screen into `frame`.
     pub fn draw(&mut self, frame: &mut Frame) {
+        if let Some(images) = self.images.as_mut() {
+            let failures = images.collect();
+            self.picture_failures(failures);
+        }
         let [header, body, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(0),
@@ -1560,9 +1651,19 @@ impl App {
         let heading = key.add_modifier(Modifier::BOLD);
         // A heading per context, then its keys on one wrapped line, so it fits in 80x24.
         let mut lines: Vec<Line> = Vec::new();
+        let pictures = self.images.is_some();
         for (context, keys) in KEYS {
             lines.push(Line::from(Span::styled(*context, heading)));
             let mut spans = vec![Span::raw("  ")];
+            // With pictures off, `o` opens every media externally and `O` is the same key.
+            let keys: Vec<(&str, &str)> = keys
+                .iter()
+                .filter(|(keys, _)| pictures || *keys != "O")
+                .map(|&(keys, does)| match keys {
+                    "o" if !pictures => (keys, "open its media externally"),
+                    _ => (keys, does),
+                })
+                .collect();
             for (n, (keys, does)) in keys.iter().enumerate() {
                 if n > 0 {
                     spans.push(Span::styled(" · ", self.muted()));
@@ -1725,7 +1826,10 @@ impl App {
         if area.is_empty() {
             return;
         }
-        let (lines, selected, owners) = self.conversation_lines();
+        if let Some(images) = self.images.as_mut() {
+            images.resized(area.width);
+        }
+        let (lines, selected, owners, boxes) = self.conversation_lines(area.width);
         let visible = usize::from(area.height);
         if let Some(start) = selected.filter(|_| self.reveal) {
             // Scroll so the selected message's header is on screen.
@@ -1737,16 +1841,19 @@ impl App {
                 .clamp(below.saturating_sub(visible), below.saturating_sub(1));
         }
         self.reveal = false;
-        // Which message each wrapped row belongs to, for the mouse.
-        let wrapped: Vec<Option<usize>> = lines
+        // How many rows each line wraps to, and which message each row belongs to (the mouse).
+        let heights: Vec<usize> = lines
+            .iter()
+            .map(|line| {
+                Paragraph::new(line.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(area.width)
+            })
+            .collect();
+        let wrapped: Vec<Option<usize>> = heights
             .iter()
             .zip(&owners)
-            .flat_map(|(line, owner)| {
-                let rows = Paragraph::new(line.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(area.width);
-                std::iter::repeat_n(*owner, rows)
-            })
+            .flat_map(|(&rows, owner)| std::iter::repeat_n(*owner, rows))
             .collect();
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
         let total = paragraph.line_count(area.width);
@@ -1764,6 +1871,12 @@ impl App {
                 .take(visible)
                 .collect()
         };
+        // The transcript row drawn on the area's first row (negative: a short one sits low).
+        let first_row = if total < visible {
+            -((visible - total) as i64)
+        } else {
+            (top - self.scroll) as i64
+        };
         if total < visible {
             // Newest at the bottom: a short conversation sits on the composer.
             let area = Rect {
@@ -1776,14 +1889,162 @@ impl App {
             let offset = u16::try_from(top - self.scroll).unwrap_or(u16::MAX);
             frame.render_widget(paragraph.scroll((offset, 0)), area);
         }
+        self.draw_pictures(frame, area, &boxes, &heights, first_row);
     }
 
-    /// The selected chat's conversation, oldest first; before it is loaded, its last message.
-    /// Also the index of the selected message's header line, and for each line the index of the
-    /// loaded message it belongs to.
-    fn conversation_lines(&self) -> (Vec<Line<'static>>, Option<usize>, Vec<Option<usize>>) {
+    /// Draw each picture box that is at least partly on screen, over the blank rows reserved for
+    /// it: the full picture when it is encoded, else the thumbnail (encoded on a worker the first
+    /// time it shows; the box stays blank meanwhile), else the `[image]` or `[sticker]` label (no
+    /// thumbnail, or one that does not decode). A box cut by the top or the bottom of the area is
+    /// drawn cut. A full picture asked for with `o` is encoded whether it is on screen or not.
+    fn draw_pictures(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        boxes: &[PictureBox],
+        heights: &[usize],
+        first_row: i64,
+    ) {
+        let label_style = self.muted();
+        let Some(jid) = self.selected_jid().map(str::to_owned) else {
+            return;
+        };
+        let Some(images) = self.images.as_mut() else {
+            return;
+        };
+        let messages = self.conversations.get(&jid).map_or(&[][..], Vec::as_slice);
+        // A full picture with no box yet (its message states no size) is decoded to learn its
+        // size; one with a box is encoded only while the box is on screen (below).
+        for ((chat, id), path) in &self.full {
+            let boxed = boxes
+                .iter()
+                .any(|b| messages.get(b.index).is_some_and(|m| &m.id == id));
+            if chat != &jid || boxed {
+                continue;
+            }
+            let key = images::Key {
+                chat: jid.clone(),
+                id: id.clone(),
+                variant: images::Variant::Full,
+                columns: area.width,
+            };
+            if images.wants(&key) {
+                images.request(key, images::Origin::File(path.clone()), None);
+            }
+        }
+        let mut starts = Vec::with_capacity(heights.len());
+        let mut row = 0;
+        for height in heights {
+            starts.push(row);
+            row += height;
+        }
+        let visible = i64::from(area.height);
+        for picture in boxes {
+            let Some(message) = messages.get(picture.index) else {
+                continue;
+            };
+            let y = starts.get(picture.line).map_or(0, |&s| s as i64) - first_row;
+            if y >= visible || y + i64::from(picture.size.height) <= 0 {
+                continue;
+            }
+            let Ok(position_y) = i16::try_from(y) else {
+                continue;
+            };
+            let position = SignedPosition {
+                x: 0,
+                y: position_y,
+            };
+            let key = |variant| images::Key {
+                chat: jid.clone(),
+                id: message.id.clone(),
+                variant,
+                columns: area.width,
+            };
+            if let Some(protocol) = images.get(&key(images::Variant::Full)) {
+                frame.render_widget(SlicedImage::new(protocol, position), area);
+                continue;
+            }
+            if let Some(path) = self.full.get(&(jid.clone(), message.id.clone())) {
+                let full = key(images::Variant::Full);
+                if images.wants(&full) {
+                    images.request(full, images::Origin::File(path.clone()), Some(picture.size));
+                }
+            }
+            let thumb = message
+                .thumb
+                .as_ref()
+                .filter(|_| !images.has_failed(&jid, &message.id, images::Variant::Thumb));
+            if let Some(thumb) = thumb {
+                let thumb_key = key(images::Variant::Thumb);
+                if let Some(protocol) = images.get(&thumb_key) {
+                    frame.render_widget(SlicedImage::new(protocol, position), area);
+                } else {
+                    images.request(
+                        thumb_key,
+                        images::Origin::Base64(thumb.clone()),
+                        Some(picture.size),
+                    );
+                }
+                continue;
+            }
+            if (0..visible).contains(&y) {
+                let label = Rect {
+                    y: area.y + y as u16,
+                    height: 1,
+                    ..area
+                };
+                frame.render_widget(
+                    Paragraph::new(format!("[{}]", plain(&message.kind))).style(label_style),
+                    label,
+                );
+            }
+        }
+    }
+
+    /// The box a picture message gets in a transcript `columns` wide, when pictures are drawn: from
+    /// the size the message states, else from its full picture once that is decoded; `None` for
+    /// any other message.
+    fn picture_box(
+        &self,
+        jid: &str,
+        message: &Message,
+        columns: u16,
+    ) -> Option<ratatui::layout::Size> {
+        let images = self.images.as_ref()?;
+        if !is_picture(&message.kind) || message.id.is_empty() {
+            return None;
+        }
+        let (width, height) = match (message.width, message.height) {
+            (Some(width), Some(height)) => (width, height),
+            _ => images.full_pixels(jid, &message.id)?,
+        };
+        Some(images::box_size(width, height, columns, images.font()))
+    }
+
+    /// Whether the full picture of `message` is being fetched or decoded (`Downloading…`).
+    fn fetching(&self, jid: &str, message: &Message, columns: u16) -> bool {
+        if self.showing.contains(&message.id) {
+            return true;
+        }
+        self.full
+            .contains_key(&(jid.to_owned(), message.id.clone()))
+            && self.images.as_ref().is_some_and(|images| {
+                images.is_pending(&images::Key {
+                    chat: jid.to_owned(),
+                    id: message.id.clone(),
+                    variant: images::Variant::Full,
+                    columns,
+                })
+            })
+    }
+
+    /// The selected chat's conversation, oldest first, laid out `columns` wide; before it is
+    /// loaded, its last message. Also the index of the selected message's header line, for each
+    /// line the index of the loaded message it belongs to, and the picture boxes (blank lines the
+    /// pictures are drawn over).
+    fn conversation_lines(&self, columns: u16) -> ConversationLines {
         let Some(chat) = self.selected_chat() else {
-            return (Vec::new(), None, Vec::new());
+            return (Vec::new(), None, Vec::new(), Vec::new());
         };
         let loaded = self.conversations.get(&chat.jid);
         let messages: Vec<&Message> = match loaded {
@@ -1795,12 +2056,14 @@ impl App {
                 vec![Line::from(Span::styled("(no messages)", self.muted()))],
                 None,
                 vec![None],
+                Vec::new(),
             );
         }
         let body = Style::default().fg(rgb(self.palette.foreground));
         let mut lines = Vec::with_capacity(messages.len() * 2);
         let mut owners = Vec::with_capacity(messages.len() * 2);
         let mut selected = None;
+        let mut boxes = Vec::new();
         for (index, message) in messages.iter().enumerate() {
             let owner = loaded.is_some().then_some(index);
             let chosen = loaded.is_some() && self.cursor == Some(index);
@@ -1834,12 +2097,38 @@ impl App {
             let text = if message.kind == "text" {
                 message.text.clone()
             } else {
-                format!("[{}] {}", message.kind, message.text)
+                // An animated sticker shows its first frame; the marker says it moves.
+                let marker = if message.kind == "sticker" && message.animated {
+                    " ▶"
+                } else {
+                    ""
+                };
+                let text = format!("[{}]{marker} {}", message.kind, message.text);
+                if self.fetching(&chat.jid, message, columns) {
+                    downloading(&text, columns)
+                } else {
+                    text
+                }
             };
             lines.extend(
                 text.lines()
                     .map(|line| Line::from(Span::styled(plain(line), body))),
             );
+            if let Some(size) = loaded
+                .is_some()
+                .then(|| self.picture_box(&chat.jid, message, columns))
+                .flatten()
+            {
+                boxes.push(PictureBox {
+                    line: lines.len(),
+                    size,
+                    index,
+                });
+                lines.extend(std::iter::repeat_n(
+                    Line::default(),
+                    usize::from(size.height),
+                ));
+            }
             if !message.reactions.is_empty() {
                 let mut spans = vec![Span::raw("  ")];
                 for reaction in &message.reactions {
@@ -1854,7 +2143,7 @@ impl App {
             }
             owners.resize(lines.len(), owner);
         }
-        (lines, selected, owners)
+        (lines, selected, owners, boxes)
     }
 
     fn header_of(&self, chat: &Chat, message: &Message) -> String {
@@ -1871,6 +2160,54 @@ impl App {
             .fg(rgb(self.palette.foreground))
             .add_modifier(Modifier::DIM)
     }
+}
+
+/// The transcript as laid out: its lines, the selected message's header line, each line's
+/// message, and the picture boxes.
+type ConversationLines = (
+    Vec<Line<'static>>,
+    Option<usize>,
+    Vec<Option<usize>>,
+    Vec<PictureBox>,
+);
+
+/// A picture's box in the transcript: its first (blank) line, its size in cells, and the index of
+/// its loaded message.
+struct PictureBox {
+    line: usize,
+    size: ratatui::layout::Size,
+    index: usize,
+}
+
+/// A picture's caption with ` · Downloading…` on its last line, cut with `…` where needed so it
+/// wraps to no more rows than the caption alone: the box under it never moves.
+fn downloading(caption: &str, columns: u16) -> String {
+    const SUFFIX: &str = " · Downloading…";
+    let rows = |text: &str| {
+        Paragraph::new(plain(text))
+            .wrap(Wrap { trim: false })
+            .line_count(columns)
+    };
+    let (head, last) = match caption.rsplit_once('\n') {
+        Some((head, last)) => (Some(head), last),
+        None => (None, caption),
+    };
+    let allowed = rows(last);
+    let mut kept: Vec<char> = last.chars().collect();
+    let mut line = format!("{last}{SUFFIX}");
+    while rows(&line) > allowed && !kept.is_empty() {
+        kept.pop();
+        line = format!("{}…{SUFFIX}", kept.iter().collect::<String>());
+    }
+    match head {
+        Some(head) => format!("{head}\n{line}"),
+        None => line,
+    }
+}
+
+/// The kinds drawn as pictures.
+fn is_picture(kind: &str) -> bool {
+    matches!(kind, "image" | "sticker")
 }
 
 /// A draft as drawn: its rows, and the cursor's row and column in them.

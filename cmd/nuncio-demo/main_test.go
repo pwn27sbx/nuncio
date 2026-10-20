@@ -476,22 +476,68 @@ func TestDownloadMediaWritesAPrivateFileWithItsMime(t *testing.T) {
 			if err != nil || st.Mode().Perm() != 0o600 || st.Size() == 0 {
 				t.Fatalf("downloaded file %s: %v, %v; want a non-empty 0600 file", ready.Path, st, err)
 			}
-			if m.Kind == ipc.KindImage {
-				head := make([]byte, 8)
-				f, _ := os.Open(ready.Path)
-				_, _ = io.ReadFull(f, head)
-				_ = f.Close()
-				if !bytes.Equal(head, []byte("\x89PNG\r\n\x1a\n")) {
-					t.Errorf("image file starts %q; want a PNG", head)
-				}
+			head := make([]byte, 12)
+			f, _ := os.Open(ready.Path)
+			_, _ = io.ReadFull(f, head)
+			_ = f.Close()
+			if m.Kind == ipc.KindImage && !bytes.Equal(head[:8], []byte("\x89PNG\r\n\x1a\n")) {
+				t.Errorf("image file starts %q; want a PNG", head)
+			}
+			if m.Kind == ipc.KindSticker && (string(head[:4]) != "RIFF" || string(head[8:12]) != "WEBP") {
+				t.Errorf("sticker file starts %q; want a WebP", head)
 			}
 		}
 	}
-	if !kinds[ipc.KindImage] || !kinds[ipc.KindDocument] {
-		t.Errorf("media kinds found %v; want an image and a document", kinds)
+	if !kinds[ipc.KindImage] || !kinds[ipc.KindDocument] || !kinds[ipc.KindSticker] {
+		t.Errorf("media kinds found %v; want an image, a sticker and a document", kinds)
 	}
 	if _, err := c.DownloadMedia(ana, "NOPE"); err == nil {
 		t.Error("download of an unknown id succeeded")
+	}
+}
+
+// The pictures carry what a real image or sticker message carries: the thumbnail WhatsApp embeds
+// (JPEG for a photo, PNG for a sticker), the size and the animated flag, so the TUI can draw them
+// before anything is downloaded. A chat's last message never carries them, as on the wire.
+func TestPicturesCarryAThumbnailAndTheirSize(t *testing.T) {
+	sock, _ := runDemo(t)
+	c := dial(t, sock)
+	msgs, err := c.Messages(group, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var photo, still, animated, bare bool
+	for _, m := range msgs.Messages {
+		switch {
+		case m.Kind == ipc.KindImage:
+			photo = bytes.HasPrefix(m.Thumb, []byte{0xff, 0xd8, 0xff}) && m.ThumbMime == "image/jpeg" &&
+				m.Width > 0 && m.Height > 0
+		case m.Kind == ipc.KindSticker && len(m.Thumb) == 0:
+			bare = m.Width == 512 && m.Height == 512
+		case m.Kind == ipc.KindSticker:
+			png := bytes.HasPrefix(m.Thumb, []byte("\x89PNG\r\n\x1a\n")) && m.ThumbMime == "image/png" &&
+				m.Width == 512 && m.Height == 512 && m.Media != nil && m.Media.Mime == "image/webp"
+			if m.Animated {
+				animated = png
+			} else {
+				still = png
+			}
+		}
+		if len(m.Thumb) > 64<<10 {
+			t.Errorf("thumbnail of %s is %d bytes; the wire allows 64 KiB", m.ID, len(m.Thumb))
+		}
+	}
+	if !photo || !still || !animated || !bare {
+		t.Errorf("photo %v, still sticker %v, animated sticker %v, sticker without thumbnail %v; want all", photo, still, animated, bare)
+	}
+	chats, err := c.Chats(200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ch := range chats.Chats {
+		if last := ch.LastMessage; last != nil && (len(last.Thumb) > 0 || last.Width != 0 || last.Height != 0 || last.Animated) {
+			t.Errorf("last message of %s carries a thumbnail or size", ch.JID)
+		}
 	}
 }
 

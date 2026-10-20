@@ -46,6 +46,7 @@ fn chat(jid: &str, name: &str, unread: u32) -> Chat {
         pinned: false,
         muted: false,
         aliases: Vec::new(),
+        phone: None,
         last_message: None,
     }
 }
@@ -110,11 +111,11 @@ impl Screen {
             .collect()
     }
 
-    /// The column of the chat pane's right border.
+    /// The column of the chat pane's right border (thick when the list has the focus).
     fn split(&self) -> usize {
         self.rows[1]
             .iter()
-            .position(|cell| cell == "┐")
+            .position(|cell| cell == "┐" || cell == "┓")
             .expect("the chat pane's top-right corner")
     }
 
@@ -149,18 +150,21 @@ fn render(app: &mut App, width: u16, height: u16) -> Screen {
     Screen { rows }
 }
 
-/// Open the first chat and load `oldest_first` into it.
+/// Open the first chat and load `oldest_first` into it, then leave the composer Enter focused for
+/// the conversation (Esc).
 fn open_first(app: &mut App, jid: &str, oldest_first: Vec<Message>) {
     assert_eq!(
         app.handle_key(key(KeyCode::Enter)),
         Some(Action::Request(ClientFrame::messages(jid, 200))),
         "Enter on a chat asks the daemon for its messages"
     );
-    assert_eq!(app.pane(), Pane::Messages);
+    assert_eq!(app.pane(), Pane::Compose, "ready to write");
     let unread = app.chats()[app.selected()].unread;
     // An unread chat is marked read once its messages are in (S8).
     let mark_read = (unread > 0).then(|| Action::Request(ClientFrame::mark_read(jid)));
     assert_eq!(app.apply(&messages_reply(jid, oldest_first)), mark_read);
+    assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
+    assert_eq!(app.pane(), Pane::Messages);
 }
 
 #[test]
@@ -244,10 +248,8 @@ fn emoji_zwj_cjk_and_rtl_text_keep_the_frame_intact() {
         let screen = render(&mut app, width, height);
         // The chat pane's right border and the screen's right border stay in their columns on
         // every body row: no wide character pushed a border out.
-        let chat_right = screen.rows[1]
-            .iter()
-            .position(|cell| cell == "┐")
-            .expect("the chat pane's top-right corner") as u16;
+        let chat_right = screen.split() as u16;
+        // The list's border is thin (the conversation has the focus), the conversation's thick.
         for y in 2..height - 2 {
             assert_eq!(
                 screen.cell(chat_right, y),
@@ -257,7 +259,7 @@ fn emoji_zwj_cjk_and_rtl_text_keep_the_frame_intact() {
             );
             assert_eq!(
                 screen.cell(width - 1, y),
-                "│",
+                "┃",
                 "right border at row {y}, {width}x{height}:\n{}",
                 screen.text()
             );
@@ -321,15 +323,15 @@ fn two_hundred_messages_scroll_to_the_top_and_back_quickly() {
         screen
     };
 
-    // Line by line upward, then page by page, then all the way.
+    // Select the newest (it stays in view), then page by page, then all the way.
     let after_k = timed(&mut app, KeyCode::Char('k'));
-    assert!(!after_k.contains("message 199") || after_k.contains("message 198"));
+    assert!(after_k.contains("› Ada Lovelace ·") && after_k.contains("message 199"));
     timed(&mut app, KeyCode::PageUp);
     let top = timed(&mut app, KeyCode::Char('g'));
     assert!(top.contains("message 000"), "top:\n{top}");
     assert!(!top.contains("message 199"), "top:\n{top}");
     // Past the top stays at the top.
-    let still_top = timed(&mut app, KeyCode::Char('k'));
+    let still_top = timed(&mut app, KeyCode::PageUp);
     assert!(still_top.contains("message 000"), "{still_top}");
 
     timed(&mut app, KeyCode::PageDown);
@@ -337,11 +339,11 @@ fn two_hundred_messages_scroll_to_the_top_and_back_quickly() {
     assert!(bottom.contains("message 199"), "bottom:\n{bottom}");
     assert!(!bottom.contains("message 000"));
     // Past the bottom stays at the bottom.
-    let still = timed(&mut app, KeyCode::Char('j'));
+    let still = timed(&mut app, KeyCode::PageDown);
     assert!(still.contains("message 199"), "{still}");
 }
 
-/// Select the second chat, open it, write "on my way" and send it.
+/// Select the second chat, open it (the composer is focused), write "on my way" and send it.
 fn write_and_send(app: &mut App) -> String {
     assert_eq!(app.handle_key(key(KeyCode::Char('j'))), None);
     assert_eq!(
@@ -352,7 +354,6 @@ fn write_and_send(app: &mut App) -> String {
         GRACE,
         vec![message("G1", "Ship it?", false, 5)],
     ));
-    assert_eq!(app.handle_key(key(KeyCode::Char('i'))), None);
     assert_eq!(app.pane(), Pane::Compose);
     type_text(app, "on my wayy");
     app.handle_key(key(KeyCode::Backspace));
@@ -468,7 +469,7 @@ fn a_send_answered_sent_or_failed_shows_that_state() {
 fn an_empty_composer_sends_nothing() {
     let mut app = two_chats();
     app.handle_key(key(KeyCode::Enter));
-    app.handle_key(key(KeyCode::Char('i')));
+    assert_eq!(app.pane(), Pane::Compose);
     type_text(&mut app, "   ");
     assert_eq!(app.handle_key(key(KeyCode::Enter)), None);
 }
@@ -687,8 +688,8 @@ fn a_reply_quotes_the_selected_message_and_the_transcript_shows_the_quote() {
     let mut app = two_chats().with_client_prefix("t");
     ada_conversation(&mut app);
     // K selects the newest message, then one older each time.
-    assert_eq!(app.handle_key(shift('K')), None);
-    assert_eq!(app.handle_key(shift('K')), None);
+    assert_eq!(app.handle_key(key(KeyCode::Char('k'))), None);
+    assert_eq!(app.handle_key(key(KeyCode::Char('k'))), None);
     let screen = render(&mut app, 80, 24).conversation();
     assert!(screen.contains("› Ada Lovelace · 17:01"), "{screen}");
     assert_eq!(app.handle_key(key(KeyCode::Char('r'))), None);
@@ -740,8 +741,8 @@ fn a_reply_quotes_the_selected_message_and_the_transcript_shows_the_quote() {
 fn react_sends_the_chosen_emoji_and_reactions_render_under_the_message() {
     let mut app = two_chats();
     ada_conversation(&mut app);
-    app.handle_key(shift('K'));
-    app.handle_key(shift('K'));
+    app.handle_key(key(KeyCode::Char('k')));
+    app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.handle_key(key(KeyCode::Char('e'))), None);
     let screen = render(&mut app, 80, 24).text();
     assert!(screen.contains("👍") && screen.contains("🙏"), "{screen}");
@@ -799,19 +800,17 @@ fn retry_sends_retry_with_the_client_id_of_a_send_that_is_not_sent() {
         id: None,
         timestamp: None,
     });
-    app.handle_key(shift('K'));
+    app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.handle_key(shift('R')), None);
-    app.handle_key(key(KeyCode::Esc));
     app.apply(&DaemonFrame::SendFailed {
         v: 1,
         client_id: client_id.clone(),
         message: "not accepted".to_owned(),
     });
     // R on a message that was received does nothing.
-    app.handle_key(shift('K'));
-    app.handle_key(shift('K'));
+    app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.handle_key(shift('R')), None);
-    app.handle_key(shift('J'));
+    app.handle_key(key(KeyCode::Char('j')));
     assert_eq!(
         app.handle_key(shift('R')),
         Some(Action::Request(ClientFrame::retry(client_id)))
@@ -929,15 +928,13 @@ fn a_refused_reaction_shows_the_daemons_error_and_changes_nothing() {
     let mut daemon = Daemon::connect(&path, "nuncio-tui/test").expect("connect");
     let mut app = two_chats();
     ada_conversation(&mut app);
+    app.handle_key(key(KeyCode::Char('k')));
     let before = render(&mut app, 120, 24).conversation();
-    app.handle_key(shift('K'));
     app.handle_key(key(KeyCode::Char('e')));
     let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Char('2'))) else {
         panic!("2 reacts");
     };
     daemon.perform(&mut app, &frame).expect("perform");
-    app.handle_key(shift('J'));
-    app.handle_key(key(KeyCode::Esc));
     let screen = render(&mut app, 120, 24);
     let footer = screen.text().lines().last().unwrap_or_default().to_owned();
     assert!(footer.contains("reaction was not sent"), "{footer}");
@@ -999,7 +996,7 @@ fn o_downloads_the_media_and_opens_it_exactly_once_and_nothing_opens_without_it(
     assert!(opened.lock().expect("lock").is_empty());
 
     app.apply(&messages_reply(ADA, vec![media_message("IMG1")]));
-    app.handle_key(shift('K'));
+    app.handle_key(key(KeyCode::Char('k')));
     let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Char('o'))) else {
         panic!("o downloads");
     };
@@ -1057,7 +1054,7 @@ fn a_refused_download_shows_the_error_and_a_later_media_ready_opens_nothing() {
         });
     let mut app = two_chats();
     open_first(&mut app, ADA, vec![media_message("IMG1")]);
-    app.handle_key(shift('K'));
+    app.handle_key(key(KeyCode::Char('k')));
     let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Char('o'))) else {
         panic!("o downloads");
     };
@@ -1176,7 +1173,7 @@ fn a_long_preview_is_cut_with_an_ellipsis_and_its_time_stays_whole() {
                 .find(|l| l.contains(start))
                 .unwrap_or_else(|| panic!("no {start:?} row at {width}x{height}:\n{chats}"));
             assert!(
-                row.trim_end_matches([' ', '│']).ends_with(end),
+                row.trim_end_matches([' ', '│', '┃']).ends_with(end),
                 "{start:?} at {width}x{height}: {row:?}"
             );
         }
@@ -1279,7 +1276,7 @@ fn a_message_whatsapp_does_not_have_cannot_be_reacted_to_or_replied_to() {
                 failed,
             ],
         );
-        app.handle_key(shift('K'));
+        app.handle_key(key(KeyCode::Char('k')));
         assert_eq!(app.handle_key(key(KeyCode::Char('e'))), None, "{state:?}");
         assert!(
             footer(&mut app).contains("that message was not sent, so it cannot be reacted to"),
@@ -1299,20 +1296,20 @@ fn a_message_whatsapp_does_not_have_cannot_be_reacted_to_or_replied_to() {
             footer(&mut app)
         );
         // A sent message of mine and a received one still can.
-        app.handle_key(shift('K'));
+        app.handle_key(key(KeyCode::Char('k')));
         app.handle_key(key(KeyCode::Char('e')));
         assert_eq!(
             app.handle_key(key(KeyCode::Char('1'))),
             Some(Action::Request(ClientFrame::react(ADA, "A2", "👍")))
         );
-        app.handle_key(shift('K'));
+        app.handle_key(key(KeyCode::Char('k')));
         app.handle_key(key(KeyCode::Char('r')));
         assert_eq!(app.pane(), Pane::Compose);
     }
     // A send still waiting for the daemon (no id yet) says so too.
     let mut app = two_chats().with_client_prefix("t");
     write_and_send(&mut app);
-    app.handle_key(shift('K'));
+    app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.handle_key(key(KeyCode::Char('e'))), None);
     assert!(
         footer(&mut app).contains("that message was not sent, so it cannot be reacted to"),
@@ -1596,7 +1593,7 @@ fn a_not_confirmed_send_says_so_and_r_retries_it_under_the_same_client_id() {
     assert!(screen.contains("· not confirmed"), "{screen}");
     assert!(!screen.contains("not sent"), "{screen}");
 
-    app.handle_key(shift('K'));
+    app.handle_key(key(KeyCode::Char('k')));
     let retry = app.handle_key(shift('R'));
     assert_eq!(
         retry,
@@ -1919,9 +1916,9 @@ fn alt_enter_and_ctrl_j_insert_a_newline_and_enter_sends_the_text_with_its_newli
         .filter(|l| l.contains("first") || l.contains("second") || l.contains("third"))
         .collect();
     assert_eq!(rows.len(), 3, "{screen}");
-    assert!(rows[0].contains("│first "), "{screen}");
-    assert!(rows[1].contains("│second "), "{screen}");
-    assert!(rows[2].contains("│third "), "{screen}");
+    assert!(rows[0].contains("┃first "), "{screen}");
+    assert!(rows[1].contains("┃second "), "{screen}");
+    assert!(rows[2].contains("┃third "), "{screen}");
 }
 
 #[test]
@@ -2062,8 +2059,8 @@ fn a_draft_longer_than_the_pane_wraps_and_the_cursor_follows_it() {
     assert!(cursor.1 > prompt.1, "the draft wrapped:\n{}", screen.text());
     let border = screen.rows[usize::from(cursor.1)]
         .iter()
-        .rposition(|cell| cell == "│")
-        .expect("the right border");
+        .rposition(|cell| cell == "┃")
+        .expect("the right border (thick: the composer has the focus)");
     assert!(
         usize::from(cursor.0) < border,
         "the cursor is inside the pane"
@@ -2081,6 +2078,7 @@ fn the_help_footer_and_keys_name_the_composer_keys() {
     assert!(footer.contains("Alt-Enter newline"), "{footer}");
     let keys: Vec<String> = nuncio_tui::KEYS
         .iter()
+        .flat_map(|(_, keys)| keys.iter())
         .map(|(k, what)| format!("{k} {what}"))
         .collect();
     assert!(keys.iter().any(|k| k.contains("Alt-Enter")), "{keys:?}");
@@ -2089,7 +2087,11 @@ fn the_help_footer_and_keys_name_the_composer_keys() {
     app.handle_key(key(KeyCode::Esc));
     app.handle_key(key(KeyCode::Char('?')));
     let screen = render(&mut app, 80, 24).text();
-    assert!(screen.contains("q Ctrl-C quit"), "{screen}");
+    assert!(screen.contains("Ctrl-C quit"), "{screen}");
+    assert!(
+        screen.contains("Shift+drag selects text"),
+        "the last key:\n{screen}"
+    );
     assert!(screen.contains("Alt-Enter C-j"), "{screen}");
 }
 
@@ -2119,7 +2121,7 @@ fn a_resync_that_drops_the_open_alias_chat_never_sends_the_draft_elsewhere() {
     let mut a = app_with(vec![chat(GRACE, "Grace", 0), chat(ADA_PN, "Ada", 0)]);
     a.select_next();
     a.handle_key(key(KeyCode::Enter));
-    a.handle_key(key(KeyCode::Char('i')));
+    assert_eq!(a.pane(), Pane::Compose);
     type_text(&mut a, "for ada only");
     a.set_connected(false);
     a.set_connected(true);
@@ -2329,7 +2331,8 @@ fn a_reacted_reply_about_another_chat_never_renames_the_pending_one() {
         ADA_PN,
         vec![message("A1", "hello", false, 1)],
     ));
-    a.handle_key(shift('K'));
+    a.handle_key(key(KeyCode::Esc));
+    a.handle_key(key(KeyCode::Char('k')));
     a.handle_key(key(KeyCode::Char('e')));
     assert!(matches!(
         a.handle_key(key(KeyCode::Char('1'))),
@@ -2378,7 +2381,7 @@ fn typing_through_a_merge_never_sends_the_draft_to_another_chat() {
     a.select_next();
     a.handle_key(key(KeyCode::Enter));
     a.apply(&messages_reply(ADA_PN, vec![]));
-    a.handle_key(key(KeyCode::Char('i')));
+    assert_eq!(a.pane(), Pane::Compose);
     type_text(&mut a, "for ada");
     a.apply(&DaemonFrame::Chats {
         v: 1,
@@ -2481,7 +2484,7 @@ fn a_mark_read_lost_with_the_connection_does_not_block_the_next_one() {
 fn a_reacted_reply_to_my_own_react_adopts_the_lid_chat() {
     let mut a = app_with(vec![chat(ADA_PN, "Ada", 0)]);
     open_first(&mut a, ADA_PN, vec![message("A1", "hello", false, 1)]);
-    a.handle_key(shift('K'));
+    a.handle_key(key(KeyCode::Char('k')));
     a.handle_key(key(KeyCode::Char('e')));
     let Some(Action::Request(request)) = a.handle_key(key(KeyCode::Char('1'))) else {
         panic!("1 reacts");

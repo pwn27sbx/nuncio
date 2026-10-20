@@ -89,7 +89,7 @@ func (s *Session) applyMarkChatAsRead(evt *waevents.MarkChatAsRead) {
 }
 
 // publishChat publishes chat jid as event_chat, as it is stored now, with the phone-number chats
-// merged into it (ChatAliases).
+// merged into it (ChatAliases) and its masked phone number (ChatPhone).
 func (s *Session) publishChat(jid string) {
 	c, err := StoredChat(s.db, jid, time.Now())
 	if err != nil {
@@ -97,6 +97,7 @@ func (s *Session) publishChat(jid string) {
 		return
 	}
 	c.Aliases = s.ChatAliases(jid)
+	c.Phone = s.ChatPhone(jid)
 	s.publish(ipc.EventChat{V: ipc.Version, Op: ipc.OpEventChat, Chat: c})
 }
 

@@ -197,6 +197,7 @@ fn chat(jid: &str, name: &str) -> Chat {
         pinned: false,
         muted: false,
         aliases: Vec::new(),
+        phone: None,
         last_message: None,
     }
 }
@@ -250,13 +251,17 @@ fn connect(path: &Path) -> Daemon {
         .with_backoff(Backoff::new(ms(20), ms(80)))
 }
 
-/// Open the selected chat through the daemon.
+/// Open the selected chat through the daemon (Enter, which focuses the composer), then leave the
+/// composer for the conversation (Esc).
 fn open(daemon: &mut Daemon, app: &mut App) {
     let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Enter)) else {
         panic!("Enter opens the chat");
     };
+    assert_eq!(app.pane(), Pane::Compose);
     daemon.perform(app, &frame).expect("messages");
     assert!(render(app).contains("the newest one"));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.pane(), Pane::Messages);
 }
 
 /// Drain events until `done` holds, then a little longer, so later events are applied too.
@@ -582,11 +587,13 @@ fn ada_open_with_draft(draft: &str, pane: Pane) -> App {
         panic!("Enter opens the chat");
     };
     app.apply_reply(&request, &messages_reply(ADA_PN));
-    if !draft.is_empty() {
-        app.handle_key(key(KeyCode::Char('i')));
-        type_text(&mut app, draft);
-        app.handle_key(key(KeyCode::Esc));
-    }
+    assert_eq!(
+        app.pane(),
+        Pane::Compose,
+        "Enter opens the chat ready to write"
+    );
+    type_text(&mut app, draft);
+    app.handle_key(key(KeyCode::Esc));
     if pane == Pane::Chats {
         app.handle_key(key(KeyCode::Tab));
     }
@@ -729,4 +736,31 @@ fn an_alias_named_later_moves_a_conversation_the_tui_only_holds_in_the_backgroun
         screen.contains("loaded before"),
         "her conversation moved with her:\n{screen}"
     );
+}
+
+#[test]
+fn enter_on_a_vanished_chat_in_the_chat_list_opens_the_composer_but_sends_nothing() {
+    let mut app = ada_open_with_draft("for ada only", Pane::Chats);
+    app.apply(&DaemonFrame::Chats {
+        v: 1,
+        chats: vec![chat(GRACE, "Grace Hopper"), chat(ADA_LID, "Ada Lovelace")],
+    });
+    assert_eq!(
+        app.selected_jid(),
+        Some(ADA_PN),
+        "the vanished chat stays selected"
+    );
+    // Enter on the chat list opens the vanished chat with the composer focused, as on any chat.
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Some(Action::Request(ClientFrame::messages(ADA_PN, 200)))
+    );
+    assert_eq!(app.pane(), Pane::Compose);
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        None,
+        "Enter sends nothing"
+    );
+    assert_eq!(app.composer(), "for ada only");
+    assert!(render(&mut app).contains("merged"));
 }

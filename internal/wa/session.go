@@ -127,6 +127,10 @@ type Session struct {
 	// mergeFailed holds, under mu, the phone-number chats whose merge into their LID chat failed in
 	// this session; they are not tried (or logged) again until the next start.
 	mergeFailed map[string]bool
+	// groupNames holds, under mu, the group subjects learnt in this session (names.go); groupsSynced
+	// is set once the one joined-groups query of this Start was started.
+	groupNames   map[string]string
+	groupsSynced bool
 }
 
 // NewSession wraps client, which may be nil for "no device store at all". db is the message
@@ -192,7 +196,10 @@ func (s *Session) Start() error {
 	if s.db != nil {
 		// A store split before ADR 0001 is merged before anything is served or received.
 		s.mergeKnownAliases()
+		s.refreshStoredNames()
 		events.Message = s.storeMessage
+		events.ContactName = s.contactChanged
+		events.GroupName = s.groupNamed
 		events.Pin = s.applyPin
 		events.Archive = s.applyArchive
 		events.Mute = s.applyMute
@@ -216,6 +223,7 @@ func (s *Session) connected() {
 	s.backoff.Connected()
 	s.mu.Unlock()
 	s.set(StateLinked)
+	s.syncGroupNamesOnce()
 	if s.db != nil {
 		s.drains.Add(1)
 		go func() {
@@ -353,7 +361,7 @@ func (s *Session) set(st State) {
 }
 
 // Close cancels a pending reconnect, disconnects a started session, waits for a running outbox
-// drain and closes the device store.
+// drain or group-subject query and closes the device store.
 // Nothing reconnects after it, and a linked session reports offline from then on (an unlinked
 // one stays unlinked).
 func (s *Session) Close() {
@@ -461,8 +469,13 @@ func OpenSession(ctx context.Context, path string) (*Session, error) {
 	return s, nil
 }
 
-// whatsmeowClient adapts *whatsmeow.Client to Client.
+// whatsmeowClient adapts *whatsmeow.Client to Client, LIDMapper and Contacts.
 type whatsmeowClient struct{ c *whatsmeow.Client }
+
+var (
+	_ LIDMapper = whatsmeowClient{}
+	_ Contacts  = whatsmeowClient{}
+)
 
 func (w whatsmeowClient) HasDevice() bool                  { return w.c.Store.ID != nil }
 func (w whatsmeowClient) Connect() error                   { return w.c.Connect() }
@@ -571,4 +584,36 @@ func (w whatsmeowClient) OwnLID() string {
 		return ""
 	}
 	return lid.ToNonAD().String()
+}
+
+// Contact reads whatsmeow's contact store (Store.Contacts.GetContact: its cache, else one SQLite
+// row of whatsmeow_contacts; never the network). An unknown contact is the zero Contact.
+func (w whatsmeowClient) Contact(ctx context.Context, jid string) (Contact, error) {
+	user, err := types.ParseJID(jid)
+	if err != nil {
+		return Contact{}, errors.New("wa: the contact JID does not parse")
+	}
+	if w.c.Store.Contacts == nil {
+		return Contact{}, nil
+	}
+	info, err := w.c.Store.Contacts.GetContact(ctx, user.ToNonAD())
+	if err != nil {
+		return Contact{}, err
+	}
+	return Contact{FullName: info.FullName, FirstName: info.FirstName, BusinessName: info.BusinessName,
+		PushName: info.PushName}, nil
+}
+
+// JoinedGroups is whatsmeow's GetJoinedGroups: one query for every group the account is in, read
+// here for its subjects only.
+func (w whatsmeowClient) JoinedGroups(ctx context.Context) (map[string]string, error) {
+	groups, err := w.c.GetJoinedGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(groups))
+	for _, g := range groups {
+		out[g.JID.String()] = g.Name
+	}
+	return out, nil
 }

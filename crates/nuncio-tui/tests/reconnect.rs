@@ -211,6 +211,7 @@ fn chat(jid: &str, name: &str) -> Chat {
         pinned: false,
         muted: false,
         aliases: Vec::new(),
+        phone: None,
         last_message: None,
     }
 }
@@ -258,13 +259,17 @@ fn last_line(screen: &str) -> String {
     screen.lines().last().unwrap_or_default().to_owned()
 }
 
-/// Open Ada's chat through the daemon.
+/// Open Ada's chat through the daemon (Enter focuses the composer), then leave the composer for
+/// the conversation (Esc).
 fn open_ada(daemon: &mut Daemon, app: &mut App) {
     let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Enter)) else {
         panic!("Enter opens the chat");
     };
+    assert_eq!(app.pane(), Pane::Compose);
     daemon.perform(app, &frame).expect("messages");
     assert!(render(app, 100, 24).contains("the newest one"));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.pane(), Pane::Messages);
 }
 
 /// Drain until `done` holds for the screen, recording whether the header ever said
@@ -321,7 +326,7 @@ fn after_a_daemon_restart_the_tui_reconnects_resyncs_and_keeps_the_draft_and_sel
     let mut app = app();
     open_ada(&mut daemon, &mut app);
     // Select the newest message, then write a draft.
-    app.handle_key(KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT));
+    app.handle_key(key(KeyCode::Char('k')));
     app.handle_key(key(KeyCode::Char('i')));
     type_text(&mut app, "half a thought");
     ready.send(()).expect("server");

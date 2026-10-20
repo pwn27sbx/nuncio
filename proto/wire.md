@@ -85,7 +85,7 @@ because events were lost; to avoid it, a UI drains every queued event on each ti
 | `event_connection` | `v`, `op`, `session` | `event_connection.json` |
 | `event_unread` | `v`, `op`, `unread` (int, total), `jid`, `chat_unread` (int) | `event_unread.json` |
 | `event_focus` | `v`, `op`, `jid` | `event_focus.json` |
-| `event_chat` | `v`, `op`, `chat` (Chat): published when app-state sync from another device changes a chat's pin, archive or mute; `chat` is the chat as it now is, as `chats` would list it (its unread count and `last_message` included), so a client replaces the chat with the same `jid` or adds it (added in M2). Also published after every merge of a contact's phone-number chat into her LID chat, with `aliases` (T15, see "One chat per contact"): a client then drops or renames the entries named in `aliases` | `event_chat.json`, `event_chat_aliases.json` |
+| `event_chat` | `v`, `op`, `chat` (Chat): published when app-state sync from another device changes a chat's pin, archive or mute; `chat` is the chat as it now is, as `chats` would list it (its unread count and `last_message` included), so a client replaces the chat with the same `jid` or adds it (added in M2). Also published after every merge of a contact's phone-number chat into her LID chat, with `aliases` (T15, see "One chat per contact"): a client then drops or renames the entries named in `aliases`. Also published when a chat's `name` changes (see "Chat names") | `event_chat.json`, `event_chat_aliases.json`, `event_chat_phone.json` |
 
 ### `session`
 
@@ -100,12 +100,13 @@ A string, not a boolean, so it can grow without a protocol break:
 | Field | Type | Notes |
 |---|---|---|
 | `jid` | string | WhatsApp JID, e.g. `15551230001@s.whatsapp.net` |
-| `name` | string | display name, may be empty |
+| `name` | string | display name, may be empty: a group's subject, a contact's address-book, business or push name (see "Chat names") |
 | `unread` | int | >= 0 |
 | `archived` | bool | |
 | `pinned` | bool | |
 | `muted` | bool | true while the chat's mute lasts (muted with no end, or its end still ahead). Added in M1; a client reads a missing key as `false` |
 | `aliases` | array of string or absent | the phone-number JIDs (`digits@s.whatsapp.net`) the daemon merged into this chat, its contact's LID chat (T15, ADR 0001; see "One chat per contact"). Listed only while WhatsApp's LID mapping still points each number to this chat, so a recycled number is never listed on the old contact's chat; omitted when there are none, and absent from an older daemon. Served in `chats` and in every `event_chat` |
+| `phone` | string or absent | the contact's phone number masked to its last four digits (`…0001`): a phone-number chat's own number, a LID chat's number from WhatsApp's LID map (ADR 0002). Absent for a group, for a LID chat whose number is not known, and from an older daemon. A client shows it when `name` is empty |
 | `last_message` | object or absent | omitted for a chat with no messages |
 
 `archived`, `pinned` and `muted` follow the phone: the daemon applies WhatsApp's app-state sync
@@ -146,8 +147,15 @@ so a client replaces it. Reactions never change unread counts. A reaction that a
 bytes never travel over the socket: the daemon downloads them only when a client sends
 `download_media`, into its media cache `$XDG_DATA_HOME/nuncio/media` (directory `0700`, files
 `0600`), and answers `media_ready` with the path of the decrypted file, whose SHA-256 it has
-checked against the one the message carries. A download can take longer than an ordinary read, so
-the Go client waits up to 90 s for that reply.
+checked against the one the message carries. The file's extension is the document's own file-name
+extension when it is a document, archive or media extension (never an executable, script or
+launcher one such as `.sh`, `.desktop`, `.jar` or `.exe`), else the usual one for its mime type
+(`text/plain` → `.txt`, `image/jpeg` → `.jpg`, the Office types → `.docx`/`.xlsx`/`.pptx`, …), else
+the mime subtype when it is such an extension, else none. A file an earlier daemon cached under its
+old name (the raw mime subtype as extension, or no extension when that subtype was not a plain
+short word) is still served without a download: it is first renamed to the current name, which is
+the `path` answered. A download can take longer than an ordinary
+read, so the Go client waits up to 90 s for that reply.
 
 ## Error codes
 
@@ -290,6 +298,27 @@ LID JID is the contact's chat (the *canonical* JID) and the phone-number JID is 
 | A phone number whatsmeow remaps to another LID (a recycled number), or a merge that failed | not listed in `aliases` of the old chat; the number is served as its own chat |
 | The LID of a phone number is not known | exactly the behaviour before T15: the phone-number chat is its own chat; nothing is guessed, and no chat lists `aliases` |
 | Groups, and a chat named by its LID | unchanged |
+
+### Chat names (ADR `docs/adr/0002-chat-names.md`)
+
+The daemon names each stored chat from WhatsApp and serves the name in `name`, in `chats` and in
+every `event_chat`:
+
+| Chat | `name` |
+|---|---|
+| A group | its subject: read once per daemon start (one joined-groups query after the first connection), and kept current from WhatsApp's group notifications (a subject change, a group joined) |
+| A direct chat | the contact's address-book name (full name, else first name), else her business name, else her push name. A LID chat also reads the contact stored under its phone number (WhatsApp's LID map), field by field, so an address-book entry saved under the number beats the push name of the LID |
+| None of these known | empty |
+
+- Names are re-read at daemon start (from what the device already stores, no network), when a chat
+  is created by its first message, and whenever WhatsApp reports a new push name, business name or
+  address-book entry; never a network call per message. A changed name publishes `event_chat` with
+  the chat as it now is.
+- Only chats already stored are named: a contact or a group with nothing stored never appears in
+  `chats` because of its name.
+- A client shows `name`; when it is empty, `phone` (the masked number); when that is absent too, a
+  neutral placeholder. **Never the digits of a LID JID**, which are not a phone number. The daemon
+  logs no name, number or JID while doing this.
 
 A WhatsApp chat JID is one of: `digits@s.whatsapp.net` (a user), `digits@lid` (a user addressed by
 its hidden id; WhatsApp uses it for direct chats too) or `digits-digits@g.us` / `digits@g.us` (a

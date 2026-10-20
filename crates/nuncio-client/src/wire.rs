@@ -498,7 +498,7 @@ impl ErrorCode {
     }
 }
 
-/// A chat, in the M0 shape plus `muted`.
+/// A chat, in the M0 shape plus `muted`, `aliases` and `phone`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Chat {
     /// WhatsApp JID, e.g. `15551230001@s.whatsapp.net`.
@@ -517,6 +517,11 @@ pub struct Chat {
     /// are none, and absent from an older daemon. A client holding one of them adopts this chat.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aliases: Vec<String>,
+    /// The contact's phone number masked to its last four digits (`…0001`), what a client shows
+    /// when `name` is empty (ADR 0002); never the chat's LID digits. Absent for a group, when the
+    /// number is not known, and from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phone: Option<String>,
     /// Absent for a chat with no messages, and it must stay absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_message: Option<Message>,

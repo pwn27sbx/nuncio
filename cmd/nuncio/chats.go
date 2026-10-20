@@ -10,7 +10,7 @@ import (
 	"github.com/pwn27sbx/nuncio/internal/ipc"
 )
 
-// chatsCommand prints one line per chat: its name (or its masked number), unread count,
+// chatsCommand prints one line per chat: its name (or its masked number, see chatName), unread count,
 // pinned/archived markers and the local time of its last message. Message text is never printed.
 func chatsCommand(args []string, stdout, stderr io.Writer) int {
 	if len(args) != 0 {
@@ -43,12 +43,20 @@ func chatsCommand(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
-// chatName is the display name, or the chat's number masked to its last four digits.
+// chatName is the display name, else the masked phone number the daemon serves, else the chat's
+// own number masked to its last four digits. A LID chat (`digits@lid`) has no number of its own:
+// its hidden id is never printed, masked or not.
 func chatName(ch ipc.Chat) string {
 	if ch.Name != "" {
 		return ch.Name
 	}
-	user, _, _ := strings.Cut(ch.JID, "@")
+	if ch.Phone != "" {
+		return ch.Phone
+	}
+	user, server, _ := strings.Cut(ch.JID, "@")
+	if server == "lid" {
+		return "hidden number"
+	}
 	return maskPhone(user)
 }
 

@@ -3,8 +3,20 @@ package wa
 import (
 	"time"
 
+	"go.mau.fi/whatsmeow/types"
 	waevents "go.mau.fi/whatsmeow/types/events"
 )
+
+// nonAD is the non-empty JIDs among jids, without device, as strings.
+func nonAD(jids ...types.JID) []string {
+	var out []string
+	for _, j := range jids {
+		if !j.IsEmpty() {
+			out = append(out, j.ToNonAD().String())
+		}
+	}
+	return out
+}
 
 // Events routes the whatsmeow events nuncio acts on to typed callbacks; a nil callback ignores its
 // event. It is the one event switch, shared by `nuncio link` and the daemon's Session, so the two
@@ -31,6 +43,11 @@ type Events struct {
 	Archive        func(*waevents.Archive)
 	Mute           func(*waevents.Mute)
 	MarkChatAsRead func(*waevents.MarkChatAsRead)
+	// ContactName: whatsmeow stored a new push name, business name or address-book name (app-state
+	// contact action) for these user JIDs (without device; the alternate JID of a push name too).
+	ContactName func(users ...string)
+	// GroupName: a group's subject, from a GroupInfo subject change or a JoinedGroup.
+	GroupName func(group, subject string)
 }
 
 // Handle dispatches one raw whatsmeow event.
@@ -94,6 +111,26 @@ func (e Events) Handle(raw any) {
 	case *waevents.MarkChatAsRead:
 		if e.MarkChatAsRead != nil {
 			e.MarkChatAsRead(v)
+		}
+	case *waevents.PushName:
+		if e.ContactName != nil {
+			e.ContactName(nonAD(v.JID, v.JIDAlt)...)
+		}
+	case *waevents.BusinessName:
+		if e.ContactName != nil {
+			e.ContactName(nonAD(v.JID)...)
+		}
+	case *waevents.Contact:
+		if e.ContactName != nil {
+			e.ContactName(nonAD(v.JID)...)
+		}
+	case *waevents.GroupInfo:
+		if e.GroupName != nil && v.Name != nil {
+			e.GroupName(v.JID.String(), v.Name.Name)
+		}
+	case *waevents.JoinedGroup:
+		if e.GroupName != nil {
+			e.GroupName(v.JID.String(), v.GroupName.Name)
 		}
 	}
 }

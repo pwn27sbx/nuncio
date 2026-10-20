@@ -139,6 +139,9 @@ func (s *Session) mergeAlias(pn, lid string) bool {
 		return false
 	}
 	if merged {
+		// The merge keeps the LID chat's name; the number's address-book entry may outrank it, so
+		// the name is resolved again before the one event_chat of the merge.
+		s.storeName(lid)
 		s.publishChat(lid)
 	}
 	return true

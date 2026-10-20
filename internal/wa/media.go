@@ -146,7 +146,7 @@ func (s *Session) DownloadMedia(jid, id string) (string, string, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), mediaTimeout)
 	defer cancel()
-	path, err := cache.Fetch(ctx, media.Request{ChatJID: jid, MessageID: id, Ext: extOf(m.Mime), Media: sub})
+	path, err := cache.Fetch(ctx, media.Request{ChatJID: jid, MessageID: id, Ext: extFor(m), Legacy: legacyExt(m.Mime), Media: sub})
 	switch {
 	case err == nil:
 		return path, m.Mime, nil
@@ -167,9 +167,69 @@ func (s *Session) DownloadMedia(jid, id string) (string, string, error) {
 	return "", "", ErrMediaNotDownloaded
 }
 
-// extOf is the cache file extension hinted by a mime type ("image/jpeg" gives "jpeg",
-// "audio/ogg; codecs=opus" gives "ogg"); the media package drops anything unsafe.
-func extOf(mime string) string {
+// mimeExts maps the mime types whose subtype is not their usual file extension.
+var mimeExts = map[string]string{
+	"text/plain":               "txt",
+	"image/jpeg":               "jpg",
+	"audio/mpeg":               "mp3",
+	"audio/mp4":                "m4a",
+	"audio/ogg":                "ogg",
+	"video/quicktime":          "mov",
+	"text/csv":                 "csv",
+	"application/msword":       "doc",
+	"application/vnd.ms-excel": "xls",
+	"application/vnd.openxmlformats-officedocument.wordprocessingml.document":   "docx",
+	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":         "xlsx",
+	"application/vnd.openxmlformats-officedocument.presentationml.presentation": "pptx",
+}
+
+// openableExts are the only extensions a cached file may carry when they come from the sender (a
+// document's file name or a mime subtype): documents, archives and media, never an executable,
+// script or launcher (sh, desktop, jar, AppImage, exe, py, ...), since a UI hands the cached file to
+// xdg-open. Compared lower-cased.
+var openableExts = map[string]bool{}
+
+func init() {
+	for _, e := range strings.Fields(`pdf txt csv tsv md rtf odt ods odp doc docx xls xlsx ppt pptx epub
+		vcf ics zip gz tar 7z rar jpg jpeg png gif webp heic heif bmp tif tiff
+		mp3 m4a ogg oga opus wav flac aac amr mp4 m4v mov mkv webm avi 3gp`) {
+		openableExts[e] = true
+	}
+}
+
+// openable reports whether ext is safe for the cache file name (media.SafeExt) and openable.
+func openable(ext string) bool { return media.SafeExt(ext) && openableExts[strings.ToLower(ext)] }
+
+// extFor is the cache file extension of a stored media message: for a document, the extension of
+// its own file name when it is openable; otherwise the usual extension of its mime type (mimeExts),
+// else the mime subtype ("audio/ogg; codecs=opus" gives "ogg") when it is openable; else none.
+func extFor(m store.Message) string {
+	if m.Kind == store.KindDocument {
+		if i := strings.LastIndexByte(m.FileName, '.'); i >= 0 && openable(m.FileName[i+1:]) {
+			return m.FileName[i+1:]
+		}
+	}
+	mime := mimeOf(m.Mime)
+	if ext, ok := mimeExts[mime]; ok {
+		return ext
+	}
+	if _, sub, _ := strings.Cut(mime, "/"); openable(sub) {
+		return sub
+	}
+	return ""
+}
+
+// mimeOf is the mime type without parameters, lower-cased.
+func mimeOf(mime string) string {
+	mime, _, _ = strings.Cut(mime, ";")
+	return strings.ToLower(strings.TrimSpace(mime))
+}
+
+// legacyExt is exactly the extension builds before extFor asked the cache for (their extOf: the raw
+// mime subtype, case kept, without parameters), so a file they cached is still found. The cache
+// appends it only when media.SafeExt accepts it, as those builds did, and otherwise looks for the
+// bare name.
+func legacyExt(mime string) string {
 	_, sub, _ := strings.Cut(mime, "/")
 	sub, _, _ = strings.Cut(sub, ";")
 	return strings.TrimSpace(sub)

@@ -404,9 +404,10 @@ type Error struct {
 	Message string `json:"message"`
 }
 
-// Chat is the M0 chat shape, plus muted (M1, from app-state sync) and aliases (T15, ADR 0001): the
+// Chat is the M0 chat shape, plus muted (M1, from app-state sync), aliases (T15, ADR 0001): the
 // phone-number chat JIDs merged into this chat, listed only while WhatsApp's LID mapping still
-// points them here, and absent when there are none.
+// points them here, and absent when there are none; and phone (ADR 0002): the contact's phone number
+// masked by MaskPhone, absent for a group and when the number is not known.
 type Chat struct {
 	JID         string   `json:"jid"`
 	Name        string   `json:"name"`
@@ -415,7 +416,17 @@ type Chat struct {
 	Pinned      bool     `json:"pinned"`
 	Muted       bool     `json:"muted"`
 	Aliases     []string `json:"aliases,omitempty"`
+	Phone       string   `json:"phone,omitempty"`
 	LastMessage *Message `json:"last_message,omitempty"`
+}
+
+// MaskPhone keeps only the last four digits of a phone number ("…0001"), so a display fallback
+// never shows a full number; a number of four digits or fewer masks to "…".
+func MaskPhone(number string) string {
+	if len(number) <= 4 {
+		return "…"
+	}
+	return "…" + number[len(number)-4:]
 }
 
 // Message is one chat message. Kind is one of the Kind* constants; Media is set for the media

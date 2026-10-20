@@ -34,7 +34,17 @@ nuncio-tui [--image <png>]
 
 ## Screen
 
-- **Chat list** (left): name, unread count `(n)`, `★` pinned, `⊘` muted, `▤` archived.
+- **Chat names**: a chat shows its `name` from the daemon (a group's subject, else the contact's
+  address-book, business or push name), else its `phone` (the number masked to its last four
+  digits, `…0001`), else, as `nuncio chats` does, a phone-number chat's own number masked the
+  same way (an older daemon sends no `phone`), else `unnamed group` for a group or `hidden number`
+  for anyone else. A LID chat's digits are never shown: they are a hidden id, not a number (ADR
+  0002).
+- **Chat list** (left): name and unread count `(n)`, then `★` pinned, `⊘` muted, `▤` archived in
+  a fixed column at the end of the row (one cell apart, a missing marker left blank), so the
+  markers line up whatever the name; a name too long is cut with `…` before the column. In a list
+  too narrow for that column (under six columns left for the name), only a chat's own markers are
+  drawn, right after its name.
   Archived chats are kept in the list, sectioned after every other chat. A pin, archive or mute
   made on the phone (`event_chat`) updates the markers at once and sorts the list again as the
   daemon's `chats` lists it (newest message first, the same time by JID, archived last), keeping
@@ -63,7 +73,15 @@ nuncio-tui [--image <png>]
   (it waits for a manual retry) or `not confirmed` (WhatsApp's acknowledgement timed out, so it
   may have been delivered). The TUI keeps that mark in memory only: after a restart the daemon
   lists such a send as `not sent`, since the wire has no not-confirmed message state.
-- **Selected message**: `K`/`J` select a message (`›`); `r` replies to it, `e` reacts, `R`
+- **Focus**: one pane has the keys at a time, the chat list or the conversation (the composer
+  counts as the conversation); it is drawn with a thick border in the theme's accent colour, the
+  other with a thin dim one. `Tab` switches between them.
+- **Footer**: always one line of hints. Outside the composer it starts with
+  `? help · Tab switch pane · Enter open · / search · q quit` (`Enter write` in the conversation)
+  and adds the focused pane's keys after it; in the composer, where `q` and `/` are text, it says
+  how to send and `Esc conversation · Ctrl-C quit`. `?` shows every key, grouped by context.
+- **Selected message**: in the conversation, `k`/`↑` select a message (`›`, the newest first,
+  then older) and `j`/`↓` a newer one; `r` replies to it, `e` reacts, `R`
   retries a send of mine that is `not sent` or `not confirmed` (one attempt per key press, under
   the same WhatsApp message id, so a send that did arrive is never sent as a second message;
   nothing is ever retried on its own), `o` downloads its media. Only a message WhatsApp has (received, or a send of mine
@@ -98,29 +116,52 @@ nuncio-tui [--image <png>]
 
 ## Keys
 
-Everything works from the keyboard. `?` shows this list on screen.
+Everything works from the keyboard. `?` shows these keys on screen, grouped the same way.
 
-| Keys | Does |
-|---|---|
-| `j`/`k`, `↓`/`↑` | chats: move · conversation: scroll a line |
-| `Enter`, `l`, `→` | open the selected chat, marking it read on WhatsApp too (blue ticks, unless read receipts are off) |
-| `i` | write a message to the selected chat |
-| `Enter` | in the composer: send |
-| `Alt-Enter`, `Ctrl-J` | in the composer: a new line |
-| `←`/`→`, `Home`/`End` | in the composer: move the cursor (`Home`/`End`: start / end of the line) |
-| `Backspace`/`Delete` | in the composer: erase before / after the cursor |
-| `K`/`J` | conversation: select an older / newer message |
-| `r` | reply to the selected message (the composer quotes it); only a sent or received one |
-| `e` | react to it: `1`-`6` 👍 ❤️ 😂 😮 😢 🙏, `x` removes mine, `Esc` cancels; only a sent or received one |
-| `R` | retry the selected send that is not sent or not confirmed (same message, never a second) |
-| `o` | download the selected media and open it externally |
-| `/` | search this chat: type, `Enter` search, `j`/`k` move, `Enter` select, `/` edit, `Esc` close |
-| `Esc` | unselect the message; composer → conversation → chats; quit from the chats |
-| `PgUp`/`PgDn` | scroll a page |
-| `g`/`G`, `Home`/`End` | scroll to the oldest / newest message |
-| `Tab` | switch between chats and conversation |
-| `?` | show or hide the key help |
-| `q`, `Ctrl-C` | quit |
+`Tab` switches the focus between the chat list and the conversation; `j`/`k` and the arrows move
+inside the focused pane. `Enter` on a chat opens it with the composer ready to type, as WhatsApp
+does; `Esc` goes back one step: composer → conversation → chat list.
+
+| Where | Keys | Does |
+|---|---|---|
+| Chats | `j`/`k`, `↓`/`↑` | move to the next / previous chat |
+| Chats | `Enter` | open the chat with the composer focused, marking it read on WhatsApp too (blue ticks, unless read receipts are off) |
+| Chats | `l`, `→` | open the chat to read, without the composer |
+| Chats | `Tab` | focus the conversation |
+| Chats | `q`, `Esc` | quit |
+| Conversation | `j`/`k`, `↓`/`↑` | select a newer / older message (`k` first selects the newest) |
+| Conversation | `r` | reply to the selected message (the composer quotes it); only a sent or received one |
+| Conversation | `e` | react to it (see Reactions); only a sent or received one |
+| Conversation | `R` | retry the selected send that is not sent or not confirmed (same message, never a second) |
+| Conversation | `o` | download the selected media and open it externally |
+| Conversation | `Enter`, `i` | write (focus the composer) |
+| Conversation | `PgUp`/`PgDn` | scroll a page |
+| Conversation | `g`/`G`, `Home`/`End` | scroll to the oldest / newest message |
+| Conversation | `Esc`, `h`, `←`, `Tab` | back to the chat list |
+| Composer | `Enter` | send |
+| Composer | `Alt-Enter`, `Ctrl-J` | a new line |
+| Composer | `←`/`→`, `Home`/`End` | move the cursor (`Home`/`End`: start / end of the line) |
+| Composer | `Backspace`/`Delete` | erase before / after the cursor |
+| Composer | `Esc` | back to the conversation (the message selection) |
+| Search | `/` (chats or conversation) | search this chat: type, `Enter` search, `j`/`k` move, `Enter` select, `/` edit, `Esc` close |
+| Reactions | `1`-`6` | 👍 ❤️ 😂 😮 😢 🙏; `x` removes mine, `Esc` cancels |
+| Everywhere | `?` | show or hide the key help (outside the composer, where `?` is text) |
+| Everywhere | `Ctrl-C` | quit (`q` quits outside the composer) |
+
+## Mouse
+
+The TUI turns on the terminal's mouse reporting:
+
+- a left click on a chat selects it and opens it with the composer focused (as `Enter`);
+- a click in the conversation focuses it and selects the message clicked (its header or its text);
+- a click in the composer focuses it;
+- the wheel scrolls the pane under the pointer: three lines of the conversation, or one chat in
+  the list (which moves the selection, as `j`/`k` do).
+
+Clicks do nothing while the help, the reaction picker or the search is open. With mouse reporting
+on, the terminal no longer selects text on a plain drag: **hold Shift while dragging** to select
+and copy text (foot, alacritty and ghostty all work this way; a few terminals use another
+modifier).
 
 ## Try the TUI with the demo daemon
 

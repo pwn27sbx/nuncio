@@ -891,7 +891,7 @@ func TestDaemonServesChatsMessagesAndUnreadFromTheStore(t *testing.T) {
 		t.Fatalf("Chats: %v", err)
 	}
 	wantChats := []ipc.Chat{
-		{JID: ada.String(), Unread: 2, LastMessage: &ipc.Message{
+		{JID: ada.String(), Unread: 2, Phone: "…0001", LastMessage: &ipc.Message{
 			ID: "A3", Kind: ipc.KindText, Text: "mine", FromMe: true, Timestamp: "2026-10-18T17:53:00Z"}},
 		{JID: group.String(), Unread: 1, LastMessage: &ipc.Message{
 			ID: "G1", Kind: ipc.KindText, Text: "group hello", Timestamp: "2026-10-18T17:50:00Z"}},

@@ -53,8 +53,11 @@ nuncio logout --confirm       unlink this device from WhatsApp, delete all local
 nuncio purge --confirm        the same without contacting WhatsApp, for a device already removed on the phone
 ```
 
-- `chats` never prints message text; a chat without a name shows only the last four digits of
-  its number.
+- `chats` never prints message text. A chat is shown by its name (a group's subject, else the
+  contact's address-book, business or push name); without one, by its number masked to the last
+  four digits (`…0001`), or `hidden number` when the number is not known (a LID chat): a LID's
+  digits are never printed. The TUI does the same (a phone-number chat it knows no `phone` for shows
+  its own number masked the same way), and shows `unnamed group` for a group with no subject.
 - `send` prints `sent`, `queued`, `not sent: <reason>` or, when WhatsApp did not acknowledge in
   time (the daemon's `not_confirmed` error), `not confirmed: …; it may have been delivered`, and exits 1 unless the message was sent
   or queued. With no linked device it says so and exits 1. While the session is offline the

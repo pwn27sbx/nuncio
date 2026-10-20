@@ -61,7 +61,8 @@ func New(dir string, dl Downloader) *Cache {
 }
 
 // Fetch returns the path of the decrypted attachment, downloading it only if
-// it is not cached yet. The bytes are written only after their SHA-256
+// it is not cached yet under its Ext; a file an earlier build cached under its Legacy name is
+// renamed to the Ext name and served. The bytes are written only after their SHA-256
 // matches req.Media.GetFileSHA256(). Every Fetch first creates the cache dir and makes it 0700 (a
 // cache hit too), so a dir that cannot be created fails before any download; once Close closed
 // it, Fetch fails with ErrClosed and creates nothing.
@@ -75,6 +76,18 @@ func (c *Cache) Fetch(ctx context.Context, req Request) (string, error) {
 	}
 	if fi, err := os.Lstat(path); err == nil && fi.Mode().IsRegular() {
 		return path, nil
+	}
+	if old := filepath.Join(c.dir, withExt(req, req.Legacy)); old != path {
+		adopted, err := c.adopt(old, path)
+		if err != nil {
+			if errors.Is(err, ErrClosed) {
+				return "", fmt.Errorf("%w: %s not fetched", ErrClosed, req.MessageID)
+			}
+			return "", cacheErr{fmt.Errorf("media: %w", err)}
+		}
+		if adopted {
+			return path, nil
+		}
 	}
 	data, err := c.dl.Download(ctx, req.Media)
 	if err != nil {
@@ -94,6 +107,31 @@ func (c *Cache) Fetch(ctx context.Context, req Request) (string, error) {
 		return "", cacheErr{err}
 	}
 	return path, nil
+}
+
+// adopt moves a regular file an earlier build cached at old to path (mode 0600), under the lock and
+// unless Close closed the dir, and reports whether path now holds it. A path that already exists is
+// kept, and old left alone; a missing old, or one that is not a regular file, adopts nothing.
+func (c *Cache) adopt(old, path string) (bool, error) {
+	closing.Lock()
+	defer closing.Unlock()
+	if isClosed(c.dir) {
+		return false, ErrClosed
+	}
+	if fi, err := os.Lstat(path); err == nil {
+		return fi.Mode().IsRegular(), nil
+	}
+	fi, err := os.Lstat(old)
+	if err != nil || !fi.Mode().IsRegular() {
+		return false, nil
+	}
+	if err := os.Rename(old, path); err != nil {
+		return false, fmt.Errorf("adopt a cached file: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return false, fmt.Errorf("restrict a cached file: %w", err)
+	}
+	return true, nil
 }
 
 // prepare creates the cache dir and makes it 0700, under the lock, unless Close closed it.

@@ -199,6 +199,7 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
             pinned: true,
             muted: false,
             aliases: Vec::new(),
+            phone: None,
             last_message: Some(Message {
                 id: "3EB0AAA1".to_owned(),
                 kind: "text".to_owned(),
@@ -256,4 +257,46 @@ fn an_inline_image_renders_without_panicking() {
         screen.contains("Ada Lovelace"),
         "the chat list is still there next to the image:\n{screen}"
     );
+}
+
+#[test]
+fn a_lid_chat_with_no_name_and_no_phone_never_shows_its_lid_digits() {
+    let lid = "100000000000001";
+    let chat = |jid: String, name: &str, phone: Option<&str>| Chat {
+        jid,
+        name: name.to_owned(),
+        unread: 0,
+        archived: false,
+        pinned: false,
+        muted: false,
+        aliases: Vec::new(),
+        phone: phone.map(str::to_owned),
+        last_message: None,
+    };
+    let snapshot = Snapshot {
+        daemon: "nunciod/0.1.0".to_owned(),
+        linked: true,
+        session: Session::Linked,
+        unread: 0,
+        chats: vec![
+            chat(format!("{lid}@lid"), "", None),
+            chat("100000000000002@lid".to_owned(), "", Some("…0002")),
+            chat("120363000000000001@g.us".to_owned(), "", None),
+            chat("15551230005@s.whatsapp.net".to_owned(), "", None),
+        ],
+    };
+    let mut app = App::new(snapshot, Source::Daemon, Palette::default());
+    // The LID chat is selected, so its title heads the conversation too.
+    let screen = render(&mut app, 80, 24);
+    assert!(
+        !screen.contains(lid),
+        "the LID digits are on screen:\n{screen}"
+    );
+    assert!(!screen.contains("10000000"), "{screen}");
+    assert!(screen.contains("hidden number"), "{screen}");
+    assert!(screen.contains("…0002"), "{screen}");
+    assert!(screen.contains("unnamed group"), "{screen}");
+    // A phone-number chat with neither shows its own number masked, never in full.
+    assert!(screen.contains("…0005"), "{screen}");
+    assert!(!screen.contains("15551230005"), "{screen}");
 }

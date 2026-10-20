@@ -3,7 +3,8 @@
 //!
 //! [`App`] is the pure state: the chat list (archived chats sectioned last), the loaded
 //! conversations, the composer, the selection and scroll, and the Omarchy [`Palette`]. It changes
-//! only through [`App::handle_key`] and [`App::apply`] (a reply or an event frame), which return
+//! only through [`App::handle_key`], [`App::handle_mouse`] (mapped through the last drawn
+//! [`ScreenMap`] by [`hit_test`]) and [`App::apply`] (a reply or an event frame), which return
 //! an [`Action`] for the I/O loop. [`Daemon`] is that I/O: a request connection and a subscribed
 //! event connection to `nunciod`. The keys are listed in [`KEYS`] and in `README.md`.
 
@@ -15,11 +16,15 @@ use nuncio_client::{
     Chat, ClientFrame, DaemonFrame, Message, Palette, Reaction, Rgb, SendState, Snapshot,
 };
 use ratatui::Frame;
-use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Block, BorderType, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
+};
 use ratatui_image::StatefulImage;
 use ratatui_image::protocol::StatefulProtocol;
 use unicode_segmentation::UnicodeSegmentation;
@@ -61,6 +66,68 @@ pub enum Action {
     Open(PathBuf),
 }
 
+/// Where things were on the last drawn screen, so a mouse event can be mapped to what is under
+/// it ([`hit_test`]). Built by [`App::draw`]; empty before the first draw.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ScreenMap {
+    /// The chat pane, borders included.
+    pub chats: Rect,
+    /// The rows of the chat list inside its border; each chat takes [`CHAT_ROWS`] rows.
+    pub chat_rows: Rect,
+    /// The list's scroll: the index of the chat on its first row.
+    pub chat_offset: usize,
+    /// How many chats are listed.
+    pub chat_count: usize,
+    /// The conversation pane, borders included (the composer is inside it).
+    pub conversation: Rect,
+    /// The rows the conversation's messages are drawn in.
+    pub message_area: Rect,
+    /// For each row of `message_area`, the index of the loaded message drawn there.
+    pub message_rows: Vec<Option<usize>>,
+    /// The composer's rows (the rule above them included).
+    pub composer: Rect,
+}
+
+/// What is under a screen cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// The chat pane: the chat at this list index, or none (a border, below the last chat).
+    Chats(Option<usize>),
+    /// The conversation pane: the loaded message at this index, or none.
+    Conversation(Option<usize>),
+    /// The composer.
+    Composer,
+}
+
+/// Rows one chat takes in the list: its name, then its last message.
+pub const CHAT_ROWS: u16 = 2;
+
+/// What is drawn at `(column, row)` on the screen `map` describes, if anything the mouse acts on.
+pub fn hit_test(map: &ScreenMap, column: u16, row: u16) -> Option<Target> {
+    let inside = |area: Rect| area.contains(ratatui::layout::Position::new(column, row));
+    if inside(map.chats) {
+        let index = inside(map.chat_rows)
+            .then(|| map.chat_offset + usize::from((row - map.chat_rows.y) / CHAT_ROWS))
+            .filter(|&index| index < map.chat_count);
+        return Some(Target::Chats(index));
+    }
+    if inside(map.composer) {
+        return Some(Target::Composer);
+    }
+    if inside(map.conversation) {
+        let message = inside(map.message_area)
+            .then(|| map.message_rows.get(usize::from(row - map.message_area.y)))
+            .flatten()
+            .copied()
+            .flatten();
+        return Some(Target::Conversation(message));
+    }
+    None
+}
+
+/// How many lines one wheel step scrolls the conversation.
+const WHEEL: usize = 3;
+
 /// Marks a pinned chat.
 const PINNED: char = '★';
 /// Marks a muted chat.
@@ -83,41 +150,75 @@ const SNIPPET: usize = 40;
 /// How many rows the composer grows to; a longer draft scrolls with the cursor.
 const COMPOSER_ROWS: usize = 5;
 
-/// Every key, by pane; drawn by the `?` help screen and documented in the crate README.
-pub const KEYS: &[(&str, &str)] = &[
-    ("j/k ↑/↓", "chats: move · conversation: scroll a line"),
+/// Every key, grouped by where it works; drawn by the `?` help screen and documented in the
+/// crate README.
+pub const KEYS: &[(&str, &[(&str, &str)])] = &[
     (
-        "Enter l →",
-        "open the chat, marking it read on WhatsApp (blue ticks)",
-    ),
-    ("i", "write a message to the selected chat"),
-    ("Enter", "in the composer: send"),
-    ("Alt-Enter C-j", "in the composer: a new line"),
-    (
-        "←/→ Home/End",
-        "in the composer: move the cursor · Bksp/Delete erase",
-    ),
-    ("K/J", "conversation: select an older / newer message"),
-    ("r", "reply to the selected sent or received message"),
-    (
-        "e",
-        "react to it: 1-6 pick an emoji, x remove mine, Esc cancel",
-    ),
-    ("R", "retry the selected not sent or not confirmed send"),
-    ("o", "download the selected media and open it externally"),
-    (
-        "/",
-        "search this chat; Enter search, j/k move, Enter select",
+        "Chats",
+        &[
+            ("j/k ↓/↑", "move down / up"),
+            (
+                "Enter",
+                "open the chat and write (marks it read on WhatsApp)",
+            ),
+            ("l →", "open it to read"),
+            ("Tab", "focus the conversation"),
+            ("/", "search the selected chat"),
+            ("q Esc", "quit"),
+        ],
     ),
     (
-        "Esc",
-        "unselect · composer → conversation → chats; quit from the chats",
+        "Conversation",
+        &[
+            ("j/k ↓/↑", "select a newer / older message"),
+            ("r", "reply to it"),
+            ("e", "react to it"),
+            ("R", "retry a not sent or not confirmed send"),
+            ("o", "open its media externally"),
+            ("Enter i", "write"),
+            ("PgUp/PgDn", "scroll a page"),
+            ("g/G Home/End", "oldest / newest"),
+            ("Esc h ← Tab", "back to the chats"),
+        ],
     ),
-    ("PgUp/PgDn", "scroll a page"),
-    ("g/G Home/End", "scroll to the oldest / newest message"),
-    ("Tab", "switch between chats and conversation"),
-    ("?", "show or hide this help"),
-    ("q Ctrl-C", "quit"),
+    (
+        "Composer",
+        &[
+            ("Enter", "send"),
+            ("Alt-Enter C-j", "new line"),
+            ("←/→ Home/End", "move the cursor"),
+            ("Bksp/Delete", "erase"),
+            ("Esc", "back to the conversation"),
+        ],
+    ),
+    (
+        "Search",
+        &[
+            ("type, Enter", "search"),
+            ("j/k", "move"),
+            ("Enter", "select"),
+            ("/", "edit"),
+            ("Esc", "close"),
+        ],
+    ),
+    (
+        "Reactions",
+        &[
+            ("1-6", "👍 ❤️ 😂 😮 😢 🙏"),
+            ("x", "remove mine"),
+            ("Esc", "cancel"),
+        ],
+    ),
+    (
+        "Everywhere",
+        &[
+            ("?", "this help"),
+            ("Ctrl-C", "quit"),
+            ("click", "a chat opens it, a message selects it"),
+            ("wheel", "scrolls the pane under the pointer"),
+            ("Shift+drag", "selects text"),
+        ],
+    ),
 ];
 
 /// The chat list from `proto/fixtures/chats_response.json`.
@@ -185,6 +286,8 @@ pub struct App {
     /// selected chat, in the pane the user was in, and nothing is sent to it until the user
     /// chooses a chat again or a reply to a request about it names the chat it became.
     orphan: Option<Chat>,
+    /// Where things were on the last drawn screen, for the mouse.
+    map: ScreenMap,
 }
 
 /// The notice when the open chat vanished from the chat list (the daemon merged it).
@@ -242,6 +345,7 @@ impl App {
             resyncing: None,
             aliases: HashMap::new(),
             orphan: None,
+            map: ScreenMap::default(),
         };
         let chats = std::mem::take(&mut app.snapshot.chats);
         app.set_chats(chats);
@@ -585,6 +689,14 @@ impl App {
         (alias != *jid).then(|| (alias, jid.clone()))
     }
 
+    /// Enter on a chat (or a click on it): open it with the composer focused, ready to type.
+    fn open_to_write(&mut self) -> Option<Action> {
+        let action = self.open_selected()?;
+        self.reply_to = None;
+        self.pane = Pane::Compose;
+        Some(action)
+    }
+
     /// Open the selected chat: show its conversation and ask the daemon for its messages.
     fn open_selected(&mut self) -> Option<Action> {
         let jid = self.selected_jid()?.to_owned();
@@ -630,7 +742,7 @@ impl App {
         Some(message.id.clone())
     }
 
-    /// `K`: select the newest message, then one older each time.
+    /// `k`/`↑` in the conversation: select the newest message, then one older each time.
     fn select_older(&mut self) {
         let len = self.loaded().len();
         if len > 0 {
@@ -639,7 +751,7 @@ impl App {
         }
     }
 
-    /// `J`: select one newer message, stopping at the newest.
+    /// `j`/`↓` in the conversation: select one newer message, stopping at the newest.
     fn select_newer(&mut self) {
         let len = self.loaded().len();
         if let Some(i) = self.cursor {
@@ -772,12 +884,10 @@ impl App {
             }
             (Pane::Chats, KeyCode::Char('j') | KeyCode::Down) => self.select_next(),
             (Pane::Chats, KeyCode::Char('k') | KeyCode::Up) => self.select_previous(),
-            (Pane::Chats, KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right) => {
-                return self.open_selected();
-            }
-            (Pane::Messages, KeyCode::Esc) if self.cursor.is_some() => self.cursor = None,
-            (Pane::Messages, KeyCode::Char('K')) => self.select_older(),
-            (Pane::Messages, KeyCode::Char('J')) => self.select_newer(),
+            (Pane::Chats, KeyCode::Enter) => return self.open_to_write(),
+            (Pane::Chats, KeyCode::Char('l') | KeyCode::Right) => return self.open_selected(),
+            (Pane::Messages, KeyCode::Char('k') | KeyCode::Up) => self.select_older(),
+            (Pane::Messages, KeyCode::Char('j') | KeyCode::Down) => self.select_newer(),
             (Pane::Messages, KeyCode::Char('r')) => {
                 if let Some(id) = self.target_id("replied to") {
                     self.reply_to = Some(id);
@@ -793,12 +903,55 @@ impl App {
                 self.pane = Pane::Chats;
             }
             (Pane::Messages, KeyCode::Enter) => self.pane = Pane::Compose,
-            (Pane::Messages, KeyCode::Char('k') | KeyCode::Up) => self.scroll_up(1),
-            (Pane::Messages, KeyCode::Char('j') | KeyCode::Down) => self.scroll_down(1),
             (_, KeyCode::PageUp) => self.scroll_up(PAGE),
             (_, KeyCode::PageDown) => self.scroll_down(PAGE),
             (Pane::Messages, KeyCode::Char('g') | KeyCode::Home) => self.scroll = usize::MAX,
             (Pane::Messages, KeyCode::Char('G') | KeyCode::End) => self.scroll = 0,
+            _ => {}
+        }
+        None
+    }
+
+    /// One mouse event, mapped through the last drawn screen ([`hit_test`]). A left click on a
+    /// chat opens it with the composer focused (as Enter does); in the conversation it focuses
+    /// the conversation and selects the clicked message; in the composer it focuses the composer.
+    /// The wheel scrolls the pane under the pointer: the conversation by lines, the chat list by
+    /// chats. Nothing happens while the help, the reaction picker or the search is open.
+    pub fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<Action> {
+        if self.help || self.picking || self.search.is_some() {
+            return None;
+        }
+        let target = hit_test(&self.map, mouse.column, mouse.row)?;
+        match (mouse.kind, target) {
+            (MouseEventKind::Down(MouseButton::Left), Target::Chats(Some(index))) => {
+                self.select(index);
+                return self.open_to_write();
+            }
+            (MouseEventKind::Down(MouseButton::Left), Target::Conversation(message)) => {
+                if self.selected_chat().is_some() {
+                    if self.pane == Pane::Compose {
+                        self.reply_to = None;
+                    }
+                    self.pane = Pane::Messages;
+                    if let Some(index) = message.filter(|&i| i < self.loaded().len()) {
+                        self.cursor = Some(index);
+                    }
+                }
+            }
+            (MouseEventKind::Down(MouseButton::Left), Target::Composer)
+                if self.selected_chat().is_some() && self.pane != Pane::Compose =>
+            {
+                self.reply_to = None;
+                self.pane = Pane::Compose;
+            }
+            (MouseEventKind::ScrollUp, Target::Chats(_)) => self.select_previous(),
+            (MouseEventKind::ScrollDown, Target::Chats(_)) => self.select_next(),
+            (MouseEventKind::ScrollUp, Target::Conversation(_) | Target::Composer) => {
+                self.scroll_up(WHEEL);
+            }
+            (MouseEventKind::ScrollDown, Target::Conversation(_) | Target::Composer) => {
+                self.scroll_down(WHEEL);
+            }
             _ => {}
         }
         None
@@ -1202,6 +1355,7 @@ impl App {
                 pinned: false,
                 muted: false,
                 aliases: Vec::new(),
+                phone: None,
                 last_message: Some(message.clone()),
             });
             self.set_chats(chats);
@@ -1359,18 +1513,29 @@ impl App {
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
+        // The same hint first wherever q and / are keys, then the keys of where the focus is.
+        let base = |enter: &str| {
+            format!(" ? help · Tab switch pane · Enter {enter} · / search · q quit · ")
+        };
         let keys = match self.pane {
-            _ if self.search.is_some() => " Enter search/select · j/k move · / edit · Esc close ",
-            _ if self.picking => " 1-6 react · x remove mine · Esc cancel ",
-            Pane::Chats => " q quit · j/k move · Enter open · i write · / search · ? help ",
+            _ if self.search.is_some() => {
+                " Enter search/select · j/k move · / edit · Esc close ".to_owned()
+            }
+            _ if self.picking => " 1-6 react · x remove mine · Esc cancel ".to_owned(),
+            Pane::Chats => base("open") + "j/k move · l open to read · Ctrl-C quit ",
             Pane::Messages if self.cursor.is_some() => {
-                " r reply · e react · R retry · o open media · J/K select · Esc unselect "
+                base("write")
+                    + "j/k select · r reply · e react · R retry · o open media · Esc chats "
             }
-            Pane::Messages => " Esc chats · j/k scroll · K select · i write · / search · ? help ",
+            Pane::Messages => base("write") + "j/k select · PgUp/PgDn scroll · Esc chats ",
             Pane::Compose if self.reply_to.is_some() => {
-                " Enter send reply · Alt-Enter newline · ←/→ move · Esc cancel "
+                " Enter send reply · Alt-Enter newline · ←/→ move · Esc conversation · Ctrl-C quit "
+                    .to_owned()
             }
-            Pane::Compose => " Enter send · Alt-Enter newline · ←/→ move · Esc cancel ",
+            Pane::Compose => {
+                " Enter send · Alt-Enter newline · ←/→ move · Esc conversation · Ctrl-C quit "
+                    .to_owned()
+            }
         };
         // The notice comes first, so a narrow terminal still shows it.
         let mut spans = Vec::new();
@@ -1385,32 +1550,39 @@ impl App {
     }
 
     fn draw_help(&self, frame: &mut Frame, area: Rect) {
-        let lines: Vec<Line> = KEYS
-            .iter()
-            .map(|(keys, what)| {
-                Line::from(vec![
-                    Span::styled(
-                        format!("{keys:>13} "),
-                        Style::default().fg(rgb(self.palette.accent)),
-                    ),
-                    Span::styled(*what, Style::default().fg(rgb(self.palette.foreground))),
-                ])
-            })
-            .collect();
+        let key = Style::default().fg(rgb(self.palette.accent));
+        let what = Style::default().fg(rgb(self.palette.foreground));
+        let heading = key.add_modifier(Modifier::BOLD);
+        // A heading per context, then its keys on one wrapped line, so it fits in 80x24.
+        let mut lines: Vec<Line> = Vec::new();
+        for (context, keys) in KEYS {
+            lines.push(Line::from(Span::styled(*context, heading)));
+            let mut spans = vec![Span::raw("  ")];
+            for (n, (keys, does)) in keys.iter().enumerate() {
+                if n > 0 {
+                    spans.push(Span::styled(" · ", self.muted()));
+                }
+                spans.push(Span::styled(plain(keys), key));
+                spans.push(Span::styled(format!(" {}", plain(does)), what));
+            }
+            lines.push(Line::from(spans));
+        }
         // As tall as the wrapped lines need, so the last keys are not cut off.
         let help = Paragraph::new(lines)
             .wrap(Wrap { trim: false })
             .style(Style::default().bg(rgb(self.palette.background)))
             .block(bordered(&self.palette).title(" Keys "));
         // `line_count` counts the block's rows but wraps at the width it is given: the inner one.
-        let height = help.line_count(area.width.min(72).saturating_sub(2));
-        let popup = popup(area, 72, u16::try_from(height).unwrap_or(u16::MAX));
+        let height = help.line_count(area.width.min(76).saturating_sub(2));
+        let popup = popup(area, 76, u16::try_from(height).unwrap_or(u16::MAX));
         frame.render_widget(Clear, popup);
         frame.render_widget(help, popup);
     }
 
     fn draw_chats(&mut self, frame: &mut Frame, area: Rect) {
-        let block = bordered(&self.palette).title(format!(" Chats ({}) ", self.chats().len()));
+        let block = pane_block(&self.palette, self.pane == Pane::Chats)
+            .title(format!(" Chats ({}) ", self.chats().len()));
+        let rows = block.inner(area);
         // Inside the border, less the highlight symbol's column (reserved on every row).
         let width = usize::from(area.width.saturating_sub(4));
         let items: Vec<ListItem> = self
@@ -1421,6 +1593,8 @@ impl App {
         let list = List::new(items)
             .block(block)
             .highlight_symbol("› ")
+            // Even with no chat highlighted (a vanished open chat), so the columns never move.
+            .highlight_spacing(HighlightSpacing::Always)
             .highlight_style(
                 Style::default()
                     .bg(rgb(self.palette.accent))
@@ -1428,6 +1602,10 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             );
         frame.render_stateful_widget(list, area, &mut self.list);
+        self.map.chats = area;
+        self.map.chat_rows = rows;
+        self.map.chat_offset = self.list.offset();
+        self.map.chat_count = self.chats().len();
     }
 
     fn draw_messages(&mut self, frame: &mut Frame, area: Rect) {
@@ -1435,7 +1613,7 @@ impl App {
             .selected_chat()
             .map(chat_title)
             .unwrap_or_else(|| "no chat selected".to_owned());
-        let block = bordered(&self.palette).title(Span::styled(
+        let block = pane_block(&self.palette, self.pane != Pane::Chats).title(Span::styled(
             format!(" {title} "),
             Style::default()
                 .fg(rgb(self.palette.foreground))
@@ -1443,6 +1621,10 @@ impl App {
         ));
         let inner = block.inner(area);
         frame.render_widget(block, area);
+        self.map.conversation = area;
+        self.map.message_area = Rect::default();
+        self.map.message_rows.clear();
+        self.map.composer = Rect::default();
         if inner.is_empty() {
             return;
         }
@@ -1485,6 +1667,7 @@ impl App {
             });
         let rule_text = quoted.unwrap_or_default() + &"─".repeat(usize::from(rule.width));
         frame.render_widget(Paragraph::new(rule_text).style(self.muted()), rule);
+        self.map.composer = rule.union(composer);
         self.draw_composer(frame, composer, draft);
     }
 
@@ -1505,7 +1688,7 @@ impl App {
             return;
         }
         let Some((rows, (row, column))) = draft else {
-            let hint = Line::from(Span::styled("  i to write a message", self.muted()));
+            let hint = Line::from(Span::styled("  Enter to write a message", self.muted()));
             frame.render_widget(Paragraph::new(hint), area);
             return;
         };
@@ -1537,7 +1720,7 @@ impl App {
         if area.is_empty() {
             return;
         }
-        let (lines, selected) = self.conversation_lines();
+        let (lines, selected, owners) = self.conversation_lines();
         let visible = usize::from(area.height);
         if let Some(start) = selected.filter(|_| self.reveal) {
             // Scroll so the selected message's header is on screen.
@@ -1549,10 +1732,33 @@ impl App {
                 .clamp(below.saturating_sub(visible), below.saturating_sub(1));
         }
         self.reveal = false;
+        // Which message each wrapped row belongs to, for the mouse.
+        let wrapped: Vec<Option<usize>> = lines
+            .iter()
+            .zip(&owners)
+            .flat_map(|(line, owner)| {
+                let rows = Paragraph::new(line.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(area.width);
+                std::iter::repeat_n(*owner, rows)
+            })
+            .collect();
         let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
         let total = paragraph.line_count(area.width);
         let top = total.saturating_sub(visible);
         self.scroll = self.scroll.min(top);
+        self.map.message_area = area;
+        self.map.message_rows = if total < visible {
+            let mut rows = vec![None; visible - total];
+            rows.extend(wrapped);
+            rows
+        } else {
+            wrapped
+                .into_iter()
+                .skip(top - self.scroll)
+                .take(visible)
+                .collect()
+        };
         if total < visible {
             // Newest at the bottom: a short conversation sits on the composer.
             let area = Rect {
@@ -1568,10 +1774,11 @@ impl App {
     }
 
     /// The selected chat's conversation, oldest first; before it is loaded, its last message.
-    /// Also the index of the selected message's header line.
-    fn conversation_lines(&self) -> (Vec<Line<'static>>, Option<usize>) {
+    /// Also the index of the selected message's header line, and for each line the index of the
+    /// loaded message it belongs to.
+    fn conversation_lines(&self) -> (Vec<Line<'static>>, Option<usize>, Vec<Option<usize>>) {
         let Some(chat) = self.selected_chat() else {
-            return (Vec::new(), None);
+            return (Vec::new(), None, Vec::new());
         };
         let loaded = self.conversations.get(&chat.jid);
         let messages: Vec<&Message> = match loaded {
@@ -1582,12 +1789,15 @@ impl App {
             return (
                 vec![Line::from(Span::styled("(no messages)", self.muted()))],
                 None,
+                vec![None],
             );
         }
         let body = Style::default().fg(rgb(self.palette.foreground));
         let mut lines = Vec::with_capacity(messages.len() * 2);
+        let mut owners = Vec::with_capacity(messages.len() * 2);
         let mut selected = None;
         for (index, message) in messages.iter().enumerate() {
+            let owner = loaded.is_some().then_some(index);
             let chosen = loaded.is_some() && self.cursor == Some(index);
             let mut header = if chosen {
                 selected = Some(lines.len());
@@ -1637,8 +1847,9 @@ impl App {
                 }
                 lines.push(Line::from(spans));
             }
+            owners.resize(lines.len(), owner);
         }
-        (lines, selected)
+        (lines, selected, owners)
     }
 
     fn header_of(&self, chat: &Chat, message: &Message) -> String {
@@ -1828,22 +2039,58 @@ fn bordered(palette: &Palette) -> Block<'static> {
     Block::bordered().border_style(Style::default().fg(rgb(palette.accent)))
 }
 
+/// One of the two panes: the focused one has a thick border in the accent colour, the other a
+/// thin dim one, so where the keys go is visible at a glance (and without colour).
+fn pane_block(palette: &Palette, focused: bool) -> Block<'static> {
+    if focused {
+        bordered(palette)
+            .border_type(BorderType::Thick)
+            .border_style(
+                Style::default()
+                    .fg(rgb(palette.accent))
+                    .add_modifier(Modifier::BOLD),
+            )
+    } else {
+        Block::bordered().border_style(
+            Style::default()
+                .fg(rgb(palette.foreground))
+                .add_modifier(Modifier::DIM),
+        )
+    }
+}
+
 fn rgb(colour: Rgb) -> Color {
     Color::Rgb(colour.r, colour.g, colour.b)
 }
 
-/// The name to show for a chat: its display name, or the JID's user part when that is
-/// empty (the wire contract allows an empty name).
+/// The name to show for a chat (wire "Chat names", ADR 0002): its `name`, else its `phone` (the
+/// number masked to its last four digits), else, as `nuncio chats` does, a phone-number chat's
+/// own number masked the same way ([`mask_phone`]); otherwise a placeholder: `unnamed group` for a
+/// group, `hidden number` for anyone else. A LID's digits are never shown: they are a hidden id,
+/// not a number.
 fn chat_title(chat: &Chat) -> String {
-    if chat.name.is_empty() {
-        chat.jid
-            .split('@')
-            .next()
-            .unwrap_or(chat.jid.as_str())
-            .to_owned()
-    } else {
-        plain(&chat.name)
+    if !chat.name.is_empty() {
+        return plain(&chat.name);
     }
+    match &chat.phone {
+        Some(phone) if !phone.is_empty() => plain(phone),
+        _ => match chat.jid.split_once('@') {
+            Some((number, "s.whatsapp.net")) => mask_phone(number),
+            Some((_, "g.us")) => "unnamed group".to_owned(),
+            _ => "hidden number".to_owned(),
+        },
+    }
+}
+
+/// A phone number masked as the daemon's `ipc.MaskPhone` does: `…` and its last four digits, or
+/// `…` alone for four digits or fewer.
+fn mask_phone(number: &str) -> String {
+    let digits: Vec<char> = number.chars().collect();
+    if digits.len() <= 4 {
+        return "…".to_owned();
+    }
+    let last: String = digits[digits.len() - 4..].iter().collect();
+    format!("…{last}")
 }
 
 /// Who sent the message (us, or the chat) and when; a send of ours that is not sent yet says
@@ -1882,42 +2129,76 @@ fn local_hhmm(message: &Message, offset: time::UtcOffset) -> String {
     format!("{:02}:{:02}", local / 60, local % 60)
 }
 
-/// A chat in the list: its markers, name and unread badge, then its last message cut to `width`
-/// columns with `…` so the ` · HH:MM` after it is always whole.
+/// The marker column at the end of a chat's name row: a space, then `★ ⊘ ▤` with a space between
+/// them, a missing marker left blank, so every marker sits in the same column on every row.
+const MARKERS: usize = 6;
+/// Below this many columns for the name, the markers give up their column: only the ones a chat
+/// has are drawn, right after the name, so a very narrow list still shows who the chat is.
+const NARROW_NAME: usize = 6;
+
+/// A chat in the list: its name and unread badge, padded to the marker column, then its markers;
+/// under it, its last message cut to `width` columns with `…` so the ` · HH:MM` after it is
+/// always whole. The name is cut first, so the badge and the markers always show.
 fn chat_item(
     chat: &Chat,
     palette: &Palette,
     width: usize,
     offset: time::UtcOffset,
 ) -> ListItem<'static> {
-    let markers = Span::styled(
+    let badge = (chat.unread > 0).then(|| format!(" ({})", chat.unread));
+    let badge_width = badge.as_deref().map_or(0, display_width);
+    let column = width.saturating_sub(MARKERS).saturating_sub(badge_width) >= NARROW_NAME;
+    let markers = if column {
         format!(
-            "{}{}{} ",
+            " {} {} {}",
             if chat.pinned { PINNED } else { ' ' },
             if chat.muted { MUTED } else { ' ' },
             if chat.archived { ARCHIVED } else { ' ' }
-        ),
-        Style::default().fg(rgb(palette.accent)),
-    );
-    let mut title = vec![
-        markers,
-        Span::styled(
-            chat_title(chat),
-            Style::default()
-                .fg(rgb(palette.foreground))
-                .add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if chat.unread > 0 {
+        )
+    } else {
+        let shown: String = [
+            (chat.pinned, PINNED),
+            (chat.muted, MUTED),
+            (chat.archived, ARCHIVED),
+        ]
+        .iter()
+        .filter_map(|&(on, marker)| on.then_some(marker))
+        .collect();
+        if shown.is_empty() {
+            shown
+        } else {
+            format!(" {shown}")
+        }
+    };
+    let markers_width = display_width(&markers);
+    let room = width
+        .saturating_sub(markers_width)
+        .saturating_sub(badge_width);
+    let name = fit(&chat_title(chat), room);
+    let mut title = vec![Span::styled(
+        name.clone(),
+        Style::default()
+            .fg(rgb(palette.foreground))
+            .add_modifier(Modifier::BOLD),
+    )];
+    let mut used = display_width(&name);
+    if let Some(badge) = badge {
+        used += display_width(&badge);
         title.push(Span::raw(" "));
         title.push(Span::styled(
-            format!("({})", chat.unread),
+            badge.trim_start().to_owned(),
             Style::default()
                 .bg(rgb(palette.red))
                 .fg(rgb(palette.background))
                 .add_modifier(Modifier::BOLD),
         ));
     }
+    let pad = width.saturating_sub(markers_width).saturating_sub(used);
+    title.push(Span::raw(" ".repeat(pad)));
+    title.push(Span::styled(
+        markers,
+        Style::default().fg(rgb(palette.accent)),
+    ));
 
     // A message with no text (a non-text kind) shows its kind instead of an empty row.
     let detail = match chat.last_message.as_ref() {
@@ -1958,20 +2239,92 @@ mod tests {
             pinned: false,
             muted: false,
             aliases: Vec::new(),
+            phone: None,
             last_message: None,
         }
     }
 
+    /// A 80x24 screen: the list in columns 0..32 (two chats from row 2, scrolled by one), the
+    /// conversation in 32..80 with its messages in rows 2..20 and the composer in rows 20..23.
+    fn map() -> super::ScreenMap {
+        use ratatui::layout::Rect;
+        let mut message_rows = vec![None; 18];
+        message_rows[14] = Some(0);
+        message_rows[15] = Some(0);
+        message_rows[16] = Some(1);
+        message_rows[17] = Some(1);
+        super::ScreenMap {
+            chats: Rect::new(0, 1, 32, 22),
+            chat_rows: Rect::new(1, 2, 30, 20),
+            chat_offset: 1,
+            chat_count: 3,
+            conversation: Rect::new(32, 1, 48, 22),
+            message_area: Rect::new(33, 2, 46, 18),
+            message_rows,
+            composer: Rect::new(33, 20, 46, 2),
+        }
+    }
+
     #[test]
-    fn a_chat_with_no_name_shows_its_jid_user_part() {
+    fn hit_test_maps_a_cell_to_the_chat_message_or_composer_under_it() {
+        use super::{Target, hit_test};
+        let map = map();
+        // Each chat takes two rows, counted from the list's scroll.
+        assert_eq!(hit_test(&map, 5, 2), Some(Target::Chats(Some(1))));
+        assert_eq!(hit_test(&map, 30, 3), Some(Target::Chats(Some(1))));
+        assert_eq!(hit_test(&map, 5, 4), Some(Target::Chats(Some(2))));
+        // Below the last chat, and on the border: the pane, no chat.
+        assert_eq!(hit_test(&map, 5, 6), Some(Target::Chats(None)));
+        assert_eq!(hit_test(&map, 0, 2), Some(Target::Chats(None)));
+        assert_eq!(hit_test(&map, 31, 2), Some(Target::Chats(None)));
+        // The conversation's rows name their message; an empty row, the border: none.
+        assert_eq!(hit_test(&map, 40, 16), Some(Target::Conversation(Some(0))));
+        assert_eq!(hit_test(&map, 78, 19), Some(Target::Conversation(Some(1))));
+        assert_eq!(hit_test(&map, 40, 5), Some(Target::Conversation(None)));
+        assert_eq!(hit_test(&map, 79, 10), Some(Target::Conversation(None)));
+        assert_eq!(hit_test(&map, 33, 20), Some(Target::Composer));
+        assert_eq!(hit_test(&map, 78, 21), Some(Target::Composer));
+        // The header and the footer are neither pane.
+        assert_eq!(hit_test(&map, 5, 0), None);
+        assert_eq!(hit_test(&map, 40, 23), None);
+        // Nothing drawn yet: nothing to hit.
+        assert_eq!(hit_test(&super::ScreenMap::default(), 5, 5), None);
+    }
+
+    #[test]
+    fn a_chats_name_wins_over_its_phone() {
+        let mut ada = chat("Ada Lovelace", "100000000000001@lid");
+        ada.phone = Some("…0001".to_owned());
+        assert_eq!(chat_title(&ada), "Ada Lovelace");
+    }
+
+    #[test]
+    fn a_chat_with_no_name_shows_its_masked_phone() {
+        let mut ada = chat("", "100000000000001@lid");
+        ada.phone = Some("…0001".to_owned());
+        assert_eq!(chat_title(&ada), "…0001");
+        let mut pn = chat("", "15551230001@s.whatsapp.net");
+        pn.phone = Some("…0001".to_owned());
+        assert_eq!(chat_title(&pn), "…0001");
+    }
+
+    #[test]
+    fn a_chat_with_neither_shows_a_placeholder_never_its_jid_digits() {
         assert_eq!(
-            chat_title(&chat("", "15551230001@s.whatsapp.net")),
-            "15551230001"
+            chat_title(&chat("", "100000000000001@lid")),
+            "hidden number"
         );
         assert_eq!(
-            chat_title(&chat("Ada Lovelace", "15551230001@s.whatsapp.net")),
-            "Ada Lovelace"
+            chat_title(&chat("", "120363000000000001@g.us")),
+            "unnamed group"
         );
+    }
+
+    #[test]
+    fn a_phone_number_chat_with_neither_shows_its_own_number_masked_as_nuncio_chats_does() {
+        // ipc.MaskPhone: "…" and the last four digits; "…" alone for four digits or fewer.
+        assert_eq!(chat_title(&chat("", "15551230005@s.whatsapp.net")), "…0005");
+        assert_eq!(chat_title(&chat("", "1234@s.whatsapp.net")), "…");
     }
 
     #[test]

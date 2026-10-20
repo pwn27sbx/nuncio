@@ -86,12 +86,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_thirty_nine_documented_files() {
+fn fixture_directory_holds_the_forty_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 39, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 40, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -368,6 +368,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                     pinned: true,
                     muted: false,
                     aliases: Vec::new(),
+                    phone: None,
                     last_message: Some(Message {
                         id: "3EB0AAA1".to_owned(),
                         kind: "text".to_owned(),
@@ -389,6 +390,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                     pinned: false,
                     muted: false,
                     aliases: Vec::new(),
+                    phone: None,
                     last_message: Some(Message {
                         id: "3EB0AAA2".to_owned(),
                         kind: "text".to_owned(),
@@ -410,6 +412,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                     pinned: false,
                     muted: true,
                     aliases: Vec::new(),
+                    phone: None,
                     last_message: None,
                 },
             ],
@@ -636,6 +639,7 @@ fn constructed_event_chat_and_not_confirmed_frames_match_their_fixtures() {
             pinned: true,
             muted: true,
             aliases: Vec::new(),
+            phone: None,
             last_message: Some(Message {
                 id: "3EB0AAA1".to_owned(),
                 kind: "text".to_owned(),
@@ -724,7 +728,7 @@ fn every_daemon_fixture_parses_to_its_own_variant_not_the_catch_all() {
             Err(_) => assert!(is_client, "{name}: a daemon fixture does not parse"),
         }
     }
-    assert_eq!(daemon_fixtures, 24, "every daemon fixture was checked");
+    assert_eq!(daemon_fixtures, 25, "every daemon fixture was checked");
 }
 
 /// ADR 0001: `event_chat` (and `chats`) name the phone-number chats merged into a chat in
@@ -741,6 +745,7 @@ fn a_constructed_event_chat_with_aliases_matches_its_fixture() {
             pinned: false,
             muted: false,
             aliases: vec!["15551230001@s.whatsapp.net".to_owned()],
+            phone: None,
             last_message: Some(Message {
                 id: "3EB0AAA3".to_owned(),
                 kind: "text".to_owned(),
@@ -758,8 +763,29 @@ fn a_constructed_event_chat_with_aliases_matches_its_fixture() {
     assert_frame(&fixtures_dir().join("event_chat_aliases.json"), &event);
 }
 
-/// A chat with no aliases serialises exactly as before `aliases` existed: the chats of the
-/// `chats` and `event_chat` fixtures, byte for byte.
+/// ADR 0002: a contact with no name carries her masked phone number in `phone`, the fallback a
+/// client shows instead of the chat's LID digits; constructed in Rust.
+#[test]
+fn a_constructed_event_chat_with_a_phone_matches_its_fixture() {
+    let event = DaemonFrame::EventChat {
+        v: PROTOCOL_VERSION,
+        chat: Chat {
+            jid: "100000000000002@lid".to_owned(),
+            name: String::new(),
+            unread: 0,
+            archived: false,
+            pinned: false,
+            muted: false,
+            aliases: Vec::new(),
+            phone: Some("…0002".to_owned()),
+            last_message: None,
+        },
+    };
+    assert_frame(&fixtures_dir().join("event_chat_phone.json"), &event);
+}
+
+/// A chat with no aliases and no phone serialises exactly as before `aliases` and `phone` existed:
+/// the chats of the `chats` and `event_chat` fixtures, byte for byte.
 #[test]
 fn chats_without_aliases_are_byte_identical_to_before() {
     let text = fs::read_to_string(fixtures_dir().join("chats_response.json")).unwrap();

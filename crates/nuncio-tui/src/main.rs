@@ -17,7 +17,10 @@ use nuncio_client::{
     ClientFrame, DaemonFrame, PROTOCOL_VERSION, Palette, Snapshot, ThemeWatcher, fetch, socket_path,
 };
 use nuncio_tui::{Action, App, Daemon, Source, fixture_snapshot, open_externally};
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+};
+use ratatui::crossterm::execute;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 
@@ -31,10 +34,12 @@ const TICK: Duration = Duration::from_millis(100);
 const USAGE: &str = "\
 usage: nuncio-tui [--image <png>]
 
-  Keys: j/k move or scroll, Enter open, i write, Enter send, Alt-Enter or Ctrl-J new line,
-  Left/Right/Home/End move in the draft, Esc back, g/G oldest/newest, PgUp/PgDn page,
-  K/J select a message, r reply, e react, R retry, o open media, / search, Tab pane,
-  ? help, q quit.
+  Keys: Tab switches between the chat list and the conversation; j/k or the arrows move in
+  the focused pane (chats, or the selected message); Enter opens a chat ready to write,
+  Enter sends, Alt-Enter or Ctrl-J new line, Esc composer -> conversation -> chats;
+  r reply, e react, R retry, o open media, / search, ? help, q quit (Ctrl-C anywhere).
+  Mouse: click a chat to open it, click a message to select it, the wheel scrolls the pane
+  under the pointer; hold Shift to select text.
 
   --image <png>   render a local PNG inline, next to the chat list (S9's ratatui-image
                   check; nothing in M0 serves images, so this points at any file)
@@ -83,6 +88,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Clicks and the wheel. A panic turns it off before ratatui's own hook restores the rest,
+    // so the shell is not left receiving mouse reports.
+    let _ = execute!(std::io::stdout(), EnableMouseCapture);
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        hook(info);
+    }));
 
     // The ratatui-image picker queries the terminal, so it must run after entering the
     // alternate screen and before reading events.
@@ -105,6 +118,7 @@ fn main() -> ExitCode {
 
     let mut io = Io { daemon, theme };
     let outcome = event_loop(&mut terminal, &mut app, &mut io);
+    let _ = execute!(std::io::stdout(), DisableMouseCapture);
     ratatui::restore();
 
     // Printed after the terminal is given back, so it does not corrupt the display.
@@ -198,13 +212,12 @@ fn event_loop(
         if !event::poll(TICK)? {
             continue;
         }
-        let Event::Key(key) = event::read()? else {
-            continue;
+        let action = match event::read()? {
+            Event::Key(key) if key.kind == KeyEventKind::Press => app.handle_key(key),
+            Event::Mouse(mouse) => app.handle_mouse(mouse),
+            _ => None,
         };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        if let Some(action) = app.handle_key(key)
+        if let Some(action) = action
             && !io.act(app, action)
         {
             return Ok(());

@@ -23,21 +23,29 @@ type Request struct {
 	ChatJID   string
 	MessageID string
 	Ext       string
-	Media     whatsmeow.DownloadableMessage
+	// Legacy is the Ext an earlier build asked for. Before downloading, the file it cached (named
+	// as fileName names it, so the bare hash when Legacy is not safe) is renamed to the current name
+	// and served, instead of fetched again.
+	Legacy string
+	Media  whatsmeow.DownloadableMessage
 }
 
 // fileName derives the cache file name from the chat and message ids: a hex
 // SHA-256, so no id can name a path component. A safe Ext is appended.
-func fileName(req Request) string {
+func fileName(req Request) string { return withExt(req, req.Ext) }
+
+// withExt is the cache file name of req with ext, appended only when it is safe.
+func withExt(req Request, ext string) string {
 	sum := sha256.Sum256([]byte(req.ChatJID + "\x00" + req.MessageID))
 	name := hex.EncodeToString(sum[:])
-	if safeExt(req.Ext) {
-		name += "." + req.Ext
+	if SafeExt(ext) {
+		name += "." + ext
 	}
 	return name
 }
 
-func safeExt(ext string) bool {
+// SafeExt reports whether ext may end a cache file name: 1 to 8 ASCII letters or digits.
+func SafeExt(ext string) bool {
 	if ext == "" || len(ext) > 8 {
 		return false
 	}

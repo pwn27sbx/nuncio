@@ -1,0 +1,604 @@
+//! The key scheme and the mouse (S8), and the chat markers' column (Part 2.2), through `App`'s
+//! public interface and a `TestBackend` buffer.
+
+use nuncio_client::{Chat, ClientFrame, DaemonFrame, Message, Palette, Session, Snapshot};
+use nuncio_tui::{Action, App, Pane, Source};
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{
+    KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::style::Color;
+
+const ADA: &str = "15551230001@s.whatsapp.net";
+const GRACE: &str = "15551230002@s.whatsapp.net";
+const FAMILY: &str = "15551230003@s.whatsapp.net";
+
+fn message(id: &str, text: &str, from_me: bool, minute: u32) -> Message {
+    Message {
+        id: id.to_owned(),
+        kind: "text".to_owned(),
+        text: text.to_owned(),
+        from_me,
+        timestamp: format!("2026-10-18T17:{:02}:00Z", minute % 60),
+        media: None,
+        state: None,
+        client_id: None,
+        reply_to: None,
+        reactions: Vec::new(),
+    }
+}
+
+fn chat(jid: &str, name: &str) -> Chat {
+    Chat {
+        jid: jid.to_owned(),
+        name: name.to_owned(),
+        unread: 0,
+        archived: false,
+        pinned: false,
+        muted: false,
+        aliases: Vec::new(),
+        phone: None,
+        last_message: None,
+    }
+}
+
+fn app_with(chats: Vec<Chat>) -> App {
+    let snapshot = Snapshot {
+        daemon: "nunciod/0.1.0".to_owned(),
+        linked: true,
+        session: Session::Linked,
+        unread: 0,
+        chats,
+    };
+    App::new(snapshot, Source::Daemon, Palette::default())
+}
+
+fn two_chats() -> App {
+    app_with(vec![chat(ADA, "Ada Lovelace"), chat(GRACE, "Grace Hopper")])
+}
+
+fn key(code: KeyCode) -> KeyEvent {
+    KeyEvent::new(code, KeyModifiers::NONE)
+}
+
+fn shift(c: char) -> KeyEvent {
+    KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT)
+}
+
+fn type_text(app: &mut App, text: &str) {
+    for c in text.chars() {
+        assert_eq!(app.handle_key(key(KeyCode::Char(c))), None, "typing {c:?}");
+    }
+}
+
+/// The `messages` reply for `jid`, newest first as on the wire.
+fn messages_reply(jid: &str, oldest_first: Vec<Message>) -> DaemonFrame {
+    let mut messages = oldest_first;
+    messages.reverse();
+    DaemonFrame::Messages {
+        v: 1,
+        jid: jid.to_owned(),
+        messages,
+    }
+}
+
+fn three() -> Vec<Message> {
+    vec![
+        message("A1", "first words", false, 1),
+        message("A2", "second words", true, 2),
+        message("A3", "third words", false, 3),
+    ]
+}
+
+/// Open Ada with Enter (the composer is focused) and load `oldest_first` into her chat.
+fn open_ada(app: &mut App, oldest_first: Vec<Message>) {
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Some(Action::Request(ClientFrame::messages(ADA, 200)))
+    );
+    app.apply(&messages_reply(ADA, oldest_first));
+}
+
+fn render(app: &mut App, width: u16, height: u16) -> Buffer {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("a test terminal");
+    terminal
+        .draw(|frame| app.draw(frame))
+        .expect("the app draws without panicking");
+    terminal.backend().buffer().clone()
+}
+
+fn text(buffer: &Buffer) -> String {
+    (0..buffer.area.height)
+        .map(|y| row(buffer, y) + "\n")
+        .collect()
+}
+
+fn row(buffer: &Buffer, y: u16) -> String {
+    (0..buffer.area.width)
+        .map(|x| buffer[(x, y)].symbol().to_owned())
+        .collect()
+}
+
+/// The first cell `(x, y)` whose row contains `needle` starting at x, searching from the left.
+fn find(buffer: &Buffer, needle: &str) -> (u16, u16) {
+    for y in 0..buffer.area.height {
+        let cells: Vec<&str> = (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect();
+        for x in 0..cells.len() {
+            if cells[x..].concat().starts_with(needle) {
+                return (x as u16, y);
+            }
+        }
+    }
+    panic!("{needle:?} is not on screen:\n{}", text(buffer));
+}
+
+fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+    MouseEvent {
+        kind,
+        column,
+        row,
+        modifiers: KeyModifiers::NONE,
+    }
+}
+
+fn click(app: &mut App, (column, row): (u16, u16)) -> Option<Action> {
+    app.handle_mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row))
+}
+
+fn accent() -> Color {
+    let rgb = Palette::default().accent;
+    Color::Rgb(rgb.r, rgb.g, rgb.b)
+}
+
+/// The column of the chat pane's right border (its top-right corner, either style).
+fn split(buffer: &Buffer) -> u16 {
+    (0..buffer.area.width)
+        .find(|&x| matches!(buffer[(x, 1)].symbol(), "┐" | "┓"))
+        .expect("the chat pane's top-right corner")
+}
+
+// --- keys -------------------------------------------------------------------------------
+
+#[test]
+fn tab_switches_focus_and_only_the_focused_pane_has_the_highlighted_border() {
+    let mut app = two_chats();
+    let screen = render(&mut app, 80, 24);
+    let right = split(&screen);
+    let chats_corner = &screen[(0, 1)];
+    let conversation_corner = &screen[(right + 1, 1)];
+    assert_eq!(
+        chats_corner.symbol(),
+        "┏",
+        "the focused list:\n{}",
+        text(&screen)
+    );
+    assert_eq!(chats_corner.fg, accent());
+    assert_eq!(conversation_corner.symbol(), "┌");
+    assert_ne!(
+        conversation_corner.fg,
+        accent(),
+        "the other pane is not highlighted"
+    );
+
+    assert_eq!(app.handle_key(key(KeyCode::Tab)), None);
+    assert_eq!(app.pane(), Pane::Messages);
+    let screen = render(&mut app, 80, 24);
+    assert_eq!(screen[(0, 1)].symbol(), "┌");
+    assert_ne!(screen[(0, 1)].fg, accent());
+    assert_eq!(screen[(right + 1, 1)].symbol(), "┏");
+    assert_eq!(screen[(right + 1, 1)].fg, accent());
+
+    assert_eq!(app.handle_key(key(KeyCode::Tab)), None);
+    assert_eq!(app.pane(), Pane::Chats);
+}
+
+#[test]
+fn the_composer_counts_as_the_conversation_pane_for_the_border() {
+    let mut app = two_chats();
+    open_ada(&mut app, three());
+    assert_eq!(app.pane(), Pane::Compose);
+    let screen = render(&mut app, 80, 24);
+    let right = split(&screen);
+    assert_eq!(screen[(0, 1)].symbol(), "┌");
+    assert_eq!(screen[(right + 1, 1)].symbol(), "┏");
+}
+
+#[test]
+fn enter_on_a_chat_opens_it_with_the_composer_focused_ready_to_type() {
+    let mut app = two_chats().with_client_prefix("t");
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Some(Action::Request(ClientFrame::messages(GRACE, 200))),
+        "Enter asks for the chat's messages"
+    );
+    assert_eq!(
+        app.pane(),
+        Pane::Compose,
+        "and the composer has the keyboard"
+    );
+    type_text(&mut app, "hi");
+    assert_eq!(app.composer(), "hi");
+    assert_eq!(
+        app.handle_key(key(KeyCode::Enter)),
+        Some(Action::Request(ClientFrame::send(GRACE, "hi", "t-1")))
+    );
+}
+
+#[test]
+fn j_k_and_the_arrows_select_messages_in_the_conversation_and_shift_k_j_do_nothing() {
+    let mut app = two_chats();
+    open_ada(&mut app, three());
+    assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
+    assert_eq!(app.pane(), Pane::Messages);
+    // The conversation row under the selected message's `›` header: its body.
+    let selected = |app: &mut App| -> Option<String> {
+        let screen = render(app, 80, 24);
+        let right = split(&screen);
+        let conversation = |y: u16| -> String {
+            (right + 1..screen.area.width)
+                .map(|x| screen[(x, y)].symbol())
+                .collect()
+        };
+        (0..screen.area.height)
+            .find(|&y| {
+                conversation(y)
+                    .trim_start_matches(['│', '┃'])
+                    .starts_with("› ")
+            })
+            .map(|y| conversation(y + 1))
+    };
+
+    // Shift-K / Shift-J are gone: they select nothing.
+    app.handle_key(shift('K'));
+    app.handle_key(shift('J'));
+    assert_eq!(selected(&mut app), None, "K/J select nothing");
+    let selected = |app: &mut App| selected(app).expect("a message is selected");
+
+    app.handle_key(key(KeyCode::Char('k')));
+    assert!(
+        selected(&mut app).contains("third words"),
+        "k selects the newest"
+    );
+    app.handle_key(key(KeyCode::Up));
+    assert!(selected(&mut app).contains("second words"), "↑ one older");
+    app.handle_key(key(KeyCode::Char('k')));
+    assert!(selected(&mut app).contains("first words"));
+    app.handle_key(key(KeyCode::Char('j')));
+    assert!(selected(&mut app).contains("second words"), "j one newer");
+    app.handle_key(key(KeyCode::Down));
+    assert!(selected(&mut app).contains("third words"), "↓ one newer");
+    // The list's selection never moved.
+    assert_eq!(app.selected(), 0);
+}
+
+#[test]
+fn j_k_in_the_chat_list_move_between_chats() {
+    let mut app = two_chats();
+    app.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(app.selected(), 1);
+    app.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(app.selected(), 0);
+    app.handle_key(key(KeyCode::Down));
+    assert_eq!(app.selected(), 1);
+    app.handle_key(key(KeyCode::Up));
+    assert_eq!(app.selected(), 0);
+}
+
+#[test]
+fn r_replies_to_the_message_selected_with_k() {
+    let mut app = two_chats();
+    open_ada(&mut app, three());
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('k')));
+    app.handle_key(key(KeyCode::Char('r')));
+    assert_eq!(app.pane(), Pane::Compose);
+    type_text(&mut app, "ok");
+    let Some(Action::Request(ClientFrame::Send { reply_to, .. })) =
+        app.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("Enter sends the reply");
+    };
+    assert_eq!(reply_to.as_deref(), Some("A3"));
+}
+
+#[test]
+fn esc_goes_from_the_composer_to_the_conversation_then_to_the_list() {
+    let mut app = two_chats();
+    open_ada(&mut app, three());
+    assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
+    assert_eq!(app.pane(), Pane::Messages);
+    // Even with a message selected, the next Esc goes to the list.
+    app.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
+    assert_eq!(app.pane(), Pane::Chats);
+}
+
+#[test]
+fn q_and_slash_are_text_in_the_composer_and_ctrl_c_quits_anywhere() {
+    let mut app = two_chats();
+    open_ada(&mut app, three());
+    type_text(&mut app, "q/?");
+    assert_eq!(app.composer(), "q/?");
+    assert_eq!(app.pane(), Pane::Compose);
+    let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+    assert_eq!(app.handle_key(ctrl_c), Some(Action::Quit));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.handle_key(ctrl_c), Some(Action::Quit));
+    assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Some(Action::Quit));
+    let mut app = two_chats();
+    assert_eq!(app.handle_key(key(KeyCode::Char('q'))), Some(Action::Quit));
+}
+
+#[test]
+fn the_footer_always_starts_with_the_same_hint_and_adds_the_panes_keys() {
+    let base = "? help · Tab switch pane · Enter open · / search · q quit";
+    let mut app = two_chats();
+    for (width, height) in [(80, 24), (240, 60)] {
+        let screen = render(&mut app, width, height);
+        let footer = row(&screen, height - 1);
+        assert!(footer.trim_start().starts_with(base), "{footer:?}");
+    }
+    let footer = row(&render(&mut app, 240, 60), 59);
+    assert!(
+        footer.contains("j/k move"),
+        "the list's keys after it: {footer:?}"
+    );
+
+    app.handle_key(key(KeyCode::Tab));
+    let footer = row(&render(&mut app, 240, 60), 59);
+    assert!(
+        footer
+            .trim_start()
+            .starts_with("? help · Tab switch pane · Enter write · / search · q quit"),
+        "{footer:?}"
+    );
+    assert!(footer.contains("j/k select"), "{footer:?}");
+    // With a message selected, the message keys follow.
+    let mut app = two_chats();
+    open_ada(&mut app, three());
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('k')));
+    let footer = row(&render(&mut app, 240, 60), 59);
+    assert!(footer.contains("r reply · e react"), "{footer:?}");
+    // In the composer, q and / are text: the hint says how to leave instead.
+    app.handle_key(key(KeyCode::Enter));
+    assert_eq!(app.pane(), Pane::Compose);
+    let footer = row(&render(&mut app, 240, 60), 59);
+    assert!(footer.contains("Enter send"), "{footer:?}");
+    assert!(footer.contains("Esc conversation"), "{footer:?}");
+    assert!(!footer.contains("q quit"), "{footer:?}");
+}
+
+#[test]
+fn the_help_is_grouped_by_context_and_fits_at_eighty_by_twenty_four() {
+    let mut app = two_chats();
+    app.handle_key(key(KeyCode::Char('?')));
+    let screen = render(&mut app, 80, 24);
+    let shown = text(&screen);
+    let mut last = 0;
+    for heading in [
+        "Chats",
+        "Conversation",
+        "Composer",
+        "Search",
+        "Reactions",
+        "Everywhere",
+    ] {
+        let (_, y) = find(&screen, heading);
+        assert!(
+            y > last || heading == "Chats",
+            "{heading} in order:\n{shown}"
+        );
+        last = y;
+    }
+    for needle in ["Tab", "Enter", "send", "Ctrl-C", "Shift"] {
+        assert!(shown.contains(needle), "{needle:?}:\n{shown}");
+    }
+    // The help's bottom border is on screen: nothing was cut off.
+    assert!(shown.contains('└') || shown.contains('┗'), "{shown}");
+    let (_, reactions) = find(&screen, "Reactions");
+    let (_, ctrl_c) = find(&screen, "Ctrl-C");
+    assert!(ctrl_c > reactions, "{shown}");
+    assert!(!shown.contains("K/J"), "K/J are gone:\n{shown}");
+}
+
+// --- mouse ------------------------------------------------------------------------------
+
+#[test]
+fn a_click_on_a_chat_row_selects_and_opens_it_with_the_composer_focused() {
+    let mut app = two_chats();
+    let screen = render(&mut app, 80, 24);
+    // Either of the chat's two rows (its name, its last message).
+    let (x, y) = find(&screen, "Grace Hopper");
+    assert_eq!(
+        click(&mut app, (x, y + 1)),
+        Some(Action::Request(ClientFrame::messages(GRACE, 200)))
+    );
+    assert_eq!(app.selected(), 1);
+    assert_eq!(app.pane(), Pane::Compose);
+
+    // Below the last chat there is no chat to open.
+    let mut app = two_chats();
+    render(&mut app, 80, 24);
+    assert_eq!(click(&mut app, (3, 15)), None);
+    assert_eq!(app.selected(), 0);
+    assert_eq!(app.pane(), Pane::Chats);
+}
+
+#[test]
+fn a_click_in_the_conversation_focuses_it_and_selects_the_clicked_message() {
+    let mut app = two_chats();
+    open_ada(&mut app, three());
+    let screen = render(&mut app, 80, 24);
+    let at = find(&screen, "second words");
+    assert_eq!(click(&mut app, at), None);
+    assert_eq!(app.pane(), Pane::Messages);
+    let shown = text(&render(&mut app, 80, 24));
+    assert!(
+        shown.contains("› you · 17:02"),
+        "the clicked message:\n{shown}"
+    );
+    // `r` now replies to it.
+    app.handle_key(key(KeyCode::Char('r')));
+    type_text(&mut app, "ok");
+    let Some(Action::Request(ClientFrame::Send { reply_to, .. })) =
+        app.handle_key(key(KeyCode::Enter))
+    else {
+        panic!("sends");
+    };
+    assert_eq!(reply_to.as_deref(), Some("A2"));
+
+    // A click on a header row selects that message too.
+    app.handle_key(key(KeyCode::Tab));
+    let screen = render(&mut app, 80, 24);
+    let at = find(&screen, "Ada Lovelace · 17:01");
+    click(&mut app, at);
+    assert_eq!(app.pane(), Pane::Messages);
+    let shown = text(&render(&mut app, 80, 24));
+    assert!(shown.contains("› Ada Lovelace · 17:01"), "{shown}");
+}
+
+#[test]
+fn a_click_in_the_composer_focuses_it() {
+    let mut app = two_chats();
+    open_ada(&mut app, three());
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.pane(), Pane::Chats);
+    let screen = render(&mut app, 80, 24);
+    let at = find(&screen, "Enter to write");
+    assert_eq!(click(&mut app, at), None);
+    assert_eq!(app.pane(), Pane::Compose);
+    type_text(&mut app, "x");
+    assert_eq!(app.composer(), "x");
+}
+
+#[test]
+fn the_wheel_scrolls_the_pane_under_the_pointer() {
+    let many: Vec<Message> = (0..60)
+        .map(|n| message(&format!("M{n:02}"), &format!("message {n:02}"), false, n))
+        .collect();
+    let mut app = two_chats();
+    open_ada(&mut app, many);
+    app.handle_key(key(KeyCode::Esc));
+    let screen = render(&mut app, 80, 24);
+    assert!(text(&screen).contains("message 59"));
+    let right = split(&screen);
+    let over_conversation = (right + 10, 10);
+    for _ in 0..4 {
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollUp,
+            over_conversation.0,
+            over_conversation.1,
+        ));
+    }
+    let shown = text(&render(&mut app, 80, 24));
+    assert!(!shown.contains("message 59"), "scrolled up:\n{shown}");
+    assert_eq!(app.selected(), 0, "the chat list did not move");
+    for _ in 0..4 {
+        app.handle_mouse(mouse(
+            MouseEventKind::ScrollDown,
+            over_conversation.0,
+            over_conversation.1,
+        ));
+    }
+    assert!(text(&render(&mut app, 80, 24)).contains("message 59"));
+
+    // Over the chat list the wheel moves through the chats; the conversation stays.
+    app.handle_mouse(mouse(MouseEventKind::ScrollDown, 3, 5));
+    assert_eq!(app.selected(), 1);
+    app.handle_mouse(mouse(MouseEventKind::ScrollUp, 3, 5));
+    assert_eq!(app.selected(), 0);
+    assert!(text(&render(&mut app, 80, 24)).contains("message 59"));
+}
+
+#[test]
+fn the_mouse_does_nothing_while_the_help_is_open() {
+    let mut app = two_chats();
+    app.handle_key(key(KeyCode::Char('?')));
+    render(&mut app, 80, 24);
+    // The first column inside the chat list, on Ada's row, left of the help.
+    assert_eq!(click(&mut app, (1, 2)), None);
+    assert_eq!(app.pane(), Pane::Chats);
+}
+
+// --- chat markers ------------------------------------------------------------------------
+
+#[test]
+fn chat_markers_sit_in_one_fixed_column_after_the_name() {
+    let family = "👨‍👩‍👧‍👦";
+    let mut pinned = chat(ADA, &format!("{family} Family group with a long name"));
+    pinned.pinned = true;
+    pinned.unread = 3;
+    let mut muted = chat(GRACE, "李小龍 漢字テスト");
+    muted.muted = true;
+    let mut archived = chat(FAMILY, "Bo");
+    archived.archived = true;
+    archived.pinned = true;
+    archived.muted = true;
+    for (width, height) in [(80u16, 24u16), (240, 60)] {
+        let mut app = app_with(vec![pinned.clone(), muted.clone(), archived.clone()]);
+        let screen = render(&mut app, width, height);
+        let right = split(&screen);
+        let mut columns: Vec<(&str, u16, u16)> = Vec::new();
+        for y in 2..height - 2 {
+            for x in 0..right {
+                let symbol = screen[(x, y)].symbol();
+                if matches!(symbol, "★" | "⊘" | "▤") {
+                    columns.push((
+                        if symbol == "★" {
+                            "pin"
+                        } else if symbol == "⊘" {
+                            "mute"
+                        } else {
+                            "archive"
+                        },
+                        x,
+                        y,
+                    ));
+                }
+            }
+        }
+        let shown = text(&screen);
+        let at = |what: &str| -> Vec<u16> {
+            columns
+                .iter()
+                .filter(|(w, _, _)| *w == what)
+                .map(|(_, x, _)| *x)
+                .collect()
+        };
+        let pins = at("pin");
+        let mutes = at("mute");
+        let archives = at("archive");
+        assert_eq!(pins.len(), 2, "{width}x{height}:\n{shown}");
+        assert_eq!(mutes.len(), 2, "{width}x{height}:\n{shown}");
+        assert_eq!(archives.len(), 1, "{width}x{height}:\n{shown}");
+        assert!(pins.iter().all(|&x| x == pins[0]), "one ★ column:\n{shown}");
+        assert!(
+            mutes.iter().all(|&x| x == mutes[0]),
+            "one ⊘ column:\n{shown}"
+        );
+        // Each marker has a space between it and the next, and the last ends by the border.
+        assert_eq!(mutes[0], pins[0] + 2, "{shown}");
+        assert_eq!(archives[0], mutes[0] + 2, "{shown}");
+        assert_eq!(
+            archives[0],
+            right - 1,
+            "the column ends at the border:\n{shown}"
+        );
+        // Every name row has a blank cell before the marker column: the name never touches it.
+        for (_, _, y) in &columns {
+            assert_eq!(screen[(pins[0] - 1, *y)].symbol(), " ", "row {y}:\n{shown}");
+        }
+        // The names come first.
+        let (name_x, name_y) = find(&screen, "Bo");
+        assert!(name_x < pins[0]);
+        assert!(columns.iter().any(|(_, _, y)| *y == name_y));
+        assert!(shown.contains("(3)"), "the unread badge stays:\n{shown}");
+    }
+}

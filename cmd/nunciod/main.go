@@ -336,8 +336,8 @@ func (d *daemon) unread() int {
 	return n
 }
 
-// Chats lists the stored chats, newest message first, each with its unread
-// count, its flags (muted only while its mute lasts) and last message. Without
+// Chats lists the stored chats, newest message first, each with its name, unread
+// count, flags (muted only while its mute lasts), aliases, masked phone and last message. Without
 // a store it is the fixture list, the answer while unlinked. A store failure,
 // or a store a wipe closed, is logged and answers no chats.
 func (d *daemon) Chats() []ipc.Chat {
@@ -356,6 +356,7 @@ func (d *daemon) Chats() []ipc.Chat {
 	chats := make([]ipc.Chat, 0, len(rows))
 	now := time.Now()
 	aliases, _ := d.session.(interface{ ChatAliases(string) []string })
+	phones, _ := d.session.(interface{ ChatPhone(string) string })
 	for _, r := range rows {
 		c, err := wa.WireChat(d.db, r, now)
 		if err != nil {
@@ -364,6 +365,9 @@ func (d *daemon) Chats() []ipc.Chat {
 		}
 		if aliases != nil {
 			c.Aliases = aliases.ChatAliases(c.JID)
+		}
+		if phones != nil {
+			c.Phone = phones.ChatPhone(c.JID)
 		}
 		chats = append(chats, c)
 	}

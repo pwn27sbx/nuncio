@@ -240,12 +240,7 @@ func daemonAnswers() bool {
 
 // maskPhone keeps only the last four digits of a phone number, so nothing this command prints can
 // put a full number into a log. A number of four digits or fewer is hidden entirely.
-func maskPhone(number string) string {
-	if len(number) <= 4 {
-		return "…"
-	}
-	return "…" + number[len(number)-4:]
-}
+func maskPhone(number string) string { return ipc.MaskPhone(number) }
 
 // replyable is an allow-list: only a one-to-one chat with a user, addressed by phone number or by
 // lid, may get the S1 reply. A group, a status update (status@broadcast), a broadcast list or a

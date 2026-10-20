@@ -283,6 +283,14 @@ func fixtureCases() []fixtureCase {
 			},
 		},
 		{
+			// A contact with no name: the masked phone number is what a client shows.
+			file: "event_chat_phone.json",
+			into: func() any { return &EventChat{} },
+			build: func() any {
+				return EventChat{V: 1, Op: OpEventChat, Chat: Chat{JID: "100000000000002@lid", Phone: MaskPhone("15551230002")}}
+			},
+		},
+		{
 			file: "download_media_request.json",
 			into: func() any { return &DownloadMediaRequest{} },
 			build: func() any {
@@ -555,5 +563,18 @@ func TestAChatWithoutAliasesEncodesByteForByteAsBefore(t *testing.T) {
 	}
 	if string(got) != want {
 		t.Errorf("chats =\n %s\nwant\n %s", got, want)
+	}
+}
+
+// MaskPhone keeps the last four digits only (the CLI's rule), so no full number reaches the wire.
+func TestMaskPhoneKeepsTheLastFourDigitsOnly(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"15551230002", "…0002"},
+		{"1234", "…"},
+		{"", "…"},
+	} {
+		if got := MaskPhone(tc.in); got != tc.want {
+			t.Errorf("MaskPhone(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

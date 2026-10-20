@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -290,5 +291,89 @@ func TestDownloadMediaIntoAnUnwritableCacheSaysSo(t *testing.T) {
 	}
 	if n := dl.calls(); n != 0 {
 		t.Errorf("downloader called %d times, want 0", n)
+	}
+}
+
+// A file cached by a build that named it after the raw mime subtype (.jpeg) is still served, with no
+// download, after the extension rule changed: renamed to the new name (.jpg).
+func TestAFileCachedUnderTheOldExtensionIsStillServed(t *testing.T) {
+	s, fake, dl, dir := mediaSession(t)
+	fake.emit(messageEvent(ada, "IMG1", false, t0, imageMessage(sum(mediaBytes))))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.Sum256([]byte(ada.String() + "\x00" + "IMG1"))
+	old := filepath.Join(dir, hex.EncodeToString(h[:])+".jpeg")
+	if err := os.WriteFile(old, mediaBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dl.err = errors.New("media expired on the server")
+	path, _, err := s.DownloadMedia(ada.String(), "IMG1")
+	want := filepath.Join(dir, hex.EncodeToString(h[:])+".jpg")
+	if err != nil || path != want || dl.calls() != 0 {
+		t.Fatalf("DownloadMedia = %q, %v (downloads %d); want the cached %s, renamed to %s", path, err, dl.calls(), old, want)
+	}
+}
+
+func docMsg(mime, fileName string) *waE2E.Message {
+	return &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{
+		Mimetype: proto.String(mime), FileName: proto.String(fileName),
+		FileLength: proto.Uint64(uint64(len(mediaBytes))), DirectPath: proto.String("/v/t62.fake/0003"),
+		MediaKey: bytes.Repeat([]byte{7}, 32), FileSHA256: sum(mediaBytes), FileEncSHA256: bytes.Repeat([]byte{9}, 32),
+	}}
+}
+
+func audioMsg(mime string) *waE2E.Message {
+	return &waE2E.Message{AudioMessage: &waE2E.AudioMessage{
+		Mimetype:   proto.String(mime),
+		FileLength: proto.Uint64(uint64(len(mediaBytes))), DirectPath: proto.String("/v/t62.fake/0004"),
+		MediaKey: bytes.Repeat([]byte{7}, 32), FileSHA256: sum(mediaBytes), FileEncSHA256: bytes.Repeat([]byte{9}, 32),
+	}}
+}
+
+// Every name an earlier build cached a file under (its raw mime subtype when safe, else the bare
+// hash) is still found with no download; the file is renamed to the current name, which is the
+// path served, so a UI never opens a legacy extension and the next request hits the new name.
+func TestEveryLegacyCacheNameIsServedUnderTheNewName(t *testing.T) {
+	for _, tc := range []struct {
+		name, oldSuffix, newSuffix string
+		msg                        *waE2E.Message
+	}{
+		{"text/plain doc", ".plain", ".txt", docMsg("text/plain", "notes.txt")},
+		{"audio/mpeg", ".mpeg", ".mp3", audioMsg("audio/mpeg")},
+		{"msword", ".msword", ".doc", docMsg("application/msword", "a.doc")},
+		{"docx, old no ext", "", ".docx", docMsg("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "a.docx")},
+		{"octet-stream pdf, old no ext", "", ".pdf", docMsg("application/octet-stream", "a.pdf")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, fake, dl, dir := mediaSession(t)
+			fake.emit(messageEvent(ada, "M1", false, t0, tc.msg))
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			h := sha256.Sum256([]byte(ada.String() + "\x00M1"))
+			base := filepath.Join(dir, hex.EncodeToString(h[:]))
+			old := base + tc.oldSuffix
+			if err := os.WriteFile(old, mediaBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			dl.err = errors.New("expired")
+			path, _, err := s.DownloadMedia(ada.String(), "M1")
+			if err != nil || dl.calls() != 0 || path != base+tc.newSuffix {
+				t.Fatalf("DownloadMedia = %q, %v (downloads %d); want the old file served as %s", path, err, dl.calls(), base+tc.newSuffix)
+			}
+			if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, mediaBytes) {
+				t.Errorf("served file = %q, %v", got, err)
+			}
+			if fi, err := os.Stat(path); err != nil || fi.Mode().Perm() != 0o600 {
+				t.Errorf("served file mode = %v, %v; want 0600", fi, err)
+			}
+			if _, err := os.Lstat(old); !errors.Is(err, os.ErrNotExist) {
+				t.Errorf("legacy file still there: %v", err)
+			}
+			if path2, _, err := s.DownloadMedia(ada.String(), "M1"); err != nil || path2 != path || dl.calls() != 0 {
+				t.Errorf("second DownloadMedia = %q, %v (downloads %d)", path2, err, dl.calls())
+			}
+		})
 	}
 }

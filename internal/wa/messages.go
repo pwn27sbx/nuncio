@@ -114,6 +114,8 @@ func (s *Session) storeMessage(evt *waevents.Message) {
 	if !m.FromMe {
 		s.publishUnread(m.ChatJID)
 	}
+	// A chat its first message created is named at once (names.go): a local read, never the network.
+	s.nameNewChat(m.ChatJID)
 }
 
 // publishUnread publishes the total unread count and that of chat jid.

@@ -325,6 +325,29 @@ func TestChatsMasksTheNumberOfAChatWithoutAName(t *testing.T) {
 	}
 }
 
+// A chat without a name prints the masked phone the daemon serves (a LID chat's number comes from
+// WhatsApp's LID map), and a LID chat whose number is unknown never prints its LID digits.
+func TestChatsPrintsTheServedPhoneAndNeverTheLIDDigits(t *testing.T) {
+	serveFakeDaemon(t, &fakeDaemon{chats: []ipc.Chat{
+		{JID: "100000000000001@lid", Unread: 1, Phone: "…0001"},
+		{JID: "100000000000009@lid"},
+		{JID: "100000000000002@lid", Name: "Grace Hopper", Phone: "…0002"},
+	}})
+	code, out, errOut := runCLI("chats")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q", code, errOut)
+	}
+	want := "…0001          1 unread  -  -\n" +
+		"hidden number  0 unread  -  -\n" +
+		"Grace Hopper   0 unread  -  -\n"
+	if out != want {
+		t.Errorf("stdout =\n%s\nwant\n%s", out, want)
+	}
+	if strings.Contains(out, "0009") || strings.Contains(out, "1000") {
+		t.Errorf("stdout %q carries LID digits", out)
+	}
+}
+
 func TestChatsWithNoChatsSaysSo(t *testing.T) {
 	serveFakeDaemon(t, &fakeDaemon{})
 	if code, out, _ := runCLI("chats"); code != 0 || out != "no chats\n" {

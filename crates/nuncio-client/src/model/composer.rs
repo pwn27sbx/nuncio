@@ -50,6 +50,13 @@ impl Composer {
         self.caret += c.len_utf8();
     }
 
+    /// Replace the whole draft with `text`, the cursor at its end; the reply target stays. For a
+    /// UI whose own text widget edits the draft.
+    pub fn set_text(&mut self, text: &str) {
+        text.clone_into(&mut self.text);
+        self.caret = self.text.len();
+    }
+
     /// Start a new line at the cursor.
     pub fn newline(&mut self) {
         self.insert('\n');
@@ -168,6 +175,17 @@ mod tests {
         composer.left();
         composer.end();
         assert_eq!(composer.caret(), 2, "the first line's end");
+    }
+
+    #[test]
+    fn a_draft_set_whole_keeps_its_reply_and_puts_the_cursor_at_its_end() {
+        // A UI with its own text widget (the desktop app) hands the whole draft over.
+        let mut composer = typed("old");
+        composer.set_reply_to("M1".to_owned());
+        composer.set_text("new\nañ");
+        assert_eq!(composer.text(), "new\nañ");
+        assert_eq!(composer.caret(), composer.text().len());
+        assert_eq!(composer.reply_to(), Some("M1"));
     }
 
     #[test]

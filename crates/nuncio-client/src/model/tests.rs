@@ -176,3 +176,75 @@ fn search_results_fill_the_search_not_the_conversation() {
     assert_eq!(search.selected(), Some(0));
     assert!(m.transcript().conversation(BEN).is_none());
 }
+
+#[test]
+fn a_notice_taken_is_shown_once() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    m.set_notice("daemon: internal: oops");
+    assert_eq!(m.take_notice().as_deref(), Some("daemon: internal: oops"));
+    assert_eq!(m.notice(), None);
+    assert_eq!(m.take_notice(), None);
+}
+
+#[test]
+fn a_retry_waiting_for_its_answer_is_not_asked_again() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    m.open_selected();
+    type_draft(&mut m, "hi");
+    m.send().expect("sends");
+    m.apply(&DaemonFrame::SendFailed {
+        v: PROTOCOL_VERSION,
+        client_id: "t-1".to_owned(),
+        message: "no".to_owned(),
+    });
+    assert!(m.select_message(0));
+    assert_eq!(m.retry_selected(), Some(ClientFrame::retry("t-1")));
+    assert_eq!(m.retry_selected(), None, "one attempt in flight at a time");
+    // Its answer ends the attempt: not sent again, so one more retry may be asked for.
+    m.apply(&DaemonFrame::SendFailed {
+        v: PROTOCOL_VERSION,
+        client_id: "t-1".to_owned(),
+        message: "no".to_owned(),
+    });
+    assert_eq!(m.retry_selected(), Some(ClientFrame::retry("t-1")));
+}
+
+#[test]
+fn a_new_message_in_the_open_chat_is_read_only_while_the_view_is_seen() {
+    let incoming = |id: &str| DaemonFrame::EventMessage {
+        v: PROTOCOL_VERSION,
+        jid: BEN.to_owned(),
+        message: message(id, false),
+    };
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    let request = m.open_selected().expect("opens");
+    m.apply_reply(&request, &messages_frame(BEN, Vec::new()));
+    assert!(m.is_seen(), "a view is seen unless the UI says otherwise");
+    m.set_seen(false);
+    assert_eq!(
+        m.apply(&incoming("M1")),
+        None,
+        "a hidden window marks nothing read"
+    );
+    m.apply(&DaemonFrame::EventUnread {
+        v: PROTOCOL_VERSION,
+        unread: 1,
+        jid: BEN.to_owned(),
+        chat_unread: 1,
+    });
+    // Seen again: the open chat's unread messages are read now.
+    assert_eq!(
+        m.set_seen(true),
+        Some(Effect::Request(ClientFrame::mark_read(BEN)))
+    );
+    m.apply(&DaemonFrame::MarkedRead {
+        v: PROTOCOL_VERSION,
+        jid: BEN.to_owned(),
+        unread: 0,
+    });
+    assert_eq!(
+        m.apply(&incoming("M2")),
+        Some(Effect::Request(ClientFrame::mark_read(BEN)))
+    );
+    assert_eq!(m.set_seen(true), None, "nothing unread, nothing to mark");
+}

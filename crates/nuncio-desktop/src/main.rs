@@ -2,19 +2,26 @@
 //!
 //! Two modes:
 //!
-//! - normal: open the window and follow the live Omarchy theme;
+//! - normal: open the window (chat list, conversation, composer) on `nunciod` at
+//!   `$XDG_RUNTIME_DIR/nuncio/core.sock`, reconnecting when it goes away, and follow the live
+//!   Omarchy theme;
 //! - `--probe`: the S5 acceptance check without a window on screen. It applies a palette, performs
 //!   the same atomic theme swap `omarchy-theme-set` does, and prints the colour GTK resolves
 //!   before and after plus how long the detection took. `--theme-dir` points it at a fixture tree
 //!   so the check never touches the running theme.
 
-use gtk::prelude::*;
-use nuncio_client::{Palette, ThemeWatcher};
+use adw::prelude::*;
+use nuncio_client::{Backoff, Config, DEFAULT_READ_TIMEOUT, Palette, ThemeWatcher, socket_path};
+use nuncio_desktop::controller::Controller;
+use nuncio_desktop::present::shows_title_bar;
+use nuncio_desktop::window::Ui;
+use nuncio_desktop::worker::Settings;
 use nuncio_desktop::{ROOT_CLASS, apply_to_display, css_for, resolved_foreground};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const APP_ID: &str = "io.github.pwn27sbx.nuncio";
+const CLIENT_NAME: &str = concat!("nuncio-desktop/", env!("CARGO_PKG_VERSION"));
 
 struct Args {
     theme_dir: Option<PathBuf>,
@@ -64,55 +71,98 @@ fn main() -> glib::ExitCode {
         return probe(&palette_file);
     }
 
+    // Read before any window, so a typo stops the app with its reason.
+    let config = match Config::default_path().map(|path| Config::load(&path)) {
+        Some(Ok(config)) => config,
+        None => Config::default(),
+        Some(Err(error)) => {
+            eprintln!("nuncio-desktop: {error}");
+            return glib::ExitCode::from(2);
+        }
+    };
+    let title_bar = shows_title_bar(
+        config.app.title_bar,
+        std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").as_deref(),
+        std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+    );
+
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| {
-        let window = adw::ApplicationWindow::builder()
-            .application(app)
-            .title("nuncio")
-            .default_width(860)
-            .default_height(560)
-            .build();
-
-        let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
-        root.add_css_class(ROOT_CLASS);
-        root.set_margin_top(12);
-        root.set_margin_bottom(12);
-        root.set_margin_start(12);
-        root.set_margin_end(12);
-        let heading = gtk::Label::new(Some("nuncio"));
-        heading.add_css_class("nuncio-accent");
-        let note = gtk::Label::new(Some("M0 spike: the window follows the live Omarchy theme."));
-        note.add_css_class("nuncio-muted");
-        root.append(&heading);
-        root.append(&note);
-        window.set_child(Some(&root));
+        // A second launch only brings the window back.
+        if let Some(window) = app.active_window() {
+            window.present();
+            return;
+        }
+        let ui = Ui::new(
+            Some(app),
+            Controller::new(client_prefix()),
+            local_offset_minutes(),
+            title_bar,
+        );
 
         let palette = Palette::load_or_default(Some(&palette_file));
         apply_to_display(&gtk::gdk::Display::default().expect("a display"), &palette);
-
-        // Follow live theme switches: the watcher owns its own thread, so hand events back to the
-        // main loop before touching any widget.
-        match ThemeWatcher::start(&palette_file) {
-            Ok(watcher) => {
-                let context = glib::MainContext::default();
-                std::thread::spawn(move || {
-                    while let Some(palette) = watcher.recv_timeout(Duration::from_secs(1)) {
-                        let context = context.clone();
-                        context.invoke(move || {
-                            if let Some(display) = gtk::gdk::Display::default() {
-                                apply_to_display(&display, &palette);
-                            }
-                        });
-                    }
-                });
-            }
-            Err(err) => eprintln!("nuncio-desktop: not following the theme: {err}"),
-        }
-
-        window.present();
+        follow_theme(&palette_file);
+        connect(&ui);
+        ui.window().present();
     });
 
-    app.run()
+    // GTK must not see this program's own options.
+    app.run_with_args(&[] as &[&str])
+}
+
+/// Start the daemon worker on the socket `nunciod` listens on.
+fn connect(ui: &Ui) {
+    match socket_path() {
+        Ok(path) => ui.start_worker(Settings {
+            path,
+            client: CLIENT_NAME.to_owned(),
+            timeout: DEFAULT_READ_TIMEOUT,
+            backoff: Backoff::default(),
+        }),
+        Err(error) => eprintln!("nuncio-desktop: cannot reach nunciod: {error}"),
+    }
+}
+
+/// Follow live theme switches: the watcher owns its own thread, so hand events back to the main
+/// loop before touching any widget.
+fn follow_theme(palette_file: &Path) {
+    match ThemeWatcher::start(palette_file) {
+        Ok(watcher) => {
+            let context = glib::MainContext::default();
+            // `None` is only a quiet second: keep waiting (stopping there, as the M0 spike did,
+            // stopped following the theme a second after the start).
+            std::thread::spawn(move || {
+                loop {
+                    let Some(palette) = watcher.recv_timeout(Duration::from_secs(1)) else {
+                        continue;
+                    };
+                    context.invoke(move || {
+                        if let Some(display) = gtk::gdk::Display::default() {
+                            apply_to_display(&display, &palette);
+                        }
+                    });
+                }
+            });
+        }
+        Err(err) => eprintln!("nuncio-desktop: not following the theme: {err}"),
+    }
+}
+
+/// The prefix of this run's `client_id`s: it must differ between runs, so a new send never repeats
+/// an old `client_id`.
+fn client_prefix() -> String {
+    let seconds = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs());
+    format!("desktop-{}-{seconds}", std::process::id())
+}
+
+/// The local offset from UTC in minutes, read once at startup (as the terminal client does).
+fn local_offset_minutes() -> i32 {
+    glib::DateTime::now_local()
+        .map(|now| i32::try_from(now.utc_offset().as_seconds() / 60).unwrap_or(0))
+        .unwrap_or(0)
 }
 
 /// Write a palette the way Omarchy does, so the fixture tree looks like the real one.

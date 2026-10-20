@@ -1,9 +1,19 @@
 //! The GTK 4 + libadwaita desktop client.
 //!
-//! M0 scope is the S5 spike: follow Omarchy's live theme, so the window repaints in the desktop's
-//! palette when the theme changes. The palette parser and the watcher live in `nuncio-client`,
-//! because following the theme is client-side work the TUI needs too; what lives here is turning a
-//! [`Palette`] into GTK styling and asking libadwaita for the matching colour scheme.
+//! - [`window`]: the window (chat list, transcript, composer), a thin drawing of
+//!   [`present`]'s view of the shared `nuncio_client::Model`;
+//! - [`controller`]: what each user action and daemon answer does to the model, with the shared
+//!   driver's rules (`nuncio_client::driver`), without GTK;
+//! - [`worker`]: the daemon connections on their own threads, posting into the main loop;
+//! - here: following Omarchy's live theme. The palette parser and the watcher live in
+//!   `nuncio-client`, because following the theme is client-side work the TUI needs too; what
+//!   lives here is turning a [`Palette`] into GTK styling and asking libadwaita for the matching
+//!   colour scheme.
+
+pub mod controller;
+pub mod present;
+pub mod window;
+pub mod worker;
 
 use gtk::prelude::*;
 use nuncio_client::{Mode, Palette, Rgb};
@@ -31,7 +41,37 @@ pub fn css_for(palette: &Palette) -> String {
            padding: 0 6px;\n\
          }}\n\
          .{ROOT_CLASS} .nuncio-muted {{ color: {bright_foreground}; }}\n\
-         .{ROOT_CLASS} .nuncio-error {{ color: {red}; }}\n",
+         .{ROOT_CLASS} .nuncio-error {{ color: {red}; }}\n\
+         .{ROOT_CLASS} .nuncio-bold {{ font-weight: bold; }}\n\
+         .{ROOT_CLASS} .nuncio-transcript {{ background-color: {background}; }}\n\
+         .{ROOT_CLASS} .nuncio-bubble {{\n  \
+           padding: 6px 10px;\n  \
+           border-radius: 12px;\n\
+         }}\n\
+         .{ROOT_CLASS} .nuncio-bubble.nuncio-mine {{\n  \
+           background-color: {accent};\n  \
+           color: {background};\n\
+         }}\n\
+         .{ROOT_CLASS} .nuncio-bubble.nuncio-theirs {{\n  \
+           background-color: alpha({foreground}, 0.08);\n\
+         }}\n\
+         .{ROOT_CLASS} .nuncio-bubble.nuncio-failed {{\n  \
+           background-color: alpha({red}, 0.15);\n  \
+           color: {foreground};\n  \
+           border: 1px solid {red};\n\
+         }}\n\
+         .{ROOT_CLASS} .nuncio-sender {{ color: {accent}; font-weight: bold; }}\n\
+         .{ROOT_CLASS} .nuncio-quote {{\n  \
+           border-left: 2px solid currentColor;\n  \
+           padding-left: 6px;\n  \
+           opacity: 0.8;\n\
+         }}\n\
+         .{ROOT_CLASS} .nuncio-media {{ font-style: italic; }}\n\
+         .{ROOT_CLASS} .nuncio-reaction-mine {{ font-weight: bold; }}\n\
+         .{ROOT_CLASS} row.nuncio-message:focus-visible .nuncio-bubble {{\n  \
+           outline: 2px solid {accent};\n  \
+           outline-offset: 1px;\n\
+         }}\n",
         background = palette.background.to_hex(),
         foreground = palette.foreground.to_hex(),
         accent = palette.accent.to_hex(),
@@ -46,14 +86,29 @@ pub fn css_for(palette: &Palette) -> String {
 /// The colour scheme is set from `colors.toml` and not from gsettings, because Omarchy's
 /// `omarchy-theme-set-gnome` updates gsettings only after the theme directory has already been
 /// swapped — waiting for it would repaint late.
+///
+/// One provider per display is installed and then reloaded on each switch, so a switch replaces
+/// the old palette's rules instead of stacking a new provider over them (no stale colours).
 pub fn apply_to_display(display: &gtk::gdk::Display, palette: &Palette) {
-    let provider = gtk::CssProvider::new();
+    thread_local! {
+        static INSTALLED: std::cell::RefCell<Vec<(gtk::gdk::Display, gtk::CssProvider)>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    let provider = INSTALLED.with(|installed| {
+        let mut installed = installed.borrow_mut();
+        if let Some((_, provider)) = installed.iter().find(|(d, _)| d == display) {
+            return provider.clone();
+        }
+        let provider = gtk::CssProvider::new();
+        gtk::style_context_add_provider_for_display(
+            display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+        installed.push((display.clone(), provider.clone()));
+        provider
+    });
     provider.load_from_string(&css_for(palette));
-    gtk::style_context_add_provider_for_display(
-        display,
-        &provider,
-        gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
 
     adw::StyleManager::default().set_color_scheme(match palette.mode {
         Mode::Light => adw::ColorScheme::ForceLight,

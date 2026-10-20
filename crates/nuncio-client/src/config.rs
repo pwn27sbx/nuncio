@@ -81,6 +81,8 @@ pub struct App {
     pub background: bool,
     /// Start with no window, in the background (default `false`).
     pub start_hidden: bool,
+    /// Whether the window shows its title bar controls (default `auto`).
+    pub title_bar: TitleBar,
 }
 
 impl Default for App {
@@ -88,8 +90,20 @@ impl Default for App {
         Self {
             background: true,
             start_hidden: false,
+            title_bar: TitleBar::Auto,
         }
     }
+}
+
+/// A value of `[app] title_bar`: `auto` shows no title bar (no window controls, no window title)
+/// on a tiling desktop (Hyprland) and shows it elsewhere; `shown` and `hidden` force it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TitleBar {
+    #[default]
+    Auto,
+    Shown,
+    Hidden,
 }
 
 /// Why the configuration file could not be used.
@@ -272,6 +286,21 @@ mod tests {
         let path = dir.join("config.toml");
         std::fs::write(&path, "[app]\nstart_hidden = true\n").expect("write");
         assert!(Config::load(&path).expect("loads").app.start_hidden);
+    }
+
+    #[test]
+    fn the_title_bar_is_auto_unless_shown_or_hidden_is_chosen() {
+        assert_eq!(Config::default().app.title_bar, TitleBar::Auto);
+        for (text, expected) in [
+            ("auto", TitleBar::Auto),
+            ("shown", TitleBar::Shown),
+            ("hidden", TitleBar::Hidden),
+        ] {
+            let config = Config::from_toml_str(&format!("[app]\ntitle_bar = \"{text}\"\n"))
+                .expect("a valid value");
+            assert_eq!(config.app.title_bar, expected);
+        }
+        assert!(Config::from_toml_str("[app]\ntitle_bar = \"none\"\n").is_err());
     }
 
     #[test]

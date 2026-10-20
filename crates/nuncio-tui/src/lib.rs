@@ -32,10 +32,9 @@ use unicode_segmentation::UnicodeSegmentation;
 
 mod daemon;
 pub mod images;
-mod reconnect;
 
 pub use daemon::{Daemon, open_externally};
-pub use reconnect::{Backoff, Reconnect};
+pub use nuncio_client::{Backoff, Reconnect};
 
 /// Where the chat list came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -139,8 +138,8 @@ const ARCHIVED: char = '▤';
 
 /// How many lines PageUp/PageDown scroll.
 const PAGE: usize = 10;
-/// The reactions the picker offers, on keys `1`..`6`; `x` removes mine.
-pub const REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+/// The reactions the picker offers (the shared set), on keys `1`..`6`; `x` removes mine.
+pub use nuncio_client::model::REACTIONS;
 /// How many characters of a quoted message are shown.
 const SNIPPET: usize = 40;
 /// How many rows the composer grows to; a longer draft scrolls with the cursor.

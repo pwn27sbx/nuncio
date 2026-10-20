@@ -1,5 +1,6 @@
-//! When to try `nunciod` again after the connection was lost. Pure: the caller passes the time,
-//! so the policy is tested without sleeping.
+//! When to try `nunciod` again after the connection was lost, for every client (the terminal
+//! client's tests pin the schedule). Pure: the caller passes the time, so the policy is tested
+//! without sleeping.
 
 use std::time::{Duration, Instant};
 
@@ -74,6 +75,12 @@ impl Reconnect {
         self.at.is_some_and(|at| now >= at)
     }
 
+    /// How long from `now` until the scheduled attempt (zero once it is due); `None` while
+    /// connected. For a client that sleeps until then instead of polling [`Reconnect::due`].
+    pub fn wait(&self, now: Instant) -> Option<Duration> {
+        self.at.map(|at| at.saturating_duration_since(now))
+    }
+
     /// The attempt made at `now` failed: wait longer before the next one.
     pub fn failed(&mut self, now: Instant) {
         self.at = Some(now + self.backoff.next_delay());
@@ -83,5 +90,26 @@ impl Reconnect {
     pub fn succeeded(&mut self) {
         self.at = None;
         self.backoff.reset();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_wait_runs_down_to_the_scheduled_attempt_and_is_none_while_connected() {
+        let t0 = Instant::now();
+        let mut reconnect = Reconnect::new(Backoff::default());
+        assert_eq!(reconnect.wait(t0), None);
+        reconnect.lost(t0);
+        assert_eq!(reconnect.wait(t0), Some(FIRST_DELAY));
+        assert_eq!(
+            reconnect.wait(t0 + Duration::from_millis(200)),
+            Some(Duration::from_millis(300))
+        );
+        assert_eq!(reconnect.wait(t0 + MAX_DELAY), Some(Duration::ZERO), "due");
+        reconnect.succeeded();
+        assert_eq!(reconnect.wait(t0), None);
     }
 }

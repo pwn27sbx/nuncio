@@ -1,44 +1,29 @@
 //! The TUI's I/O: one connection for requests and one subscribed connection for events, as
-//! `nuncio_client::conn` recommends, reconnected on a capped backoff when lost. Everything it reads goes through [`App::apply`]; an
-//! [`Action::Open`] it gets back goes to the opener (the desktop's by default).
+//! `nuncio_client::conn` recommends, reconnected on a capped backoff when lost. Everything it
+//! reads goes through [`App::apply`]; an [`Action::Open`] it gets back goes to the opener (the
+//! desktop's by default). What an answer, a failure or a loss means for the view is the shared
+//! driver's ([`nuncio_client::driver`]), so the desktop app follows the same rules.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use nuncio_client::{
-    ClientError, ClientFrame, Connection, DEFAULT_READ_TIMEOUT, DaemonFrame, ErrorCode,
-};
+pub use nuncio_client::driver::open_externally;
+use nuncio_client::driver::{self, Host, Link, Outcome};
+use nuncio_client::model::Effect;
+use nuncio_client::{ClientError, ClientFrame, DEFAULT_READ_TIMEOUT, DaemonFrame};
 
 use crate::{Action, App, Backoff, Reconnect};
 
 /// How long a drain waits for one more event before the tick moves on.
 const EVENT_WAIT: Duration = Duration::from_millis(1);
-/// The footer's word for a request made while the driver is reconnecting.
-const NOT_CONNECTED: &str = "not connected to nunciod";
-/// How long a `download_media` reply may take (the Go client's bound too).
-const MEDIA_WAIT: Duration = Duration::from_secs(90);
+/// How the terminal client names itself in the driver's notices.
+const CLIENT: driver::Client = driver::Client {
+    program: "nuncio-tui",
+    retry_hint: "R retries it once reconnected",
+};
 
 /// Opens a downloaded media file outside the terminal.
 type Opener = Box<dyn FnMut(&Path) -> std::io::Result<()>>;
-
-/// The production opener: `open` on macOS, `xdg-open` elsewhere, detached from the terminal.
-/// It is reaped on a thread so it never lingers as a zombie.
-pub fn open_externally(path: &Path) -> std::io::Result<()> {
-    let program = if cfg!(target_os = "macos") {
-        "open"
-    } else {
-        "xdg-open"
-    };
-    let mut child = Command::new(program)
-        .arg(path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
-    std::thread::spawn(move || child.wait());
-    Ok(())
-}
 
 /// The connections to `nunciod`. When either is lost (the daemon restarted, a read hit its
 /// bound, a frame was malformed) both are dropped and the driver reconnects on a capped backoff
@@ -54,19 +39,42 @@ pub struct Daemon {
     opener: Opener,
 }
 
-struct Link {
-    requests: Connection,
-    events: Connection,
+/// What an [`Action`] is to the shared driver (`Quit` never comes from the daemon).
+fn effect(action: Option<Action>) -> Option<Effect> {
+    match action? {
+        Action::Request(frame) => Some(Effect::Request(frame)),
+        Action::Open(path) => Some(Effect::Open(path)),
+        Action::Quit => None,
+    }
 }
 
-impl Link {
-    fn open(path: &Path, client: &str, timeout: Duration) -> Result<Self, ClientError> {
-        let mut requests = Connection::connect_with_timeout(path, timeout)?;
-        requests.handshake(client)?;
-        let mut events = Connection::connect_with_timeout(path, timeout)?;
-        events.handshake(client)?;
-        events.subscribe()?;
-        Ok(Self { requests, events })
+impl Host for App {
+    fn apply(&mut self, frame: &DaemonFrame) -> Option<Effect> {
+        effect(App::apply(self, frame))
+    }
+
+    fn apply_reply(&mut self, request: &ClientFrame, reply: &DaemonFrame) -> Option<Effect> {
+        effect(App::apply_reply(self, request, reply))
+    }
+
+    fn request_failed(&mut self, frame: &ClientFrame, message: String) {
+        App::request_failed(self, frame, message);
+    }
+
+    fn send_not_confirmed(&mut self, client_id: &str) {
+        App::send_not_confirmed(self, client_id);
+    }
+
+    fn set_connected(&mut self, connected: bool) {
+        App::set_connected(self, connected);
+    }
+
+    fn set_notice(&mut self, notice: String) {
+        App::set_notice(self, notice);
+    }
+
+    fn resync(&mut self) -> Vec<ClientFrame> {
+        App::resync(self)
     }
 }
 
@@ -144,86 +152,33 @@ impl Daemon {
     fn lost(&mut self, app: &mut App, error: &ClientError) {
         self.link = None;
         self.reconnect.lost(Instant::now());
-        app.set_connected(false);
-        app.set_notice(format!("daemon connection lost: {error}; reconnecting…"));
+        driver::lost(app, error);
     }
 
-    /// Send `frame`, then fold the reply into `app`. A send (or retry) the daemon answers with
-    /// `not_confirmed` is shown as not confirmed (it may have been delivered); one it refuses
-    /// with any other `error` (as `not_linked`) is shown as not sent; every `error` also becomes
-    /// the footer notice. A broken connection (closed, timed out, malformed) is returned as the
-    /// error after a send (or retry) it carried is marked not sent, and the driver reconnects.
-    /// While disconnected nothing is sent: a send (or retry) is shown as not sent, the footer
-    /// says `not connected to nunciod`, and nothing retries it later. A `media_ready` the user
-    /// asked for is opened, and a request the reply asks for (a `mark_read` after a chat is
+    /// Send `frame`, then fold the reply into `app` ([`driver::settle`]): a send (or retry) the
+    /// daemon answers with `not_confirmed` is shown as not confirmed (it may have been delivered);
+    /// one it refuses with any other `error` (as `not_linked`) is shown as not sent; every `error`
+    /// also becomes the footer notice. A broken connection (closed, timed out, malformed) is
+    /// returned as the error after a send (or retry) it carried is marked not sent, and the driver
+    /// reconnects. While disconnected nothing is sent: a send (or retry) is shown as not sent, the
+    /// footer says `not connected to nunciod`, and nothing retries it later. A `media_ready` the
+    /// user asked for is opened, and a request the reply asks for (a `mark_read` after a chat is
     /// opened) is sent. A reply whose op this build does not know (a newer daemon) becomes the
     /// footer notice, and a send (or retry) it answered is shown as not confirmed.
     pub fn perform(&mut self, app: &mut App, frame: &ClientFrame) -> Result<(), ClientError> {
-        let failed_send = |app: &mut App, message: String| {
-            if let ClientFrame::Send { client_id, .. } | ClientFrame::Retry { client_id, .. } =
-                frame
-            {
-                app.apply(&DaemonFrame::SendFailed {
-                    v: nuncio_client::PROTOCOL_VERSION,
-                    client_id: client_id.clone(),
-                    message,
-                });
-            }
-        };
         let Some(link) = self.link.as_mut() else {
-            failed_send(app, NOT_CONNECTED.to_owned());
-            let notice = match frame {
-                ClientFrame::Send { .. } | ClientFrame::Retry { .. } => {
-                    format!("{NOT_CONNECTED}: not sent (R retries it once reconnected)")
-                }
-                _ => format!("{NOT_CONNECTED}; reconnecting…"),
-            };
-            app.request_failed(frame, notice);
+            driver::not_connected(app, frame, CLIENT);
             return Ok(());
         };
-        let result = match frame {
-            ClientFrame::DownloadMedia { .. } => link.requests.request_within(frame, MEDIA_WAIT),
-            _ => link.requests.request(frame),
-        };
-        match result {
-            // A newer daemon's reply this build cannot read: the request's outcome is unknown, so
-            // a send (or retry) is shown as not confirmed (`R` reuses its WhatsApp id).
-            Ok(DaemonFrame::Unknown { op }) => {
-                if let ClientFrame::Send { client_id, .. } | ClientFrame::Retry { client_id, .. } =
-                    frame
-                {
-                    app.send_not_confirmed(client_id);
-                }
-                app.request_failed(
-                    frame,
-                    format!("daemon: unknown reply `{op}`; this nuncio-tui may be too old"),
-                );
+        let result = driver::request_on(&mut link.requests, frame);
+        match driver::settle(app, frame, result, CLIENT) {
+            Outcome::Done => Ok(()),
+            Outcome::Effect(Effect::Open(path)) => {
+                self.open(app, &path);
                 Ok(())
             }
-            // The reply to this very request: a different chat in it is the one the daemon served
-            // (ADR 0001), which `apply_reply` adopts.
-            Ok(reply) => match app.apply_reply(frame, &reply) {
-                Some(Action::Open(path)) => {
-                    self.open(app, &path);
-                    Ok(())
-                }
-                Some(Action::Request(next)) => self.perform(app, &next),
-                Some(Action::Quit) | None => Ok(()),
-            },
-            Err(ClientError::Daemon { code, message }) => {
-                match frame {
-                    ClientFrame::Send { client_id, .. } | ClientFrame::Retry { client_id, .. }
-                        if code == ErrorCode::NotConfirmed.as_str() =>
-                    {
-                        app.send_not_confirmed(client_id)
-                    }
-                    _ => failed_send(app, message.clone()),
-                }
-                app.request_failed(frame, format!("daemon: {code}: {message}"));
-                Ok(())
-            }
-            Err(error) => {
-                failed_send(app, error.to_string());
+            Outcome::Effect(Effect::Request(next)) => self.perform(app, &next),
+            Outcome::Lost(error) => {
                 self.lost(app, &error);
                 Err(error)
             }
@@ -240,8 +195,6 @@ impl Daemon {
                 Ok(link) => {
                     self.link = Some(link);
                     self.reconnect.succeeded();
-                    app.set_connected(true);
-                    app.set_notice("reconnected to nunciod");
                     self.resync(app);
                 }
                 Err(_) => self.reconnect.failed(Instant::now()),
@@ -264,9 +217,10 @@ impl Daemon {
         Ok(())
     }
 
-    /// Ask again for what events would have said while disconnected; stops at a loss.
+    /// Say the connection is back and ask again for what events would have said while
+    /// disconnected; stops at a loss.
     fn resync(&mut self, app: &mut App) {
-        for frame in app.resync() {
+        for frame in driver::reconnected(app) {
             if self.perform(app, &frame).is_err() {
                 return;
             }

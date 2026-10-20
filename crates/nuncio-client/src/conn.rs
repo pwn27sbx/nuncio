@@ -111,7 +111,14 @@ impl Connection {
             path: path.to_owned(),
             source,
         })?;
-        stream.set_read_timeout(Some(timeout))?;
+        // A daemon that drops the connection right after accepting it (one shutting down)
+        // can close before this line, and macOS then refuses the timeout with EINVAL. Only a
+        // socket shut down in both directions is refused, so no read can block on it: the
+        // first `recv` returns what the daemon sent, then `Closed`.
+        match stream.set_read_timeout(Some(timeout)) {
+            Err(err) if err.kind() != std::io::ErrorKind::InvalidInput => return Err(err.into()),
+            _ => {}
+        }
         Ok(Self {
             stream: BufReader::new(stream),
             timeout,

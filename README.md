@@ -101,4 +101,11 @@ mkdir -m 700 -p /tmp/nuncio-demo && XDG_RUNTIME_DIR=/tmp/nuncio-demo go run ./cm
 XDG_RUNTIME_DIR=/tmp/nuncio-demo cargo run -p nuncio-tui
 ```
 
-See `crates/nuncio-tui/README.md` for what the demo answers.
+See `crates/nuncio-tui/README.md` for what the demo answers. The desktop app runs against the same
+demo (GTK 4 and libadwaita installed; on a Mac, `brew install gtk4 libadwaita pkgconf`):
+
+```sh
+XDG_RUNTIME_DIR=/tmp/nuncio-demo cargo run -p nuncio-desktop
+```
+
+See `crates/nuncio-desktop/README.md` for its layout and keys.

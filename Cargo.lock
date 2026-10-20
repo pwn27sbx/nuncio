@@ -1350,6 +1350,7 @@ dependencies = [
 name = "nuncio-desktop"
 version = "0.1.0"
 dependencies = [
+ "futures-channel",
  "glib",
  "gtk4",
  "libadwaita",

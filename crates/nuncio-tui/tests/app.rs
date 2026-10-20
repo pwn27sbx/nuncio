@@ -310,6 +310,18 @@ fn two_hundred() -> Vec<Message> {
         .collect()
 }
 
+/// The CPU time this thread has used: the time it ran, not the time it waited to run.
+fn thread_cpu_time() -> Duration {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid, writable timespec, and the clock id is a constant.
+    let status = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut now) };
+    assert_eq!(status, 0, "the thread CPU clock is readable");
+    Duration::new(now.tv_sec as u64, now.tv_nsec as u32)
+}
+
 #[test]
 fn two_hundred_messages_scroll_to_the_top_and_back_quickly() {
     let mut app = two_chats();
@@ -318,13 +330,17 @@ fn two_hundred_messages_scroll_to_the_top_and_back_quickly() {
     assert!(screen.contains("message 199"), "newest shown:\n{screen}");
     assert!(!screen.contains("message 000"));
 
+    // CPU time of this thread, not wall-clock: on a busy machine (a parallel workspace run)
+    // a step waits to be scheduled, and its wall clock was measured past 250 ms while its
+    // CPU time stayed under 17 ms (5-14 ms on an idle machine). The bound is 15 times the
+    // worst step measured, so only a step that does an order of magnitude more work fails.
     let bound = Duration::from_millis(250);
     let timed = |app: &mut App, code: KeyCode| {
-        let start = Instant::now();
+        let start = thread_cpu_time();
         app.handle_key(key(code));
         let screen = render(app, 80, 24).text();
-        let took = start.elapsed();
-        assert!(took < bound, "{code:?} + render took {took:?}");
+        let took = thread_cpu_time() - start;
+        assert!(took < bound, "{code:?} + render took {took:?} of CPU");
         screen
     };
 

@@ -35,6 +35,8 @@ pub const MESSAGE_LIMIT: u16 = 200;
 pub const CHAT_LIMIT: u16 = 200;
 /// How many results an in-chat search asks for.
 pub const SEARCH_LIMIT: u16 = 50;
+/// The reactions a client's picker offers, in this order (an empty emoji removes mine).
+pub const REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 
 /// What the UI must do after a frame was folded in.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -88,6 +90,8 @@ pub struct Model {
     sends: u64,
     /// The view lost its place (another chat, or a send): a scrolled view goes back to the newest.
     view_reset: bool,
+    /// The user can see the view ([`Model::set_seen`]).
+    seen: bool,
 }
 
 impl Model {
@@ -117,6 +121,7 @@ impl Model {
             client_prefix: client_prefix.into(),
             sends: 0,
             view_reset: false,
+            seen: true,
         };
         model.set_chats(chats);
         model
@@ -153,6 +158,11 @@ impl Model {
         self.notice.as_deref()
     }
 
+    /// Take the notice to show it once (a toast), leaving none.
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
+    }
+
     pub fn set_notice(&mut self, notice: impl Into<String>) {
         self.notice = Some(notice.into());
     }
@@ -167,6 +177,24 @@ impl Model {
     /// keeps the selection.
     pub fn set_open(&mut self, open: bool) {
         self.open = open;
+    }
+
+    /// Whether the user can see the view (a desktop window that is active and not minimized).
+    pub fn is_seen(&self) -> bool {
+        self.seen
+    }
+
+    /// The UI's window became seen (`true`) or hidden (`false`). A new message in the open chat
+    /// is marked read only while the view is seen (read receipts only on an explicit view); seen
+    /// again, the open chat's unread messages are marked read then. A terminal client never calls
+    /// it: its view is always seen.
+    pub fn set_seen(&mut self, seen: bool) -> Option<Effect> {
+        self.seen = seen;
+        let jid = self.chats.selected_jid()?.to_owned();
+        let unread = self.chats.get(&jid).is_some_and(|chat| chat.unread > 0);
+        (seen && unread && self.is_open_chat(&jid))
+            .then(|| self.mark_read(&jid))
+            .flatten()
     }
 
     /// Whether the view lost its place since the last call (another chat was selected, or a
@@ -511,10 +539,11 @@ impl Model {
         }
     }
 
-    /// One more attempt of the selected send that ended not sent. Never automatic.
+    /// One more attempt of the selected send that ended not sent. Never automatic, and one at a
+    /// time: while an attempt waits for its answer, asking again asks for nothing.
     pub fn retry_selected(&mut self) -> Option<ClientFrame> {
         let message = self.selected_message()?;
-        if message.state != Some(MessageState::NotSent) {
+        if message.state != Some(MessageState::NotSent) || self.transcript.is_sending(message) {
             return None;
         }
         let client_id = message.client_id.clone()?;
@@ -776,8 +805,13 @@ impl Model {
                 return Some(Effect::Open(PathBuf::from(path)));
             }
             DaemonFrame::EventMessage { jid, message, .. } => {
-                // A new message in the open chat is read at once, as the official clients do.
-                if self.message_event(jid, message) && !message.from_me && self.is_open_chat(jid) {
+                // A new message in the open chat is read at once while it is seen, as the
+                // official clients do.
+                if self.message_event(jid, message)
+                    && !message.from_me
+                    && self.seen
+                    && self.is_open_chat(jid)
+                {
                     return self.mark_read(jid);
                 }
             }

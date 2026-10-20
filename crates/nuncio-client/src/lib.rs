@@ -10,21 +10,25 @@
 
 pub mod config;
 pub mod conn;
+pub mod driver;
 pub mod link;
 pub mod model;
 pub mod notify;
+pub mod reconnect;
 pub mod theme;
 pub mod wire;
 
-pub use config::{Config, ConfigError, ImageProtocol, config_path_from};
+pub use config::{Config, ConfigError, ImageProtocol, TitleBar, config_path_from};
 pub use conn::{
     ClientError, Connection, DEFAULT_READ_TIMEOUT, Snapshot, fetch, socket_path, socket_path_from,
 };
+pub use driver::{Host, Link, Outcome, is_loss, open_externally};
 pub use link::{LinkError, LinkTarget, MAX_DRAFT_CHARS, parse_link};
 pub use model::{
     ChatList, Composer, Download, Effect, Model, Search, Status, Transcript, chat_title,
 };
 pub use notify::{Notification, Notified, ViewState, default_action, notification_for};
+pub use reconnect::{Backoff, Reconnect};
 pub use theme::{Mode, Palette, Rgb, ThemeError, ThemeWatcher, default_path_from};
 pub use wire::{
     Chat, ClientFrame, DaemonFrame, ErrorCode, MAX_FRAME_BYTES, Media, Message, PROTOCOL_VERSION,

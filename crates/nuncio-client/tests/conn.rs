@@ -193,6 +193,35 @@ fn a_closed_connection_is_reported_as_closed() {
     let _ = server.join();
 }
 
+/// A daemon that drops each connection the moment it accepts it (as one shutting down
+/// does) can close before the client has set its read timeout, and macOS then refuses the
+/// timeout with EINVAL. Connecting must still succeed and the read must say `Closed`, never
+/// an opaque I/O error. Many attempts, because the window is a few microseconds wide.
+#[test]
+fn a_daemon_that_closes_right_after_accept_is_reported_as_closed() {
+    const ATTEMPTS: usize = 20_000;
+    let dir = TempDir::new("closer");
+    let path = dir.0.join("core.sock");
+    let listener = UnixListener::bind(&path).expect("socket binds");
+    let server = thread::spawn(move || {
+        for _ in 0..ATTEMPTS {
+            let (stream, _) = listener.accept().expect("a client connects");
+            drop(stream);
+        }
+    });
+
+    for attempt in 0..ATTEMPTS {
+        let mut connection = Connection::connect(&path)
+            .unwrap_or_else(|err| panic!("attempt {attempt}: connects, got {err:?}"));
+        let err = connection.recv().unwrap_err();
+        assert!(
+            matches!(err, ClientError::Closed),
+            "attempt {attempt}: expected a closed connection, got {err:?}"
+        );
+    }
+    server.join().expect("the daemon accepted every attempt");
+}
+
 #[test]
 fn socket_path_follows_xdg_runtime_dir() {
     assert_eq!(

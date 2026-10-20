@@ -30,6 +30,10 @@ show_preview = false
 background = true
 # nuncio-desktop: start with no window, in the background.
 start_hidden = false
+# nuncio-desktop: the window controls in the header bars. "auto" hides them on Hyprland
+# (HYPRLAND_INSTANCE_SIGNATURE set, or Hyprland in XDG_CURRENT_DESKTOP) and shows them elsewhere;
+# "shown" and "hidden" force it.
+title_bar = "auto"
 ```
 
 ## Keys
@@ -41,6 +45,7 @@ start_hidden = false
 | `[notifications] show_preview` | bool | `false` | nuncio-desktop |
 | `[app] background` | bool | `true` | nuncio-desktop |
 | `[app] start_hidden` | bool | `false` | nuncio-desktop |
+| `[app] title_bar` | string: `auto`, `shown`, `hidden` | `auto` | nuncio-desktop |
 
 ## When a message notifies
 

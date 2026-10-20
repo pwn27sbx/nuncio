@@ -86,12 +86,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_forty_documented_files() {
+fn fixture_directory_holds_the_forty_two_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 40, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 42, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -164,6 +164,11 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                     client_id: None,
                     reply_to: None,
                     reactions: Vec::new(),
+                    thumb: None,
+                    thumb_mime: None,
+                    width: None,
+                    height: None,
+                    animated: false,
                 },
                 Message {
                     id: "3EB0AAA0".to_owned(),
@@ -180,6 +185,11 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                     client_id: None,
                     reply_to: None,
                     reactions: Vec::new(),
+                    thumb: None,
+                    thumb_mime: None,
+                    width: None,
+                    height: None,
+                    animated: false,
                 },
             ],
         },
@@ -242,6 +252,11 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                 client_id: None,
                 reply_to: None,
                 reactions: Vec::new(),
+                thumb: None,
+                thumb_mime: None,
+                width: None,
+                height: None,
+                animated: false,
             },
         },
     );
@@ -261,6 +276,11 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                 client_id: Some("c-7f3a9e23".to_owned()),
                 reply_to: None,
                 reactions: Vec::new(),
+                thumb: None,
+                thumb_mime: None,
+                width: None,
+                height: None,
+                animated: false,
             },
         },
     );
@@ -380,6 +400,11 @@ fn constructed_daemon_frames_match_their_fixtures() {
                         client_id: None,
                         reply_to: None,
                         reactions: Vec::new(),
+                        thumb: None,
+                        thumb_mime: None,
+                        width: None,
+                        height: None,
+                        animated: false,
                     }),
                 },
                 Chat {
@@ -402,6 +427,11 @@ fn constructed_daemon_frames_match_their_fixtures() {
                         client_id: None,
                         reply_to: None,
                         reactions: Vec::new(),
+                        thumb: None,
+                        thumb_mime: None,
+                        width: None,
+                        height: None,
+                        animated: false,
                     }),
                 },
                 Chat {
@@ -570,6 +600,11 @@ fn constructed_m2_frames_match_their_fixtures() {
                         emoji: "\u{1F44D}".to_owned(),
                         from_me: false,
                     }],
+                    thumb: None,
+                    thumb_mime: None,
+                    width: None,
+                    height: None,
+                    animated: false,
                 },
                 Message {
                     id: "3EB0AAA0".to_owned(),
@@ -586,6 +621,11 @@ fn constructed_m2_frames_match_their_fixtures() {
                     client_id: None,
                     reply_to: None,
                     reactions: Vec::new(),
+                    thumb: None,
+                    thumb_mime: None,
+                    width: None,
+                    height: None,
+                    animated: false,
                 },
             ],
         },
@@ -651,6 +691,11 @@ fn constructed_event_chat_and_not_confirmed_frames_match_their_fixtures() {
                 client_id: None,
                 reply_to: None,
                 reactions: Vec::new(),
+                thumb: None,
+                thumb_mime: None,
+                width: None,
+                height: None,
+                animated: false,
             }),
         },
     };
@@ -728,7 +773,7 @@ fn every_daemon_fixture_parses_to_its_own_variant_not_the_catch_all() {
             Err(_) => assert!(is_client, "{name}: a daemon fixture does not parse"),
         }
     }
-    assert_eq!(daemon_fixtures, 25, "every daemon fixture was checked");
+    assert_eq!(daemon_fixtures, 27, "every daemon fixture was checked");
 }
 
 /// ADR 0001: `event_chat` (and `chats`) name the phone-number chats merged into a chat in
@@ -757,6 +802,11 @@ fn a_constructed_event_chat_with_aliases_matches_its_fixture() {
                 client_id: None,
                 reply_to: None,
                 reactions: Vec::new(),
+                thumb: None,
+                thumb_mime: None,
+                width: None,
+                height: None,
+                animated: false,
             }),
         },
     };
@@ -809,4 +859,90 @@ fn chats_without_aliases_are_byte_identical_to_before() {
         .and_then(|rest| rest.strip_suffix('}'))
         .expect("the fixture's shape");
     assert_eq!(serde_json::to_string(&chat).unwrap(), want);
+}
+
+/// An image carries the thumbnail embedded in the message itself and its size; an animated sticker
+/// is a media kind of its own with its PNG thumbnail (T15 Part 2.5).
+#[test]
+fn constructed_image_and_sticker_previews_match_their_fixtures() {
+    let dir = fixtures_dir();
+    let ada = "15551230001@s.whatsapp.net".to_owned();
+    assert_frame(
+        &dir.join("event_message_image.json"),
+        &DaemonFrame::EventMessage {
+            v: PROTOCOL_VERSION,
+            jid: ada.clone(),
+            message: Message {
+                id: "3EB0AAA4".to_owned(),
+                kind: "image".to_owned(),
+                text: "the venue".to_owned(),
+                from_me: false,
+                timestamp: "2026-10-18T17:59:00Z".to_owned(),
+                media: Some(Media {
+                    mime: "image/jpeg".to_owned(),
+                    size: 48213,
+                    file_name: String::new(),
+                }),
+                state: None,
+                client_id: None,
+                reply_to: None,
+                reactions: Vec::new(),
+                thumb: Some("/9j/4GZha2UganBlZyB0aHVtYm5haWw=".to_owned()),
+                thumb_mime: Some("image/jpeg".to_owned()),
+                width: Some(1280),
+                height: Some(960),
+                animated: false,
+            },
+        },
+    );
+    assert_frame(
+        &dir.join("event_message_sticker.json"),
+        &DaemonFrame::EventMessage {
+            v: PROTOCOL_VERSION,
+            jid: ada,
+            message: Message {
+                id: "3EB0AAA5".to_owned(),
+                kind: "sticker".to_owned(),
+                text: String::new(),
+                from_me: false,
+                timestamp: "2026-10-18T17:59:30Z".to_owned(),
+                media: Some(Media {
+                    mime: "image/webp".to_owned(),
+                    size: 18000,
+                    file_name: String::new(),
+                }),
+                state: None,
+                client_id: None,
+                reply_to: None,
+                reactions: Vec::new(),
+                thumb: Some("iVBORw0KGgpmYWtlIHBuZyB0aHVtYm5haWw=".to_owned()),
+                thumb_mime: Some("image/png".to_owned()),
+                width: Some(512),
+                height: Some(512),
+                animated: true,
+            },
+        },
+    );
+}
+
+/// Messages without a preview serialise exactly as before `thumb`, `thumb_mime`, `width`,
+/// `height` and `animated` existed: the messages of the `messages` and `search` fixtures, byte
+/// for byte.
+#[test]
+fn messages_without_a_preview_are_byte_identical_to_before() {
+    for file in ["messages_response.json", "search_response.json"] {
+        let text = fs::read_to_string(fixtures_dir().join(file)).unwrap();
+        let DaemonFrame::Messages { messages, .. } = serde_json::from_str(&text).unwrap() else {
+            panic!("{file} is a messages frame");
+        };
+        assert!(messages.iter().all(|m| m.thumb.is_none() && !m.animated));
+        let want = text
+            .trim_end()
+            .strip_prefix(
+                r#"{"v":1,"op":"messages","jid":"15551230001@s.whatsapp.net","messages":"#,
+            )
+            .and_then(|rest| rest.strip_suffix('}'))
+            .expect("the fixture's shape");
+        assert_eq!(serde_json::to_string(&messages).unwrap(), want, "{file}");
+    }
 }

@@ -120,6 +120,8 @@ func WireChat(db *sql.DB, c store.Chat, now time.Time) (ipc.Chat, error) {
 		return ipc.Chat{}, err
 	}
 	if len(last) == 1 {
+		// The chat list carries no previews: 200 chats with a thumbnail each would not fit a frame.
+		last[0].MediaRef = nil
 		m := WireMessage(last[0])
 		chat.LastMessage = &m
 	}

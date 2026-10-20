@@ -1052,6 +1052,11 @@ impl App {
                 client_id: Some(client_id.clone()),
                 reply_to: self.reply_to.clone(),
                 reactions: Vec::new(),
+                thumb: None,
+                thumb_mime: None,
+                width: None,
+                height: None,
+                animated: false,
             });
         self.pane = Pane::Messages;
         self.scroll = 0;
@@ -2340,6 +2345,11 @@ mod tests {
             client_id: None,
             reply_to: None,
             reactions: Vec::new(),
+            thumb: None,
+            thumb_mime: None,
+            width: None,
+            height: None,
+            animated: false,
         };
         assert_eq!(
             super::sent_by(Some(&chat("Ada", "a@b")), &message, UTC, false),
@@ -2360,6 +2370,11 @@ mod tests {
             client_id: Some("c-1".to_owned()),
             reply_to: None,
             reactions: Vec::new(),
+            thumb: None,
+            thumb_mime: None,
+            width: None,
+            height: None,
+            animated: false,
         };
         assert_eq!(
             super::sent_by(None, &message, UTC, false),

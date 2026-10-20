@@ -79,6 +79,9 @@ const (
 	KindAudio    = "audio"
 	KindVideo    = "video"
 	KindDocument = "document"
+	// KindSticker is a WhatsApp sticker: a media kind, downloaded only on request like an image
+	// (T15 Part 2.5). A client that does not know it treats it like any other media kind.
+	KindSticker = "sticker"
 )
 
 // Values of the sent frame's state field.
@@ -446,6 +449,15 @@ type Message struct {
 	// mine first. Both are absent when empty (added in M2).
 	ReplyTo   string     `json:"reply_to,omitempty"`
 	Reactions []Reaction `json:"reactions,omitempty"`
+	// Thumb is the thumbnail WhatsApp embeds in an image (JPEG) or sticker (PNG) message, base64 on
+	// the wire, with its ThumbMime; Width and Height are the picture's size in pixels and Animated
+	// marks an animated sticker. All are read from the message itself, never downloaded, and absent
+	// when empty, so a message without them encodes as before (T15 Part 2.5).
+	Thumb     []byte `json:"thumb,omitempty"`
+	ThumbMime string `json:"thumb_mime,omitempty"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
+	Animated  bool   `json:"animated,omitempty"`
 }
 
 // Reaction is one sender's current reaction on a message.

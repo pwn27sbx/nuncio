@@ -387,11 +387,7 @@ func (d *daemon) Messages(jid string, limit int) ([]ipc.Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	msgs := make([]ipc.Message, 0, len(rows))
-	for _, r := range rows {
-		msgs = append(msgs, wa.WireMessage(r))
-	}
-	return msgs, nil
+	return wa.WireMessages(jid, rows), nil
 }
 
 // DownloadMedia serves download_media: the session downloads the attachment into the media cache
@@ -456,11 +452,7 @@ func (d *daemon) Search(jid, query string, limit int) ([]ipc.Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	msgs := make([]ipc.Message, 0, len(rows))
-	for _, r := range rows {
-		msgs = append(msgs, wa.WireMessage(r))
-	}
-	return msgs, nil
+	return wa.WireMessages(jid, rows), nil
 }
 
 // Retry serves retry: the session sends a not-sent message again, once, under its first WhatsApp

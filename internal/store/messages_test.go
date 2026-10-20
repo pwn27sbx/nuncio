@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 )
@@ -685,5 +686,45 @@ func TestGetChatEqualsItsListChatsRow(t *testing.T) {
 	}
 	if _, err := GetChat(db, "15550000009@s.whatsapp.net"); !errors.Is(err, ErrNoChat) {
 		t.Errorf("GetChat of an unknown chat = %v, want ErrNoChat", err)
+	}
+}
+
+// ListMessages and SearchChat read back the media reference of the kinds whose preview the wire
+// serves (image and sticker) and of no other: a document, a text and a queued send list none.
+func TestListingsReadTheReferenceOfImagesAndStickersOnly(t *testing.T) {
+	db := newMessagesDB(t)
+	mustInsert(t, db, Message{ID: "IMG1", ChatJID: chatAlice, Kind: KindImage, Text: "venue photo", Timestamp: t0,
+		Mime: "image/jpeg", MediaRef: []byte("img-ref")})
+	mustInsert(t, db, Message{ID: "STK1", ChatJID: chatAlice, Kind: KindSticker, Timestamp: t0.Add(time.Minute),
+		Mime: "image/webp", MediaRef: []byte("stk-ref")})
+	mustInsert(t, db, Message{ID: "DOC1", ChatJID: chatAlice, Kind: KindDocument, Text: "venue menu", Timestamp: t0.Add(2 * time.Minute),
+		Mime: "application/pdf", MediaRef: []byte("doc-ref")})
+	mustInsert(t, db, text("TXT1", chatAlice, "venue text", false, t0.Add(3*time.Minute)))
+
+	msgs, err := ListMessages(db, chatAlice, 10)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	refs := map[string]string{}
+	for _, m := range msgs {
+		refs[m.ID] = string(m.MediaRef)
+	}
+	want := map[string]string{"IMG1": "img-ref", "STK1": "stk-ref", "DOC1": "", "TXT1": ""}
+	if !reflect.DeepEqual(refs, want) {
+		t.Errorf("ListMessages refs = %v, want %v", refs, want)
+	}
+	if msgs[0].MediaRef != nil {
+		t.Errorf("a text message lists the reference %v, want nil", msgs[0].MediaRef)
+	}
+	hits, err := SearchChat(db, chatAlice, "venue", 10)
+	if err != nil {
+		t.Fatalf("SearchChat: %v", err)
+	}
+	refs = map[string]string{}
+	for _, m := range hits {
+		refs[m.ID] = string(m.MediaRef)
+	}
+	if want := map[string]string{"IMG1": "img-ref", "DOC1": "", "TXT1": ""}; !reflect.DeepEqual(refs, want) {
+		t.Errorf("SearchChat refs = %v, want %v", refs, want)
 	}
 }

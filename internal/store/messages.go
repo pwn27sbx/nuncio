@@ -15,6 +15,7 @@ const (
 	KindAudio    = "audio"
 	KindVideo    = "video"
 	KindDocument = "document"
+	KindSticker  = "sticker"
 )
 
 // Chat is one conversation. LastMessageAt and Unread are derived from its messages. MutedUntil is
@@ -44,7 +45,8 @@ var ErrNoMessage = errors.New("no such message in that chat")
 
 // Message is one stored message. Its identity is (ChatJID, ID). Mime, Size and FileName
 // describe media and stay empty for text. MediaRef is what a later download needs (the
-// serialised media sub-message, with its key, path and hashes); only GetMessage reads it back.
+// serialised media sub-message, with its key, path and hashes); GetMessage reads it back, and
+// ListMessages and SearchChat for images and stickers only (their preview is read from it).
 // State and ClientID are set only on a send of mine that is not sent yet, as ListMessages lists
 // it from the outbox: State is OutboxQueued, OutboxNotSent or OutboxNotConfirmed.
 type Message struct {
@@ -283,18 +285,24 @@ func GetChat(db *sql.DB, jid string) (Chat, error) {
 	return c, nil
 }
 
+// previewRef selects, for a messages row m joined to its media_refs row r, the MediaRef of the
+// kinds whose wire preview is read from it (image and sticker), and NULL for every other kind.
+const previewRef = `CASE WHEN m.kind IN ('` + KindImage + `', '` + KindSticker + `') THEN r.ref END`
+
 // ListMessages returns up to limit messages of a chat, newest first: the stored messages and the
 // sends of mine to that chat that are queued or not sent, which carry their State and ClientID and
-// the time they were queued. A send that was sent is listed once, as the stored message.
+// the time they were queued. A send that was sent is listed once, as the stored message. Images and
+// stickers carry their MediaRef, from which the wire reads their preview; other kinds carry none.
 func ListMessages(db *sql.DB, chatJID string, limit int) ([]Message, error) {
 	rows, err := db.Query(`SELECT m.id, m.chat_jid, m.kind, m.text, m.from_me, m.ts AS ts, m.read,
 			COALESCE(m.mime, ''), COALESCE(m.size, 0), COALESCE(m.file_name, ''),
-			'', '', 0 AS pending, m.seq AS seq, COALESCE(mm.reply_to, '')
+			'', '', 0 AS pending, m.seq AS seq, COALESCE(mm.reply_to, ''), `+previewRef+`
 		FROM messages m LEFT JOIN message_meta mm ON mm.chat_jid = m.chat_jid AND mm.id = m.id
+			LEFT JOIN media_refs r ON r.chat_jid = m.chat_jid AND r.id = m.id
 		WHERE m.chat_jid = ?
 		UNION ALL
 		SELECT o.message_id, o.chat_jid, 'text', o.text, 1, o.created, 1, '', 0, '', o.state, o.client_id, 1, o.seq,
-			COALESCE(r.reply_to, '')
+			COALESCE(r.reply_to, ''), NULL
 		FROM outbox o LEFT JOIN outbox_replies r ON r.client_id = o.client_id
 		WHERE o.chat_jid = ? AND o.state != ?
 			AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_jid = o.chat_jid AND m.id = o.message_id)
@@ -308,7 +316,7 @@ func ListMessages(db *sql.DB, chatJID string, limit int) ([]Message, error) {
 		var m Message
 		var ts, pending, seq int64
 		if err := rows.Scan(&m.ID, &m.ChatJID, &m.Kind, &m.Text, &m.FromMe, &ts, &m.Read,
-			&m.Mime, &m.Size, &m.FileName, &m.State, &m.ClientID, &pending, &seq, &m.ReplyTo); err != nil {
+			&m.Mime, &m.Size, &m.FileName, &m.State, &m.ClientID, &pending, &seq, &m.ReplyTo, &m.MediaRef); err != nil {
 			return nil, fmt.Errorf("cannot read message: %w", err)
 		}
 		m.Timestamp = fromNanos(ts)

@@ -244,6 +244,30 @@ func fixtureCases() []fixtureCase {
 			},
 		},
 		{
+			// An image with the thumbnail embedded in the message itself and its size (T15 Part 2.5).
+			file: "event_message_image.json",
+			into: func() any { return &EventMessage{} },
+			build: func() any {
+				return EventMessage{V: 1, Op: OpEventMessage, JID: "15551230001@s.whatsapp.net", Message: Message{
+					ID: "3EB0AAA4", Kind: KindImage, Text: "the venue", Timestamp: "2026-10-18T17:59:00Z",
+					Media: &Media{Mime: "image/jpeg", Size: 48213}, Thumb: []byte("\xff\xd8\xff\xe0fake jpeg thumbnail"),
+					ThumbMime: "image/jpeg", Width: 1280, Height: 960,
+				}}
+			},
+		},
+		{
+			// An animated sticker: kind sticker, no text, its PNG thumbnail.
+			file: "event_message_sticker.json",
+			into: func() any { return &EventMessage{} },
+			build: func() any {
+				return EventMessage{V: 1, Op: OpEventMessage, JID: "15551230001@s.whatsapp.net", Message: Message{
+					ID: "3EB0AAA5", Kind: KindSticker, Timestamp: "2026-10-18T17:59:30Z",
+					Media: &Media{Mime: "image/webp", Size: 18000}, Thumb: []byte("\x89PNG\r\n\x1a\nfake png thumbnail"),
+					ThumbMime: "image/png", Width: 512, Height: 512, Animated: true,
+				}}
+			},
+		},
+		{
 			file:  "retry_request.json",
 			into:  func() any { return &RetryRequest{} },
 			build: func() any { return RetryRequest{V: 1, Op: OpRetry, ClientID: "c-7f3a9e23"} },
@@ -563,6 +587,28 @@ func TestAChatWithoutAliasesEncodesByteForByteAsBefore(t *testing.T) {
 	}
 	if string(got) != want {
 		t.Errorf("chats =\n %s\nwant\n %s", got, want)
+	}
+}
+
+// A message without a preview is encoded exactly as before thumb, thumb_mime, width, height and
+// animated existed: messages_response.json and search_response.json byte for byte.
+func TestAMessageWithoutAPreviewEncodesByteForByteAsBefore(t *testing.T) {
+	for _, file := range []string{"messages_response.json", "search_response.json", "event_message.json"} {
+		want := strings.TrimSuffix(string(readFixture(t, file)), "\n")
+		var tc *fixtureCase
+		for _, c := range fixtureCases() {
+			if c.file == file {
+				c := c
+				tc = &c
+			}
+		}
+		got, err := json.Marshal(tc.build())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("%s =\n %s\nwant\n %s", file, got, want)
+		}
 	}
 }
 

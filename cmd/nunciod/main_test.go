@@ -1780,3 +1780,104 @@ func downloadErr(c *ipc.Client, jid, id string) error {
 	_, err := c.DownloadMedia(jid, id)
 	return err
 }
+
+// messages and search serve an image with the thumbnail embedded in it and its size, read from the
+// store (never the network); chats lists it as last_message without them. A chat full of photos
+// with large thumbnails still answers messages in one frame: the oldest ones leave the thumb out.
+func TestDaemonServesImageThumbnailsInMessagesAndSearchWithoutDownloading(t *testing.T) {
+	session, fake, sock := linkedDaemon(t)
+	dl := &fakeDownloader{plain: photo}
+	session.SetMedia(filepath.Join(t.TempDir(), "media"), dl)
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	thumb := []byte("\xff\xd8\xff fake embedded thumbnail")
+	ev := imageEvent(ada, "3EB0AAA0", time.Date(2026, 10, 18, 17, 50, 30, 0, time.UTC), sha(photo))
+	ev.Message.ImageMessage.JPEGThumbnail = thumb
+	ev.Message.ImageMessage.Width, ev.Message.ImageMessage.Height = proto.Uint32(1280), proto.Uint32(960)
+	fake.emit(ev)
+	c := dial(t, sock)
+
+	want := ipc.Message{ID: "3EB0AAA0", Kind: ipc.KindImage, Text: "the venue", Timestamp: "2026-10-18T17:50:30Z",
+		Media: &ipc.Media{Mime: "image/jpeg", Size: 48213}, Thumb: thumb, ThumbMime: "image/jpeg", Width: 1280, Height: 960}
+	msgs, err := c.Messages(ada.String(), 10)
+	if err != nil || len(msgs.Messages) != 1 || !reflect.DeepEqual(msgs.Messages[0], want) {
+		t.Fatalf("Messages = %s, %v; want only %s", jsonOf(t, msgs.Messages), err, jsonOf(t, want))
+	}
+	d, err := newDaemon(session, session.Store())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, err := d.Search(ada.String(), "venue", 10)
+	if err != nil || len(hits) != 1 || !reflect.DeepEqual(hits[0], want) {
+		t.Fatalf("Search = %s, %v; want only %s", jsonOf(t, hits), err, jsonOf(t, want))
+	}
+	chats, err := c.Chats(40)
+	last := want
+	last.Thumb, last.ThumbMime, last.Width, last.Height = nil, "", 0, 0
+	if err != nil || len(chats.Chats) != 1 || !reflect.DeepEqual(chats.Chats[0].LastMessage, &last) {
+		t.Fatalf("Chats = %s, %v; want the image as last_message without its preview", jsonOf(t, chats.Chats), err)
+	}
+
+	big := jpegOf(wa.MaxThumb)
+	for i := 0; i < 30; i++ {
+		ev := imageEvent(ada, fmt.Sprintf("3EB0BIG%02d", i), time.Date(2026, 10, 18, 18, i, 0, 0, time.UTC), sha(photo))
+		ev.Message.ImageMessage.JPEGThumbnail = big
+		fake.emit(ev)
+	}
+	msgs, err = c.Messages(ada.String(), 200)
+	if err != nil || len(msgs.Messages) != 31 {
+		t.Fatalf("Messages of 31 photos = %d, %v; want all 31 in one frame", len(msgs.Messages), err)
+	}
+	if len(msgs.Messages[0].Thumb) != wa.MaxThumb || msgs.Messages[30].Thumb != nil {
+		t.Errorf("the newest photo carries %d thumb bytes and the oldest %d; want %d and none",
+			len(msgs.Messages[0].Thumb), len(msgs.Messages[30].Thumb), wa.MaxThumb)
+	}
+	if n := dl.calls.Load(); n != 0 {
+		t.Errorf("serving thumbnails called the downloader %d times, want 0", n)
+	}
+}
+
+// jpegOf is a fake JPEG thumbnail of n bytes: the JPEG magic bytes, then padding.
+func jpegOf(n int) []byte {
+	return append([]byte{0xff, 0xd8, 0xff}, bytes.Repeat([]byte{0xff}, n-3)...)
+}
+
+// A chat with a few large thumbnails and long texts answers messages in one frame, as before thumbnails.
+func TestThumbnailsNeverPushAMessagesReplyOverTheFrameLimit(t *testing.T) {
+	session, fake, sock := linkedDaemon(t)
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	base := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 6; i++ {
+		ev := imageEvent(ada, fmt.Sprintf("3EB0P%04d", i), base.Add(time.Duration(i)*time.Minute), sha(photo))
+		ev.Message.ImageMessage.JPEGThumbnail = jpegOf(wa.MaxThumb)
+		fake.emit(ev)
+	}
+	for i := 0; i < 194; i++ {
+		ev := imageEvent(ada, fmt.Sprintf("3EB0T%04d", i), base.Add(time.Duration(100+i)*time.Minute), sha(photo))
+		ev.Message.ImageMessage, ev.Message.Conversation = nil, proto.String("venue "+strings.Repeat("a", 2800))
+		fake.emit(ev)
+	}
+	c := dial(t, sock)
+	msgs, err := c.Messages(ada.String(), 200)
+	if err != nil || len(msgs.Messages) != 200 {
+		t.Fatalf("Messages = %d, %v; want all 200 in one frame", len(msgs.Messages), err)
+	}
+	if _, err := c.Status(); err != nil {
+		t.Errorf("the connection did not survive the reply: %v", err)
+	}
+	if msgs.Messages[194].Thumb == nil {
+		t.Errorf("the newest photo lost its thumb although some room was left")
+	}
+
+	// search answers with the same frame, so it keeps under the limit the same way.
+	d, err := newDaemon(session, session.Store())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, err := d.Search(ada.String(), "venue", 200)
+	if err != nil || len(hits) != 200 {
+		t.Fatalf("Search = %d, %v; want all 200", len(hits), err)
+	}
+	if err := ipc.WriteFrame(io.Discard, ipc.MessagesResponse{V: ipc.Version, Op: ipc.OpMessages, JID: ada.String(), Messages: hits}); err != nil {
+		t.Errorf("the search reply does not fit in one frame: %v", err)
+	}
+}

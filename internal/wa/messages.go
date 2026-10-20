@@ -1,6 +1,9 @@
 package wa
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"log"
 
@@ -13,7 +16,7 @@ import (
 )
 
 // messageRow turns a whatsmeow message into a store row: text and extended text as text, and the
-// image, video, audio and document kinds with their caption as text, their mime type, size and file
+// image, video, audio, document and sticker kinds with their caption as text, their mime type, size and file
 // name, and the serialised media sub-message as MediaRef, which is everything a download on request
 // needs later; nothing is downloaded here. A quoted reply, text or media, records the id it quotes
 // as ReplyTo. Any other kind and any chat the wire protocol does not carry (status updates,
@@ -75,7 +78,97 @@ func WireMessage(m store.Message) ipc.Message {
 	if m.Kind != store.KindText {
 		w.Media = &ipc.Media{Mime: m.Mime, Size: m.Size, FileName: m.FileName}
 	}
+	setPreview(&w, m)
 	return w
+}
+
+const (
+	// MaxThumb is the largest embedded thumbnail served, in bytes before base64; a larger one is
+	// left out (WhatsApp's own are a few KiB).
+	MaxThumb = 64 << 10
+	// ThumbBudget bounds the thumbnails of one messages or search reply, in bytes before base64;
+	// the room left in the frame bounds them too (WireMessages).
+	ThumbBudget = 384 << 10
+	// MaxSide is the largest width or height served; a size outside 1..MaxSide is left out, so a
+	// client can size a box from it safely.
+	MaxSide = 16384
+	// frameMargin is room a reply frame keeps free beyond what WireMessages measures.
+	frameMargin = 4 << 10
+)
+
+var (
+	jpegMagic = []byte{0xff, 0xd8, 0xff}
+	pngMagic  = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	// thumbKeys is what a thumb adds to an encoded message besides its base64 (both thumb mime
+	// types have the same length).
+	thumbKeys = len(`,"thumb":"","thumb_mime":"image/jpeg"`)
+)
+
+// setPreview adds to w what an image or sticker message embeds of itself, read from its stored
+// reference (no network): the thumbnail (up to MaxThumb, and only when its bytes are the JPEG or
+// PNG its label says), its mime type, the size in pixels (each within 1..MaxSide) and, for a
+// sticker, whether it is animated. Any other kind, a message without a reference or one whose
+// reference is unreadable gets none, so it encodes as before.
+func setPreview(w *ipc.Message, m store.Message) {
+	if len(m.MediaRef) == 0 || (m.Kind != store.KindImage && m.Kind != store.KindSticker) {
+		return
+	}
+	sub, err := decodeRef(m.Kind, m.MediaRef)
+	if err != nil {
+		return
+	}
+	var thumb, magic []byte
+	var width, height uint32
+	switch v := sub.(type) {
+	case *waE2E.ImageMessage:
+		thumb, width, height, magic = v.GetJPEGThumbnail(), v.GetWidth(), v.GetHeight(), jpegMagic
+		w.ThumbMime = "image/jpeg"
+	case *waE2E.StickerMessage:
+		thumb, width, height, magic = v.GetPngThumbnail(), v.GetWidth(), v.GetHeight(), pngMagic
+		w.ThumbMime, w.Animated = "image/png", v.GetIsAnimated()
+	}
+	if len(thumb) > MaxThumb || !bytes.HasPrefix(thumb, magic) {
+		w.ThumbMime = ""
+	} else {
+		w.Thumb = thumb
+	}
+	w.Width, w.Height = side(width), side(height)
+}
+
+// side is a stated width or height when it is within 1..MaxSide, else 0 (left out).
+func side(n uint32) int {
+	if n > MaxSide {
+		return 0
+	}
+	return int(n)
+}
+
+// WireMessages is WireMessage for the rows of the messages or search reply for chat jid, newest
+// first, which never exceeds ipc.MaxFrameLen because of thumbnails: the reply is measured without
+// them, and they are added back newest first while each fits in the room left in the frame (less
+// frameMargin) and in ThumbBudget. One that does not fit is left out (its width and height stay).
+func WireMessages(jid string, rows []store.Message) []ipc.Message {
+	msgs := make([]ipc.Message, len(rows))
+	thumbs := make([]ipc.Message, len(rows))
+	for i, r := range rows {
+		msgs[i] = WireMessage(r)
+		thumbs[i] = ipc.Message{Thumb: msgs[i].Thumb, ThumbMime: msgs[i].ThumbMime}
+		msgs[i].Thumb, msgs[i].ThumbMime = nil, ""
+	}
+	bare, err := json.Marshal(ipc.MessagesResponse{V: ipc.Version, Op: ipc.OpMessages, JID: jid, Messages: msgs})
+	if err != nil {
+		return msgs
+	}
+	room, budget := ipc.MaxFrameLen-frameMargin-len(bare), ThumbBudget
+	for i, t := range thumbs {
+		cost := base64.StdEncoding.EncodedLen(len(t.Thumb)) + thumbKeys
+		if len(t.Thumb) == 0 || cost > room || len(t.Thumb) > budget {
+			continue
+		}
+		msgs[i].Thumb, msgs[i].ThumbMime = t.Thumb, t.ThumbMime
+		room, budget = room-cost, budget-len(t.Thumb)
+	}
+	return msgs
 }
 
 // storeMessage saves one incoming or own message and publishes it with any reactions that arrived

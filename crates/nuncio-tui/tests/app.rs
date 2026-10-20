@@ -34,6 +34,11 @@ fn message(id: &str, text: &str, from_me: bool, minute: u32) -> Message {
         client_id: None,
         reply_to: None,
         reactions: Vec::new(),
+        thumb: None,
+        thumb_mime: None,
+        width: None,
+        height: None,
+        animated: false,
     }
 }
 

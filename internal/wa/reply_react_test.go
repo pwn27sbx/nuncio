@@ -299,6 +299,9 @@ func TestAReplyToAMediaMessageQuotesItsKindCaptionAndMimeType(t *testing.T) {
 			m := q.GetDocumentMessage()
 			return m.GetCaption() == "the menu" && m.GetMimetype() == "application/pdf" && m.GetFileName() == "menu.pdf"
 		}},
+		"sticker": {stickerMessage(false), func(q *waE2E.Message) bool {
+			return q.GetStickerMessage().GetMimetype() == "image/webp"
+		}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			s, fake, _ := subscribedSession(t)

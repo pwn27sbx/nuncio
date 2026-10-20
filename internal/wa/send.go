@@ -274,7 +274,7 @@ func (s *Session) textMessage(e store.OutboxEntry) *waE2E.Message {
 }
 
 // quotedOf is stored message q as a quote carries it: a media message as its own kind (image,
-// video, audio or document) with its caption, mime type and file name, taken from its stored
+// video, audio, document or sticker) with its caption, mime type and file name, taken from its stored
 // reference when it has one and from the row otherwise, so WhatsApp shows a quoted photo or file;
 // a text, or a media row that keeps neither its reference nor its mime type, as a conversation of
 // its text. The quote carries no media key or path, only what WhatsApp shows of the quoted message.
@@ -308,6 +308,8 @@ func quotedOf(q store.Message) *waE2E.Message {
 	case store.KindDocument:
 		return &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{Caption: proto.String(caption),
 			Mimetype: proto.String(mime), FileName: proto.String(fileName)}}
+	case store.KindSticker:
+		return &waE2E.Message{StickerMessage: &waE2E.StickerMessage{Mimetype: proto.String(mime)}}
 	}
 	return &waE2E.Message{Conversation: proto.String(q.Text)}
 }

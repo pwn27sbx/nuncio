@@ -211,6 +211,11 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
                 client_id: None,
                 reply_to: None,
                 reactions: Vec::new(),
+                thumb: None,
+                thumb_mime: None,
+                width: None,
+                height: None,
+                animated: false,
             }),
         }],
     };

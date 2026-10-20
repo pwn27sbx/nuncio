@@ -532,7 +532,8 @@ pub struct Chat {
 pub struct Message {
     /// WhatsApp message id.
     pub id: String,
-    /// `text`, `image`, `audio`, `video` or `document`.
+    /// `text`, `image`, `audio`, `video`, `document` or `sticker`; a kind a client does not know
+    /// is treated like any other media kind.
     pub kind: String,
     /// May be empty for non-text kinds (a media caption).
     pub text: String,
@@ -555,6 +556,26 @@ pub struct Message {
     /// The current reactions on this message, mine first; absent when there are none (M2).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<Reaction>,
+    /// Base64 of the thumbnail an image (JPEG) or sticker (PNG) message embeds in itself, never
+    /// downloaded; absent when there is none (T15 Part 2.5).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<String>,
+    /// The mime type of `thumb`: `image/jpeg` or `image/png`; set with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb_mime: Option<String>,
+    /// The picture's width in pixels (images and stickers); absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// The picture's height in pixels (images and stickers); absent when unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// An animated sticker; absent (false) otherwise.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub animated: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One sender's current reaction on a message.

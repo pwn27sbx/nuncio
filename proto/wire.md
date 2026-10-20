@@ -81,7 +81,7 @@ because events were lost; to avoid it, a UI drains every queued event on each ti
 
 | `op` | Fields | Fixture |
 |---|---|---|
-| `event_message` | `v`, `op`, `jid`, `message` (Message); also published when a send of mine changes state (queued, sent, not sent): a client replaces the message with the same `id` | `event_message.json`, `event_message_not_sent.json` |
+| `event_message` | `v`, `op`, `jid`, `message` (Message); also published when a send of mine changes state (queued, sent, not sent): a client replaces the message with the same `id` | `event_message.json`, `event_message_not_sent.json`, `event_message_image.json`, `event_message_sticker.json` |
 | `event_connection` | `v`, `op`, `session` | `event_connection.json` |
 | `event_unread` | `v`, `op`, `unread` (int, total), `jid`, `chat_unread` (int) | `event_unread.json` |
 | `event_focus` | `v`, `op`, `jid` | `event_focus.json` |
@@ -128,15 +128,25 @@ queued, and every attempt of that send uses it, so it stays the same across stat
 | Field | Type | Notes |
 |---|---|---|
 | `id` | string | WhatsApp message id |
-| `kind` | string | `text`, `image`, `audio`, `video` or `document` |
+| `kind` | string | `text`, `image`, `audio`, `video`, `document` or `sticker` (added in T15 Part 2.5; a client that does not know `sticker`, or any later kind, treats it like the other media kinds) |
 | `text` | string | the body, or the caption of a media kind; may be empty for media |
 | `from_me` | bool | |
 | `timestamp` | string | RFC 3339 UTC |
-| `media` | object or absent | set for the media kinds, omitted for `text` |
+| `media` | object or absent | set for the media kinds (`sticker` included), omitted for `text` |
 | `state` | string or absent | only on a send of mine that is not sent yet: `queued` (waiting for the session to reconnect) or `not_sent` (its one attempt failed or was not confirmed; it waits for a manual `retry`). Absent once sent and on every received message. Added in M1; a client reads a missing key as sent, and an unknown value as an unknown state |
 | `client_id` | string or absent | set with `state`: the `client_id` of that send, which `retry` names |
 | `reply_to` | string or absent | the id of the message this one quotes (a reply received, text or media with or without a caption, or one of mine sent with `reply_to`). Added in M2; absent means it quotes nothing |
 | `reactions` | array or absent | the current reactions on this message, mine first: `{ "emoji": string, "from_me": bool }`, one per sender. Absent when there are none. Added in M2; a client reads a missing key as no reactions |
+| `thumb` | string or absent | `image` and `sticker` only: base64 (standard, padded) of the thumbnail WhatsApp embeds in the message itself (an image's JPEG thumbnail, a sticker's PNG thumbnail). Absent when the message carries none, one larger than 64 KiB (before base64) or one whose bytes are not the JPEG or PNG it is labelled, and in a chat's `last_message`. Thumbnails never push a `messages` or `search` reply over the frame limit: the reply is measured without them, and they are added newest first while each still fits in the room left (and in 384 KiB before base64 in all); one that does not fit is left out, its `width` and `height` stay. Added in T15 Part 2.5 |
+| `thumb_mime` | string or absent | set with `thumb`: `image/jpeg` for an image, `image/png` for a sticker |
+| `width`, `height` | int or absent | `image` and `sticker` only: the picture's size in pixels, as the message states it, from 1 to 16384; each absent when 0 (unknown) or larger, and in a chat's `last_message`. Added in T15 Part 2.5 |
+| `animated` | bool or absent | `sticker` only: `true` for an animated sticker; absent otherwise. Added in T15 Part 2.5 |
+
+A message without any of `thumb`, `thumb_mime`, `width`, `height` and `animated` (every text, audio,
+video and document message, and an image or sticker that states none of them) is encoded exactly
+as before they existed. They are read from the stored message, so serving them never contacts
+WhatsApp; a client shows the thumbnail at once and fetches the full picture only with
+`download_media`.
 
 A reaction is never a message of its own: an incoming reaction (or one of mine made on another
 device) is stored against the message it targets, replacing that sender's earlier one (an empty
@@ -229,6 +239,8 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `wipe` with `unlink: true` while `unlinked` | `error` / `not_linked`; nothing is deleted (a `wipe` with `unlink: false` deletes the data of a device that is already gone) |
 | `wipe` with `unlink: true` that WhatsApp does not confirm | `error` / `internal` saying nothing was deleted; the daemon keeps serving |
 | A media message arrives | stored with its `media` object and what a download needs; nothing is downloaded |
+| A sticker arrives (or one of mine is synced from another device) | stored as a message of kind `sticker` with no text, its `media` object (mime `image/webp`) and what a download needs; it is never downloaded on its own. `download_media` serves it exactly like an image (same cache, file extension `.webp`) |
+| Thumbnails | thumbnails come from the message itself; nuncio never downloads media on its own. `thumb`, `width`, `height` and `animated` are read from the stored message in `messages`, `search` and every `event_message`; logs never carry a thumbnail |
 | `download_media` with a `jid` that is not a chat JID, or an empty or missing `id` | `bad_frame`; nothing is downloaded; the connection stays usable |
 | `download_media` for an id not stored in that chat, or for a text message | `error` / `internal` with the message `no media message with that id in that chat` |
 | `download_media` while `unlinked` | `error` / `not_linked`; nothing is downloaded |
@@ -250,7 +262,7 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | `search` with a `query` the index cannot tokenise (only emoji, symbols or punctuation, e.g. `🎉` or `?!`) | the messages of that chat whose text contains every word as a literal substring, newest first, up to `limit`; a query with any letter or number uses the index as before (whole words, any case) |
 | `search` | `messages` for that chat only, newest first, each message with its `reply_to` and `reactions`; an empty list when nothing matches or there is no store. It never contacts WhatsApp |
 | `send` with `reply_to` naming a message stored in that chat | sent like any `send` (outbox, queue, drain, retry), as a WhatsApp extended text whose context quotes that message (its id, its sender, and the message: its text, or for a media message its kind, below); the queued send keeps `reply_to` through queue, drain and retry, and is listed and published with it |
-| `send` with `reply_to` naming a media message (image, video, audio or document) | the quote carries that media kind with its caption, mime type and (for a document) file name, as WhatsApp shows a quoted photo or file; never its media key or path. A media message stored without its reference or mime type is quoted as its text |
+| `send` with `reply_to` naming a media message (image, video, audio, document or sticker) | the quote carries that media kind with its caption, mime type and (for a document) file name, as WhatsApp shows a quoted photo or file; never its media key or path. A media message stored without its reference or mime type is quoted as its text |
 | `send` with `reply_to` naming a message of mine in a chat addressed by LID (`digits@lid`) | the quote names me by my own LID, when the device knows it; in every other chat by my phone-number JID |
 | `send` with `reply_to` naming no message stored in that chat | `send_failed` with the message `no message with that id in that chat`; nothing is stored or sent |
 | `send` with `reply_to` repeating a `client_id` already accepted | the stored state of that send, as for any repeated `client_id`, whatever `reply_to` names (a stored message or none); never a second message |

@@ -41,7 +41,7 @@ var (
 	ErrMediaWiped = errors.New("nuncio is wiping its data, so the media was not downloaded")
 )
 
-// mediaMessage is what the four media sub-messages of whatsmeow have in common.
+// mediaMessage is what the media sub-messages of whatsmeow nuncio stores have in common.
 type mediaMessage interface {
 	proto.Message
 	whatsmeow.DownloadableMessage
@@ -64,6 +64,9 @@ func mediaOf(msg *waE2E.Message) (kind string, sub mediaMessage, caption, fileNa
 	case msg.GetDocumentMessage() != nil:
 		m := msg.GetDocumentMessage()
 		return store.KindDocument, m, m.GetCaption(), m.GetFileName(), true
+	case msg.GetStickerMessage() != nil:
+		// A sticker has no caption; it is downloaded only on request, like an image.
+		return store.KindSticker, msg.GetStickerMessage(), "", "", true
 	}
 	return "", nil, "", "", false
 }
@@ -80,6 +83,8 @@ func decodeRef(kind string, ref []byte) (mediaMessage, error) {
 		m = &waE2E.AudioMessage{}
 	case store.KindDocument:
 		m = &waE2E.DocumentMessage{}
+	case store.KindSticker:
+		m = &waE2E.StickerMessage{}
 	default:
 		return nil, ErrNoMedia
 	}

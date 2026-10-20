@@ -99,8 +99,11 @@ type Session struct {
 	// once Close has run.
 	connMu sync.Mutex
 
-	mu      sync.Mutex
-	state   State
+	mu    sync.Mutex
+	state State
+	// drops counts, under mu, every time the session left linked (a drop, a dead keepalive, a stop
+	// or Close), so a send can tell that its connection died while it waited (see leftLinked).
+	drops   uint64
 	started bool
 	events  *ipc.Broker
 	backoff *Backoff
@@ -256,6 +259,7 @@ func (s *Session) keepAliveFailed(lastSuccess time.Time) {
 		s.backoff.Stopped() == "" && s.cancel == nil
 	if act {
 		s.state = StateOffline
+		s.drops++
 	}
 	logf := s.logf
 	s.mu.Unlock()
@@ -353,6 +357,9 @@ func (s *Session) State() State {
 func (s *Session) set(st State) {
 	s.mu.Lock()
 	changed := s.state != st
+	if s.state == StateLinked && st != StateLinked {
+		s.drops++
+	}
 	s.state = st
 	s.mu.Unlock()
 	if changed {

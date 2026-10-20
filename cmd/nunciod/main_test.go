@@ -752,6 +752,12 @@ type fakeWAClient struct {
 	sendTime time.Time
 	sends    atomic.Int64
 	fail     atomic.Bool
+	// timeout makes SendMessage answer whatsmeow's ack timeout, dropped the DisconnectedError real
+	// whatsmeow answers a send pending when the socket drops; onSend, when set, runs inside the
+	// first SendMessage call only, as what happens to the connection while it waits for the ack.
+	timeout atomic.Bool
+	dropped atomic.Bool
+	onSend  func()
 	// logouts counts Logout calls; onLogout, when set, runs inside each one; Logout answers
 	// logoutErr.
 	logouts   atomic.Int64
@@ -778,7 +784,15 @@ func (f *fakeWAClient) OwnJID() string { return "15551230009@s.whatsapp.net" }
 func (f *fakeWAClient) OwnLID() string { return "" }
 
 func (f *fakeWAClient) SendMessage(context.Context, string, *waE2E.Message, string) (time.Time, error) {
-	f.sends.Add(1)
+	if f.sends.Add(1) == 1 && f.onSend != nil {
+		f.onSend()
+	}
+	if f.timeout.Load() {
+		return time.Time{}, whatsmeow.ErrMessageTimedOut
+	}
+	if f.dropped.Load() {
+		return time.Time{}, &whatsmeow.DisconnectedError{Action: "message send"}
+	}
 	if f.fail.Load() {
 		return time.Time{}, errors.New("websocket closed")
 	}
@@ -1217,6 +1231,51 @@ func TestDaemonSendWhileOfflineAnswersQueuedAndDrainsOnReconnect(t *testing.T) {
 	}
 	if n := fake.sends.Load(); n != 1 {
 		t.Errorf("client sends = %d, want exactly 1", n)
+	}
+}
+
+// A send whose ack times out while the connection drops answers sent with state queued, never
+// not_confirmed, and the reconnect's drain sends it once under the same WhatsApp id; one whose ack
+// times out while the session stays linked still answers not_confirmed.
+func TestDaemonSendWhoseAckTimesOutAsTheConnectionDropsAnswersQueued(t *testing.T) {
+	_, fake, sock := linkedDaemon(t)
+	c := dial(t, sock)
+	const ada = "15551230001@s.whatsapp.net"
+	fake.dropped.Store(true)
+	fake.onSend = func() { fake.emit(&waevents.Disconnected{}) }
+
+	sent, err := c.Send(ada, "On my way", "c-1")
+	if want := (ipc.Sent{V: 1, Op: ipc.OpSent, ClientID: "c-1", State: ipc.SendQueued}); err != nil || sent != want {
+		t.Fatalf("Send = %+v, %v; want %+v", sent, err, want)
+	}
+	msgs, err := c.Messages(ada, 10)
+	if err != nil || len(msgs.Messages) != 1 || msgs.Messages[0].State != ipc.MessageQueued || msgs.Messages[0].ID != "3EB0BBB1" {
+		t.Fatalf("Messages = %+v, %v; want the message queued under 3EB0BBB1", msgs.Messages, err)
+	}
+
+	fake.dropped.Store(false)
+	fake.emit(&waevents.Connected{})
+	want := ipc.Message{ID: "3EB0BBB1", Kind: ipc.KindText, Text: "On my way", FromMe: true, Timestamp: "2026-10-18T17:56:10Z"}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		msgs, err = c.Messages(ada, 10)
+		if err == nil && len(msgs.Messages) == 1 && reflect.DeepEqual(msgs.Messages[0], want) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Messages after reconnect = %+v, %v; want only %+v", msgs.Messages, err, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := fake.sends.Load(); n != 2 {
+		t.Errorf("client sends = %d, want 2 (the timed-out one and one drained resend)", n)
+	}
+
+	fake.timeout.Store(true)
+	_, err = c.Send(ada, "Still there?", "c-2")
+	var pe *ipc.ProtocolError
+	if !errors.As(err, &pe) || pe.Code != ipc.CodeNotConfirmed {
+		t.Errorf("Send whose ack timed out while linked = %v, want a %s error", err, ipc.CodeNotConfirmed)
 	}
 }
 

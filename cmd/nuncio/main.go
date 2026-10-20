@@ -34,10 +34,11 @@ const usage = `usage:
 
 A <jid> is a WhatsApp chat: 15551230001@s.whatsapp.net (a person) or 120363000000000000@g.us (a group).
 send prints "sent", "queued", "not sent: <reason>" or "not confirmed: …; it may have been delivered"
-(no acknowledgement in time), and exits non-zero unless it was sent or queued. Offline, a message is
-queued and sent once when the session reconnects. Nothing is ever retried on its own: unless it was
-sent, send prints the message's client_id, and nuncio retry <client_id> sends it again under the
-same WhatsApp message id, so it cannot arrive twice.
+(no acknowledgement in time), and exits non-zero unless it was sent or queued. Offline, or when the
+connection drops before WhatsApp acknowledges it, a message is queued and sent once when the session
+reconnects. Nothing else is ever retried on its own: unless it was sent, send prints the message's
+client_id, and nuncio retry <client_id> sends it again under the same WhatsApp message id, so it
+cannot arrive twice.
 Nothing links a device without --consent. logout and purge without --confirm only list what they
 would delete. logout needs a running nunciod (it unlinks through the daemon's session); purge works
 with or without one.`

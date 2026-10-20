@@ -125,7 +125,7 @@ func (s *Session) sendOrQueue(e store.OutboxEntry) (ipc.Sent, error) {
 		s.publishEntry(e)
 		return ipc.Sent{State: ipc.SendQueued}, nil
 	}
-	return s.deliver(e.ClientID)
+	return s.deliver(e.ClientID, true)
 }
 
 // storedReply is the answer for a send in its stored state, without sending anything: a send whose
@@ -145,8 +145,9 @@ func storedReply(e store.OutboxEntry) (ipc.Sent, error) {
 // deliver gets the queued send stored under clientID its one attempt, under sendMu, after every
 // send queued before it, so no send overtakes an older one: while linked, each older queued send
 // gets its one attempt first, in order. A send that a drain or another call already attempted is
-// answered from its stored state, never sent twice.
-func (s *Session) deliver(clientID string) (ipc.Sent, error) {
+// answered from its stored state, never sent twice. live is true for the attempt a send or retry
+// makes for its caller and false for a drain's; see attempt.
+func (s *Session) deliver(clientID string, live bool) (ipc.Sent, error) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	queued, err := store.QueuedOutbox(s.db)
@@ -156,12 +157,12 @@ func (s *Session) deliver(clientID string) (ipc.Sent, error) {
 	}
 	for _, e := range queued {
 		if e.ClientID == clientID {
-			return s.attempt(e)
+			return s.attemptLive(e, live)
 		}
 		if s.State() != StateLinked {
 			break
 		}
-		_, _ = s.attempt(e)
+		_, _ = s.attempt(e, false)
 	}
 	e, err := store.GetOutbox(s.db, clientID)
 	if err != nil {
@@ -169,27 +170,54 @@ func (s *Session) deliver(clientID string) (ipc.Sent, error) {
 		return ipc.Sent{}, errOutbox
 	}
 	if e.State == store.OutboxQueued {
-		return s.attempt(e)
+		return s.attemptLive(e, live)
 	}
 	return storedReply(e)
+}
+
+// attemptLive is attempt, except that a live send whose session is no longer linked by the time
+// its turn comes (an older send's attempt, or a drop, took the connection down) is not attempted
+// on a connection that is gone: it stays queued for the next reconnect's drain, is published as
+// queued and answers queued.
+func (s *Session) attemptLive(e store.OutboxEntry, live bool) (ipc.Sent, error) {
+	if live && s.State() == StateOffline {
+		s.publishEntry(e)
+		return ipc.Sent{State: ipc.SendQueued}, nil
+	}
+	return s.attempt(e, live)
 }
 
 // attempt is the one attempt of queued send e; the caller holds sendMu. On success the entry is
 // sent, the message is stored as mine (never unread) and published as event_message; a store
 // failure after that is logged and the send still counts. Any failure is published with the wire
-// state not_sent and stored with its reason: an ack that does not arrive in time is
-// not_confirmed and answers ipc.ErrNotConfirmed (it may have been delivered; a retry reuses its
+// state not_sent and stored with its reason: an unknown outcome (unknownOutcome: an ack that does
+// not arrive in time, or a connection lost while it waits) is not_confirmed and answers ipc.ErrNotConfirmed (it may have been delivered; a retry reuses its
 // WhatsApp id), anything else is not_sent and answers ErrNotSent. Nothing is retried on its own.
-func (s *Session) attempt(e store.OutboxEntry) (ipc.Sent, error) {
+//
+// One exception, for the live attempt only (live: the one a send or retry makes for its caller):
+// an unknown outcome because the connection died while it waited (leftLinked)
+// leaves the entry queued, under the WhatsApp id it was queued with, publishes it as queued and
+// answers queued, so the next reconnect's one drain sends it, as WhatsApp itself queues a message
+// sent as the network drops. A drain's attempt never does that: its failures end as above, so a
+// send gets at most one automatic resend.
+func (s *Session) attempt(e store.OutboxEntry, live bool) (ipc.Sent, error) {
 	// An entry queued under a phone number before its LID was known is sent, and kept, in the LID
 	// chat once it is (the merge moves the entry there).
 	e.ChatJID = s.CanonicalJID(e.ChatJID)
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
+	drops := s.dropCount()
 	ts, err := s.client.SendMessage(ctx, e.ChatJID, s.textMessage(e), e.MessageID)
 	if err != nil {
 		state, reply := store.OutboxNotSent, ErrNotSent
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, whatsmeow.ErrMessageTimedOut) {
+		if unknownOutcome(err) {
+			if live && s.leftLinked(drops) {
+				// The row is still queued: no state to write, and the drain waits on sendMu.
+				log.Print("wa: a send was not acknowledged before the connection dropped; it stays queued")
+				e.State = store.OutboxQueued
+				s.publishEntry(e)
+				return ipc.Sent{State: ipc.SendQueued}, nil
+			}
 			// whatsmeow writes the frame before it waits for the ack, so the message may have
 			// arrived: report the outcome as unknown, never as not accepted.
 			state, reply = store.OutboxNotConfirmed, ipc.ErrNotConfirmed
@@ -303,6 +331,37 @@ func (s *Session) senderOf(m store.Message) string {
 	return ""
 }
 
+// unknownOutcome reports whether a failed SendMessage may still have reached WhatsApp: its ack
+// timed out, or the socket dropped while it waited (whatsmeow clears the response waiter with a
+// stream end and, once its retryFrame gives up, answers a DisconnectedError; errors.As, because
+// DisconnectedError.Is compares the Action, which differs for the retried frame). whatsmeow writes
+// the frame before it waits, so neither is ever "not accepted".
+func unknownOutcome(err error) bool {
+	var dropped *whatsmeow.DisconnectedError
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, whatsmeow.ErrMessageTimedOut) || errors.As(err, &dropped)
+}
+
+// dropCount is how many times the session has left linked so far.
+func (s *Session) dropCount() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.drops
+}
+
+// leftLinked reports whether the connection a send was attempted on died before its answer:
+// the session is offline now, or it has left linked at least once since dropCount answered
+// drops, even if it has reconnected since. It is decided when the attempt returns, from state the
+// session already holds; nothing waits for a Disconnected that has not arrived. An unlinked
+// session (logged out) never counts, since nothing would drain the send.
+func (s *Session) leftLinked(drops uint64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == StateUnlinked {
+		return false
+	}
+	return s.state != StateLinked || s.drops != drops
+}
+
 // publishEntry publishes a send that is not sent (queued or not_sent) as event_message, with its
 // state and client_id, timestamped when it was queued.
 func (s *Session) publishEntry(e store.OutboxEntry) {
@@ -325,6 +384,6 @@ func (s *Session) drain() {
 		if s.State() != StateLinked {
 			return
 		}
-		_, _ = s.deliver(e.ClientID)
+		_, _ = s.deliver(e.ClientID, false)
 	}
 }

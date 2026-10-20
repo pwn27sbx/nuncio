@@ -1,20 +1,20 @@
 //! `nuncio-tui`'s model and rendering, as a library so it can be tested against a
 //! `TestBackend` buffer without a terminal or a daemon.
 //!
-//! [`App`] is the pure state: the chat list (archived chats sectioned last), the loaded
-//! conversations, the composer, the selection and scroll, and the Omarchy [`Palette`]. It changes
+//! [`App`] is the pure state: the shared view [`Model`] from `nuncio-client` (the chat list with
+//! archived chats sectioned last, the loaded conversations, the composer, and the rules the
+//! desktop app follows too), plus the focused pane, the overlays, the scroll, the pictures and
+//! the Omarchy [`Palette`]. It changes
 //! only through [`App::handle_key`], [`App::handle_mouse`] (mapped through the last drawn
 //! [`ScreenMap`] by [`hit_test`]) and [`App::apply`] (a reply or an event frame), which return
 //! an [`Action`] for the I/O loop. [`Daemon`] is that I/O: a request connection and a subscribed
 //! event connection to `nunciod`. The keys are listed in [`KEYS`] and in `README.md`.
 
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
+use nuncio_client::model::{Effect, Model, chat_title, is_picture, quoted};
 use nuncio_client::wire::MessageState;
-use nuncio_client::{
-    Chat, ClientFrame, DaemonFrame, Message, Palette, Reaction, Rgb, SendState, Snapshot,
-};
+use nuncio_client::{Chat, ClientFrame, DaemonFrame, Message, Palette, Rgb, Snapshot};
 use ratatui::Frame;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -137,14 +137,8 @@ const MUTED: char = '⊘';
 /// Marks an archived chat.
 const ARCHIVED: char = '▤';
 
-/// How many messages a conversation loads (the wire maximum).
-const MESSAGE_LIMIT: u16 = 200;
-/// How many chats a resync asks for (the wire contract allows 1..200).
-const CHAT_LIMIT: u16 = 200;
 /// How many lines PageUp/PageDown scroll.
 const PAGE: usize = 10;
-/// How many results an in-chat search asks for.
-const SEARCH_LIMIT: u16 = 50;
 /// The reactions the picker offers, on keys `1`..`6`; `x` removes mine.
 pub const REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
 /// How many characters of a quoted message are shown.
@@ -234,133 +228,62 @@ pub fn fixture_snapshot() -> Snapshot {
         .expect("the embedded chats fixture matches the wire types")
 }
 
-/// The terminal client's state: everything the screen needs, changed only by
-/// [`App::handle_key`] and [`App::apply`], so it is testable without a terminal or a daemon.
+/// The terminal client: the shared view [`Model`] (chat list, transcript, composer and their
+/// rules) plus what only the terminal has: the focused pane, the overlays, the scroll, the
+/// pictures and the [`Palette`]. It changes only through [`App::handle_key`],
+/// [`App::handle_mouse`] and [`App::apply`], so it is testable without a terminal or a daemon.
 pub struct App {
-    snapshot: Snapshot,
+    model: Model,
     source: Source,
     palette: Palette,
-    selected: usize,
     pane: Pane,
     list: ListState,
     image: Option<StatefulProtocol>,
-    /// Loaded conversations by JID, oldest first.
-    conversations: HashMap<String, Vec<Message>>,
     /// Lines scrolled up from the newest message; clamped when drawn.
     scroll: usize,
-    composer: String,
-    /// The composer's cursor: a byte offset into `composer`, on a grapheme boundary.
-    caret: usize,
-    /// `client_id`s of sends that have no reply yet.
-    sending: HashSet<String>,
-    client_prefix: String,
-    sends: u64,
     help: bool,
-    notice: Option<String>,
-    /// The selected message: an index into the open chat's loaded conversation.
-    cursor: Option<usize>,
     /// Scroll the selected message into view on the next draw.
     reveal: bool,
-    /// The id of the message the composer's text will quote.
-    reply_to: Option<String>,
     /// The reaction picker is open on the selected message.
     picking: bool,
-    search: Option<Search>,
-    /// Ids of media messages whose download was asked for to open externally, not answered yet.
-    downloading: HashSet<String>,
+    /// The search results' list scroll (the results and the chosen one are the model's).
+    search_list: ListState,
     /// The inline pictures, when the terminal draws them.
     images: Option<images::Images>,
-    /// Ids of pictures whose full file was asked for with `o`, to draw inline, not answered yet.
-    showing: HashSet<String>,
-    /// The full file of a picture fetched with `o`, by chat JID and message id.
-    full: HashMap<(String, String), PathBuf>,
-    /// The chat opened with Enter whose `messages` reply has not come yet.
-    opening: Option<String>,
-    /// JIDs of chats with a `mark_read` sent and not answered yet (at most one per chat).
-    marking: HashSet<String>,
-    /// `client_id`s of my sends whose acknowledgement timed out (`not_confirmed`): they may have
-    /// been delivered, so they are shown as not confirmed rather than not sent.
-    unconfirmed: HashSet<String>,
     utc_offset: time::UtcOffset,
-    /// The driver's daemon connection is up (it is `false` while the driver reconnects).
-    connected: bool,
-    /// The chat whose `messages` were asked for again after a reconnect: its reply keeps the
-    /// selected message and the sends the daemon never stored (as one not sent while
-    /// disconnected).
-    resyncing: Option<String>,
-    /// Phone-number JIDs the daemon merged into another chat (its LID chat, ADR 0001), from a
-    /// chat's `aliases` or a reply to a request naming them, with that canonical JID.
-    aliases: HashMap<String, String>,
-    /// The open chat that a new chat list no longer has (the daemon merged it): it stays the
-    /// selected chat, in the pane the user was in, and nothing is sent to it until the user
-    /// chooses a chat again or a reply to a request about it names the chat it became.
-    orphan: Option<Chat>,
     /// Where things were on the last drawn screen, for the mouse.
     map: ScreenMap,
 }
 
-/// The notice when the open chat vanished from the chat list (the daemon merged it).
-const MERGED_NOTICE: &str = "that chat was merged; choose it again before sending";
-
-/// A phone-number chat JID and a LID chat JID: the only pair the daemon merges (ADR 0001).
-fn is_alias_pair(alias: &str, canonical: &str) -> bool {
-    alias.ends_with("@s.whatsapp.net") && canonical.ends_with("@lid")
-}
-
-/// The in-chat search overlay.
-#[derive(Default)]
-struct Search {
-    query: String,
-    /// The query is being typed (otherwise j/k move through the results).
-    editing: bool,
-    /// A `search` was sent; the next `messages` reply for the chat is its results.
-    awaiting: bool,
-    /// Newest first, as the daemon answers.
-    results: Option<Vec<Message>>,
-    list: ListState,
+impl From<Effect> for Action {
+    fn from(effect: Effect) -> Self {
+        match effect {
+            Effect::Request(frame) => Action::Request(frame),
+            Effect::Open(path) => Action::Open(path),
+        }
+    }
 }
 
 impl App {
     /// The chat list is shown with archived chats last (kept in the daemon's order otherwise).
     pub fn new(snapshot: Snapshot, source: Source, palette: Palette) -> Self {
         let mut app = Self {
-            snapshot,
+            model: Model::new(snapshot, "tui"),
             source,
             palette,
-            selected: 0,
             pane: Pane::Chats,
             list: ListState::default(),
             image: None,
-            conversations: HashMap::new(),
             scroll: 0,
-            composer: String::new(),
-            caret: 0,
-            sending: HashSet::new(),
-            client_prefix: "tui".to_owned(),
-            sends: 0,
             help: false,
-            notice: None,
-            cursor: None,
             reveal: false,
-            reply_to: None,
             picking: false,
-            search: None,
-            downloading: HashSet::new(),
+            search_list: ListState::default(),
             images: None,
-            showing: HashSet::new(),
-            full: HashMap::new(),
-            opening: None,
-            marking: HashSet::new(),
-            unconfirmed: HashSet::new(),
             utc_offset: time::UtcOffset::UTC,
-            connected: true,
-            resyncing: None,
-            aliases: HashMap::new(),
-            orphan: None,
             map: ScreenMap::default(),
         };
-        let chats = std::mem::take(&mut app.snapshot.chats);
-        app.set_chats(chats);
+        app.sync();
         app
     }
 
@@ -409,14 +332,15 @@ impl App {
     /// A full picture that cannot be shown says why in the footer; its thumbnail stays.
     fn picture_failures(&mut self, failures: Vec<String>) {
         if let Some(why) = failures.into_iter().last() {
-            self.notice = Some(format!("cannot show the picture: {why}"));
+            self.model
+                .set_notice(format!("cannot show the picture: {why}"));
         }
     }
 
     /// The prefix of the `client_id`s this app chooses: `<prefix>-1`, `<prefix>-2`, ...
     /// It must differ between runs, so a new send never repeats an old `client_id`.
     pub fn with_client_prefix(mut self, prefix: impl Into<String>) -> Self {
-        self.client_prefix = prefix.into();
+        self.model.set_client_prefix(prefix);
         self
     }
 
@@ -435,15 +359,20 @@ impl App {
 
     /// A one-line notice in the footer (an error from the daemon, a lost connection).
     pub fn set_notice(&mut self, notice: impl Into<String>) {
-        self.notice = Some(notice.into());
+        self.model.set_notice(notice);
+    }
+
+    /// The shared view model this terminal client draws.
+    pub fn model(&self) -> &Model {
+        &self.model
     }
 
     pub fn chats(&self) -> &[Chat] {
-        &self.snapshot.chats
+        self.model.chat_list().chats()
     }
 
     pub fn selected(&self) -> usize {
-        self.selected
+        self.model.chat_list().selected()
     }
 
     pub fn pane(&self) -> Pane {
@@ -452,32 +381,20 @@ impl App {
 
     /// Whether the driver is connected to the daemon (`false` while it reconnects).
     pub fn connected(&self) -> bool {
-        self.connected
+        self.model.connected()
     }
 
     /// The driver lost (`false`) or regained (`true`) its daemon connection. While it is lost
     /// the header says `reconnecting…` instead of the session.
     pub fn set_connected(&mut self, connected: bool) {
-        self.connected = connected;
-        if !connected {
-            // Nothing sent on the lost connection will be answered.
-            self.opening = None;
-            self.resyncing = None;
-            self.marking.clear();
-            self.showing.clear();
-        }
+        self.model.set_connected(connected);
     }
 
     /// What to ask the daemon again after a reconnect, since events were missed: the status,
     /// the chat list and the selected chat's messages. The draft, the selected chat, the open
     /// pane and the selected message are kept.
     pub fn resync(&mut self) -> Vec<ClientFrame> {
-        let mut frames = vec![ClientFrame::status(), ClientFrame::chats(CHAT_LIMIT)];
-        self.resyncing = self.selected_jid().map(str::to_owned);
-        if let Some(jid) = &self.resyncing {
-            frames.push(ClientFrame::messages(jid.clone(), MESSAGE_LIMIT));
-        }
-        frames
+        self.model.resync()
     }
 
     pub fn source(&self) -> Source {
@@ -486,381 +403,122 @@ impl App {
 
     /// The text being written.
     pub fn composer(&self) -> &str {
-        &self.composer
+        self.model.composer().text()
     }
 
     /// The JID of the selected chat, if any.
     pub fn selected_jid(&self) -> Option<&str> {
-        self.selected_chat().map(|chat| chat.jid.as_str())
+        self.model.selected_jid()
     }
 
     /// Select the next chat, stopping at the last one.
     pub fn select_next(&mut self) {
-        self.select(self.selected.saturating_add(1));
+        self.model.select_next_chat();
+        self.sync();
     }
 
     /// Select the previous chat, stopping at the first one.
     pub fn select_previous(&mut self) {
-        self.select(self.selected.saturating_sub(1));
+        self.model.select_previous_chat();
+        self.sync();
     }
 
     pub fn toggle_pane(&mut self) {
-        self.pane = match self.pane {
+        self.set_pane(match self.pane {
             Pane::Chats => Pane::Messages,
             Pane::Messages | Pane::Compose => Pane::Chats,
-        };
-    }
-
-    fn select(&mut self, index: usize) {
-        let index = index.min(self.snapshot.chats.len().saturating_sub(1));
-        // The user chose a chat: a vanished chat no longer reclaims the selection.
-        self.orphan = None;
-        if index != self.selected {
-            self.scroll = 0;
-            self.cursor = None;
-        }
-        self.selected = index;
-        self.list.select(if self.snapshot.chats.is_empty() {
-            None
-        } else {
-            Some(self.selected)
         });
     }
 
-    fn selected_chat(&self) -> Option<&Chat> {
-        self.orphan
-            .as_ref()
-            .or_else(|| self.snapshot.chats.get(self.selected))
+    /// Focus `pane`; outside the chat list the selected chat's conversation is open.
+    fn set_pane(&mut self, pane: Pane) {
+        self.pane = pane;
+        self.model.set_open(pane != Pane::Chats);
     }
 
-    /// Replace the chat list, archived chats last, keeping the selection on the same chat. Aliases
-    /// the list names are adopted first ([`App::adopt_listed`]). When the selected chat is gone
-    /// (the daemon merged it into its LID chat), the selection follows it to the chat an alias or
-    /// a reply named; otherwise, outside the chat list or with a draft written, it stays on the
-    /// vanished chat (`orphan`), in the same pane with the draft intact, and nothing is sent until
-    /// the user chooses a chat again: a draft never changes recipient.
-    fn set_chats(&mut self, mut chats: Vec<Chat>) {
-        self.adopt_listed(&chats);
-        let selected = self.selected_jid().map(str::to_owned);
-        let previous = self.selected_chat().cloned();
-        self.orphan = None;
-        chats.sort_by_key(|chat| chat.archived);
-        self.snapshot.chats = chats;
-        let position = |chats: &[Chat], jid: &str| chats.iter().position(|chat| chat.jid == jid);
-        let mut kept = selected
-            .as_deref()
-            .and_then(|jid| position(&self.snapshot.chats, jid));
-        if kept.is_none()
-            && let Some(jid) = selected.as_deref()
-        {
-            let canonical = self.aliases.get(jid).cloned();
-            match canonical.and_then(|c| position(&self.snapshot.chats, &c).map(|i| (c, i))) {
-                Some((canonical, index)) => {
-                    self.rename_keys(jid, &canonical);
-                    if self.notice.as_deref() == Some(MERGED_NOTICE) {
-                        self.notice = None;
-                    }
-                    kept = Some(index);
-                }
-                // A draft never changes recipient, even from the chat list.
-                None if self.pane != Pane::Chats || !self.composer.is_empty() => {
-                    self.orphan = previous;
-                    self.notice = Some(MERGED_NOTICE.to_owned());
-                    self.list.select(None);
-                    return;
-                }
-                None => {}
-            }
-        }
-        if kept.is_none() {
+    /// The model moved the view to another chat or made a send: the conversation scrolls back to
+    /// the newest message.
+    fn sync(&mut self) {
+        if self.model.take_view_reset() {
             self.scroll = 0;
-            self.cursor = None;
         }
-        self.selected = kept.unwrap_or(0);
-        self.list.select(if self.snapshot.chats.is_empty() {
-            None
-        } else {
-            Some(self.selected)
-        });
-    }
-
-    /// The daemon names in a chat's `aliases` the phone-number chats it merged into it (ADR 0001),
-    /// in `chats` and in every `event_chat`. Each one this app holds anywhere (a list entry, the
-    /// selected or vanished chat, a loaded conversation, a pending request) is adopted: its state
-    /// moves to that chat, and [`App::set_chats`] then keeps the selection on it. A number the same
-    /// list also lists as its own chat is never adopted (a recycled number), and an earlier
-    /// adoption of it is forgotten.
-    fn adopt_listed(&mut self, chats: &[Chat]) {
-        let listed = |jid: &str| chats.iter().any(|c| c.jid == jid);
-        self.aliases.retain(|alias, _| !listed(alias));
-        let pairs: Vec<(String, String)> = chats
-            .iter()
-            .flat_map(|chat| {
-                chat.aliases
-                    .iter()
-                    .filter(|alias| is_alias_pair(alias, &chat.jid) && !listed(alias))
-                    .map(|alias| (alias.clone(), chat.jid.clone()))
-            })
-            .collect();
-        for (alias, canonical) in pairs {
-            if self.holds(&alias) {
-                self.aliases.insert(alias.clone(), canonical.clone());
-                self.rename_keys(&alias, &canonical);
-            }
-        }
-    }
-
-    /// Whether the app holds anything keyed by the chat `jid`.
-    fn holds(&self, jid: &str) -> bool {
-        self.snapshot.chats.iter().any(|c| c.jid == jid)
-            || self.selected_jid() == Some(jid)
-            || self.conversations.contains_key(jid)
-            || self.marking.contains(jid)
-            || self.opening.as_deref() == Some(jid)
-            || self.resyncing.as_deref() == Some(jid)
     }
 
     /// The daemon answered a request about the phone-number chat `alias` with its own reply naming
-    /// the chat `canonical` (ADR 0001): from now on the app keys that conversation by `canonical`.
-    /// Its list entry is renamed (or dropped when `canonical` is already listed), its loaded
-    /// messages, pending `mark_read` and requests move, and a selection on it, or on the vanished
-    /// open chat, follows it. When `canonical` is not listed (more chats than the list holds, or a
-    /// number recycled after the merge), the vanished open chat stays vanished, renamed
-    /// `canonical`, and nothing is sent until the user chooses a chat: the selection never falls
-    /// to another list index.
-    /// Only a phone-number JID answered as a LID JID is adopted. The driver calls it through
+    /// the chat `canonical` (ADR 0001); see [`Model::adopt`]. The driver calls it through
     /// [`App::apply_reply`], which pairs a request with its own reply.
     pub fn adopt(&mut self, alias: &str, canonical: &str) {
-        if !is_alias_pair(alias, canonical) {
-            return;
-        }
-        self.aliases.insert(alias.to_owned(), canonical.to_owned());
-        let selected = self.selected_jid() == Some(alias);
-        let current = self.selected_jid().map(str::to_owned);
-        let vanished = self.orphan.as_ref().is_some_and(|c| c.jid == alias);
-        let previous = self.selected_chat().cloned();
-        if vanished {
-            self.orphan = None;
-        }
-        self.rename_keys(alias, canonical);
-        let chats = &mut self.snapshot.chats;
-        if chats.iter().any(|c| c.jid == canonical) {
-            chats.retain(|c| c.jid != alias);
-        } else if let Some(entry) = chats.iter_mut().find(|c| c.jid == alias) {
-            entry.jid = canonical.to_owned();
-        }
-        let target = if selected {
-            Some(canonical.to_owned())
-        } else {
-            current
-        };
-        // Keep the selection on the chat it was on; removing an entry can shift it.
-        if self.orphan.is_none() {
-            let index =
-                target.and_then(|jid| self.snapshot.chats.iter().position(|c| c.jid == jid));
-            // A listed selection on `alias` was renamed above, so only the vanished chat can
-            // miss: the chat it became is not listed and the old index is now another contact.
-            if index.is_none() && vanished {
-                self.orphan = previous.map(|chat| Chat {
-                    jid: canonical.to_owned(),
-                    ..chat
-                });
-                self.notice = Some(MERGED_NOTICE.to_owned());
-                self.list.select(None);
-                return;
-            }
-            if vanished && self.notice.as_deref() == Some(MERGED_NOTICE) {
-                self.notice = None;
-            }
-            self.selected = index.unwrap_or_else(|| {
-                self.selected
-                    .min(self.snapshot.chats.len().saturating_sub(1))
-            });
-            self.list
-                .select((!self.snapshot.chats.is_empty()).then_some(self.selected));
-        }
+        self.model.adopt(alias, canonical);
+        self.sync();
     }
 
-    /// Fold the daemon's `reply` to `request` into the model, as [`App::apply`] does. When the
-    /// request named a phone-number chat and its own reply names a LID chat, the daemon served it
-    /// as that contact's LID chat (ADR 0001), and the app adopts the LID JID first. Nothing else
-    /// adopts a chat: a reply is paired with the request it answers, never guessed.
+    /// Fold the daemon's `reply` to `request` into the model, as [`App::apply`] does; see
+    /// [`Model::apply_reply`]: a reply is paired with the request it answers, never guessed.
     pub fn apply_reply(&mut self, request: &ClientFrame, reply: &DaemonFrame) -> Option<Action> {
-        let asked = match request {
-            ClientFrame::Messages { jid, .. }
-            | ClientFrame::Search { jid, .. }
-            | ClientFrame::React { jid, .. }
-            | ClientFrame::MarkRead { jid, .. }
-            | ClientFrame::DownloadMedia { jid, .. }
-            | ClientFrame::Focus { jid, .. } => Some(jid),
-            _ => None,
-        };
-        let answered = match reply {
-            DaemonFrame::Messages { jid, .. }
-            | DaemonFrame::Reacted { jid, .. }
-            | DaemonFrame::MarkedRead { jid, .. }
-            | DaemonFrame::MediaReady { jid, .. }
-            | DaemonFrame::Focused { jid, .. } => Some(jid),
-            _ => None,
-        };
-        if let (Some(asked), Some(answered)) = (asked, answered)
-            && asked != answered
-        {
-            self.adopt(asked, answered);
-        }
-        self.apply(reply)
+        let effect = self.model.apply_reply(request, reply);
+        self.applied(reply, effect)
     }
 
-    /// Move everything keyed by the chat `alias` to `canonical`.
-    fn rename_keys(&mut self, alias: &str, canonical: &str) {
-        if let Some(moved) = self.conversations.remove(alias) {
-            let into = self.conversations.entry(canonical.to_owned()).or_default();
-            for message in moved {
-                let same = |m: &Message| {
-                    (!message.id.is_empty() && m.id == message.id)
-                        || (message.client_id.is_some() && m.client_id == message.client_id)
-                };
-                if !into.iter().any(same) {
-                    into.push(message);
-                }
-            }
-        }
-        if self.marking.remove(alias) {
-            self.marking.insert(canonical.to_owned());
-        }
-        let moved: Vec<(String, String)> = self
-            .full
-            .keys()
-            .filter(|(jid, _)| jid == alias)
-            .cloned()
-            .collect();
-        for key in moved {
-            if let Some(path) = self.full.remove(&key) {
-                self.full.insert((canonical.to_owned(), key.1), path);
-            }
-        }
-        for pending in [&mut self.opening, &mut self.resyncing] {
-            if pending.as_deref() == Some(alias) {
-                *pending = Some(canonical.to_owned());
-            }
-        }
+    /// Fold one daemon frame (a reply or an event) into the model. An `event_focus` opens the
+    /// focused chat (closing the help) and asks for its messages; the messages of a chat just
+    /// opened with unread messages, or a new message in the open chat, ask for a `mark_read` (one
+    /// in flight per chat).
+    pub fn apply(&mut self, frame: &DaemonFrame) -> Option<Action> {
+        let effect = self.model.apply(frame);
+        self.applied(frame, effect)
     }
 
-    /// The phone-number chat that `event_message` about `jid` answers: a send of mine (its exact
-    /// `client_id`) that this app made to that chat, published by the daemon under its LID chat.
-    fn send_answered(&self, frame: &DaemonFrame) -> Option<(String, String)> {
-        let DaemonFrame::EventMessage { jid, message, .. } = frame else {
-            return None;
-        };
-        let (alias, _) = self.locate_send(message.client_id.as_deref()?)?;
-        (alias != *jid).then(|| (alias, jid.clone()))
+    fn applied(&mut self, frame: &DaemonFrame, effect: Option<Effect>) -> Option<Action> {
+        self.sync();
+        if matches!(frame, DaemonFrame::EventFocus { .. }) && effect.is_some() {
+            self.help = false;
+            self.set_pane(Pane::Messages);
+        }
+        effect.map(Action::from)
+    }
+
+    /// The daemon refused `frame` with an `error`: show it in the footer and end what the
+    /// request left waiting (a download's pending open, a search's "searching…").
+    pub fn request_failed(&mut self, frame: &ClientFrame, message: impl Into<String>) {
+        self.model.request_failed(frame, message);
+    }
+
+    /// The daemon answered my send (or retry) `client_id` with `not_confirmed`: WhatsApp's
+    /// acknowledgement timed out, so it may have been delivered. It is shown as not confirmed, not
+    /// as not sent, and `R` still retries it: a retry reuses its WhatsApp id, so it can never
+    /// become a second message.
+    pub fn send_not_confirmed(&mut self, client_id: &str) {
+        self.model.send_not_confirmed(client_id);
     }
 
     /// Enter on a chat (or a click on it): open it with the composer focused, ready to type.
     fn open_to_write(&mut self) -> Option<Action> {
         let action = self.open_selected()?;
-        self.reply_to = None;
-        self.pane = Pane::Compose;
+        self.model.composer_mut().cancel_reply();
+        self.set_pane(Pane::Compose);
         Some(action)
     }
 
     /// Open the selected chat: show its conversation and ask the daemon for its messages.
     fn open_selected(&mut self) -> Option<Action> {
-        let jid = self.selected_jid()?.to_owned();
-        self.pane = Pane::Messages;
-        self.search = None;
-        self.opening = Some(jid.clone());
-        Some(Action::Request(ClientFrame::messages(jid, MESSAGE_LIMIT)))
-    }
-
-    /// Mark chat `jid` read here and on WhatsApp, unless a `mark_read` for it is in flight.
-    fn mark_read(&mut self, jid: &str) -> Option<Action> {
-        self.marking
-            .insert(jid.to_owned())
-            .then(|| Action::Request(ClientFrame::mark_read(jid)))
-    }
-
-    /// The chat whose conversation the user has open (not just selected in the list).
-    fn is_open(&self, jid: &str) -> bool {
-        self.pane != Pane::Chats && self.selected_jid() == Some(jid)
-    }
-
-    /// The open chat's loaded conversation, oldest first.
-    fn loaded(&self) -> &[Message] {
-        self.selected_jid()
-            .and_then(|jid| self.conversations.get(jid))
-            .map_or(&[], Vec::as_slice)
-    }
-
-    fn selected_message(&self) -> Option<&Message> {
-        self.loaded().get(self.cursor?)
-    }
-
-    /// The selected message's id, when WhatsApp has that message (received, or a send of mine
-    /// that was sent), so it can be replied or reacted to. A send that is still sending, queued
-    /// or not sent has no WhatsApp message to point at: the footer says so (`what` is the verb,
-    /// e.g. "reacted to") and `None` is returned. No message selected is just `None`.
-    fn target_id(&mut self, what: &str) -> Option<String> {
-        let message = self.selected_message()?;
-        if message.id.is_empty() || message.state.is_some() || self.is_sending(message) {
-            self.notice = Some(format!("that message was not sent, so it cannot be {what}"));
-            return None;
-        }
-        Some(message.id.clone())
-    }
-
-    /// `k`/`↑` in the conversation: select the newest message, then one older each time.
-    fn select_older(&mut self) {
-        let len = self.loaded().len();
-        if len > 0 {
-            self.cursor = Some(self.cursor.map_or(len - 1, |i| i.saturating_sub(1)));
-            self.reveal = true;
-        }
-    }
-
-    /// `j`/`↓` in the conversation: select one newer message, stopping at the newest.
-    fn select_newer(&mut self) {
-        let len = self.loaded().len();
-        if let Some(i) = self.cursor {
-            self.cursor = Some((i + 1).min(len.saturating_sub(1)));
-            self.reveal = true;
-        }
-    }
-
-    /// `R`: one more attempt of the selected send that ended not sent. Never automatic.
-    fn retry_selected(&mut self) -> Option<Action> {
-        let message = self.selected_message()?;
-        if message.state != Some(MessageState::NotSent) {
-            return None;
-        }
-        let client_id = message.client_id.clone()?;
-        self.sending.insert(client_id.clone());
-        Some(Action::Request(ClientFrame::retry(client_id)))
+        let frame = self.model.open_selected()?;
+        self.set_pane(Pane::Messages);
+        Some(Action::Request(frame))
     }
 
     /// `o` (`external` false) and `O` (true): ask the daemon for the selected media message's
     /// file. With pictures drawn, `o` on an image or sticker shows the full picture in its box;
     /// everything else (and `O`) opens the file externally once it is downloaded.
     fn download_selected(&mut self, external: bool) -> Option<Action> {
-        let message = self.selected_message()?;
-        if message.kind == "text" || message.id.is_empty() {
-            return None;
+        let download = self
+            .model
+            .download_selected(self.images.is_some(), external)?;
+        if download.inline
+            && let Some(images) = self.images.as_mut()
+        {
+            images.retry_full(&download.jid, &download.id);
         }
-        let inline = !external && self.images.is_some() && is_picture(&message.kind);
-        let id = message.id.clone();
-        let jid = self.selected_jid()?.to_owned();
-        if inline {
-            if !self.showing.insert(id.clone()) {
-                return None;
-            }
-            if let Some(images) = self.images.as_mut() {
-                images.retry_full(&jid, &id);
-            }
-            self.full.remove(&(jid.clone(), id.clone()));
-        } else {
-            self.downloading.insert(id.clone());
-        }
-        Some(Action::Request(ClientFrame::download_media(jid, id)))
+        Some(Action::Request(download.frame()))
     }
 
     fn picker_key(&mut self, key: KeyEvent) -> Option<Action> {
@@ -874,69 +532,45 @@ impl App {
             _ => return None,
         };
         self.picking = false;
-        let id = self.target_id("reacted to")?;
-        let jid = self.selected_jid()?.to_owned();
-        Some(Action::Request(ClientFrame::react(jid, id, emoji)))
+        self.model.react_selected(emoji).map(Action::Request)
     }
 
     fn search_key(&mut self, key: KeyEvent) -> Option<Action> {
-        let jid = self.selected_jid()?.to_owned();
-        let search = self.search.as_mut()?;
+        self.model.selected_jid()?;
+        let editing = self.model.transcript().search()?.is_editing();
         match key.code {
-            KeyCode::Esc => self.search = None,
-            KeyCode::Backspace if search.editing => {
-                search.query.pop();
+            KeyCode::Esc => self.model.close_search(),
+            KeyCode::Backspace if editing => self.model.search_backspace(),
+            KeyCode::Enter if editing => return self.model.submit_search().map(Action::Request),
+            KeyCode::Char(c) if editing => self.model.search_type(c),
+            KeyCode::Char('/') => self.model.search_edit(),
+            KeyCode::Char('j') | KeyCode::Down => self.model.select_next_result(),
+            KeyCode::Char('k') | KeyCode::Up => self.model.select_previous_result(),
+            // Close the search and select the chosen result, if it is loaded.
+            KeyCode::Enter if self.model.jump_to_result() => {
+                self.reveal = true;
+                self.set_pane(Pane::Messages);
             }
-            KeyCode::Enter if search.editing => {
-                let query = search.query.trim();
-                if !query.is_empty() {
-                    search.editing = false;
-                    search.awaiting = true;
-                    return Some(Action::Request(ClientFrame::search(
-                        jid,
-                        query,
-                        SEARCH_LIMIT,
-                    )));
-                }
-            }
-            KeyCode::Char(c) if search.editing => search.query.push(c),
-            KeyCode::Char('/') => search.editing = true,
-            KeyCode::Char('j') | KeyCode::Down => search.list.select_next(),
-            KeyCode::Char('k') | KeyCode::Up => search.list.select_previous(),
-            KeyCode::Enter => self.jump_to_result(),
             _ => {}
         }
         None
     }
 
-    /// Close the search and select the chosen result in the conversation, if it is loaded.
-    fn jump_to_result(&mut self) {
-        let Some(search) = self.search.take() else {
-            return;
-        };
-        let results = search.results.unwrap_or_default();
-        let Some(result) = search.list.selected().and_then(|i| results.get(i)) else {
-            return;
-        };
-        match self.loaded().iter().position(|m| m.id == result.id) {
-            Some(index) => {
-                self.cursor = Some(index);
-                self.reveal = true;
-                self.pane = Pane::Messages;
-            }
-            None => self.notice = Some("that message is older than the loaded ones".to_owned()),
-        }
-    }
-
     /// One key press. Returns what the I/O loop must do, if anything.
     pub fn handle_key(&mut self, key: KeyEvent) -> Option<Action> {
+        let action = self.key(key);
+        self.sync();
+        action
+    }
+
+    fn key(&mut self, key: KeyEvent) -> Option<Action> {
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             return Some(Action::Quit);
         }
         if self.pane == Pane::Compose {
             return self.compose_key(key);
         }
-        if self.search.is_some() {
+        if self.model.transcript().search().is_some() {
             return self.search_key(key);
         }
         if self.picking {
@@ -948,42 +582,46 @@ impl App {
             }
             return None;
         }
+        let chosen = self.model.selected_chat().is_some();
         match (self.pane, key.code) {
             (_, KeyCode::Char('?')) => self.help = true,
             (_, KeyCode::Char('q')) | (Pane::Chats, KeyCode::Esc) => return Some(Action::Quit),
             (_, KeyCode::Tab) => self.toggle_pane(),
-            (_, KeyCode::Char('i')) if self.selected_chat().is_some() => {
-                self.reply_to = None;
-                self.pane = Pane::Compose;
+            (_, KeyCode::Char('i')) if chosen => {
+                self.model.composer_mut().cancel_reply();
+                self.set_pane(Pane::Compose);
             }
-            (_, KeyCode::Char('/')) if self.selected_chat().is_some() => {
-                self.search = Some(Search {
-                    editing: true,
-                    ..Search::default()
-                });
+            (_, KeyCode::Char('/')) if chosen => {
+                self.model.open_search();
+                self.search_list = ListState::default();
             }
             (Pane::Chats, KeyCode::Char('j') | KeyCode::Down) => self.select_next(),
             (Pane::Chats, KeyCode::Char('k') | KeyCode::Up) => self.select_previous(),
             (Pane::Chats, KeyCode::Enter) => return self.open_to_write(),
             (Pane::Chats, KeyCode::Char('l') | KeyCode::Right) => return self.open_selected(),
-            (Pane::Messages, KeyCode::Char('k') | KeyCode::Up) => self.select_older(),
-            (Pane::Messages, KeyCode::Char('j') | KeyCode::Down) => self.select_newer(),
+            (Pane::Messages, KeyCode::Char('k') | KeyCode::Up) => {
+                self.reveal |= self.model.select_older();
+            }
+            (Pane::Messages, KeyCode::Char('j') | KeyCode::Down) => {
+                self.reveal |= self.model.select_newer();
+            }
             (Pane::Messages, KeyCode::Char('r')) => {
-                if let Some(id) = self.target_id("replied to") {
-                    self.reply_to = Some(id);
-                    self.pane = Pane::Compose;
+                if self.model.reply_to_selected() {
+                    self.set_pane(Pane::Compose);
                 }
             }
             (Pane::Messages, KeyCode::Char('e')) => {
-                self.picking = self.target_id("reacted to").is_some();
+                self.picking = self.model.target_id("reacted to").is_some();
             }
-            (Pane::Messages, KeyCode::Char('R')) => return self.retry_selected(),
+            (Pane::Messages, KeyCode::Char('R')) => {
+                return self.model.retry_selected().map(Action::Request);
+            }
             (Pane::Messages, KeyCode::Char('o')) => return self.download_selected(false),
             (Pane::Messages, KeyCode::Char('O')) => return self.download_selected(true),
             (Pane::Messages, KeyCode::Esc | KeyCode::Char('h') | KeyCode::Left) => {
-                self.pane = Pane::Chats;
+                self.set_pane(Pane::Chats);
             }
-            (Pane::Messages, KeyCode::Enter) => self.pane = Pane::Compose,
+            (Pane::Messages, KeyCode::Enter) => self.set_pane(Pane::Compose),
             (_, KeyCode::PageUp) => self.scroll_up(PAGE),
             (_, KeyCode::PageDown) => self.scroll_down(PAGE),
             (Pane::Messages, KeyCode::Char('g') | KeyCode::Home) => self.scroll = usize::MAX,
@@ -999,31 +637,38 @@ impl App {
     /// The wheel scrolls the pane under the pointer: the conversation by lines, the chat list by
     /// chats. Nothing happens while the help, the reaction picker or the search is open.
     pub fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<Action> {
-        if self.help || self.picking || self.search.is_some() {
+        let action = self.mouse(mouse);
+        self.sync();
+        action
+    }
+
+    fn mouse(&mut self, mouse: MouseEvent) -> Option<Action> {
+        if self.help || self.picking || self.model.transcript().search().is_some() {
             return None;
         }
         let target = hit_test(&self.map, mouse.column, mouse.row)?;
+        let chosen = self.model.selected_chat().is_some();
         match (mouse.kind, target) {
             (MouseEventKind::Down(MouseButton::Left), Target::Chats(Some(index))) => {
-                self.select(index);
+                self.model.select_chat(index);
                 return self.open_to_write();
             }
             (MouseEventKind::Down(MouseButton::Left), Target::Conversation(message)) => {
-                if self.selected_chat().is_some() {
+                if chosen {
                     if self.pane == Pane::Compose {
-                        self.reply_to = None;
+                        self.model.composer_mut().cancel_reply();
                     }
-                    self.pane = Pane::Messages;
-                    if let Some(index) = message.filter(|&i| i < self.loaded().len()) {
-                        self.cursor = Some(index);
+                    self.set_pane(Pane::Messages);
+                    if let Some(index) = message {
+                        self.model.select_message(index);
                     }
                 }
             }
             (MouseEventKind::Down(MouseButton::Left), Target::Composer)
-                if self.selected_chat().is_some() && self.pane != Pane::Compose =>
+                if chosen && self.pane != Pane::Compose =>
             {
-                self.reply_to = None;
-                self.pane = Pane::Compose;
+                self.model.composer_mut().cancel_reply();
+                self.set_pane(Pane::Compose);
             }
             (MouseEventKind::ScrollUp, Target::Chats(_)) => self.select_previous(),
             (MouseEventKind::ScrollDown, Target::Chats(_)) => self.select_next(),
@@ -1052,423 +697,33 @@ impl App {
     fn compose_key(&mut self, key: KeyEvent) -> Option<Action> {
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let composer = self.model.composer_mut();
         match key.code {
             KeyCode::Esc => {
-                self.reply_to = None;
-                self.pane = Pane::Messages;
+                composer.cancel_reply();
+                self.set_pane(Pane::Messages);
             }
-            KeyCode::Enter if alt => self.insert('\n'),
-            KeyCode::Char('j') if ctrl => self.insert('\n'),
+            KeyCode::Enter if alt => composer.newline(),
+            KeyCode::Char('j') if ctrl => composer.newline(),
             KeyCode::Enter => return self.send(),
-            KeyCode::Backspace => {
-                if let Some(start) = previous_grapheme(&self.composer, self.caret) {
-                    self.composer.replace_range(start..self.caret, "");
-                    self.caret = start;
-                }
-            }
-            KeyCode::Delete => {
-                if let Some(end) = next_grapheme(&self.composer, self.caret) {
-                    self.composer.replace_range(self.caret..end, "");
-                }
-            }
-            KeyCode::Left => {
-                if let Some(start) = previous_grapheme(&self.composer, self.caret) {
-                    self.caret = start;
-                }
-            }
-            KeyCode::Right => {
-                if let Some(end) = next_grapheme(&self.composer, self.caret) {
-                    self.caret = end;
-                }
-            }
-            KeyCode::Home => {
-                self.caret = self.composer[..self.caret]
-                    .rfind('\n')
-                    .map_or(0, |newline| newline + 1);
-            }
-            KeyCode::End => {
-                self.caret = self.composer[self.caret..]
-                    .find('\n')
-                    .map_or(self.composer.len(), |newline| self.caret + newline);
-            }
-            KeyCode::Char(c) => self.insert(c),
+            KeyCode::Backspace => composer.backspace(),
+            KeyCode::Delete => composer.delete(),
+            KeyCode::Left => composer.left(),
+            KeyCode::Right => composer.right(),
+            KeyCode::Home => composer.home(),
+            KeyCode::End => composer.end(),
+            KeyCode::Char(c) => composer.insert(c),
             _ => {}
         }
         None
-    }
-
-    /// Put `c` into the draft at the cursor and move the cursor after it.
-    fn insert(&mut self, c: char) {
-        self.composer.insert(self.caret, c);
-        self.caret += c.len_utf8();
     }
 
     /// Send the composer's text to the selected chat as one message. It is shown at once as
     /// "sending" until the daemon answers.
     fn send(&mut self) -> Option<Action> {
-        if self.composer.trim().is_empty() {
-            return None;
-        }
-        if self.orphan.is_some() {
-            self.notice = Some(MERGED_NOTICE.to_owned());
-            return None;
-        }
-        let jid = self.selected_jid()?.to_owned();
-        let text = std::mem::take(&mut self.composer);
-        self.caret = 0;
-        self.sends += 1;
-        let client_id = format!("{}-{}", self.client_prefix, self.sends);
-        self.sending.insert(client_id.clone());
-        self.conversations
-            .entry(jid.clone())
-            .or_default()
-            .push(Message {
-                id: String::new(),
-                kind: "text".to_owned(),
-                text: text.clone(),
-                from_me: true,
-                timestamp: String::new(),
-                media: None,
-                state: None,
-                client_id: Some(client_id.clone()),
-                reply_to: self.reply_to.clone(),
-                reactions: Vec::new(),
-                thumb: None,
-                thumb_mime: None,
-                width: None,
-                height: None,
-                animated: false,
-            });
-        self.pane = Pane::Messages;
-        self.scroll = 0;
-        Some(Action::Request(match self.reply_to.take() {
-            Some(quoted) => ClientFrame::send_reply(jid, text, client_id, quoted),
-            None => ClientFrame::send(jid, text, client_id),
-        }))
-    }
-
-    /// Fold one daemon frame (a reply or an event) into the model. An `event_focus` asks for
-    /// the focused chat's messages; the messages of a chat just opened with unread messages, or
-    /// a new message in the open chat, ask for a `mark_read` (one in flight per chat).
-    pub fn apply(&mut self, frame: &DaemonFrame) -> Option<Action> {
-        if let Some((alias, canonical)) = self.send_answered(frame) {
-            self.adopt(&alias, &canonical);
-        }
-        match frame {
-            DaemonFrame::Status {
-                daemon,
-                linked,
-                session,
-                unread,
-                ..
-            } => {
-                self.snapshot.daemon = daemon.clone();
-                self.snapshot.linked = *linked;
-                self.snapshot.session = session.clone();
-                self.snapshot.unread = *unread;
-            }
-            DaemonFrame::Chats { chats, .. } => self.set_chats(chats.clone()),
-            DaemonFrame::Messages { jid, messages, .. }
-                if self.selected_jid() == Some(jid.as_str())
-                    && self.search.as_ref().is_some_and(|s| s.awaiting) =>
-            {
-                if let Some(search) = self.search.as_mut() {
-                    search.awaiting = false;
-                    search.list.select((!messages.is_empty()).then_some(0));
-                    search.results = Some(messages.clone());
-                }
-            }
-            DaemonFrame::Messages { jid, messages, .. } => {
-                let resynced = self.resyncing.as_deref() == Some(jid.as_str());
-                if resynced {
-                    self.resyncing = None;
-                }
-                let selected_id = self
-                    .cursor
-                    .and_then(|i| self.conversations.get(jid)?.get(i))
-                    .map(|m| m.id.clone());
-                let mut loaded: Vec<Message> = messages.iter().rev().cloned().collect();
-                // Sends still waiting for a reply are not stored yet; keep them visible. After a
-                // reconnect, so are sends that never reached the daemon (not sent): a failure
-                // stays on screen until the user retries it.
-                if let Some(old) = self.conversations.get(jid) {
-                    let unstored = |m: &Message| {
-                        resynced
-                            && m.id.is_empty()
-                            && m.client_id.as_ref().is_some_and(|id| {
-                                !loaded.iter().any(|l| l.client_id.as_ref() == Some(id))
-                            })
-                    };
-                    let kept: Vec<Message> = old
-                        .iter()
-                        .filter(|m| self.is_sending(m) || unstored(m))
-                        .cloned()
-                        .collect();
-                    loaded.extend(kept);
-                }
-                if self.selected_jid() == Some(jid.as_str()) {
-                    // A resync keeps the selected message where it still is; anything else
-                    // starts with none selected.
-                    self.cursor = selected_id
-                        .filter(|id| resynced && !id.is_empty())
-                        .and_then(|id| loaded.iter().position(|m| m.id == id));
-                }
-                self.conversations.insert(jid.clone(), loaded);
-                // The chat the user opened is read once its messages are shown (S8).
-                if self.opening.as_deref() == Some(jid.as_str()) {
-                    self.opening = None;
-                    let unread = self.snapshot.chats.iter().find(|c| &c.jid == jid);
-                    if unread.is_some_and(|chat| chat.unread > 0) {
-                        return self.mark_read(jid);
-                    }
-                }
-            }
-            DaemonFrame::MarkedRead { jid, unread, .. } => {
-                self.marking.remove(jid);
-                self.snapshot.unread = *unread;
-                if let Some(chat) = self.snapshot.chats.iter_mut().find(|c| &c.jid == jid) {
-                    chat.unread = 0;
-                }
-            }
-            DaemonFrame::Sent {
-                client_id,
-                state,
-                id,
-                timestamp,
-                ..
-            } => {
-                self.sending.remove(client_id);
-                self.unconfirmed.remove(client_id);
-                self.settle(client_id, state, id.as_deref(), timestamp.as_deref());
-            }
-            DaemonFrame::SendFailed { client_id, .. } => {
-                self.sending.remove(client_id);
-                self.unconfirmed.remove(client_id);
-                if let Some(message) = self.find_send(client_id) {
-                    message.state = Some(MessageState::NotSent);
-                }
-            }
-            DaemonFrame::Error { message, .. } => self.notice = Some(message.clone()),
-            DaemonFrame::Reacted { jid, id, emoji, .. } => {
-                let target = self
-                    .conversations
-                    .get_mut(jid)
-                    .and_then(|messages| messages.iter_mut().find(|m| &m.id == id));
-                if let Some(message) = target {
-                    message.reactions.retain(|r| !r.from_me);
-                    if !emoji.is_empty() {
-                        let mine = Reaction {
-                            emoji: emoji.clone(),
-                            from_me: true,
-                        };
-                        message.reactions.insert(0, mine);
-                    }
-                }
-            }
-            // The full picture asked for with `o`: drawn in its box from the next draw on.
-            DaemonFrame::MediaReady { jid, id, path, .. } if self.showing.remove(id) => {
-                self.full
-                    .insert((jid.clone(), id.clone()), PathBuf::from(path));
-            }
-            DaemonFrame::MediaReady { id, path, .. } if self.downloading.remove(id) => {
-                return Some(Action::Open(PathBuf::from(path)));
-            }
-            DaemonFrame::EventMessage { jid, message, .. } => {
-                // A new message in the open chat is read at once, as the official clients do.
-                if self.message_event(jid, message) && !message.from_me && self.is_open(jid) {
-                    return self.mark_read(jid);
-                }
-            }
-            DaemonFrame::EventUnread {
-                unread,
-                jid,
-                chat_unread,
-                ..
-            } => {
-                self.snapshot.unread = *unread;
-                if let Some(chat) = self.snapshot.chats.iter_mut().find(|c| &c.jid == jid) {
-                    chat.unread = *chat_unread;
-                }
-            }
-            DaemonFrame::EventConnection { session, .. } => {
-                self.snapshot.session = session.clone();
-            }
-            // App-state sync changed a chat's pin, archive or mute: take the chat as it now is and
-            // sort the list again as the daemon lists it (newest message first, so an unarchived
-            // chat goes back to its place; archived chats last), keeping the selection.
-            DaemonFrame::EventChat { chat, .. } => {
-                let mut chats = self.snapshot.chats.clone();
-                // The numbers merged into it are no longer chats of their own (ADR 0001).
-                chats.retain(|c| {
-                    !chat.aliases.contains(&c.jid) || !is_alias_pair(&c.jid, &chat.jid)
-                });
-                match chats.iter_mut().find(|c| c.jid == chat.jid) {
-                    Some(shown) => *shown = chat.clone(),
-                    None => chats.push(chat.clone()),
-                }
-                // RFC 3339 UTC timestamps sort as text; a chat with no message sorts last; the
-                // same time sorts by JID, as the daemon's `ORDER BY ... DESC, c.jid` does.
-                chats.sort_by(|a, b| newest(b).cmp(newest(a)).then_with(|| a.jid.cmp(&b.jid)));
-                self.set_chats(chats);
-            }
-            DaemonFrame::EventFocus { jid, .. } => {
-                let index = self.snapshot.chats.iter().position(|c| &c.jid == jid)?;
-                self.select(index);
-                self.help = false;
-                return self.open_selected();
-            }
-            _ => {}
-        }
-        None
-    }
-
-    /// The daemon refused `frame` with an `error`: show it in the footer and end what the
-    /// request left waiting (a download's pending open, a search's "searching…").
-    pub fn request_failed(&mut self, frame: &ClientFrame, message: impl Into<String>) {
-        self.notice = Some(message.into());
-        match frame {
-            ClientFrame::DownloadMedia { id, .. } => {
-                self.downloading.remove(id);
-                self.showing.remove(id);
-            }
-            ClientFrame::Search { .. } => {
-                if let Some(search) = self.search.as_mut() {
-                    search.awaiting = false;
-                    search.editing = true;
-                }
-            }
-            // A chat whose messages never came is not being opened or resynced any more.
-            ClientFrame::Messages { jid, .. } => {
-                if self.opening.as_ref() == Some(jid) {
-                    self.opening = None;
-                }
-                if self.resyncing.as_ref() == Some(jid) {
-                    self.resyncing = None;
-                }
-            }
-            // The chat stays unread; nothing retries it (the next open does).
-            ClientFrame::MarkRead { jid, .. } => {
-                self.marking.remove(jid);
-            }
-            _ => {}
-        }
-    }
-
-    /// The daemon answered my send (or retry) `client_id` with `not_confirmed`: WhatsApp's
-    /// acknowledgement timed out, so it may have been delivered. It is shown as not confirmed, not
-    /// as not sent, and `R` still retries it: a retry reuses its WhatsApp id, so it can never
-    /// become a second message.
-    pub fn send_not_confirmed(&mut self, client_id: &str) {
-        self.sending.remove(client_id);
-        let Some(message) = self.find_send(client_id) else {
-            return;
-        };
-        message.state = Some(MessageState::NotSent);
-        self.unconfirmed.insert(client_id.to_owned());
-    }
-
-    fn is_unconfirmed(&self, message: &Message) -> bool {
-        message.state == Some(MessageState::NotSent)
-            && message
-                .client_id
-                .as_ref()
-                .is_some_and(|id| self.unconfirmed.contains(id))
-    }
-
-    fn is_sending(&self, message: &Message) -> bool {
-        message
-            .client_id
-            .as_ref()
-            .is_some_and(|id| self.sending.contains(id))
-    }
-
-    /// The JID and index of my send with this `client_id`.
-    fn locate_send(&self, client_id: &str) -> Option<(String, usize)> {
-        self.conversations.iter().find_map(|(jid, messages)| {
-            messages
-                .iter()
-                .position(|m| m.client_id.as_deref() == Some(client_id))
-                .map(|index| (jid.clone(), index))
-        })
-    }
-
-    fn find_send(&mut self, client_id: &str) -> Option<&mut Message> {
-        let (jid, index) = self.locate_send(client_id)?;
-        self.conversations.get_mut(&jid)?.get_mut(index)
-    }
-
-    /// Apply a `sent` reply to my send.
-    fn settle(&mut self, client_id: &str, state: &SendState, id: Option<&str>, at: Option<&str>) {
-        let Some((jid, index)) = self.locate_send(client_id) else {
-            return;
-        };
-        let Some(messages) = self.conversations.get_mut(&jid) else {
-            return;
-        };
-        match state {
-            SendState::Sent => {
-                let id = id.unwrap_or_default();
-                // Its event may have come first: then the message is already listed.
-                if !id.is_empty() && messages.iter().any(|m| m.id == id) {
-                    messages.remove(index);
-                    return;
-                }
-                let message = &mut messages[index];
-                message.id = id.to_owned();
-                message.timestamp = at.unwrap_or_default().to_owned();
-                message.state = None;
-                message.client_id = None;
-            }
-            SendState::Queued => messages[index].state = Some(MessageState::Queued),
-            SendState::Unknown => messages[index].state = Some(MessageState::Unknown),
-        }
-    }
-
-    /// A new message, or a new state of one already shown (same `id`, or same `client_id` for
-    /// a send of mine). True when it was added to the loaded conversation as a new message.
-    fn message_event(&mut self, jid: &str, message: &Message) -> bool {
-        if let Some(client_id) = &message.client_id {
-            self.sending.remove(client_id);
-            // The daemon publishes a not-confirmed send as not_sent (before or after its reply),
-            // so only a later queued or sent state clears the mark.
-            if message.state != Some(MessageState::NotSent) {
-                self.unconfirmed.remove(client_id);
-            }
-        }
-        if let Some(chat) = self.snapshot.chats.iter_mut().find(|c| c.jid == jid) {
-            chat.last_message = Some(message.clone());
-        } else {
-            let mut chats = self.snapshot.chats.clone();
-            chats.push(Chat {
-                jid: jid.to_owned(),
-                name: String::new(),
-                unread: 0,
-                archived: false,
-                pinned: false,
-                muted: false,
-                aliases: Vec::new(),
-                phone: None,
-                last_message: Some(message.clone()),
-            });
-            self.set_chats(chats);
-        }
-        let Some(messages) = self.conversations.get_mut(jid) else {
-            return false;
-        };
-        let same = |m: &Message| {
-            (!message.id.is_empty() && m.id == message.id)
-                || (message.client_id.is_some() && m.client_id == message.client_id)
-        };
-        match messages.iter_mut().find(|m| same(m)) {
-            Some(existing) => {
-                *existing = message.clone();
-                false
-            }
-            None => {
-                messages.push(message.clone());
-                true
-            }
-        }
+        let frame = self.model.send()?;
+        self.set_pane(Pane::Messages);
+        Some(Action::Request(frame))
     }
 
     /// Draw the whole screen into `frame`.
@@ -1497,7 +752,7 @@ impl App {
         if self.picking {
             self.draw_picker(frame, body);
         }
-        if self.search.is_some() {
+        if self.model.transcript().search().is_some() {
             self.draw_search(frame, body);
         }
     }
@@ -1524,10 +779,10 @@ impl App {
     }
 
     fn draw_search(&mut self, frame: &mut Frame, area: Rect) {
-        let chat = self.selected_chat().cloned();
+        let chat = self.model.selected_chat().cloned();
         let palette = self.palette.clone();
         let muted = self.muted();
-        let Some(search) = self.search.as_mut() else {
+        let Some(search) = self.model.transcript().search() else {
             return;
         };
         let area = popup(area, 72, area.height);
@@ -1539,16 +794,16 @@ impl App {
         frame.render_widget(block, area);
         let [prompt, results] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
-        let cursor = if search.editing { "▏" } else { "" };
+        let cursor = if search.is_editing() { "▏" } else { "" };
         frame.render_widget(
-            Paragraph::new(format!("Search: {}{cursor}", plain(&search.query)))
+            Paragraph::new(format!("Search: {}{cursor}", plain(search.query())))
                 .style(Style::default().fg(rgb(palette.foreground))),
             prompt,
         );
-        let items: Vec<ListItem> = match (&search.results, search.awaiting) {
+        let items: Vec<ListItem> = match (search.results(), search.is_awaiting()) {
             (_, true) => vec![ListItem::new(Span::styled("searching…", muted))],
             (None, false) => vec![ListItem::new(Span::styled("Enter to search", muted))],
-            (Some(found), false) if found.is_empty() => {
+            (Some([]), false) => {
                 vec![ListItem::new(Span::styled("no matches", muted))]
             }
             (Some(found), false) => found
@@ -1563,15 +818,19 @@ impl App {
             .style(Style::default().fg(rgb(palette.foreground)))
             .highlight_symbol("› ")
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-        frame.render_stateful_widget(list, results, &mut search.list);
+        // The list clamps the chosen result to what it shows; the model keeps that choice.
+        self.search_list.select(search.selected());
+        frame.render_stateful_widget(list, results, &mut self.search_list);
+        self.model.set_result_selected(self.search_list.selected());
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
         let status = match self.source {
-            Source::Daemon if !self.connected => Span::styled(
+            Source::Daemon if !self.model.connected() => Span::styled(
                 format!(
                     " · {} · reconnecting… · {} unread",
-                    self.snapshot.daemon, self.snapshot.unread
+                    self.model.status().daemon,
+                    self.model.status().unread
                 ),
                 Style::default()
                     .fg(rgb(self.palette.yellow))
@@ -1580,16 +839,16 @@ impl App {
             Source::Daemon => Span::styled(
                 format!(
                     " · {} · {} · {} unread",
-                    self.snapshot.daemon,
-                    self.snapshot.session.as_str(),
-                    self.snapshot.unread
+                    self.model.status().daemon,
+                    self.model.status().session.as_str(),
+                    self.model.status().unread
                 ),
                 self.muted(),
             ),
             Source::Fixture => Span::styled(
                 format!(
                     " · FIXTURE DATA · no daemon · {} unread",
-                    self.snapshot.unread
+                    self.model.status().unread
                 ),
                 Style::default()
                     .fg(rgb(self.palette.yellow))
@@ -1614,17 +873,17 @@ impl App {
             format!(" ? help · Tab switch pane · Enter {enter} · / search · q quit · ")
         };
         let keys = match self.pane {
-            _ if self.search.is_some() => {
+            _ if self.model.transcript().search().is_some() => {
                 " Enter search/select · j/k move · / edit · Esc close ".to_owned()
             }
             _ if self.picking => " 1-6 react · x remove mine · Esc cancel ".to_owned(),
             Pane::Chats => base("open") + "j/k move · l open to read · Ctrl-C quit ",
-            Pane::Messages if self.cursor.is_some() => {
+            Pane::Messages if self.model.transcript().cursor().is_some() => {
                 base("write")
                     + "j/k select · r reply · e react · R retry · o open media · Esc chats "
             }
             Pane::Messages => base("write") + "j/k select · PgUp/PgDn scroll · Esc chats ",
-            Pane::Compose if self.reply_to.is_some() => {
+            Pane::Compose if self.model.composer().reply_to().is_some() => {
                 " Enter send reply · Alt-Enter newline · ←/→ move · Esc conversation · Ctrl-C quit "
                     .to_owned()
             }
@@ -1635,7 +894,7 @@ impl App {
         };
         // The notice comes first, so a narrow terminal still shows it.
         let mut spans = Vec::new();
-        if let Some(notice) = &self.notice {
+        if let Some(notice) = self.model.notice() {
             spans.push(Span::styled(
                 format!(" {notice} ·"),
                 Style::default().fg(rgb(self.palette.red)),
@@ -1707,6 +966,7 @@ impl App {
                     .fg(rgb(self.palette.background))
                     .add_modifier(Modifier::BOLD),
             );
+        self.list.select(self.model.chat_list().highlighted());
         frame.render_stateful_widget(list, area, &mut self.list);
         self.map.chats = area;
         self.map.chat_rows = rows;
@@ -1716,8 +976,9 @@ impl App {
 
     fn draw_messages(&mut self, frame: &mut Frame, area: Rect) {
         let title = self
+            .model
             .selected_chat()
-            .map(chat_title)
+            .map(|chat| plain(&chat_title(chat)))
             .unwrap_or_else(|| "no chat selected".to_owned());
         let block = pane_block(&self.palette, self.pane != Pane::Chats).title(Span::styled(
             format!(" {title} "),
@@ -1764,10 +1025,11 @@ impl App {
         .areas(rest);
         self.draw_conversation(frame, text_area);
         let quoted = self
-            .reply_to
-            .as_ref()
+            .model
+            .composer()
+            .reply_to()
             .filter(|_| self.pane == Pane::Compose)
-            .map(|id| match self.loaded().iter().find(|m| &m.id == id) {
+            .map(|id| match quoted(self.model.loaded(), id) {
                 Some(message) => format!("── replying to: {} ", snippet(message)),
                 None => "── replying ".to_owned(),
             });
@@ -1780,10 +1042,11 @@ impl App {
     /// The draft laid out for a composer `width` columns wide, after the 2-column prompt, plus
     /// the cursor's row and column; `None` when there is no draft to show (the hint instead).
     fn draft_rows(&self, width: u16) -> Option<DraftRows> {
-        (self.pane == Pane::Compose || !self.composer.is_empty()).then(|| {
+        let composer = self.model.composer();
+        (self.pane == Pane::Compose || !composer.is_empty()).then(|| {
             layout_draft(
-                &self.composer,
-                self.caret,
+                composer.text(),
+                composer.caret(),
                 usize::from(width.saturating_sub(2)),
             )
         })
@@ -1909,30 +1172,31 @@ impl App {
         first_row: i64,
     ) {
         let label_style = self.muted();
-        let Some(jid) = self.selected_jid().map(str::to_owned) else {
+        let Some(jid) = self.model.selected_jid().map(str::to_owned) else {
             return;
         };
         let Some(images) = self.images.as_mut() else {
             return;
         };
-        let messages = self.conversations.get(&jid).map_or(&[][..], Vec::as_slice);
+        let transcript = self.model.transcript();
+        let messages = transcript.conversation(&jid).unwrap_or(&[]);
         // A full picture with no box yet (its message states no size) is decoded to learn its
         // size; one with a box is encoded only while the box is on screen (below).
-        for ((chat, id), path) in &self.full {
+        for (chat, id, path) in transcript.full_pictures() {
             let boxed = boxes
                 .iter()
-                .any(|b| messages.get(b.index).is_some_and(|m| &m.id == id));
-            if chat != &jid || boxed {
+                .any(|b| messages.get(b.index).is_some_and(|m| m.id == id));
+            if chat != jid || boxed {
                 continue;
             }
             let key = images::Key {
                 chat: jid.clone(),
-                id: id.clone(),
+                id: id.to_owned(),
                 variant: images::Variant::Full,
                 columns: area.width,
             };
             if images.wants(&key) {
-                images.request(key, images::Origin::File(path.clone()), None);
+                images.request(key, images::Origin::File(path.to_owned()), None);
             }
         }
         let mut starts = Vec::with_capacity(heights.len());
@@ -1967,10 +1231,14 @@ impl App {
                 frame.render_widget(SlicedImage::new(protocol, position), area);
                 continue;
             }
-            if let Some(path) = self.full.get(&(jid.clone(), message.id.clone())) {
+            if let Some(path) = transcript.full_picture(&jid, &message.id) {
                 let full = key(images::Variant::Full);
                 if images.wants(&full) {
-                    images.request(full, images::Origin::File(path.clone()), Some(picture.size));
+                    images.request(
+                        full,
+                        images::Origin::File(path.to_owned()),
+                        Some(picture.size),
+                    );
                 }
             }
             let thumb = message
@@ -2028,11 +1296,11 @@ impl App {
 
     /// Whether the full picture of `message` is being fetched or decoded (`Downloading…`).
     fn fetching(&self, jid: &str, message: &Message, columns: u16) -> bool {
-        if self.showing.contains(&message.id) {
+        let transcript = self.model.transcript();
+        if transcript.is_showing(&message.id) {
             return true;
         }
-        self.full
-            .contains_key(&(jid.to_owned(), message.id.clone()))
+        transcript.full_picture(jid, &message.id).is_some()
             && self.images.as_ref().is_some_and(|images| {
                 images.is_pending(&images::Key {
                     chat: jid.to_owned(),
@@ -2048,10 +1316,10 @@ impl App {
     /// line the index of the loaded message it belongs to, and the picture boxes (blank lines the
     /// pictures are drawn over).
     fn conversation_lines(&self, columns: u16) -> ConversationLines {
-        let Some(chat) = self.selected_chat() else {
+        let Some(chat) = self.model.selected_chat() else {
             return (Vec::new(), None, Vec::new(), Vec::new());
         };
-        let loaded = self.conversations.get(&chat.jid);
+        let loaded = self.model.transcript().conversation(&chat.jid);
         let messages: Vec<&Message> = match loaded {
             Some(messages) => messages.iter().collect(),
             None => chat.last_message.iter().collect(),
@@ -2071,14 +1339,14 @@ impl App {
         let mut boxes = Vec::new();
         for (index, message) in messages.iter().enumerate() {
             let owner = loaded.is_some().then_some(index);
-            let chosen = loaded.is_some() && self.cursor == Some(index);
+            let chosen = loaded.is_some() && self.model.transcript().cursor() == Some(index);
             let mut header = if chosen {
                 selected = Some(lines.len());
                 format!("› {}", self.header_of(chat, message))
             } else {
                 self.header_of(chat, message)
             };
-            if self.is_sending(message) {
+            if self.model.transcript().is_sending(message) {
                 header.push_str(" · sending");
             }
             let header_style = match message.state {
@@ -2092,8 +1360,8 @@ impl App {
                 header_style
             };
             lines.push(Line::from(Span::styled(header, header_style)));
-            if let Some(quoted) = &message.reply_to {
-                let quote = match messages.iter().find(|m| &m.id == quoted) {
+            if let Some(quoted_id) = &message.reply_to {
+                let quote = match quoted(messages.iter().copied(), quoted_id) {
                     Some(original) => snippet(original),
                     None => "(a message not loaded)".to_owned(),
                 };
@@ -2156,7 +1424,7 @@ impl App {
             Some(chat),
             message,
             self.utc_offset,
-            self.is_unconfirmed(message),
+            self.model.transcript().is_unconfirmed(message),
         )
     }
 
@@ -2208,11 +1476,6 @@ fn downloading(caption: &str, columns: u16) -> String {
         Some(head) => format!("{head}\n{line}"),
         None => line,
     }
-}
-
-/// The kinds drawn as pictures.
-fn is_picture(kind: &str) -> bool {
-    matches!(kind, "image" | "sticker")
 }
 
 /// A draft as drawn: its rows, and the cursor's row and column in them.
@@ -2277,31 +1540,6 @@ fn layout_draft(draft: &str, caret: usize, width: usize) -> DraftRows {
     }
     let cursor = cursor.unwrap_or((rows.len() - 1, used));
     (rows, cursor)
-}
-
-/// The start of the grapheme before byte `at` of `text`, if there is one.
-fn previous_grapheme(text: &str, at: usize) -> Option<usize> {
-    text.grapheme_indices(true)
-        .map(|(start, _)| start)
-        .take_while(|&start| start < at)
-        .last()
-}
-
-/// The end of the grapheme after byte `at` of `text`, if there is one.
-fn next_grapheme(text: &str, at: usize) -> Option<usize> {
-    (at < text.len()).then(|| {
-        text.grapheme_indices(true)
-            .map(|(start, _)| start)
-            .find(|&start| start > at)
-            .unwrap_or(text.len())
-    })
-}
-
-/// The timestamp of a chat's newest message, or "" for a chat with none.
-fn newest(chat: &Chat) -> &str {
-    chat.last_message
-        .as_ref()
-        .map_or("", |message| message.timestamp.as_str())
 }
 
 /// A centred overlay at most `width` by `height`, inside `area`.
@@ -2410,36 +1648,6 @@ fn rgb(colour: Rgb) -> Color {
     Color::Rgb(colour.r, colour.g, colour.b)
 }
 
-/// The name to show for a chat (wire "Chat names", ADR 0002): its `name`, else its `phone` (the
-/// number masked to its last four digits), else, as `nuncio chats` does, a phone-number chat's
-/// own number masked the same way ([`mask_phone`]); otherwise a placeholder: `unnamed group` for a
-/// group, `hidden number` for anyone else. A LID's digits are never shown: they are a hidden id,
-/// not a number.
-fn chat_title(chat: &Chat) -> String {
-    if !chat.name.is_empty() {
-        return plain(&chat.name);
-    }
-    match &chat.phone {
-        Some(phone) if !phone.is_empty() => plain(phone),
-        _ => match chat.jid.split_once('@') {
-            Some((number, "s.whatsapp.net")) => mask_phone(number),
-            Some((_, "g.us")) => "unnamed group".to_owned(),
-            _ => "hidden number".to_owned(),
-        },
-    }
-}
-
-/// A phone number masked as the daemon's `ipc.MaskPhone` does: `…` and its last four digits, or
-/// `…` alone for four digits or fewer.
-fn mask_phone(number: &str) -> String {
-    let digits: Vec<char> = number.chars().collect();
-    if digits.len() <= 4 {
-        return "…".to_owned();
-    }
-    let last: String = digits[digits.len() - 4..].iter().collect();
-    format!("…{last}")
-}
-
 /// Who sent the message (us, or the chat) and when; a send of ours that is not sent yet says
 /// so, so a failure stays visible, and one that was not confirmed (`unconfirmed`) says that
 /// instead, since it may have been delivered.
@@ -2451,7 +1659,7 @@ fn sent_by(
 ) -> String {
     let who = match (message.from_me, chat) {
         (true, _) => "you".to_owned(),
-        (false, Some(chat)) => chat_title(chat),
+        (false, Some(chat)) => plain(&chat_title(chat)),
         (false, None) => "them".to_owned(),
     };
     let state = match message.state {
@@ -2521,7 +1729,7 @@ fn chat_item(
     let room = width
         .saturating_sub(markers_width)
         .saturating_sub(badge_width);
-    let name = fit(&chat_title(chat), room);
+    let name = fit(&plain(&chat_title(chat)), room);
     let mut title = vec![Span::styled(
         name.clone(),
         Style::default()
@@ -2571,7 +1779,6 @@ fn chat_item(
 
 #[cfg(test)]
 mod tests {
-    use super::chat_title;
     use nuncio_client::{Chat, Message};
     use time::UtcOffset;
 
@@ -2636,42 +1843,6 @@ mod tests {
         assert_eq!(hit_test(&map, 40, 23), None);
         // Nothing drawn yet: nothing to hit.
         assert_eq!(hit_test(&super::ScreenMap::default(), 5, 5), None);
-    }
-
-    #[test]
-    fn a_chats_name_wins_over_its_phone() {
-        let mut ada = chat("Ada Lovelace", "100000000000001@lid");
-        ada.phone = Some("…0001".to_owned());
-        assert_eq!(chat_title(&ada), "Ada Lovelace");
-    }
-
-    #[test]
-    fn a_chat_with_no_name_shows_its_masked_phone() {
-        let mut ada = chat("", "100000000000001@lid");
-        ada.phone = Some("…0001".to_owned());
-        assert_eq!(chat_title(&ada), "…0001");
-        let mut pn = chat("", "15551230001@s.whatsapp.net");
-        pn.phone = Some("…0001".to_owned());
-        assert_eq!(chat_title(&pn), "…0001");
-    }
-
-    #[test]
-    fn a_chat_with_neither_shows_a_placeholder_never_its_jid_digits() {
-        assert_eq!(
-            chat_title(&chat("", "100000000000001@lid")),
-            "hidden number"
-        );
-        assert_eq!(
-            chat_title(&chat("", "120363000000000001@g.us")),
-            "unnamed group"
-        );
-    }
-
-    #[test]
-    fn a_phone_number_chat_with_neither_shows_its_own_number_masked_as_nuncio_chats_does() {
-        // ipc.MaskPhone: "…" and the last four digits; "…" alone for four digits or fewer.
-        assert_eq!(chat_title(&chat("", "15551230005@s.whatsapp.net")), "…0005");
-        assert_eq!(chat_title(&chat("", "1234@s.whatsapp.net")), "…");
     }
 
     #[test]

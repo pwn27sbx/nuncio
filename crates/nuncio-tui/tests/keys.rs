@@ -607,3 +607,41 @@ fn chat_markers_sit_in_one_fixed_column_after_the_name() {
         assert!(shown.contains("(3)"), "the unread badge stays:\n{shown}");
     }
 }
+
+#[test]
+fn the_conversation_scrolls_back_to_the_newest_after_a_send_or_another_chat() {
+    let mut app = two_chats();
+    let many: Vec<Message> = (0..30)
+        .map(|n| message(&format!("M{n}"), &format!("line {n:02}"), false, n))
+        .collect();
+    open_ada(&mut app, many);
+    app.handle_key(key(KeyCode::Esc));
+    assert_eq!(app.pane(), Pane::Messages);
+    let scrolled_up = |app: &mut App| {
+        app.handle_key(key(KeyCode::PageUp));
+        app.handle_key(key(KeyCode::PageUp));
+        let shown = text(&render(app, 80, 24));
+        assert!(!shown.contains("line 29"), "scrolled up:\n{shown}");
+    };
+    scrolled_up(&mut app);
+    // Another chat and back: Ada's conversation shows its newest message again.
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('j')));
+    app.handle_key(key(KeyCode::Char('k')));
+    let shown = text(&render(&mut app, 80, 24));
+    assert!(shown.contains("line 29"), "back at the newest:\n{shown}");
+    // A send goes back to the newest too, so it is seen.
+    app.handle_key(key(KeyCode::Tab));
+    scrolled_up(&mut app);
+    app.handle_key(key(KeyCode::Enter));
+    type_text(&mut app, "fresh words");
+    assert!(matches!(
+        app.handle_key(key(KeyCode::Enter)),
+        Some(Action::Request(ClientFrame::Send { .. }))
+    ));
+    let shown = text(&render(&mut app, 80, 24));
+    assert!(
+        shown.contains("fresh words"),
+        "the send is on screen:\n{shown}"
+    );
+}

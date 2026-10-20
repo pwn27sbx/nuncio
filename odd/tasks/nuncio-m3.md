@@ -10,15 +10,18 @@ Branch: `feat/m3-desktop` (from `feat/m2-tui` at `f6af712`). Delivery: `single-p
 - S3 Rules unchanged: tests first with RED, GGA per commit, independent verifier for high-risk changes, no AI attribution, no push without the owner's explicit OK naming remote and branch, no real-account actions from the Mac.
 - S4 Assumptions (orchestrator, to confirm with the owner when they matter): a `whatsapp:` / `wa.me` link only opens the chat and pre-fills the composer, it never sends (ban-risk rule: one message per explicit user action); the config file is plain TOML under `$XDG_CONFIG_HOME/nuncio/config.toml` with every key optional and documented.
 
+- S5 (owner, 2026-10-20, verbatim): "si sigamos el camino del plan porque es lo que se verifico y es lo mejor". Before the GTK UI, move the TUI's chat-list, transcript and composer state into nuncio-client as view models, so the app reuses the same verified rules (one chat per contact and aliases, orphan/draft safety, not-confirmed marks, reactions, search results, multi-line composer). The TUI's observable behaviour must not change: every existing TUI test keeps its assertions.
+
 ## Tasks
 
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
-| D1 | S2 shared logic: config, links, notification target | delegated writer (context backstop) | done: RED per rule (29 client + 2 TUI), 17 mutants killed; no new dependency (toml 0.9 already used); parent reran fmt/clippy/cargo test --no-fail-fast | this commit |
-| D2 | S2 shared view models (chat list, transcript, composer) | after D1; scope to agree with the owner (refactor of the TUI model) | open | |
+| D1 | S2 shared logic: config, links, notification target | delegated writer (context backstop) | done: RED per rule (29 client + 2 TUI), 17 mutants killed; no new dependency (toml 0.9 already used); parent reran fmt/clippy/cargo test --no-fail-fast | 82b8f00 |
+| D2 | S2/S5 shared view models (chat list, transcript, composer) moved into nuncio-client; the TUI uses them with unchanged behaviour | delegated writer; Risk 3 (shared code every TUI behaviour uses) → verifier | done: tests 241→257, no TUI assertion changed; 14 mutants killed; verifier PASS: differential harness old vs new App, 130 seeds / 790 000 ops, rendered buffers and requests identical; Model has no ratatui and no I/O | this commit |
 | D3 | S1/S2 GTK UI slices on the Mac (needs Homebrew gtk4/libadwaita — ask first) | later | open | |
 
 ## Log
 
 - L1 (2026-10-20, owner): "si" to pushing f6af712 and starting M3 with the logic shared by the TUI and the desktop app. Pushed `origin/feat/m2-tui` = f6af712.
 - L2 D1 decisions to confirm with the owner: a bounded `notified` set (last 1024 messages) so a reaction that republishes a message does not notify again; link text over 65536 chars is an error, never cut; `chat_title` now exists in nuncio-client and nuncio-tui (dedupe in D2); a config file with an unknown key or wrong type stops the TUI with exit 2.
+- L3 D2 verifier advisories: locate_send scans a HashMap of conversations, so a client_id duplicated across chats marks a nondeterministic one (pre-existing; real flows dedupe by client_id); nuncio_client::notify::chat_title moved to nuncio_client::chat_title (local only). Next: D3 GTK UI needs Homebrew gtk4/libadwaita — ask the owner first.

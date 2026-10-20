@@ -17,6 +17,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use crate::config::Config;
+use crate::model::{chat_title, title_from_jid};
 use crate::wire::{Chat, ClientFrame, DaemonFrame};
 
 /// How many notified message ids [`Notified`] remembers before forgetting the oldest.
@@ -150,39 +151,6 @@ fn find_chat<'a>(chats: &'a [Chat], jid: &str) -> Option<&'a Chat> {
             .iter()
             .find(|chat| chat.aliases.iter().any(|alias| alias == jid))
     })
-}
-
-/// The name a chat shows, as nuncio-tui's chat list does (wire "Chat names", ADR 0002): its
-/// `name`, else its `phone`, else a phone-number chat's own number masked to its last four digits,
-/// else `unnamed group` for a group and `hidden number` for anyone else. A LID's digits are never
-/// shown.
-pub fn chat_title(chat: &Chat) -> String {
-    if !chat.name.is_empty() {
-        return chat.name.clone();
-    }
-    match &chat.phone {
-        Some(phone) if !phone.is_empty() => phone.clone(),
-        _ => title_from_jid(&chat.jid),
-    }
-}
-
-fn title_from_jid(jid: &str) -> String {
-    match jid.split_once('@') {
-        Some((number, "s.whatsapp.net")) => mask_phone(number),
-        Some((_, "g.us")) => "unnamed group".to_owned(),
-        _ => "hidden number".to_owned(),
-    }
-}
-
-/// `…` and the last four digits, or `…` alone for four digits or fewer (the daemon's
-/// `ipc.MaskPhone`).
-fn mask_phone(number: &str) -> String {
-    let digits: Vec<char> = number.chars().collect();
-    if digits.len() <= 4 {
-        return "…".to_owned();
-    }
-    let last: String = digits[digits.len() - 4..].iter().collect();
-    format!("…{last}")
 }
 
 /// What a notification without the text says.

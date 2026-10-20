@@ -208,7 +208,10 @@ the footer (`pictures: kitty (detected)`):
 `NUNCIO_IMAGE_PROTOCOL` chooses it without asking: `kitty`, `sixel`, `iterm2`, `halfblocks`, or
 `off` (no pictures: `[image]` labels only, and `o` opens every media externally; `?` says so).
 Another value is
-named in the footer and ignored.
+named in the footer and ignored. The same five values under `[ui] image_protocol` in the config
+file (`~/.config/nuncio/config.toml`, see [`docs/config.md`](../../docs/config.md)) choose it too;
+the variable wins over the file, and a bad variable falls back to the file. A config file the TUI
+cannot read, or one with a key it does not know, stops it at startup with the reason (exit 2).
 
 The query is ratatui-image 11.1's, which reads the terminal's answer on a thread that it does not
 stop when no answer comes (upstream issue #202). So the TUI queries only when stdin and stdout are
@@ -217,7 +220,7 @@ uses half blocks and makes stdin safe before the first key is read: it asks for 
 once more and holds Rust's stdin lock for the rest of the run, so that thread can never read
 again; if the terminal still does not answer, the screen asks for one key first. 100 ms later,
 whatever is left of a late answer is thrown away (`tcflush`), so it never reaches the composer as
-keys. Setting the variable skips the query.
+keys. Setting the variable (or the config key) skips the query.
 
 ## Mouse
 

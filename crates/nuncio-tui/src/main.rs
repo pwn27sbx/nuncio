@@ -15,7 +15,8 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nuncio_client::{
-    ClientFrame, DaemonFrame, PROTOCOL_VERSION, Palette, Snapshot, ThemeWatcher, fetch, socket_path,
+    ClientFrame, Config, DaemonFrame, ImageProtocol, PROTOCOL_VERSION, Palette, Snapshot,
+    ThemeWatcher, fetch, socket_path,
 };
 use nuncio_tui::images::{self, Graphics, Plan, ProtocolChoice};
 use nuncio_tui::{Action, App, Daemon, Source, fixture_snapshot, open_externally};
@@ -57,7 +58,8 @@ usage: nuncio-tui [--image <png>]
   Pictures are drawn in the conversation from the thumbnail in each message; nothing is
   downloaded until o. The protocol is asked from the terminal once at startup (kitty, sixel,
   iTerm2, else half blocks; sixel or half blocks under zellij). NUNCIO_IMAGE_PROTOCOL=kitty,
-  sixel, iterm2, halfblocks or off chooses it without asking.
+  sixel, iterm2, halfblocks or off chooses it without asking, and so does image_protocol under
+  [ui] in ~/.config/nuncio/config.toml (the variable wins; see docs/config.md).
 
   --image <png>   render a local PNG inline, next to the chat list (S9's ratatui-image
                   check; this points at any file)
@@ -82,6 +84,14 @@ fn main() -> ExitCode {
     };
 
     // Printed before the terminal is taken over, so it is still readable.
+    let config = match Config::default_path().map(|path| Config::load(&path)) {
+        Some(Ok(config)) => config,
+        None => Config::default(),
+        Some(Err(error)) => {
+            eprintln!("nuncio-tui: {error}");
+            return ExitCode::from(2);
+        }
+    };
     let palette_path = Palette::default_path();
     let palette = Palette::load_or_default(palette_path.as_deref());
     let theme = palette_path
@@ -108,7 +118,7 @@ fn main() -> ExitCode {
     };
     // The picture protocol is asked from the terminal once, after entering the alternate screen
     // and before mouse reports are turned on or any event is read.
-    let (graphics, picture_notice) = choose_graphics(&mut terminal);
+    let (graphics, picture_notice) = choose_graphics(&mut terminal, config.ui.image_protocol);
 
     // Clicks and the wheel. A panic turns it off before ratatui's own hook restores the rest,
     // so the shell is not left receiving mouse reports.
@@ -266,14 +276,18 @@ fn client_prefix() -> String {
     format!("tui-{}-{seconds}", std::process::id())
 }
 
-/// Choose how pictures are drawn, once: [`images::plan`] from `NUNCIO_IMAGE_PROTOCOL`, `ZELLIJ`
+/// Choose how pictures are drawn, once: [`images::plan_with_config`] from `NUNCIO_IMAGE_PROTOCOL`,
+/// the config file's `[ui] image_protocol`, `ZELLIJ`
 /// and whether stdin and stdout are a terminal, then either that choice or ratatui-image's query.
 /// Returns the protocol (`None` for `off`) and the footer's one-time line naming it.
-fn choose_graphics(terminal: &mut ratatui::DefaultTerminal) -> (Option<Graphics>, String) {
+fn choose_graphics(
+    terminal: &mut ratatui::DefaultTerminal,
+    configured: Option<ImageProtocol>,
+) -> (Option<Graphics>, String) {
     let value = std::env::var(images::OVERRIDE).ok();
     let zellij = std::env::var_os("ZELLIJ").is_some();
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
-    let (plan, warning) = images::plan(value.as_deref(), zellij, tty);
+    let (plan, warning) = images::plan_with_config(value.as_deref(), configured, zellij, tty);
     let (graphics, notice) = match plan {
         Plan::Fixed { choice, why } => fixed_graphics(choice, why),
         Plan::Query { zellij } => queried_graphics(terminal, zellij),

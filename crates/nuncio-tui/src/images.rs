@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use image::{DynamicImage, ImageFormat, ImageReader, Limits, Rgba, RgbaImage, imageops};
+use nuncio_client::ImageProtocol;
 use ratatui::layout::Size;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::sliced::SlicedProtocol;
@@ -135,6 +136,38 @@ pub fn plan(override_value: Option<&str>, zellij: bool, terminal: bool) -> (Plan
         );
     }
     (Plan::Query { zellij }, warning)
+}
+
+/// Where `[ui] image_protocol` of the config file is named in a [`Plan::Fixed`].
+pub const CONFIG_KEY: &str = "config [ui] image_protocol";
+
+/// [`plan`] with the config file's `[ui] image_protocol` as well: [`OVERRIDE`] wins over the file,
+/// and the file wins over asking the terminal. An [`OVERRIDE`] value that is not one of the five
+/// is ignored with a warning, as in [`plan`], and the file decides instead.
+pub fn plan_with_config(
+    override_value: Option<&str>,
+    configured: Option<ImageProtocol>,
+    zellij: bool,
+    terminal: bool,
+) -> (Plan, Option<String>) {
+    let mut warning = None;
+    if let Some(value) = override_value {
+        match parse_protocol(value) {
+            Ok(_) => return plan(override_value, zellij, terminal),
+            Err(error) => warning = Some(error),
+        }
+    }
+    match configured.map(|configured| parse_protocol(configured.as_str())) {
+        Some(Ok(choice)) => (
+            Plan::Fixed {
+                choice,
+                why: CONFIG_KEY,
+            },
+            warning.map(|error| format!("{error}; using {CONFIG_KEY} instead")),
+        ),
+        // The five values are the same on both sides, so a configured one always parses.
+        _ => plan(override_value, zellij, terminal),
+    }
 }
 
 /// The protocol to use under zellij, given what the query detected and whether the terminal
@@ -721,4 +754,77 @@ fn decode(bytes: &[u8], bounds: Bounds) -> Result<DynamicImage, String> {
     reader
         .decode()
         .map_err(|error| format!("the picture could not be decoded: {error}"))
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn the_config_file_chooses_the_protocol_when_the_variable_is_unset() {
+        for (configured, choice) in [
+            (ImageProtocol::Kitty, ProtocolChoice::Kitty),
+            (ImageProtocol::Sixel, ProtocolChoice::Sixel),
+            (ImageProtocol::Iterm2, ProtocolChoice::Iterm2),
+            (ImageProtocol::Halfblocks, ProtocolChoice::Halfblocks),
+            (ImageProtocol::Off, ProtocolChoice::Off),
+        ] {
+            assert_eq!(
+                plan_with_config(None, Some(configured), false, true),
+                (
+                    Plan::Fixed {
+                        choice,
+                        why: CONFIG_KEY
+                    },
+                    None
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn the_variable_wins_over_the_config_file() {
+        assert_eq!(
+            plan_with_config(Some("sixel"), Some(ImageProtocol::Off), false, true),
+            (
+                Plan::Fixed {
+                    choice: ProtocolChoice::Sixel,
+                    why: OVERRIDE
+                },
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn a_bad_variable_warns_and_the_config_file_decides() {
+        let (plan, warning) =
+            plan_with_config(Some("png"), Some(ImageProtocol::Kitty), false, true);
+        assert_eq!(
+            plan,
+            Plan::Fixed {
+                choice: ProtocolChoice::Kitty,
+                why: CONFIG_KEY
+            }
+        );
+        assert!(warning.is_some_and(|w| w.contains(OVERRIDE)));
+    }
+
+    #[test]
+    fn with_neither_it_plans_as_before() {
+        for (zellij, terminal) in [(false, true), (true, true), (false, false)] {
+            assert_eq!(
+                plan_with_config(None, None, zellij, terminal),
+                plan(None, zellij, terminal)
+            );
+        }
+        assert_eq!(
+            plan_with_config(Some("kitty"), None, false, true),
+            plan(Some("kitty"), false, true)
+        );
+        assert_eq!(
+            plan_with_config(Some("png"), None, false, true),
+            plan(Some("png"), false, true)
+        );
+    }
 }

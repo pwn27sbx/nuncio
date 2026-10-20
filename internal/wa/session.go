@@ -79,6 +79,17 @@ type Client interface {
 // outdated client or a connection WhatsApp rejects (any other ConnectFailure) stops reconnecting
 // for good, and StopReason says why; the daemon logs that reason once. Surfacing it to clients (a
 // wire field) is a follow-up.
+//
+// A connection can also die silently (a NAT timeout or a network change drops the TCP stream with
+// no FIN or RST), and then no Disconnected ever arrives. whatsmeow notices only through its
+// keepalive pings, and with EnableAutoReconnect off it just reports them (keepalive.go:42-51). The
+// session applies whatsmeow's own rule: a KeepAliveTimeout whose last good ping is more than
+// whatsmeow.KeepAliveMaxFailTime (3 min) old means the socket is dead, so a linked session goes
+// offline, disconnects it, logs it once and reconnects through the same Backoff and stop rules as a
+// drop. An earlier timeout (a blip that KeepAliveRestored ends) changes nothing, and so does one
+// while the session is already offline, stopped or closed, so there is never a second loop. A late
+// timeout from the previous connection (its last good ping predates the latest Connect) is ignored,
+// so it never tears a healthy new connection down.
 type Session struct {
 	client     Client
 	db         *sql.DB
@@ -96,6 +107,11 @@ type Session struct {
 	// after schedules f once after d and returns its cancel; time.AfterFunc outside tests.
 	after  func(d time.Duration, f func()) (cancel func() bool)
 	cancel func() bool // the pending reconnect, nil when none
+	// connectAt is when the latest Connect was called (backoff's clock). whatsmeow starts each
+	// connection's keepalive loop inside Connect with lastSuccess = now (client.go:598,
+	// keepalive.go:31), so a KeepAliveTimeout whose LastSuccess is before connectAt comes from an
+	// earlier connection's loop (each is dispatched on its own goroutine) and is ignored.
+	connectAt time.Time
 	// logf reports a stop, once, and each failed reconnect attempt; log.Printf outside tests.
 	logf func(format string, args ...any)
 	// media serves DownloadMedia; nil until SetMedia.
@@ -160,9 +176,10 @@ func (s *Session) Start() error {
 	s.mu.Unlock()
 	// Subscribe before Connect, and count as offline until the Connected event arrives.
 	events := Events{
-		Connected:    s.connected,
-		Disconnected: s.dropped,
-		LoggedOut:    func() { s.stop("logged out", StateUnlinked) },
+		Connected:        s.connected,
+		Disconnected:     s.dropped,
+		KeepAliveTimeout: s.keepAliveFailed,
+		LoggedOut:        func() { s.stop("logged out", StateUnlinked) },
 		// A replaced stream means another connection of this same device (a second nunciod, or
 		// `nuncio link` reusing the device) took the session over. Reconnecting would take it back,
 		// the other side would do the same, and the two would replace each other in a loop: stop
@@ -178,6 +195,7 @@ func (s *Session) Start() error {
 	}
 	s.client.AddEventHandler(events.Handle)
 	s.set(StateOffline)
+	s.markConnect()
 	if err := s.client.Connect(); err != nil {
 		s.set(StateOffline)
 		s.reconnectLater()
@@ -213,6 +231,39 @@ func (s *Session) dropped() {
 	}
 	s.set(StateOffline)
 	s.reconnectLater()
+}
+
+// keepAliveFailed handles whatsmeow's KeepAliveTimeout (see the Session doc). Only a linked,
+// started, unstopped session with no reconnect pending acts, and it flips to offline under the same
+// lock that checks this, so concurrent timeouts act once.
+func (s *Session) keepAliveFailed(lastSuccess time.Time) {
+	s.mu.Lock()
+	gap := s.backoff.Now().Sub(lastSuccess)
+	act := gap > whatsmeow.KeepAliveMaxFailTime && !lastSuccess.Before(s.connectAt) && s.started && s.state == StateLinked &&
+		s.backoff.Stopped() == "" && s.cancel == nil
+	if act {
+		s.state = StateOffline
+	}
+	logf := s.logf
+	s.mu.Unlock()
+	if !act {
+		return
+	}
+	s.publish(ipc.EventConnection{V: ipc.Version, Op: ipc.OpEventConnection, Session: string(StateOffline)})
+	logf("wa: keepalive failed for %s; dropping the connection and reconnecting", gap.Round(time.Second))
+	// whatsmeow's Disconnect marks the disconnect as expected, so it emits no Disconnected event
+	// (client.go:695-704, :608-618); the reconnect is scheduled here instead.
+	s.connMu.Lock()
+	s.client.Disconnect()
+	s.connMu.Unlock()
+	s.reconnectLater()
+}
+
+// markConnect records that a Connect is about to start (see connectAt).
+func (s *Session) markConnect() {
+	s.mu.Lock()
+	s.connectAt = s.backoff.Now()
+	s.mu.Unlock()
 }
 
 // stop ends reconnecting for good, cancels a pending reconnect, logs the reason once and reports
@@ -268,6 +319,7 @@ func (s *Session) reconnect() {
 	if !run {
 		return
 	}
+	s.markConnect()
 	if err := s.client.Connect(); err != nil {
 		// The error's type only: whatsmeow's text can carry a JID.
 		if delay, ok := s.reconnectLater(); ok {
@@ -386,6 +438,14 @@ func OpenSession(ctx context.Context, path string) (*Session, error) {
 	// (only an explicit SendPresence does, and Client has no such call), so the account is never
 	// marked online on connect.
 	client.EnableAutoReconnect = false
+	// Normal delivery receipts (two grey ticks for the sender) without marking the account online.
+	// By default a client never marked online sends type="inactive" delivery receipts, which the
+	// official apps do not render (receipt.go:240-254, :287-288). SetForceActiveDeliveryReceipts
+	// only stores 2 in the sendActiveReceipts atomic (receipt.go:255-264); that atomic is read only
+	// to pick the receipt type (receipt.go:287) and otherwise touched only by SendPresence
+	// (presence.go:70-75), which nuncio never calls. It sends no presence node or anything else, and
+	// read (blue) receipts still go only through MarkRead.
+	client.SetForceActiveDeliveryReceipts(true)
 	// whatsmeow keeps the pins, archives and mutes of the initial full app-state sync in its own
 	// tables and emits no event for them unless asked; nuncio applies them like any later change.
 	client.EmitAppStateEventsOnFullSync = true

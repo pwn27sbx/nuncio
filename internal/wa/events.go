@@ -1,6 +1,8 @@
 package wa
 
 import (
+	"time"
+
 	waevents "go.mau.fi/whatsmeow/types/events"
 )
 
@@ -12,6 +14,11 @@ type Events struct {
 	Paired       func(user string)
 	Connected    func()
 	Disconnected func()
+	// KeepAliveTimeout: one of whatsmeow's keepalive pings failed (it pings every 20-30 s);
+	// lastSuccess is when one last succeeded. whatsmeow emits it for every failed ping and treats
+	// the socket as dead only after KeepAliveMaxFailTime without a success (keepalive.go). Its
+	// KeepAliveRestored, after a ping works again, needs no action and is ignored.
+	KeepAliveTimeout func(lastSuccess time.Time)
 	// LoggedOut: the device was unlinked (from the phone or by the server).
 	LoggedOut func()
 	// Stopped: the server ended the session in a way a reconnect must not fight: a temporary ban,
@@ -40,6 +47,10 @@ func (e Events) Handle(raw any) {
 	case *waevents.Disconnected:
 		if e.Disconnected != nil {
 			e.Disconnected()
+		}
+	case *waevents.KeepAliveTimeout:
+		if e.KeepAliveTimeout != nil {
+			e.KeepAliveTimeout(v.LastSuccess)
 		}
 	case *waevents.LoggedOut:
 		if e.LoggedOut != nil {

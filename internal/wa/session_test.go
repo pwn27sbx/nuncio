@@ -23,8 +23,11 @@ import (
 // fakeClient stands in for whatsmeow: it never opens a socket. Connect delivers the events a real
 // client would, through the handler the session registered.
 type fakeClient struct {
-	device      bool
-	connectErr  error
+	device     bool
+	connectErr error
+	// connecting makes a successful Connect deliver no Connected event, as while whatsmeow is
+	// still logging in.
+	connecting  bool
 	connects    int
 	disconnects int
 	handlers    []func(any)
@@ -151,6 +154,9 @@ func (f *fakeClient) Connect() error {
 	f.connects++
 	if f.connectErr != nil {
 		return f.connectErr
+	}
+	if f.connecting {
+		return nil
 	}
 	f.emit(&waevents.Connected{})
 	return nil

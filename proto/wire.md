@@ -268,6 +268,7 @@ A frame of exactly 1 MiB is accepted; one byte more is not.
 | A pin, archive or mute from app-state sync (the initial full sync included) | stored, then `event_chat` with the chat as `chats` would list it; a chat not stored yet is created and published without `last_message`. A full sync can publish many at once, and a subscriber whose queue fills is dropped and re-reads `chats` as for any event |
 | App-state for a JID that is not a chat JID, or with no action | ignored; nothing is stored or published |
 | A chat marked read (or unread) on another device | no `event_chat`: a read publishes `event_unread` only, an unread nothing |
+| The WhatsApp connection dies silently while `linked` (a NAT timeout or a network change, no socket error) | once WhatsApp keepalive pings have failed for more than 3 minutes (whatsmeow's own threshold), `event_connection` with `session: "offline"`; the daemon drops the dead connection and reconnects with its usual backoff, then publishes `linked` again. A shorter keepalive blip changes nothing |
 | a frame with an `op` this client does not know (a newer daemon) | the Rust client parses it as `DaemonFrame::Unknown`; nuncio-tui ignores an unknown event and shows an unknown reply in the footer (a send answered that way is shown as not confirmed) |
 
 A WhatsApp chat JID is one of: `digits@s.whatsapp.net` (a user), `digits@lid` (a user addressed by

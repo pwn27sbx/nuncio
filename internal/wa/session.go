@@ -135,6 +135,12 @@ type Session struct {
 	markReadSem chan struct{}
 	// drains counts the running outbox drains; Close waits for them before closing the store.
 	drains sync.WaitGroup
+	// paceAfter schedules the pause between two drained sends (drainPace) like after; a separate
+	// field so the outbox never shows up among the reconnect timers. time.AfterFunc outside tests.
+	paceAfter func(d time.Duration, f func()) (cancel func() bool)
+	// left is, under mu, closed when the session leaves linked and made anew when it becomes linked,
+	// so a drain's pause ends as soon as its connection does.
+	left chan struct{}
 	// mergeFailed holds, under mu, the phone-number chats whose merge into their LID chat failed in
 	// this session; they are not tried (or logged) again until the next start.
 	mergeFailed map[string]bool
@@ -152,7 +158,7 @@ type publisher interface{ Publish(frame any) int }
 // after the client is disconnected.
 func NewSession(client Client, db *sql.DB, closeStore func() error) *Session {
 	return &Session{client: client, db: db, closeStore: closeStore, state: StateUnlinked, published: StateUnlinked,
-		backoff: NewBackoff(), after: afterFunc, logf: log.Printf, markReadSem: make(chan struct{}, 1)}
+		backoff: NewBackoff(), after: afterFunc, paceAfter: afterFunc, logf: log.Printf, markReadSem: make(chan struct{}, 1)}
 }
 
 func afterFunc(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
@@ -409,6 +415,10 @@ func (s *Session) set(st State) {
 func (s *Session) setLocked(st State) {
 	if s.state == StateLinked && st != StateLinked {
 		s.drops++
+		close(s.left)
+	}
+	if s.state != StateLinked && st == StateLinked {
+		s.left = make(chan struct{})
 	}
 	s.state = st
 }

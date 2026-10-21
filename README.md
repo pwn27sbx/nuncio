@@ -120,9 +120,9 @@ A `<jid>` is a WhatsApp chat: `15551230001@s.whatsapp.net` (a person) or
   time, `not confirmed: …; it may have been delivered`, and exits 1 unless the message was sent or
   queued. With no linked device it says so and exits 1. While the session is offline, or when the
   connection drops before WhatsApp acknowledges the message, it is queued and sent once when the
-  session reconnects (one pass, oldest first, same message id). A connection that dies silently
-  still counts as linked for up to 3 minutes, until its keepalive fails, so a send in that window
-  ends `not confirmed` rather than queued. Nothing else is ever retried on
+  session reconnects (one pass, oldest first, one second apart, same message id). A connection
+  that dies silently still counts as linked for up to 3 minutes, until its keepalive fails, so a
+  send in that window ends `not confirmed` rather than queued. Nothing else is ever retried on
   its own: a message that ends `not sent` or `not confirmed` stays listed as not sent, and `send`
   prints its client_id.
 - `retry <client_id>` sends that one message again, once, under the same WhatsApp message id, so it

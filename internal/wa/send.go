@@ -19,6 +19,13 @@ import (
 // daemon's answer instead of its own timeout. Hitting it answers ipc.ErrNotConfirmed.
 const sendTimeout = 20 * time.Second
 
+// drainPace is the pause a reconnect's drain makes between two of its sends, so a backlog does not
+// reach WhatsApp as one burst (a burst of sends from one device is what spam detection looks for).
+// One second is a conservative guess, not a documented WhatsApp limit (to confirm): about a
+// person's pace, small next to sendTimeout, and a backlog of ten still drains in about ten seconds.
+// A normal send is never paced; see drain.
+const drainPace = time.Second
+
 var (
 	// ErrNotSent: WhatsApp did not accept the message, or an earlier attempt of this send ended
 	// not sent. whatsmeow's own error is not passed on, because it can name a number.
@@ -374,19 +381,54 @@ func (s *Session) publishEntry(e store.OutboxEntry) {
 }
 
 // drain is the one pass a reconnect makes over the outbox: every queued send, oldest first, gets
-// its one attempt. A failed one ends not_sent (refused) or not_confirmed (not acknowledged, its
-// outcome unknown) and no later drain attempts it again; when the connection drops mid-pass the
-// rest stays queued for the next reconnect. Nothing here schedules anything.
+// its one attempt, drainPace apart. A failed one ends not_sent (refused) or not_confirmed (not
+// acknowledged, its outcome unknown) and no later drain attempts it again; when the connection
+// drops mid-pass, or the session stops or closes, the rest stays queued for the next reconnect.
+// The pause holds no lock, so a normal send meanwhile goes out at once (after the older queued
+// sends, in order, as deliver does) and is never paced; a send no longer queued by its turn gets
+// no pause. Nothing is retried on a timer.
 func (s *Session) drain() {
+	s.mu.Lock()
+	left := s.left
+	linked := s.state == StateLinked
+	s.mu.Unlock()
+	if !linked {
+		return
+	}
 	queued, err := store.QueuedOutbox(s.db)
 	if err != nil {
 		log.Printf("wa: cannot read the outbox (%T)", err)
 		return
 	}
-	for _, e := range queued {
+	for i, e := range queued {
+		if i > 0 && s.stillQueued(e.ClientID) && !s.pause(left) {
+			return
+		}
 		if s.State() != StateLinked {
 			return
 		}
 		_, _ = s.deliver(e.ClientID, false)
+	}
+}
+
+// stillQueued reports whether the send stored under clientID is still queued; a read error counts
+// as queued, so the drain still pauses before it.
+func (s *Session) stillQueued(clientID string) bool {
+	e, err := store.GetOutbox(s.db, clientID)
+	return err != nil || e.State == store.OutboxQueued
+}
+
+// pause waits drainPace, holding no lock, unless the connection ends first (left is closed when
+// the session leaves linked: a drop, a stop or Close); then it cancels the timer and reports
+// false, so the drain ends at once instead of sleeping past it.
+func (s *Session) pause(left <-chan struct{}) bool {
+	fired := make(chan struct{})
+	cancel := s.paceAfter(drainPace, func() { close(fired) })
+	select {
+	case <-fired:
+		return true
+	case <-left:
+		cancel()
+		return false
 	}
 }

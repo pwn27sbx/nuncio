@@ -33,6 +33,7 @@ func offlineSession(t *testing.T) (*Session, *fakeClient, func() []string, *fake
 	s := NewSession(fake, openTestStore(t), nil)
 	timers := &fakeTimers{}
 	s.after = timers.after
+	s.paceAfter = instantPace
 	s.logf = t.Logf
 	events := eventsOf(t, s)
 	t.Cleanup(s.Close)
@@ -43,6 +44,13 @@ func offlineSession(t *testing.T) (*Session, *fakeClient, func() []string, *fake
 	s.drains.Wait()
 	events()
 	return s, fake, events, timers
+}
+
+// instantPace stands in for paceAfter in tests that do not check pacing: the pause between two
+// drained sends ends at once instead of after drainPace.
+func instantPace(_ time.Duration, f func()) (cancel func() bool) {
+	f()
+	return func() bool { return false }
 }
 
 // reconnect delivers a Connected event and waits for the drain it starts.

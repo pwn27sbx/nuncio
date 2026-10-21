@@ -60,7 +60,8 @@ func (b *Broker) remove(s *subscription) bool {
 }
 
 // Publish queues frame for every subscriber and returns how many it was queued for. It never
-// blocks: a subscriber whose queue is full is dropped instead.
+// blocks: a subscriber whose queue is full is dropped instead. An event_message longer than
+// MaxFrameLen is queued cut to fit (fitEvent); frame itself is never changed.
 func (b *Broker) Publish(frame any) int {
 	if b == nil {
 		return 0
@@ -70,6 +71,14 @@ func (b *Broker) Publish(frame any) int {
 		// The error's type only: a marshaler's text can quote a value of the event.
 		log.Printf("ipc: cannot encode a %T event (%T)", frame, err)
 		return 0
+	}
+	if len(data) > MaxFrameLen {
+		// A frame this long could not be read: an incoming message is sent cut instead (fitEvent).
+		var fits bool
+		if data, fits = fitEvent(frame); !fits {
+			log.Printf("ipc: a %T event does not fit in one frame and was not sent", frame)
+			return 0
+		}
 	}
 	data = append(data, '\n')
 

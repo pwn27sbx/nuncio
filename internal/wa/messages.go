@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"unicode/utf8"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	waevents "go.mau.fi/whatsmeow/types/events"
@@ -189,7 +188,7 @@ func WireMessages(jid string, rows []store.Message, senders func(string) string)
 // fitReply is the newest messages of msgs whose reply for chat jid encodes in at most limit bytes
 // (without thumbnails): the oldest are left out, and a message kept is whole, except the newest when
 // it alone does not fit, whose text is cut and, when even an empty text does not fit, its file name
-// too (cutField). A client that wants an older message finds it
+// too (ipc.CutMessage). A client that wants an older message finds it
 // with search.
 func fitReply(jid string, msgs []ipc.Message, limit int) []ipc.Message {
 	empty, err := json.Marshal(ipc.MessagesResponse{V: ipc.Version, Op: ipc.OpMessages, JID: jid, Messages: []ipc.Message{}})
@@ -206,13 +205,12 @@ func fitReply(jid string, msgs []ipc.Message, limit int) []ipc.Message {
 		if i > 0 {
 			cost++ // the comma before it
 		} else if cost > room {
-			if !cutField(&msgs[0], &msgs[0].Text, room) {
-				if msgs[0].Text != "" {
-					msgs[0].Text = "…"
-				}
-				if msgs[0].Media == nil || !cutField(&msgs[0], &msgs[0].Media.FileName, room) {
-					return msgs[:0]
-				}
+			fits := func() bool {
+				enc, err := json.Marshal(msgs[0])
+				return err == nil && len(enc) <= room
+			}
+			if !ipc.CutMessage(&msgs[0], fits) {
+				return msgs[:0]
 			}
 			if enc, err = json.Marshal(msgs[0]); err != nil {
 				return msgs[:0] // a message that does not encode does not fit
@@ -225,48 +223,6 @@ func fitReply(jid string, msgs []ipc.Message, limit int) []ipc.Message {
 		room -= cost
 	}
 	return msgs
-}
-
-// cutField cuts field, a string of m (its text or its file name), on a code point boundary (never
-// inside a UTF-8 sequence), to the longest prefix that, followed by "…", lets m encode in at most
-// room bytes. It reports false, leaving field as it was, when not even an empty prefix fits.
-func cutField(m *ipc.Message, field *string, room int) bool {
-	text := *field
-	fits := func(n int) bool {
-		*field = text[:n] + "…"
-		enc, err := json.Marshal(*m)
-		return err == nil && len(enc) <= room
-	}
-	// boundary is n moved back to the start of the code point it falls in.
-	boundary := func(n int) int {
-		for n > 0 && n < len(text) && !utf8.RuneStart(text[n]) {
-			n--
-		}
-		return n
-	}
-	if !fits(0) {
-		*field = text
-		return false
-	}
-	lo, hi := 0, len(text) // fits(lo) holds; the answer is in [lo, hi]
-	for lo < hi {
-		mid := boundary(lo + (hi-lo+1)/2)
-		if mid <= lo {
-			// No code point starts between lo and the midpoint: try the next one after lo.
-			_, size := utf8.DecodeRuneInString(text[lo:])
-			mid = lo + size
-			if mid > hi {
-				break
-			}
-		}
-		if fits(mid) {
-			lo = mid
-		} else {
-			hi = mid - 1
-		}
-	}
-	*field = text[:lo] + "…"
-	return true
 }
 
 // storeMessage saves one incoming or own message and publishes it with any reactions that arrived

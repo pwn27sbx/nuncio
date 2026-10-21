@@ -802,6 +802,8 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) (err er
 			if chats == nil {
 				chats = []Chat{}
 			}
+			// Long previews or names can make the list longer than a frame: it keeps its newest chats.
+			chats = fitChats(chats)
 			if err := WriteFrame(out, ChatsResponse{V: Version, Op: OpChats, Chats: chats}); err != nil {
 				return err
 			}

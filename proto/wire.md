@@ -53,7 +53,7 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 |---|---|---|
 | `hello_ok` | `v`, `op`, `daemon` (string), `session` (see below), `unread` (int) | `hello_ok_daemon.json` |
 | `status` | `v`, `op`, `daemon`, `linked` (bool), `session`, `unread` (int) | `status_response.json` |
-| `chats` | `v`, `op`, `chats` (array of Chat) | `chats_response.json` |
+| `chats` | `v`, `op`, `chats` (array of Chat, at most `limit`; fewer when they do not all fit in one frame, see "Replies too long for one frame") | `chats_response.json` |
 | `error` | `v`, `op`, `code` (string), `message` (string) | `error_version_mismatch.json`, `error_not_linked.json` |
 | `messages` | `v`, `op`, `jid`, `messages` (array of Message, newest first, at most `limit`; fewer when they do not all fit in one frame, see "Replies too long for one frame"); answers `messages` and `search` | `messages_response.json`, `search_response.json`, `messages_group_response.json` |
 | `sent` | `v`, `op`, `client_id`, `state` (`sent` or `queued`), `id` and `timestamp` (only when `sent`); answers `send` and `retry` | `sent_response.json`, `sent_queued_response.json` |
@@ -246,6 +246,20 @@ exactly what it was before this rule. The request has no cursor, so `messages` c
 messages it leaves out (as it cannot past `limit`); `search` still finds each of them. A client needs
 no change: a reply with fewer than `limit` messages was always valid.
 
+A `chats` reply is never written over the frame limit either (200 chats whose last messages or names
+are long). The daemon measures it exactly, after `limit`; when it does not fit, the reply keeps the
+first chats of the list (the newest), as many as fit, each whole, and leaves the rest out. When the
+first chat alone does not fit, its `last_message` is cut as the newest message of a `messages` reply
+is (`text`, then `media.file_name`, on a code point boundary followed by `…`) and, when that is not
+enough, its `name` the same way; a chat that still does not fit leaves the list empty. A reply that
+fits is exactly what it was before this rule.
+
+An `event_message` is never written over the frame limit: one that would be (an incoming text, or
+a file name, longer than a frame) reaches every subscriber cut the same way, its `text` then its
+`media.file_name`; its thumbnail and every other field are kept, and the subscriber is neither
+dropped nor closed. One that does not fit even cut is not sent (the daemon logs its type only). An
+event that fits is exactly what it was before this rule. Other events are not cut: one too long for a frame is not sent, and the daemon logs its type.
+
 ### M1 corners (specified now, pinned by daemon tests as each op is served)
 
 | Situation | Behaviour |
@@ -253,6 +267,8 @@ no change: a reply with fewer than `limit` messages was always valid.
 | `messages` `limit` outside 1..200 | `bad_frame`; the connection stays usable |
 | `messages` for a well-formed `jid` with no stored chat | `messages` with an empty list |
 | `messages` or `search` whose messages, even without thumbnails, do not fit in one frame (e.g. 200 texts of 5 KiB) | the reply keeps the newest messages that fit, as many as fit, and leaves the oldest out: it never exceeds the frame limit and the connection stays usable. See "Replies too long for one frame" |
+| `chats` whose chats do not fit in one frame (e.g. 200 chats whose last messages are 6 KiB texts) | the reply keeps the newest chats that fit, as many as fit, each whole (the first alone is cut when it does not fit): it never exceeds the frame limit and the connection stays usable. See "Replies too long for one frame" |
+| An incoming message whose `event_message` would not fit in one frame (a text or a file name over 1 MiB) | every subscriber receives it with its `text`, then its `media.file_name`, cut on a code point boundary followed by `…`; the subscription and the connection stay open. See "Replies too long for one frame" |
 | `jid` that is not a WhatsApp chat JID in any request | `bad_frame`; the connection stays usable |
 | `send` with empty `text` (or only whitespace) | `bad_frame`; nothing is stored or sent |
 | `send` with `text` over 65 536 bytes | `bad_frame`; nothing is stored or sent |

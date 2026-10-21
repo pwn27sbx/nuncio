@@ -131,3 +131,40 @@ func TestATrimmedReplyWithAnOldPhotoKeepsTheDaemonServing(t *testing.T) {
 		t.Fatalf("status after the trimmed reply = %.80s, want a status frame", status)
 	}
 }
+
+// A chats reply whose last messages do not fit in one frame no longer closes the connection: the
+// daemon answers with its newest chats that fit, and the connection serves the next request.
+func TestAChatsReplyTooLongForOneFrameKeepsTheConnection(t *testing.T) {
+	db := openTestStore(t)
+	t0 := time.Date(2026, 10, 18, 17, 0, 0, 0, time.UTC)
+	for i := 0; i < ipc.MaxChatLimit; i++ {
+		id := fmt.Sprintf("last%03d", i)
+		m := store.Message{ID: id, ChatJID: fmt.Sprintf("1555123%04d@s.whatsapp.net", i), Kind: store.KindText,
+			Timestamp: t0.Add(time.Duration(i) * time.Second), Text: id + " " + strings.Repeat("x", 6000-len(id)-1)}
+		if _, err := store.InsertMessage(db, m); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := newDaemon(fixedSession(wa.StateLinked), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, br := subscriber(t, serveSocket(t, d, ipc.NewBroker()))
+
+	reply := ask(t, conn, br, `{"v":1,"op":"chats","limit":200}`)
+	if len(reply) > ipc.MaxFrameLen {
+		t.Fatalf("chats reply is %d bytes, over the %d byte frame limit", len(reply), ipc.MaxFrameLen)
+	}
+	var got ipc.ChatsResponse
+	if err := json.Unmarshal([]byte(reply), &got); err != nil || got.Op != ipc.OpChats {
+		t.Fatalf("chats reply = %.80s (%v), want a chats frame", reply, err)
+	}
+	n := len(got.Chats)
+	if n == 0 || n == ipc.MaxChatLimit || got.Chats[0].LastMessage.ID != "last199" ||
+		got.Chats[n-1].LastMessage.ID != fmt.Sprintf("last%03d", 200-n) {
+		t.Fatalf("reply keeps %d chats from %s, want the newest that fit, from last199", n, got.Chats[0].LastMessage.ID)
+	}
+	if status := ask(t, conn, br, `{"v":1,"op":"status"}`); !strings.Contains(status, `"op":"status"`) {
+		t.Fatalf("status after the long chats reply = %.80s, want a status frame on the same connection", status)
+	}
+}

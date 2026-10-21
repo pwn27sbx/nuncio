@@ -778,6 +778,7 @@ impl Model {
                 width: None,
                 height: None,
                 animated: false,
+                sender: None,
             });
         self.view_reset = true;
         Some(match reply_to {

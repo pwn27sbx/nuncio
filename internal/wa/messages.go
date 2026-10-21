@@ -64,10 +64,15 @@ func messageRow(evt *waevents.Message) (store.Message, bool) {
 
 // WireMessage is a stored message in its wire shape: the media kinds carry their media object,
 // text carries none, and a send of mine that is not sent yet carries its state and client_id (the
-// store's outbox states are the wire's, except not_confirmed, which the wire calls not_sent).
-func WireMessage(m store.Message) ipc.Message {
+// store's outbox states are the wire's, except not_confirmed, which the wire calls not_sent). It
+// carries no `sender`: wireMessage adds it.
+func WireMessage(m store.Message) ipc.Message { return wireMessage(m, nil) }
+
+// wireMessage is WireMessage naming the author of an incoming group message with senders (see
+// senders.go); a nil senders names none.
+func wireMessage(m store.Message, senders func(string) string) ipc.Message {
 	w := ipc.Message{ID: m.ID, Kind: m.Kind, Text: m.Text, FromMe: m.FromMe, Timestamp: ipc.Timestamp(m.Timestamp),
-		State: m.State, ClientID: m.ClientID, ReplyTo: m.ReplyTo}
+		State: m.State, ClientID: m.ClientID, ReplyTo: m.ReplyTo, Sender: wireSender(m, senders)}
 	for _, r := range m.Reactions {
 		w.Reactions = append(w.Reactions, ipc.Reaction{Emoji: r.Emoji, FromMe: r.FromMe})
 	}
@@ -143,15 +148,16 @@ func side(n uint32) int {
 	return int(n)
 }
 
-// WireMessages is WireMessage for the rows of the messages or search reply for chat jid, newest
-// first, which never exceeds ipc.MaxFrameLen because of thumbnails: the reply is measured without
-// them, and they are added back newest first while each fits in the room left in the frame (less
+// WireMessages is wireMessage for the rows of the messages or search reply for chat jid, newest
+// first, each incoming group message named by senders (nil names none). The reply never exceeds
+// ipc.MaxFrameLen because of thumbnails: it is measured without them (its senders included), and
+// they are added back newest first while each fits in the room left in the frame (less
 // frameMargin) and in ThumbBudget. One that does not fit is left out (its width and height stay).
-func WireMessages(jid string, rows []store.Message) []ipc.Message {
+func WireMessages(jid string, rows []store.Message, senders func(string) string) []ipc.Message {
 	msgs := make([]ipc.Message, len(rows))
 	thumbs := make([]ipc.Message, len(rows))
 	for i, r := range rows {
-		msgs[i] = WireMessage(r)
+		msgs[i] = wireMessage(r, senders)
 		thumbs[i] = ipc.Message{Thumb: msgs[i].Thumb, ThumbMime: msgs[i].ThumbMime}
 		msgs[i].Thumb, msgs[i].ThumbMime = nil, ""
 	}
@@ -203,7 +209,7 @@ func (s *Session) storeMessage(evt *waevents.Message) {
 	if m.Reactions, err = store.MessageReactions(s.db, m.ChatJID, m.ID); err != nil {
 		log.Printf("wa: %v", err)
 	}
-	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: m.ChatJID, Message: WireMessage(m)})
+	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: m.ChatJID, Message: wireMessage(m, s.Senders())})
 	if !m.FromMe {
 		s.publishUnread(m.ChatJID)
 	}

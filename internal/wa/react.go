@@ -102,11 +102,11 @@ func (s *Session) storeReaction(evt *waevents.Message) {
 }
 
 // publishStored publishes stored message id of chat again as event_message, if it is stored, so a
-// client replaces it (with its new reactions).
+// client replaces it (with its new reactions and, in a group, its sender).
 func (s *Session) publishStored(chat, id string) {
 	m, err := store.GetMessage(s.db, chat, id)
 	if err != nil {
 		return
 	}
-	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: chat, Message: WireMessage(m)})
+	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: chat, Message: wireMessage(m, s.Senders())})
 }

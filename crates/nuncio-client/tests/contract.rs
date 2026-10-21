@@ -86,12 +86,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_forty_two_documented_files() {
+fn fixture_directory_holds_the_forty_four_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 42, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 44, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -169,6 +169,7 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                     width: None,
                     height: None,
                     animated: false,
+                    sender: None,
                 },
                 Message {
                     id: "3EB0AAA0".to_owned(),
@@ -190,6 +191,7 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                     width: None,
                     height: None,
                     animated: false,
+                    sender: None,
                 },
             ],
         },
@@ -257,6 +259,7 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                 width: None,
                 height: None,
                 animated: false,
+                sender: None,
             },
         },
     );
@@ -281,6 +284,7 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
                 width: None,
                 height: None,
                 animated: false,
+                sender: None,
             },
         },
     );
@@ -405,6 +409,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                         width: None,
                         height: None,
                         animated: false,
+                        sender: None,
                     }),
                 },
                 Chat {
@@ -432,6 +437,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
                         width: None,
                         height: None,
                         animated: false,
+                        sender: None,
                     }),
                 },
                 Chat {
@@ -605,6 +611,7 @@ fn constructed_m2_frames_match_their_fixtures() {
                     width: None,
                     height: None,
                     animated: false,
+                    sender: None,
                 },
                 Message {
                     id: "3EB0AAA0".to_owned(),
@@ -626,6 +633,7 @@ fn constructed_m2_frames_match_their_fixtures() {
                     width: None,
                     height: None,
                     animated: false,
+                    sender: None,
                 },
             ],
         },
@@ -696,6 +704,7 @@ fn constructed_event_chat_and_not_confirmed_frames_match_their_fixtures() {
                 width: None,
                 height: None,
                 animated: false,
+                sender: None,
             }),
         },
     };
@@ -773,7 +782,7 @@ fn every_daemon_fixture_parses_to_its_own_variant_not_the_catch_all() {
             Err(_) => assert!(is_client, "{name}: a daemon fixture does not parse"),
         }
     }
-    assert_eq!(daemon_fixtures, 27, "every daemon fixture was checked");
+    assert_eq!(daemon_fixtures, 29, "every daemon fixture was checked");
 }
 
 /// ADR 0001: `event_chat` (and `chats`) name the phone-number chats merged into a chat in
@@ -807,6 +816,7 @@ fn a_constructed_event_chat_with_aliases_matches_its_fixture() {
                 width: None,
                 height: None,
                 animated: false,
+                sender: None,
             }),
         },
     };
@@ -892,6 +902,7 @@ fn constructed_image_and_sticker_previews_match_their_fixtures() {
                 width: Some(1280),
                 height: Some(960),
                 animated: false,
+                sender: None,
             },
         },
     );
@@ -920,6 +931,7 @@ fn constructed_image_and_sticker_previews_match_their_fixtures() {
                 width: Some(512),
                 height: Some(512),
                 animated: true,
+                sender: None,
             },
         },
     );
@@ -945,4 +957,68 @@ fn messages_without_a_preview_are_byte_identical_to_before() {
             .expect("the fixture's shape");
         assert_eq!(serde_json::to_string(&messages).unwrap(), want, "{file}");
     }
+}
+
+/// A group message names its author in `sender` (M4): constructed in Rust, an incoming one carries
+/// it, mine does not, and both group fixtures agree.
+#[test]
+fn constructed_group_messages_with_their_sender_match_their_fixtures() {
+    let dir = fixtures_dir();
+    let group = "120363000000000001@g.us".to_owned();
+    let text = |id: &str, body: &str, from_me: bool, at: &str, sender: Option<&str>| Message {
+        id: id.to_owned(),
+        kind: "text".to_owned(),
+        text: body.to_owned(),
+        from_me,
+        timestamp: at.to_owned(),
+        media: None,
+        state: None,
+        client_id: None,
+        reply_to: None,
+        reactions: Vec::new(),
+        sender: sender.map(str::to_owned),
+        thumb: None,
+        thumb_mime: None,
+        width: None,
+        height: None,
+        animated: false,
+    };
+    assert_frame(
+        &dir.join("messages_group_response.json"),
+        &DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: group.clone(),
+            messages: vec![
+                text("3EB0CCC3", "On my way", true, "2026-10-18T18:02:00Z", None),
+                text(
+                    "3EB0CCC2",
+                    "Who brings the rope?",
+                    false,
+                    "2026-10-18T18:01:00Z",
+                    Some("…0002"),
+                ),
+                text(
+                    "3EB0CCC1",
+                    "Meet at the crag",
+                    false,
+                    "2026-10-18T18:00:00Z",
+                    Some("Ana"),
+                ),
+            ],
+        },
+    );
+    assert_frame(
+        &dir.join("event_message_group.json"),
+        &DaemonFrame::EventMessage {
+            v: PROTOCOL_VERSION,
+            jid: group,
+            message: text(
+                "3EB0CCC4",
+                "Running late",
+                false,
+                "2026-10-18T18:03:00Z",
+                Some("Ana"),
+            ),
+        },
+    );
 }

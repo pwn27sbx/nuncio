@@ -197,7 +197,7 @@ func TestWireMessagesKeepsThumbnailsWithinTheFrameBudget(t *testing.T) {
 		rows = append(rows, store.Message{ID: "IMG", Kind: store.KindImage, Mime: "image/jpeg", Timestamp: t0, MediaRef: ref})
 	}
 	rows = append(rows, store.Message{ID: "TXT", Kind: store.KindText, Text: "hi", Timestamp: t0})
-	msgs := WireMessages(ada.String(), rows)
+	msgs := WireMessages(ada.String(), rows, nil)
 	total, with := 0, 0
 	for i, m := range msgs {
 		total += len(m.Thumb)
@@ -230,7 +230,7 @@ func TestServingPreviewsLogsNoThumbnailOrText(t *testing.T) {
 	_, fake, events := subscribedSession(t)
 	fake.emit(messageEvent(ada, "IMG1", false, t0, thumbImage(fakeJPEGThumb, 1, 1)))
 	fake.emit(messageEvent(ada, "STK1", false, t0, stickerMessage(true)))
-	_ = WireMessages(ada.String(), []store.Message{{ID: "BAD", Kind: store.KindImage, Text: "secret caption", MediaRef: []byte{0xff, 0xff}}})
+	_ = WireMessages(ada.String(), []store.Message{{ID: "BAD", Kind: store.KindImage, Text: "secret caption", MediaRef: []byte{0xff, 0xff}}}, nil)
 	events()
 	for _, leak := range []string{string(fakeJPEGThumb), b64(fakeJPEGThumb), string(fakePNGThumb), b64(fakePNGThumb), "the venue", "secret caption"} {
 		if strings.Contains(buf.String(), leak) {

@@ -216,6 +216,7 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
                 width: None,
                 height: None,
                 animated: false,
+                sender: None,
             }),
         }],
     };

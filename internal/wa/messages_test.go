@@ -106,7 +106,8 @@ func TestIncomingTextMessageIsStoredAsUnread(t *testing.T) {
 	fake.emit(textEvent(ada, "MSG1", false, t0.In(time.FixedZone("x", 3600)), "See you at 18:00"))
 
 	got := onlyMessage(t, db, ada.String())
-	want := store.Message{ID: "MSG1", ChatJID: ada.String(), Kind: store.KindText, Text: "See you at 18:00", Timestamp: t0}
+	want := store.Message{ID: "MSG1", ChatJID: ada.String(), Kind: store.KindText, Text: "See you at 18:00", Timestamp: t0,
+		Sender: ada.String()}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("stored %+v, want %+v", got, want)
 	}

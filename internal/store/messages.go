@@ -293,16 +293,17 @@ const previewRef = `CASE WHEN m.kind IN ('` + KindImage + `', '` + KindSticker +
 // sends of mine to that chat that are queued or not sent, which carry their State and ClientID and
 // the time they were queued. A send that was sent is listed once, as the stored message. Images and
 // stickers carry their MediaRef, from which the wire reads their preview; other kinds carry none.
+// A received message carries its recorded Sender (empty when stored before senders were recorded).
 func ListMessages(db *sql.DB, chatJID string, limit int) ([]Message, error) {
 	rows, err := db.Query(`SELECT m.id, m.chat_jid, m.kind, m.text, m.from_me, m.ts AS ts, m.read,
 			COALESCE(m.mime, ''), COALESCE(m.size, 0), COALESCE(m.file_name, ''),
-			'', '', 0 AS pending, m.seq AS seq, COALESCE(mm.reply_to, ''), `+previewRef+`
+			'', '', 0 AS pending, m.seq AS seq, COALESCE(mm.reply_to, ''), COALESCE(mm.sender, ''), `+previewRef+`
 		FROM messages m LEFT JOIN message_meta mm ON mm.chat_jid = m.chat_jid AND mm.id = m.id
 			LEFT JOIN media_refs r ON r.chat_jid = m.chat_jid AND r.id = m.id
 		WHERE m.chat_jid = ?
 		UNION ALL
 		SELECT o.message_id, o.chat_jid, 'text', o.text, 1, o.created, 1, '', 0, '', o.state, o.client_id, 1, o.seq,
-			COALESCE(r.reply_to, ''), NULL
+			COALESCE(r.reply_to, ''), '', NULL
 		FROM outbox o LEFT JOIN outbox_replies r ON r.client_id = o.client_id
 		WHERE o.chat_jid = ? AND o.state != ?
 			AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_jid = o.chat_jid AND m.id = o.message_id)
@@ -316,7 +317,7 @@ func ListMessages(db *sql.DB, chatJID string, limit int) ([]Message, error) {
 		var m Message
 		var ts, pending, seq int64
 		if err := rows.Scan(&m.ID, &m.ChatJID, &m.Kind, &m.Text, &m.FromMe, &ts, &m.Read,
-			&m.Mime, &m.Size, &m.FileName, &m.State, &m.ClientID, &pending, &seq, &m.ReplyTo, &m.MediaRef); err != nil {
+			&m.Mime, &m.Size, &m.FileName, &m.State, &m.ClientID, &pending, &seq, &m.ReplyTo, &m.Sender, &m.MediaRef); err != nil {
 			return nil, fmt.Errorf("cannot read message: %w", err)
 		}
 		m.Timestamp = fromNanos(ts)

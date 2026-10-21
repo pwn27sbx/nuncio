@@ -38,6 +38,7 @@ fn message(id: &str, kind: &str) -> Message {
         width: None,
         height: None,
         animated: false,
+        sender: None,
     }
 }
 

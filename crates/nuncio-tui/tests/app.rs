@@ -39,6 +39,7 @@ fn message(id: &str, text: &str, from_me: bool, minute: u32) -> Message {
         width: None,
         height: None,
         animated: false,
+        sender: None,
     }
 }
 

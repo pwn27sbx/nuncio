@@ -1647,19 +1647,21 @@ fn rgb(colour: Rgb) -> Color {
     Color::Rgb(colour.r, colour.g, colour.b)
 }
 
-/// Who sent the message (us, or the chat) and when; a send of ours that is not sent yet says
-/// so, so a failure stays visible, and one that was not confirmed (`unconfirmed`) says that
-/// instead, since it may have been delivered.
+/// Who sent the message (us, the group member the daemon names in `sender`, or the chat) and
+/// when; a send of ours that is not sent yet says so, so a failure stays visible, and one that
+/// was not confirmed (`unconfirmed`) says that instead, since it may have been delivered.
 fn sent_by(
     chat: Option<&Chat>,
     message: &Message,
     offset: time::UtcOffset,
     unconfirmed: bool,
 ) -> String {
-    let who = match (message.from_me, chat) {
-        (true, _) => "you".to_owned(),
-        (false, Some(chat)) => plain(&chat_title(chat)),
-        (false, None) => "them".to_owned(),
+    let sender = message.sender.as_deref().filter(|s| !s.is_empty());
+    let who = match (message.from_me, sender, chat) {
+        (true, _, _) => "you".to_owned(),
+        (false, Some(sender), _) => plain(sender),
+        (false, None, Some(chat)) => plain(&chat_title(chat)),
+        (false, None, None) => "them".to_owned(),
     };
     let state = match message.state {
         Some(MessageState::Queued) => " · queued",
@@ -1862,6 +1864,7 @@ mod tests {
             width: None,
             height: None,
             animated: false,
+            sender: None,
         };
         assert_eq!(
             super::sent_by(Some(&chat("Ada", "a@b")), &message, UTC, false),
@@ -1887,6 +1890,7 @@ mod tests {
             width: None,
             height: None,
             animated: false,
+            sender: None,
         };
         assert_eq!(
             super::sent_by(None, &message, UTC, false),

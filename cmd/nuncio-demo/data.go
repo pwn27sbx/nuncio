@@ -7,6 +7,9 @@ import (
 	"github.com/pwn27sbx/nuncio/internal/ipc"
 )
 
+// groupSenders are the invented authors of the group's incoming messages.
+var groupSenders = []string{"Lena (demo)", "Marco (demo)", "…0042"}
+
 // chat is one invented chat: its list entry and its messages, oldest first.
 type chat struct {
 	info ipc.Chat
@@ -71,6 +74,12 @@ func seed(now time.Time) []*chat {
 			text("DEMOG0006", "東京タワー 🗼 は最高でした", false, 10*time.Minute),
 		},
 		files: stickerFiles,
+	}
+	// Who wrote each incoming group message, as nunciod serves it: a name, else a masked number.
+	for i := range group.msgs {
+		if !group.msgs[i].FromMe {
+			group.msgs[i].Sender = groupSenders[i%len(groupSenders)]
+		}
 	}
 
 	long := &chat{info: ipc.Chat{JID: "15551230002@s.whatsapp.net", Name: "Long thread (demo)", Unread: 1}}

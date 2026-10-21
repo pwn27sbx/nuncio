@@ -374,8 +374,8 @@ func (d *daemon) Chats() []ipc.Chat {
 	return chats
 }
 
-// Messages lists up to limit stored messages of a chat, newest first; none
-// without a store or for a chat it has never seen.
+// Messages lists up to limit stored messages of a chat, newest first, each incoming group message
+// with its sender; none without a store or for a chat it has never seen.
 func (d *daemon) Messages(jid string, limit int) ([]ipc.Message, error) {
 	if d.db == nil {
 		return nil, nil
@@ -387,7 +387,7 @@ func (d *daemon) Messages(jid string, limit int) ([]ipc.Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	return wa.WireMessages(jid, rows), nil
+	return wa.WireMessages(jid, rows, d.senders()), nil
 }
 
 // DownloadMedia serves download_media: the session downloads the attachment into the media cache
@@ -440,7 +440,7 @@ func (d *daemon) MarkRead(jid string) (int, error) {
 }
 
 // Search serves search: up to limit stored messages of a chat that contain every word of query,
-// newest first; none without a store.
+// newest first, with their senders as Messages; none without a store.
 func (d *daemon) Search(jid, query string, limit int) ([]ipc.Message, error) {
 	if d.db == nil {
 		return nil, nil
@@ -452,7 +452,17 @@ func (d *daemon) Search(jid, query string, limit int) ([]ipc.Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	return wa.WireMessages(jid, rows), nil
+	return wa.WireMessages(jid, rows, d.senders()), nil
+}
+
+// senders names the authors of the incoming group messages of one reply (wire Message `sender`):
+// the session's resolver, which reads each sender's name once and only locally, or none for a
+// session that has no names.
+func (d *daemon) senders() func(string) string {
+	if names, ok := d.session.(interface{ Senders() func(string) string }); ok {
+		return names.Senders()
+	}
+	return nil
 }
 
 // Retry serves retry: the session sends a not-sent message again, once, under its first WhatsApp

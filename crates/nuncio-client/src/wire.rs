@@ -556,6 +556,12 @@ pub struct Message {
     /// The current reactions on this message, mine first; absent when there are none (M2).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<Reaction>,
+    /// Who wrote an incoming message in a group chat, as the daemon names her: her name, else her
+    /// number masked to its last four digits (`…0001`), else `unknown`; never a LID's digits or a
+    /// full number. Absent in a direct chat, on mine and on a group message stored before senders
+    /// were recorded; a client then shows the chat's name (added in M4).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
     /// Base64 of the thumbnail an image (JPEG) or sticker (PNG) message embeds in itself, never
     /// downloaded; absent when there is none (T15 Part 2.5).
     #[serde(default, skip_serializing_if = "Option::is_none")]

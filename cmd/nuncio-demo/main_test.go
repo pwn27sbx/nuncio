@@ -707,3 +707,33 @@ func TestMarkReadAnswersMarkedReadWithTheNewTotalAndPublishesEventUnread(t *test
 		}
 	}
 }
+
+// The group's incoming messages name their (invented) authors in `sender`, a live reply there too;
+// mine and a direct chat's carry none, so the clients' group headers can be tried by hand.
+func TestGroupMessagesNameTheirSenders(t *testing.T) {
+	sock, _ := runDemo(t, "-reply-after=50ms")
+	r := dialRaw(t, sock)
+	for _, jid := range []string{group, ana} {
+		r.send(t, map[string]any{"v": 1, "op": "messages", "jid": jid, "limit": 50})
+		msgs, _ := r.next(t)["messages"].([]any)
+		if len(msgs) == 0 {
+			t.Fatalf("%s has no messages", jid)
+		}
+		for _, raw := range msgs {
+			m := raw.(map[string]any)
+			sender, has := m["sender"].(string)
+			if want := jid == group && m["from_me"] == false; has != want || (has && sender == "") {
+				t.Errorf("%s: %s sender = %v, want one: %v", jid, m["id"], m["sender"], want)
+			}
+		}
+	}
+	ui := subscriber(t, sock)
+	if _, err := dial(t, sock).Send(group, "hello all", "c-g"); err != nil {
+		t.Fatal(err)
+	}
+	ui.until(t, "an incoming reply with its sender", func(m map[string]any) bool {
+		msg, _ := m["message"].(map[string]any)
+		sender, _ := msg["sender"].(string)
+		return m["op"] == "event_message" && msg["from_me"] == false && sender != ""
+	})
+}

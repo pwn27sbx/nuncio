@@ -449,6 +449,11 @@ type Message struct {
 	// mine first. Both are absent when empty (added in M2).
 	ReplyTo   string     `json:"reply_to,omitempty"`
 	Reactions []Reaction `json:"reactions,omitempty"`
+	// Sender names the author of an incoming message in a group chat: her name (address book,
+	// business, push name), else her number masked by MaskPhone, else "unknown"; never a LID's
+	// digits or a full number. Absent in a direct chat, on mine and on a message stored before
+	// senders were recorded (added in M4).
+	Sender string `json:"sender,omitempty"`
 	// Thumb is the thumbnail WhatsApp embeds in an image (JPEG) or sticker (PNG) message, base64 on
 	// the wire, with its ThumbMime; Width and Height are the picture's size in pixels and Animated
 	// marks an animated sticker. All are read from the message itself, never downloaded, and absent

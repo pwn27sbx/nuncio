@@ -44,6 +44,9 @@ nuncio-tui [--image <png>]
   same way (an older daemon sends no `phone`), else `unnamed group` for a group or `hidden number`
   for anyone else. A LID chat's digits are never shown: they are a hidden id, not a number (ADR
   0002).
+- **Group senders**: in a group, an incoming message's header names who wrote it, the daemon's
+  `sender` (her name, else her masked number, else `unknown`); without one (an older daemon, a
+  message stored before senders were recorded) it shows the group's name as before.
 - **Chat list** (left): name and unread count `(n)`, then `★` pinned, `⊘` muted, `▤` archived in
   a fixed column at the end of the row (one cell apart, a missing marker left blank), so the
   markers line up whatever the name; a name too long is cut with `…` before the column. In a list
@@ -259,6 +262,8 @@ What it gives you to try:
 - A text starting with `fail` ends `not sent`; `R` on it then sends it. Until then the demo, like
   `nunciod`, refuses a reply to it or a reaction on it.
 - `e` reacts, `/` searches the open chat (every word, case-insensitive).
+- In "Travel group (demo)" each incoming message names its invented author (`Lena (demo)`,
+  `Marco (demo)`, `…0042`), and so does the live reply.
 - Pictures, in "Travel group (demo)": a photo with its JPEG thumbnail (`o` fetches a 480x320
   gradient into its box), a sticker and an animated sticker (`▶`) with PNG thumbnails, and a
   sticker with none (an empty box until `o` fetches its WebP). Each sticker's WebP is a disc of its

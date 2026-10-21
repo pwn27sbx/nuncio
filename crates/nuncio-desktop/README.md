@@ -38,7 +38,8 @@ notification daemon draws it) when `nuncio_client::notify` says it deserves one:
 messages, a muted chat, a message already notified (the daemon publishes a message again when a
 reaction on it changes), the chat open in a window you can see, or with `[notifications] enabled =
 false`. The title is the chat's name (else its masked number); the body says only `New message`,
-`Photo`, `Sticker`, … unless `[notifications] show_preview = true`.
+`Photo`, `Sticker`, … unless `[notifications] show_preview = true`, which shows the text and, for a
+group message, who wrote it first (`Ana: Running late`; the title stays the group's name).
 
 - Each chat has one notification: a newer message replaces the older one's.
 - Clicking it (its `default` action, `app.open-chat` with the chat's JID) shows the window and

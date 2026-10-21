@@ -78,7 +78,7 @@ func chatReactions(db *sql.DB, chatJID string) (map[string][]Reaction, error) {
 }
 
 // SearchChat returns up to limit stored messages of one chat whose text contains every word of
-// query, newest first, each with its quoted id and reactions (and, for an image or sticker, its
+// query, newest first, each with its recorded sender, quoted id and reactions (and, for an image or sticker, its
 // MediaRef, as ListMessages). Like Search, the words are matched
 // literally, so FTS5 syntax typed by the user cannot break the query; a query with no words finds
 // nothing. A query the index cannot tokenise at all (only emoji, symbols or punctuation, which
@@ -86,7 +86,7 @@ func chatReactions(db *sql.DB, chatJID string) (map[string][]Reaction, error) {
 func SearchChat(db *sql.DB, chatJID, query string, limit int) ([]Message, error) {
 	const columns = `SELECT m.id, m.chat_jid, m.kind, m.text, m.from_me, m.ts, m.read,
 			COALESCE(m.mime, ''), COALESCE(m.size, 0), COALESCE(m.file_name, ''), COALESCE(mm.reply_to, ''),
-			` + previewRef
+			COALESCE(mm.sender, ''), ` + previewRef
 	const meta = ` LEFT JOIN message_meta mm ON mm.chat_jid = m.chat_jid AND mm.id = m.id
 		LEFT JOIN media_refs r ON r.chat_jid = m.chat_jid AND r.id = m.id`
 	const order = ` ORDER BY m.ts DESC, m.seq DESC LIMIT ?`
@@ -117,7 +117,7 @@ func SearchChat(db *sql.DB, chatJID, query string, limit int) ([]Message, error)
 		var m Message
 		var ts int64
 		if err := rows.Scan(&m.ID, &m.ChatJID, &m.Kind, &m.Text, &m.FromMe, &ts, &m.Read,
-			&m.Mime, &m.Size, &m.FileName, &m.ReplyTo, &m.MediaRef); err != nil {
+			&m.Mime, &m.Size, &m.FileName, &m.ReplyTo, &m.Sender, &m.MediaRef); err != nil {
 			return nil, fmt.Errorf("cannot read search hit: %w", err)
 		}
 		m.Timestamp = fromNanos(ts)

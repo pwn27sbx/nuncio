@@ -55,7 +55,7 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `status` | `v`, `op`, `daemon`, `linked` (bool), `session`, `unread` (int) | `status_response.json` |
 | `chats` | `v`, `op`, `chats` (array of Chat) | `chats_response.json` |
 | `error` | `v`, `op`, `code` (string), `message` (string) | `error_version_mismatch.json`, `error_not_linked.json` |
-| `messages` | `v`, `op`, `jid`, `messages` (array of Message, newest first); answers `messages` and `search` | `messages_response.json`, `search_response.json` |
+| `messages` | `v`, `op`, `jid`, `messages` (array of Message, newest first); answers `messages` and `search` | `messages_response.json`, `search_response.json`, `messages_group_response.json` |
 | `sent` | `v`, `op`, `client_id`, `state` (`sent` or `queued`), `id` and `timestamp` (only when `sent`); answers `send` and `retry` | `sent_response.json`, `sent_queued_response.json` |
 | `send_failed` | `v`, `op`, `client_id`, `message` (string); answers `send` and `retry` | `send_failed_response.json` |
 | `subscribed` | `v`, `op` | `subscribed_response.json` |
@@ -81,7 +81,7 @@ because events were lost; to avoid it, a UI drains every queued event on each ti
 
 | `op` | Fields | Fixture |
 |---|---|---|
-| `event_message` | `v`, `op`, `jid`, `message` (Message); also published when a send of mine changes state (queued, sent, not sent): a client replaces the message with the same `id` | `event_message.json`, `event_message_not_sent.json`, `event_message_image.json`, `event_message_sticker.json` |
+| `event_message` | `v`, `op`, `jid`, `message` (Message); also published when a send of mine changes state (queued, sent, not sent): a client replaces the message with the same `id` | `event_message.json`, `event_message_not_sent.json`, `event_message_image.json`, `event_message_sticker.json`, `event_message_group.json` |
 | `event_connection` | `v`, `op`, `session` | `event_connection.json` |
 | `event_unread` | `v`, `op`, `unread` (int, total), `jid`, `chat_unread` (int) | `event_unread.json` |
 | `event_focus` | `v`, `op`, `jid` | `event_focus.json` |
@@ -137,6 +137,7 @@ queued, and every attempt of that send uses it, so it stays the same across stat
 | `client_id` | string or absent | set with `state`: the `client_id` of that send, which `retry` names |
 | `reply_to` | string or absent | the id of the message this one quotes (a reply received, text or media with or without a caption, or one of mine sent with `reply_to`). Added in M2; absent means it quotes nothing |
 | `reactions` | array or absent | the current reactions on this message, mine first: `{ "emoji": string, "from_me": bool }`, one per sender. Absent when there are none. Added in M2; a client reads a missing key as no reactions |
+| `sender` | string or absent | only on an incoming message in a group chat: who wrote it, as the daemon names her (see "Chat names"): her address-book name (full, else first), else her business name, else her push name, a LID sender read through her phone number too (WhatsApp's LID map); else her phone number masked to its last four digits (`…0001`); else `unknown`. **Never the digits of a LID JID and never a full number.** Absent in a direct chat, on every message of mine, on a group message stored before M2 recorded senders, and in a chat's `last_message`. Read locally (whatsmeow's contact store and LID map) when the message is served, never over the network; each sender is read once per reply. It counts inside the frame budget below: the reply is measured with its senders before thumbnails are added. Added in M4; a client that does not know it shows what it showed before (the chat's name) |
 | `thumb` | string or absent | `image` and `sticker` only: base64 (standard, padded) of the thumbnail WhatsApp embeds in the message itself (an image's JPEG thumbnail, a sticker's PNG thumbnail). Absent when the message carries none, one larger than 64 KiB (before base64) or one whose bytes are not the JPEG or PNG it is labelled, and in a chat's `last_message`. Thumbnails never push a `messages` or `search` reply over the frame limit: the reply is measured without them, and they are added newest first while each still fits in the room left (and in 384 KiB before base64 in all); one that does not fit is left out, its `width` and `height` stay. Added in T15 Part 2.5 |
 | `thumb_mime` | string or absent | set with `thumb`: `image/jpeg` for an image, `image/png` for a sticker |
 | `width`, `height` | int or absent | `image` and `sticker` only: the picture's size in pixels, as the message states it, from 1 to 16384; each absent when 0 (unknown) or larger, and in a chat's `last_message`. Added in T15 Part 2.5 |
@@ -329,6 +330,13 @@ every `event_chat`:
   the chat as it now is.
 - Only chats already stored are named: a contact or a group with nothing stored never appears in
   `chats` because of its name.
+- The author of an incoming group message is named the same way in the message's `sender` (see
+  Message): her name by the priority of a direct chat, else her masked number, else `unknown`. A
+  client shows `sender` as the author of that message (the TUI's message header, the app's bubble
+  and its accessible label) and falls back to the chat's name when it is absent. A desktop
+  notification for it keeps the group's name as its title; the sender is prefixed to the body
+  (`Ana: Running late`) only with `[notifications] show_preview = true`, so the default
+  notification still says nothing about who wrote it.
 - A client shows `name`; when it is empty, `phone` (the masked number); when that is absent too, a
   neutral placeholder. **Never the digits of a LID JID**, which are not a phone number. The daemon
   logs no name, number or JID while doing this.

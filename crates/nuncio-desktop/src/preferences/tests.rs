@@ -224,6 +224,7 @@ fn new_message(c: &mut Controller, id: &str) -> Vec<Alert> {
             width: None,
             height: None,
             animated: false,
+            sender: None,
         },
     }));
     c.take_alerts()

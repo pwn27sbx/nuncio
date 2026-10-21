@@ -36,6 +36,7 @@ fn message(id: &str, kind: &str, text: &str, from_me: bool) -> Message {
         width: None,
         height: None,
         animated: false,
+        sender: None,
     }
 }
 
@@ -381,4 +382,29 @@ fn a_time_with_no_timestamp_shows_dashes_and_wraps_past_midnight() {
     assert_eq!(local_hhmm(&late, 60), "00:30");
     late.timestamp = String::new();
     assert_eq!(local_hhmm(&late, 60), "--:--");
+}
+
+#[test]
+fn a_group_bubble_and_its_label_name_the_sender_and_fall_back_to_the_group() {
+    const GROUP: &str = "120363000000000001@g.us";
+    let mut m = model(vec![chat(GROUP, "Climbing")]);
+    let request = m.open_selected().expect("opens");
+    let mut from_ana = message("G1", "text", "rope?", false);
+    from_ana.sender = Some("Ana".to_owned());
+    m.apply_reply(
+        &request,
+        &DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: GROUP.to_owned(),
+            messages: vec![message("G2", "text", "an old one", false), from_ana],
+        },
+    );
+    let shown = bubbles(&m, 0);
+    assert_eq!(shown[0].sender, "Ana");
+    assert_eq!(shown[0].label, "Ana, 10:05: rope?");
+    assert_eq!(
+        shown[1].sender, "Climbing",
+        "no sender: the group, as before"
+    );
+    assert_eq!(shown[1].label, "Climbing, 10:05: an old one");
 }

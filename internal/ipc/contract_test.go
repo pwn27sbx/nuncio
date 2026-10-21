@@ -268,6 +268,28 @@ func fixtureCases() []fixtureCase {
 			},
 		},
 		{
+			// A group's messages: each incoming one names its author in `sender` (a name, else the
+			// masked number); mine carries none.
+			file: "messages_group_response.json",
+			into: func() any { return &MessagesResponse{} },
+			build: func() any {
+				return MessagesResponse{V: 1, Op: OpMessages, JID: "120363000000000001@g.us", Messages: []Message{
+					{ID: "3EB0CCC3", Kind: KindText, Text: "On my way", FromMe: true, Timestamp: "2026-10-18T18:02:00Z"},
+					{ID: "3EB0CCC2", Kind: KindText, Text: "Who brings the rope?", Timestamp: "2026-10-18T18:01:00Z", Sender: "…0002"},
+					{ID: "3EB0CCC1", Kind: KindText, Text: "Meet at the crag", Timestamp: "2026-10-18T18:00:00Z", Sender: "Ana"},
+				}}
+			},
+		},
+		{
+			file: "event_message_group.json",
+			into: func() any { return &EventMessage{} },
+			build: func() any {
+				return EventMessage{V: 1, Op: OpEventMessage, JID: "120363000000000001@g.us", Message: Message{
+					ID: "3EB0CCC4", Kind: KindText, Text: "Running late", Timestamp: "2026-10-18T18:03:00Z", Sender: "Ana",
+				}}
+			},
+		},
+		{
 			file:  "retry_request.json",
 			into:  func() any { return &RetryRequest{} },
 			build: func() any { return RetryRequest{V: 1, Op: OpRetry, ClientID: "c-7f3a9e23"} },

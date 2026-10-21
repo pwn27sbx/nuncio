@@ -314,6 +314,9 @@ func (d *demo) replyLater(jid string) {
 		defer d.mu.Unlock()
 		c := d.find(jid)
 		m := ipc.Message{ID: d.newID("DEMOI"), Kind: ipc.KindText, Text: replies[d.next%len(replies)], Timestamp: ipc.Timestamp(time.Now())}
+		if strings.HasSuffix(jid, "@g.us") {
+			m.Sender = groupSenders[d.next%len(groupSenders)]
+		}
 		c.msgs = append(c.msgs, m)
 		c.info.Unread++
 		d.events.Publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: jid, Message: m})

@@ -253,7 +253,8 @@ fn mark(model: &Model, message: &Message) -> Option<SendMark> {
     })
 }
 
-/// The selected chat's loaded conversation as bubbles, oldest first.
+/// The selected chat's loaded conversation as bubbles, oldest first. A bubble's sender (and its
+/// accessible label) is `You`, the group member the daemon names in `sender`, or the chat's title.
 pub fn bubbles(model: &Model, offset_minutes: i32) -> Vec<Bubble> {
     let messages = model.loaded();
     let theirs = model
@@ -265,10 +266,11 @@ pub fn bubbles(model: &Model, offset_minutes: i32) -> Vec<Bubble> {
         .enumerate()
         .map(|(index, message)| {
             let mark = mark(model, message);
-            let sender = if message.from_me {
-                "You".to_owned()
-            } else {
-                theirs.clone()
+            // In a group, the member the daemon names in `sender`; else the chat, as before.
+            let sender = match (message.from_me, message.sender.as_deref()) {
+                (true, _) => "You".to_owned(),
+                (false, Some(sender)) if !sender.is_empty() => sender.to_owned(),
+                (false, _) => theirs.clone(),
             };
             let time = local_hhmm(message, offset_minutes);
             let quote = message

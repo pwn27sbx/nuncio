@@ -13,6 +13,10 @@
 //! - anything while `[notifications] enabled = false`.
 //!
 //! An archived chat that is not muted still notifies, as WhatsApp does.
+//!
+//! A group message is titled with the group's name, as any chat; its sender (the wire's `sender`)
+//! is not message text but still says who wrote, so it is shown only with `show_preview`, before
+//! the text (`Ana: Running late`), and the default notification names nobody.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -82,8 +86,9 @@ pub struct Notification {
     pub chat_jid: String,
     /// The chat's name, else its masked number, else `hidden number` / `unnamed group`.
     pub title: String,
-    /// The message text with `[notifications] show_preview = true`; otherwise only what kind of
-    /// message it is (`New message`, `Photo`, `Sticker`, …).
+    /// The message text with `[notifications] show_preview = true`, after its sender in a group
+    /// (`Ana: Running late`); otherwise only what kind of message it is (`New message`, `Photo`,
+    /// `Sticker`, …), never who wrote it: the title stays the group's name.
     pub body: String,
     pub message_id: String,
 }
@@ -124,10 +129,18 @@ pub fn notification_for(
         Some(chat) => chat_title(chat),
         None => title_from_jid(jid),
     };
-    let body = if config.notifications.show_preview && !message.text.trim().is_empty() {
-        message.text.clone()
-    } else {
+    let body = if !config.notifications.show_preview {
         kind_label(&message.kind).to_owned()
+    } else {
+        let what = if message.text.trim().is_empty() {
+            kind_label(&message.kind)
+        } else {
+            message.text.as_str()
+        };
+        match message.sender.as_deref() {
+            Some(sender) if !sender.is_empty() => format!("{sender}: {what}"),
+            _ => what.to_owned(),
+        }
     };
     Some(Notification {
         chat_jid: chat_jid.to_owned(),
@@ -520,5 +533,44 @@ mod tests {
         .expect("notifies");
         assert_eq!(default_action(&n), ClientFrame::focus(GROUP));
         assert_eq!(n.title, "Climbing");
+    }
+
+    fn from_ana(id: &str, kind: &str, text: &str) -> DaemonFrame {
+        let mut m = message(id, kind, text, false);
+        m.sender = Some("Ana".to_owned());
+        event(GROUP, m)
+    }
+
+    #[test]
+    fn a_group_message_keeps_the_group_title_and_names_no_sender_by_default() {
+        let n = notification_for(
+            &from_ana("M19", "text", "Running late"),
+            &chats(),
+            &hidden(),
+            &Config::default(),
+        )
+        .expect("notifies");
+        assert_eq!(
+            (n.title.as_str(), n.body.as_str()),
+            ("Climbing", "New message")
+        );
+        assert!(!n.body.contains("Ana"), "privacy: no sender by default");
+    }
+
+    #[test]
+    fn with_preview_a_group_message_body_starts_with_its_sender() {
+        let mut config = Config::default();
+        config.notifications.show_preview = true;
+        let body = |ev| {
+            notification_for(&ev, &chats(), &hidden(), &config)
+                .expect("notifies")
+                .body
+        };
+        assert_eq!(
+            body(from_ana("M20", "text", "Running late")),
+            "Ana: Running late"
+        );
+        assert_eq!(body(from_ana("M21", "image", "")), "Ana: Photo");
+        assert_eq!(body(text_event(GROUP, "M22")), "Running late");
     }
 }

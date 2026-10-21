@@ -295,11 +295,30 @@ const previewRef = `CASE WHEN m.kind IN ('` + KindImage + `', '` + KindSticker +
 // stickers carry their MediaRef, from which the wire reads their preview; other kinds carry none.
 // A received message carries its recorded Sender (empty when stored before senders were recorded).
 func ListMessages(db *sql.DB, chatJID string, limit int) ([]Message, error) {
+	return listMessages(db, chatJID, limit, true)
+}
+
+// LastMessage is the newest message of a chat as ListMessages lists it, but without its MediaRef
+// (never read), and false for a chat without messages.
+func LastMessage(db *sql.DB, chatJID string) (Message, bool, error) {
+	msgs, err := listMessages(db, chatJID, 1, false)
+	if err != nil || len(msgs) == 0 {
+		return Message{}, false, err
+	}
+	return msgs[0], true, nil
+}
+
+// listMessages is ListMessages, reading the MediaRef of images and stickers only when withRef.
+func listMessages(db *sql.DB, chatJID string, limit int, withRef bool) ([]Message, error) {
+	ref, join := `NULL`, ``
+	if withRef {
+		ref, join = previewRef, `LEFT JOIN media_refs r ON r.chat_jid = m.chat_jid AND r.id = m.id`
+	}
 	rows, err := db.Query(`SELECT m.id, m.chat_jid, m.kind, m.text, m.from_me, m.ts AS ts, m.read,
 			COALESCE(m.mime, ''), COALESCE(m.size, 0), COALESCE(m.file_name, ''),
-			'', '', 0 AS pending, m.seq AS seq, COALESCE(mm.reply_to, ''), COALESCE(mm.sender, ''), `+previewRef+`
+			'', '', 0 AS pending, m.seq AS seq, COALESCE(mm.reply_to, ''), COALESCE(mm.sender, ''), `+ref+`
 		FROM messages m LEFT JOIN message_meta mm ON mm.chat_jid = m.chat_jid AND mm.id = m.id
-			LEFT JOIN media_refs r ON r.chat_jid = m.chat_jid AND r.id = m.id
+			`+join+`
 		WHERE m.chat_jid = ?
 		UNION ALL
 		SELECT o.message_id, o.chat_jid, 'text', o.text, 1, o.created, 1, '', 0, '', o.state, o.client_id, 1, o.seq,

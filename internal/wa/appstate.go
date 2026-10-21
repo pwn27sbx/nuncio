@@ -116,14 +116,14 @@ func StoredChat(db *sql.DB, jid string, now time.Time) (ipc.Chat, error) {
 func WireChat(db *sql.DB, c store.Chat, now time.Time) (ipc.Chat, error) {
 	chat := ipc.Chat{JID: c.JID, Name: c.Name, Unread: c.Unread, Archived: c.Archived, Pinned: c.Pinned,
 		Muted: c.Muted(now)}
-	last, err := store.ListMessages(db, c.JID, 1)
+	// The chat list carries no previews (200 chats with a thumbnail each would not fit a frame), so
+	// the last message's media reference is not even read.
+	last, ok, err := store.LastMessage(db, c.JID)
 	if err != nil {
 		return ipc.Chat{}, err
 	}
-	if len(last) == 1 {
-		// The chat list carries no previews: 200 chats with a thumbnail each would not fit a frame.
-		last[0].MediaRef = nil
-		m := WireMessage(last[0])
+	if ok {
+		m := WireMessage(last)
 		chat.LastMessage = &m
 	}
 	return chat, nil

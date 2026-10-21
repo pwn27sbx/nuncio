@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"unicode/utf8"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	waevents "go.mau.fi/whatsmeow/types/events"
@@ -150,8 +151,9 @@ func side(n uint32) int {
 
 // WireMessages is wireMessage for the rows of the messages or search reply for chat jid, newest
 // first, each incoming group message named by senders (nil names none). The reply never exceeds
-// ipc.MaxFrameLen because of thumbnails: it is measured without them (its senders included), and
-// they are added back newest first while each fits in the room left in the frame (less
+// ipc.MaxFrameLen: it is measured without thumbnails (its senders included), and when that alone
+// is more than the frame less frameMargin it keeps only its newest messages that fit (fitReply).
+// Thumbnails are then added back newest first while each fits in the room left in the frame (less
 // frameMargin) and in ThumbBudget. One that does not fit is left out (its width and height stay).
 func WireMessages(jid string, rows []store.Message, senders func(string) string) []ipc.Message {
 	msgs := make([]ipc.Message, len(rows))
@@ -165,8 +167,15 @@ func WireMessages(jid string, rows []store.Message, senders func(string) string)
 	if err != nil {
 		return msgs
 	}
+	if len(bare) > ipc.MaxFrameLen-frameMargin {
+		msgs = fitReply(jid, msgs, ipc.MaxFrameLen-frameMargin)
+		if bare, err = json.Marshal(ipc.MessagesResponse{V: ipc.Version, Op: ipc.OpMessages, JID: jid, Messages: msgs}); err != nil {
+			return msgs
+		}
+	}
 	room, budget := ipc.MaxFrameLen-frameMargin-len(bare), ThumbBudget
-	for i, t := range thumbs {
+	// Only the messages the reply kept get their thumbnails back.
+	for i, t := range thumbs[:len(msgs)] {
 		cost := base64.StdEncoding.EncodedLen(len(t.Thumb)) + thumbKeys
 		if len(t.Thumb) == 0 || cost > room || len(t.Thumb) > budget {
 			continue
@@ -175,6 +184,87 @@ func WireMessages(jid string, rows []store.Message, senders func(string) string)
 		room, budget = room-cost, budget-len(t.Thumb)
 	}
 	return msgs
+}
+
+// fitReply is the newest messages of msgs whose reply for chat jid encodes in at most limit bytes
+// (without thumbnails): the oldest are left out, and a message kept is whole, except the newest when
+// it alone does not fit, whose text is cut and, when even an empty text does not fit, its file name
+// too (cutField). A client that wants an older message finds it
+// with search.
+func fitReply(jid string, msgs []ipc.Message, limit int) []ipc.Message {
+	empty, err := json.Marshal(ipc.MessagesResponse{V: ipc.Version, Op: ipc.OpMessages, JID: jid, Messages: []ipc.Message{}})
+	if err != nil {
+		return nil
+	}
+	room := limit - len(empty)
+	for i := range msgs {
+		enc, err := json.Marshal(msgs[i])
+		if err != nil {
+			return msgs[:i]
+		}
+		cost := len(enc)
+		if i > 0 {
+			cost++ // the comma before it
+		} else if cost > room {
+			if !cutField(&msgs[0], &msgs[0].Text, room) {
+				if msgs[0].Text != "" {
+					msgs[0].Text = "…"
+				}
+				if msgs[0].Media == nil || !cutField(&msgs[0], &msgs[0].Media.FileName, room) {
+					return msgs[:0]
+				}
+			}
+			enc, _ = json.Marshal(msgs[0])
+			cost = len(enc)
+		}
+		if cost > room {
+			return msgs[:i]
+		}
+		room -= cost
+	}
+	return msgs
+}
+
+// cutField cuts field, a string of m (its text or its file name), on a code point boundary (never
+// inside a UTF-8 sequence), to the longest prefix that, followed by "…", lets m encode in at most
+// room bytes. It reports false, leaving field as it was, when not even an empty prefix fits.
+func cutField(m *ipc.Message, field *string, room int) bool {
+	text := *field
+	fits := func(n int) bool {
+		*field = text[:n] + "…"
+		enc, err := json.Marshal(*m)
+		return err == nil && len(enc) <= room
+	}
+	// boundary is n moved back to the start of the code point it falls in.
+	boundary := func(n int) int {
+		for n > 0 && n < len(text) && !utf8.RuneStart(text[n]) {
+			n--
+		}
+		return n
+	}
+	if !fits(0) {
+		*field = text
+		return false
+	}
+	lo, hi := 0, len(text) // fits(lo) holds; the answer is in [lo, hi]
+	for lo < hi {
+		mid := boundary(lo + (hi-lo+1)/2)
+		if mid <= lo {
+			// No code point starts between lo and the midpoint: try the next one after lo.
+			_, size := utf8.DecodeRuneInString(text[lo:])
+			mid = lo + size
+			if mid > hi {
+				break
+			}
+		}
+		if fits(mid) {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	*field = text[:lo] + "…"
+	return true
 }
 
 // storeMessage saves one incoming or own message and publishes it with any reactions that arrived

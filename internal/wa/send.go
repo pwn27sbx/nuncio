@@ -374,9 +374,9 @@ func (s *Session) publishEntry(e store.OutboxEntry) {
 }
 
 // drain is the one pass a reconnect makes over the outbox: every queued send, oldest first, gets
-// its one attempt. A failed one stays not_sent and no later drain attempts it again; when the
-// connection drops mid-pass the rest stays queued for the next reconnect. Nothing here schedules
-// anything.
+// its one attempt. A failed one ends not_sent (refused) or not_confirmed (not acknowledged, its
+// outcome unknown) and no later drain attempts it again; when the connection drops mid-pass the
+// rest stays queued for the next reconnect. Nothing here schedules anything.
 func (s *Session) drain() {
 	queued, err := store.QueuedOutbox(s.db)
 	if err != nil {

@@ -8,7 +8,8 @@
 # 3. Every file package() copies from the source tree exists in this checkout.
 # 4. The unit, D-Bus service and desktop entries carry the lines nuncio depends on; the app icon
 #    is valid, clean SVG, installed, and named by every Icon=.
-# 5. The shell scripts parse (bash -n), and shellcheck passes when it is installed.
+# 5. The shell scripts parse (bash -n), and shellcheck passes when it is installed; every curl in
+#    install.sh carries --proto '=https' --proto-redir '=https'.
 # 6. The code agrees with the packaging: the desktop APP_ID, and the D-Bus names (bus, object,
 #    interface, UnreadCount, UnreadChanged) the bar widget uses.
 # Exits non-zero on the first failing group, after printing every failure in it.
@@ -221,6 +222,20 @@ if command -v shellcheck >/dev/null; then
 else
 	printf 'skip shellcheck (not installed)\n'
 fi
+# Every curl of install.sh (continuation lines joined, comments left out) refuses plain HTTP, on
+# redirects too.
+curls=$(sed -e ':a' -e '/\\$/N; s/\\\n[[:space:]]*/ /; ta' "$here/install.sh" | grep -E '(^|[^[:alnum:]_-])curl[[:space:]]' | grep -vE '^[[:space:]]*#')
+if [[ -z $curls ]]; then
+	fail "install.sh: no curl found to check"
+fi
+while IFS= read -r line; do
+	[[ -n $line ]] || continue
+	if grep -qF -- "--proto '=https'" <<<"$line" && grep -qF -- "--proto-redir '=https'" <<<"$line"; then
+		pass "install.sh: curl carries --proto '=https' --proto-redir '=https'"
+	else
+		fail "install.sh: a curl lacks --proto '=https' or --proto-redir '=https': $(sed -E 's/^[[:space:]]+//' <<<"$line")"
+	fi
+done <<<"$curls"
 end_group "scripts"
 
 # --- 6. the code agrees with the packaging ---

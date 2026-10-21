@@ -36,6 +36,8 @@ keys as long as T17 is open.
 
 - **Message text** is never written to a log. Notifications carry it only with
   `[notifications] show_preview = true` (off by default; otherwise "New message", "Photo", …).
+  With it, a group message's notification body starts with its sender's name (`Ana: …`); without
+  it the body names no one.
   The daemon's D-Bus face carries only `Status` and the `UnreadCount` number: no message bodies, no
   media, no chat names.
 - **Full phone numbers** are never printed or logged: the CLI and the apps mask a number to its last

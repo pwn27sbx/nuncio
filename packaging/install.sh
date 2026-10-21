@@ -136,7 +136,7 @@ confirm "Install nuncio?"
 
 if [[ -n $version ]]; then
 	for name in "$file" SHA256SUMS; do
-		curl --fail --location --proto '=https' --tlsv1.2 --silent --show-error \
+		curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --silent --show-error \
 			--output "$work/$name" "$base/$name" || die "could not download $base/$name"
 	done
 else

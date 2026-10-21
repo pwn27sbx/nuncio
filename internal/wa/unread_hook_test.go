@@ -1,6 +1,10 @@
 package wa
 
 import (
+	"bytes"
+	"log"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -99,5 +103,25 @@ func TestUnreadHookRunsWhenAnOwnMessageMergesAReadDuplicate(t *testing.T) {
 	c.emit(textEvent(adaLID, "M1", true, t0.Add(time.Minute), "mine"))
 	if n, _ := store.TotalUnread(db); n != 0 || calls.Load() == 0 {
 		t.Errorf("total %d after the merge, hook calls %d; want 0 and at least one call", n, calls.Load())
+	}
+}
+
+// A failed unread count is logged by its error type only: SQLite's text could quote a value.
+func TestAFailedUnreadCountIsLoggedByItsTypeOnly(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	db := openTestStore(t)
+	s := NewSession(&fakeClient{device: true}, db, nil)
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s.publishUnread(ada.String())
+	got := buf.String()
+	if !strings.Contains(got, "wa: cannot count the unread messages (*fmt.wrapError)") {
+		t.Errorf("log = %q, want the failed count by its error type", got)
+	}
+	if strings.Contains(got, "database is closed") {
+		t.Errorf("log = %q carries the error's text", got)
 	}
 }

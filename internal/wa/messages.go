@@ -227,14 +227,15 @@ func (s *Session) publishUnread(jid string) {
 	if changed != nil {
 		changed()
 	}
+	// A failed count is logged by its error type only: SQLite's text could quote a value.
 	total, err := store.TotalUnread(s.db)
 	if err != nil {
-		log.Printf("wa: %v", err)
+		log.Printf("wa: cannot count the unread messages (%T)", err)
 		return
 	}
 	chat, err := store.UnreadCount(s.db, jid)
 	if err != nil {
-		log.Printf("wa: %v", err)
+		log.Printf("wa: cannot count the unread messages of a chat (%T)", err)
 		return
 	}
 	s.publish(ipc.EventUnread{V: ipc.Version, Op: ipc.OpEventUnread, Unread: total, JID: jid, ChatUnread: chat})

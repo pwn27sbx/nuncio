@@ -105,7 +105,8 @@ invite links are not supported yet. Details: [docs/config.md](docs/config.md#lin
 
 nuncio-desktop shows notifications through `GApplication`, so the desktop's own notification
 daemon draws them. By default they carry no message text (only "New message",
-"Photo", …); `[notifications] show_preview = true` adds it, `enabled = false` turns them off. One
+"Photo", …); `[notifications] show_preview = true` adds it, and in a group the body then starts
+with the sender's name (`Ana: …`; without it no name is shown), `enabled = false` turns them off. One
 notification per chat, withdrawn when you open or read the chat; a click opens it. Not for muted
 chats, your own messages or the chat open in a visible window. Details:
 [docs/config.md](docs/config.md#when-a-message-notifies). The terminal app does not notify.

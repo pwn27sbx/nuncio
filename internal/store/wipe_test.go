@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -336,8 +337,16 @@ func TestWipeReportsAFileItCouldNotDeleteUnderTheSandbox(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
 	undeletableDataDir(t, syscall.EBUSY)
 
-	if err := Wipe(dir, newFakeKeyring()); err == nil {
+	err := Wipe(dir, newFakeKeyring())
+	if err == nil {
 		t.Fatal("Wipe = nil, want an error for the file it could not delete")
+	}
+	// The error names the owned entry by its fixed name, and still unwraps to the cause.
+	if !strings.Contains(err.Error(), "store: delete "+MediaDir+": ") {
+		t.Errorf("Wipe = %q, want it to name the entry: store: delete %s: ...", err, MediaDir)
+	}
+	if !errors.Is(err, fs.ErrPermission) {
+		t.Errorf("Wipe = %v, want errors.Is(err, fs.ErrPermission)", err)
 	}
 	if _, err := os.Lstat(stuck); err != nil {
 		t.Fatalf("precondition: %s should still exist: %v", stuck, err)

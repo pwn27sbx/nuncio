@@ -44,6 +44,15 @@ whatsmeow already keeps the names (all evidence from
    without it are byte for byte as before (one fixture added, `event_chat_phone.json`).
 4. A failed read keeps the stored name; logs carry the error's type only.
 
+### The `sender` of a group message (M4)
+
+An incoming group message names its author in the wire's `sender` by the same priority as a direct
+chat's name (full name, else first, else business, else push name; a LID sender read through her
+phone number too), else her masked number (`…0001`), else `unknown`; never a LID's digits and never
+a full number. A name is capped at 64 code points (its first 63 and `…`), cut on a code point
+boundary, so long names cannot push a reply past the frame limit. Each sender is read locally once
+per reply; mine and a direct chat's messages carry none.
+
 ## Alternatives considered
 
 - **Resolve at serve time, store nothing.** No event bookkeeping, but group subjects exist only in

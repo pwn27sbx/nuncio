@@ -13,6 +13,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -197,6 +198,47 @@ func TestSendersCountInsideTheFrameBudget(t *testing.T) {
 	}
 	if err := ipc.WriteFrame(io.Discard, ipc.MessagesResponse{V: 1, Op: ipc.OpMessages, JID: omarchy.String(), Messages: msgs}); err != nil {
 		t.Errorf("the messages frame cannot be written: %v", err)
+	}
+}
+
+// A sender is at most maxSenderRunes runes: a longer name is cut on a rune boundary and ends with
+// "…", so 200 group messages with long names and long texts still fit in one frame.
+func TestASenderIsCappedAt64Runes(t *testing.T) {
+	c := newNameClient()
+	db := openTestStore(t)
+	s, _, _ := lidSession(t, c, db)
+	var rows []store.Message
+	for i := 0; i < ipc.MaxChatLimit; i++ {
+		sender := fmt.Sprintf("1555%07d@s.whatsapp.net", i)
+		c.setContact(sender, Contact{PushName: fmt.Sprintf("%04d", i) + strings.Repeat("n", 3000)})
+		rows = append(rows, store.Message{ID: fmt.Sprintf("G%d", i), ChatJID: omarchy.String(), Kind: store.KindText,
+			Text: strings.Repeat("t", 4500), Timestamp: t0, Sender: sender})
+	}
+	msgs := WireMessages(omarchy.String(), rows, s.Senders())
+	for _, m := range msgs {
+		if n := utf8.RuneCountInString(m.Sender); n > 64 || len(m.Sender) > 64*utf8.UTFMax || !strings.HasSuffix(m.Sender, "…") {
+			t.Fatalf("%s sender is %d runes, %d bytes (%.12q), want at most 64 runes ending in …", m.ID, n, len(m.Sender), m.Sender)
+		}
+	}
+	if err := ipc.WriteFrame(io.Discard, ipc.MessagesResponse{V: 1, Op: ipc.OpMessages, JID: omarchy.String(), Messages: msgs}); err != nil {
+		t.Errorf("the messages frame cannot be written: %v", err)
+	}
+
+	whole := strings.Repeat("a", 64)
+	wide := strings.Repeat("é", 40) + strings.Repeat("🦊", 40)
+	for i, name := range []string{whole, wide} {
+		jid := fmt.Sprintf("1666%07d@s.whatsapp.net", i)
+		c.setContact(jid, Contact{PushName: name})
+		got := wireSender(store.Message{ChatJID: omarchy.String(), Sender: jid}, s.Senders())
+		if name == whole && got != whole {
+			t.Errorf("a 64-rune name = %q, want it whole", got)
+		}
+		if name == wide {
+			want := strings.Repeat("é", 40) + strings.Repeat("🦊", 23) + "…"
+			if !utf8.ValidString(got) || got != want {
+				t.Errorf("a multi-byte name = %q, want %q (cut on a rune)", got, want)
+			}
+		}
 	}
 }
 

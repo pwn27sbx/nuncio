@@ -72,8 +72,9 @@ func (n *unreadNotifier) run(ctx context.Context) {
 		v, err := n.count()
 		if err != nil {
 			// A store that cannot count says nothing about the total: keep the last one, so a
-			// passing SQLite error never clears the badge. The error names no count.
-			log.Printf("cannot recount the unread total for D-Bus: %v", err)
+			// passing SQLite error never clears the badge. The error is logged by its type only:
+			// SQLite's text could quote a value.
+			log.Printf("cannot recount the unread total for D-Bus (%T)", err)
 			continue
 		}
 		if v != n.last {
@@ -128,13 +129,13 @@ type busUnread struct {
 }
 
 // EmitUnread sets UnreadCount, which sends PropertiesChanged, then sends UnreadChanged. A failure
-// (the bus went away) is logged, without the count, and the daemon goes on.
+// (the bus went away) is logged by its error type, without the count, and the daemon goes on.
 func (b busUnread) EmitUnread(count int32) {
 	if err := b.setProp(count); err != nil {
-		log.Printf("cannot update %s: %v", ipc.UnreadCountProperty, err)
+		log.Printf("cannot update %s (%T)", ipc.UnreadCountProperty, err)
 	}
 	if err := b.conn.Emit(dbus.ObjectPath(ipc.ObjectPath), ipc.Interface+"."+ipc.UnreadChangedSignal, count); err != nil {
-		log.Printf("cannot emit %s: %v", ipc.UnreadChangedSignal, err)
+		log.Printf("cannot emit %s (%T)", ipc.UnreadChangedSignal, err)
 	}
 }
 

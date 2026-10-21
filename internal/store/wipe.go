@@ -69,10 +69,11 @@ func Wipe(dataDir string, kr Keyring) error {
 		}
 	}
 	// os.RemoveAll removes a symlink itself, never what it points at, and does not follow
-	// symlinks below a directory it removes.
+	// symlinks below a directory it removes. An error names the entry by its fixed name in owned,
+	// never by a user value.
 	for _, name := range owned {
 		if err := os.RemoveAll(filepath.Join(dataDir, name)); err != nil {
-			errs = append(errs, fmt.Errorf("store: %w", err))
+			errs = append(errs, fmt.Errorf("store: delete %s: %w", name, err))
 		}
 	}
 	if len(errs) == 0 {

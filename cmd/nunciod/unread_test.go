@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -298,5 +301,46 @@ func TestUnreadNotifierSkipsTheEmitWhenTheCountFails(t *testing.T) {
 	time.Sleep(5 * testWindow)
 	if got := emit.emitted(); len(got) != 1 {
 		t.Errorf("after the store recovered with the same total emitted %v, want [4]", got)
+	}
+}
+
+// lockedBuffer is a log output that the notifier's goroutine and the test share.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// A failed recount is logged by its error type only: SQLite's text could quote a value.
+func TestAFailedRecountIsLoggedByItsTypeOnly(t *testing.T) {
+	var buf lockedBuffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	n := newUnreadNotifier(func() (int, error) {
+		return 0, fmt.Errorf("near \"Ada Lovelace\": syntax error")
+	}, &fakeEmitter{}, 3, testWindow)
+	runNotifier(t, n)
+	n.Changed()
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(buf.String(), "cannot recount") && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "cannot recount the unread total for D-Bus (*errors.errorString)") {
+		t.Errorf("log = %q, want the failed recount by its error type", got)
+	}
+	if strings.Contains(got, "Ada") {
+		t.Errorf("log = %q carries the error's text", got)
 	}
 }

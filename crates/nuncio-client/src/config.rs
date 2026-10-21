@@ -185,14 +185,21 @@ impl Config {
     /// (mode 0600) renamed over it, so a failure leaves the old file whole. A missing directory is
     /// created with mode 0700. A file there that does not load ([`Config::load`] fails: an unknown
     /// key, a wrong type, bad TOML) is never overwritten. A symlink is followed: its target is
-    /// rewritten and the link stays.
+    /// rewritten and the link stays. After the rename the directory holding the file (the
+    /// link's target's, for a symlink) is flushed too, best effort: a directory that cannot be
+    /// synced does not fail a save that has already happened.
     pub fn save(&self, path: &Path) -> Result<(), SaveError> {
-        Self::write_text(path, self.to_toml_string())
+        Self::write_text(path, self.to_toml_string(), &mut sync_dir)
     }
 
     /// [`Config::save`] of an already serialised configuration: a serialisation error is
-    /// returned before anything on disk is touched.
-    fn write_text(path: &Path, text: Result<String, toml::ser::Error>) -> Result<(), SaveError> {
+    /// returned before anything on disk is touched. `sync_dir` flushes the directory that
+    /// received the rename ([`sync_dir`] in a real save; a test counts the calls).
+    fn write_text(
+        path: &Path,
+        text: Result<String, toml::ser::Error>,
+        sync_dir: &mut dyn FnMut(&Path) -> std::io::Result<()>,
+    ) -> Result<(), SaveError> {
         Self::load(path).map_err(SaveError::Invalid)?;
         let text = text.map_err(SaveError::Serialize)?;
         let write_error = |path: &Path| {
@@ -230,6 +237,10 @@ impl Config {
                 source,
             });
         }
+        // The rename is done and the file is whole; flushing the directory only makes the rename
+        // itself durable across a crash. Best effort: a filesystem or platform that cannot open or
+        // fsync a directory leaves a save that already succeeded, so its error is not returned.
+        let _ = sync_dir(&dir);
         Ok(())
     }
 
@@ -283,6 +294,11 @@ fn fill(mut file: std::fs::File, bytes: &[u8]) -> std::io::Result<()> {
     file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     file.write_all(bytes)?;
     file.sync_all()
+}
+
+/// Flush `dir`'s entries to the disk, so a rename into it survives a crash.
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
 }
 
 /// The configuration path for a given `$XDG_CONFIG_HOME` and `$HOME`, split out so it is testable
@@ -587,14 +603,14 @@ mod tests {
         let path = dir.join("config.toml");
         let mine = "[app]\nstart_hidden = true\n";
         std::fs::write(&path, mine).expect("write");
-        let err = Config::write_text(&path, failed()).expect_err("nothing to write");
+        let err = Config::write_text(&path, failed(), &mut sync_dir).expect_err("nothing to write");
         assert!(matches!(err, SaveError::Serialize(_)), "{err}");
         assert_eq!(std::fs::read_to_string(&path).expect("read"), mine);
         let names: Vec<_> = std::fs::read_dir(&dir).expect("dir").collect();
         assert_eq!(names.len(), 1, "no temporary file left: {names:?}");
         // Nor is a missing file or its directory created.
         let fresh = dir.join("nuncio").join("config.toml");
-        Config::write_text(&fresh, failed()).expect_err("nothing to write");
+        Config::write_text(&fresh, failed(), &mut sync_dir).expect_err("nothing to write");
         assert!(!dir.join("nuncio").exists());
     }
 
@@ -703,5 +719,49 @@ mod tests {
             "the link stays a link"
         );
         assert!(Config::load(&target).expect("loads").app.start_hidden);
+    }
+
+    #[test]
+    fn a_save_syncs_the_directory_of_the_resolved_target_once() {
+        let dir = temp_dir("dirsync");
+        let real = dir.join("dotfiles");
+        std::fs::create_dir(&real).expect("dir");
+        let target = real.join("config.toml");
+        std::fs::write(&target, "").expect("write");
+        let link = dir.join("config.toml");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let mut synced = Vec::new();
+        let mut config = Config::default();
+        config.app.start_hidden = true;
+        Config::write_text(&link, config.to_toml_string(), &mut |dir: &Path| {
+            synced.push(dir.to_owned());
+            Ok(())
+        })
+        .expect("saves");
+        let resolved = std::fs::canonicalize(&real).expect("canonical");
+        assert_eq!(synced, vec![resolved]);
+        assert!(Config::load(&link).expect("loads").app.start_hidden);
+    }
+
+    #[test]
+    fn a_directory_that_cannot_be_synced_still_saves() {
+        let dir = temp_dir("dirsync-fails");
+        let path = dir.join("config.toml");
+        let mut calls = 0;
+        let mut config = Config::default();
+        config.app.start_hidden = true;
+        Config::write_text(&path, config.to_toml_string(), &mut |_: &Path| {
+            calls += 1;
+            Err(std::io::Error::from(std::io::ErrorKind::Unsupported))
+        })
+        .expect("an unsupported directory sync is not a failed save");
+        assert_eq!(calls, 1);
+        assert_eq!(Config::load(&path).expect("loads"), config);
+    }
+
+    #[test]
+    fn the_real_directory_sync_works_on_a_directory() {
+        let dir = temp_dir("dirsync-real");
+        sync_dir(&dir).expect("a directory can be synced here");
     }
 }

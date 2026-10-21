@@ -20,32 +20,12 @@ pub const TIMEOUT: Duration = Duration::from_millis(200);
 pub const MAX_RADIUS: u32 = 64;
 
 /// Why Hyprland's rounding is not used.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 pub enum RoundingError {
-    Run(RunError),
+    #[error(transparent)]
+    Run(#[from] RunError),
+    #[error("hyprctl answered something other than a rounding: {0:?}")]
     Unexpected(String),
-}
-
-impl std::fmt::Display for RoundingError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Run(error) => error.fmt(f),
-            Self::Unexpected(out) => {
-                write!(
-                    f,
-                    "hyprctl answered something other than a rounding: {out:?}"
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for RoundingError {}
-
-impl From<RunError> for RoundingError {
-    fn from(error: RunError) -> Self {
-        Self::Run(error)
-    }
 }
 
 /// The window corner radius in pixels: `Ok(None)` when not on Hyprland (nothing is run),
@@ -209,5 +189,32 @@ mod tests {
         let garbage = Fake::new(|| Ok(b"Couldn't connect to the Hyprland socket\n".to_vec()));
         let err = rounding(signature(), &garbage).expect_err("garbage");
         assert!(err.to_string().contains("Couldn't connect"), "{err}");
+    }
+
+    #[test]
+    fn each_error_message_is_unchanged() {
+        let run = |error| RoundingError::from(error).to_string();
+        assert_eq!(
+            run(RunError::NotFound("hyprctl".to_owned())),
+            "hyprctl is not installed"
+        );
+        assert_eq!(
+            run(RunError::TimedOut {
+                program: "hyprctl".to_owned(),
+                timeout: Duration::from_millis(200),
+            }),
+            "hyprctl did not answer within 200ms"
+        );
+        assert_eq!(
+            run(RunError::Io {
+                program: "hyprctl".to_owned(),
+                source: std::io::Error::other("denied"),
+            }),
+            "cannot run hyprctl: denied"
+        );
+        assert_eq!(
+            RoundingError::Unexpected("nope".to_owned()).to_string(),
+            r#"hyprctl answered something other than a rounding: "nope""#
+        );
     }
 }

@@ -18,6 +18,8 @@ futures-channel = "0.3"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # Already in Cargo.lock (through nuncio-client): `hyprctl -j` output.
 serde_json = "1.0"
+# Already in Cargo.lock (through nuncio-client): the error types, as nuncio-client writes them.
+thiserror = "2.0"
 
 [dev-dependencies]
 # Already in Cargo.lock: test thumbnails, as the wire carries them.

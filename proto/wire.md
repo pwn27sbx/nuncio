@@ -183,11 +183,26 @@ read, so the Go client waits up to 90 s for that reply.
 Name `io.github.pwn27sbx.nuncio` on the **session** bus, at object path
 `/io/github/pwn27sbx/nuncio`, interface `io.github.pwn27sbx.nuncio`, with an activation file at
 `~/.local/share/dbus-1/services/io.github.pwn27sbx.nuncio.service` (installed by us, no root).
-It exposes a `Status` method and an `UnreadCount` property (int). It exists for:
+It exposes a `Status` method, an `UnreadCount` property (`i`, read-only) and an `UnreadChanged`
+signal (`i count`), and answers `org.freedesktop.DBus.Introspectable` and
+`org.freedesktop.DBus.Properties` on that object. It exists for:
 
 - **activation on demand** — a client calling the name starts the daemon;
 - **single instance** — the daemon owns the name, so a second start exits;
 - **unread count** — property `UnreadCount` (int) plus signal `UnreadChanged`.
+
+`UnreadCount` is the total of incoming messages not read yet across every chat, archived and muted
+ones included: the sum of the per-chat `unread` that `chats` lists, and the `unread` of `status` (0
+while unlinked, and 0 once a logout or purge closed the store). It is kept current: after every
+change that may move it (an incoming message stored, a chat read through `mark_read` or on another
+device, a contact's phone-number chat merged into her LID chat) the daemon waits 200 ms, recounts
+from the store and, only when the total differs from the last one published, sets the property
+(which sends `org.freedesktop.DBus.Properties.PropertiesChanged` with the new value) and emits
+`UnreadChanged(count)`. Everything that happens within those 200 ms lands in one count, so a burst
+(the messages a reconnect brings in) emits at most five times a second, and an unchanged total, or a
+recount the store fails, emits nothing. The bus is fed from its own goroutine: a slow or absent bus
+never holds up message handling. The signal carries the total only, never a chat, a name or a
+number.
 
 Message bodies and media never travel over D-Bus.
 
@@ -307,7 +322,7 @@ LID JID is the contact's chat (the *canonical* JID) and the phone-number JID is 
 | `send` to a phone-number JID whose LID is known | sent to, stored in and published for the LID chat; `retry` of it acts there too |
 | `send` to a phone-number JID whose LID is not known yet | as before, except that WhatsApp's routing teaches the daemon the LID during the send: the sent message is then stored in the LID chat and anything stored under the number moves there (see the merge below) |
 | `reply_to` across the two JIDs | resolves: a quote of a message sent to the phone number, or of one received in the LID chat, finds it in the one chat |
-| A chat stored under a phone number whose LID becomes known (at daemon start, or when a message, a send or WhatsApp itself teaches the mapping) | merged into the LID chat in one transaction: its messages (an id stored in both kept once, read if either copy was read), reactions, outbox entries, media references and search index move; pinned if either was pinned, archived only if both were, muted until the later end, the LID chat's name or else the alias's. Then `event_chat` with the merged chat and the number in its `aliases`. A merge that fails changes nothing and leaves both chats listed; until the daemon restarts, the phone-number JID is then served as its own chat, as when its LID is not known |
+| A chat stored under a phone number whose LID becomes known (at daemon start, or when a message, a send or WhatsApp itself teaches the mapping) | merged into the LID chat in one transaction: its messages (an id stored in both kept once, read if either copy was read), reactions, outbox entries, media references and search index move; pinned if either was pinned, archived only if both were, muted until the later end, the LID chat's name or else the alias's. Then `event_chat` with the merged chat and the number in its `aliases`, followed by `event_unread` with the new total and the LID chat's count (a message stored in both is counted once, so the total can drop). A merge that fails changes nothing and leaves both chats listed; until the daemon restarts, the phone-number JID is then served as its own chat, as when its LID is not known |
 | A chat merged into its LID chat, as clients see it | the LID chat lists the phone-number JID in `aliases`, in `chats` and in the `event_chat` published after the merge (at daemon start too, so a client that reconnects learns it from `chats`). A client holding that phone-number JID anywhere (a list entry, the open or selected chat, a draft's chat, loaded messages, pending requests) moves it to the LID chat: it drops the phone-number entry (or renames it when the LID chat is not listed), keys everything by the LID JID, and a selection or draft on the number follows it. It never adopts a number that the same `chats` list also lists as a chat of its own. The reply to a request naming the number (its `jid`) is a second source. When a `chats` list no longer has the chat a client has open and neither `aliases` nor a reply explains it, the client never moves a draft to another chat (nuncio-tui keeps the vanished chat selected and blocks sending until the user chooses a chat again) |
 | A phone number whatsmeow remaps to another LID (a recycled number), or a merge that failed | not listed in `aliases` of the old chat; the number is served as its own chat |
 | The LID of a phone number is not known | exactly the behaviour before T15: the phone-number chat is its own chat; nothing is guessed, and no chat lists `aliases` |

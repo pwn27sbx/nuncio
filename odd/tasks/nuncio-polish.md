@@ -14,10 +14,11 @@ Branch: `feat/m4-omarchy` (continues from `a028a65`). Delivery: `single-pr`. Run
 |---|---|---|---|---|
 | G1 | S1(1) group senders: wire field + store/wa + TUI + desktop | delegated writer (parallel with G2); Risk 3 → verifier | done: RED per rule, 15 mutants killed; verifier PASS, 0 blockers (no LID digits or full numbers in sender, no names in logs, 0 network calls over 200 messages, direct-chat frames and TUI renders byte-identical to baseline); parent reran cargo 425/0 + smoke, go all ok | this commit |
 | G2 | S1(2) app icon SVG + packaging install | delegated writer (parallel with G1) | done: envelope + seal, scalable 128 and symbolic 16; check.sh verifies clean SVG, viewBox and every Icon= | 0454d99 |
-| G3 | S1(3) T18 UnreadChanged + live UnreadCount | after G1 (shares internal/wa); Risk 4 → verifier | open | |
+| G3 | S1(3) T18 UnreadChanged + live UnreadCount | delegated writer after G1; Risk 3, 4 → verifier | done: coalesced notifier (200 ms window, emits only on change, never blocks the session), PropertiesChanged + UnreadChanged + Introspectable; RED per rule, 11 mutants killed; verifier B1 (alias merge lowered the total without notifying) and A1 (a failed count emitted 0) fixed, recheck FIXED; real-bus tests skip on the Mac (first run at home); parent reran the full suite | this commit |
 | G4 | S1(4) minor advisories | after G3 | open | |
 
 ## Log
 
 - L1 (2026-10-21, owner): "si empieza por los primero 4".
 - L2 G1 verifier advisories: A1 a reply already near MaxFrameLen without thumbnails can be pushed over by senders (same class as long texts at HEAD; push names cap at 25) — cap sender at ~64 runes; A2 notification body markup unchecked (pre-existing with message text). Docs to update: SECURITY.md and INTEGRATIONS.md show_preview lines, ADR 0002, README status (icon exists now).
+- L3 G3 left: a failed recount keeps the last value with no retry until the next change; the notifier is not awaited at shutdown (harmless); dbus-broker delivery of NameOwnerChanged to busctl monitor unverified (home, contrib README step 5); BarWidget.qml not linted (no qmllint on the Mac).

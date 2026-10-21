@@ -9,6 +9,8 @@
 # 4. The unit, D-Bus service and desktop entries carry the lines nuncio depends on; the app icon
 #    is valid, clean SVG, installed, and named by every Icon=.
 # 5. The shell scripts parse (bash -n), and shellcheck passes when it is installed.
+# 6. The code agrees with the packaging: the desktop APP_ID, and the D-Bus names (bus, object,
+#    interface, UnreadCount, UnreadChanged) the bar widget uses.
 # Exits non-zero on the first failing group, after printing every failure in it.
 set -uo pipefail
 
@@ -236,6 +238,18 @@ elif [[ $app_id_defs == "$app_id" ]]; then
 else
 	fail "crates/nuncio-desktop APP_ID is $app_id_defs, the packaging says $app_id"
 fi
+# The bar widget reads the daemon's D-Bus face by the names internal/ipc/connect.go exports.
+widget=$root/contrib/omarchy/bar-widget/BarWidget.qml
+for const in DaemonName ObjectPath Interface UnreadCountProperty UnreadChangedSignal; do
+	value=$(sed -n "s/^[[:space:]]*$const[[:space:]]*= \"\(.*\)\"$/\1/p" "$root/internal/ipc/connect.go")
+	if [[ -z $value ]]; then
+		fail "internal/ipc/connect.go defines no $const"
+	else
+		has "$widget" "\"$value\"" "bar widget: names the code's $const ($value)"
+	fi
+done
+# Reading the count must never start the daemon through D-Bus activation.
+has "$widget" '"--auto-start=no"' "bar widget: reads UnreadCount with --auto-start=no"
 end_group "code agreement"
 
 printf 'check.sh: all packaging checks passed\n'

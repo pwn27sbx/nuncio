@@ -106,7 +106,10 @@ type Session struct {
 	drops   uint64
 	started bool
 	events  *ipc.Broker
-	backoff *Backoff
+	// unreadChanged, when not nil, runs after every change that may move the total unread count
+	// (SetUnreadChanged); it must not block.
+	unreadChanged func()
+	backoff       *Backoff
 	// after schedules f once after d and returns its cancel; time.AfterFunc outside tests.
 	after  func(d time.Duration, f func()) (cancel func() bool)
 	cancel func() bool // the pending reconnect, nil when none
@@ -160,6 +163,16 @@ func (s *Session) StopReason() string {
 func (s *Session) SetEvents(b *ipc.Broker) {
 	s.mu.Lock()
 	s.events = b
+	s.mu.Unlock()
+}
+
+// SetUnreadChanged makes the session call f after every change that may move the total unread
+// count: an incoming message stored, a chat read here (mark_read) or on another device (app
+// state). f must return at once; the daemon's D-Bus face recounts and emits on its own goroutine.
+// Call it before Start.
+func (s *Session) SetUnreadChanged(f func()) {
+	s.mu.Lock()
+	s.unreadChanged = f
 	s.mu.Unlock()
 }
 

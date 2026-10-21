@@ -19,6 +19,11 @@ const (
 	DaemonName = "io.github.pwn27sbx.nuncio"
 	ObjectPath = "/io/github/pwn27sbx/nuncio"
 	Interface  = "io.github.pwn27sbx.nuncio"
+	// UnreadCountProperty is the read-only int32 property with the total unread count, and
+	// UnreadChangedSignal the signal (one int32, the new total) emitted with PropertiesChanged
+	// whenever that total changes.
+	UnreadCountProperty = "UnreadCount"
+	UnreadChangedSignal = "UnreadChanged"
 )
 
 // ClientName is what the thin `nuncio` CLI sends in its hello frame.

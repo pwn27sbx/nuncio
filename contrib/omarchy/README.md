@@ -60,14 +60,17 @@ Quickshell has no generic D-Bus API, so the widget runs `busctl` (part of system
 - `busctl --user --auto-start=no get-property io.github.pwn27sbx.nuncio /io/github/pwn27sbx/nuncio io.github.pwn27sbx.nuncio UnreadCount`
   prints `i <n>`. `--auto-start=no` means the bar never starts the daemon just to read it.
   If the daemon is not running, the read fails and the badge hides.
-- `busctl --user monitor --match "type='signal',path='/io/github/pwn27sbx/nuncio'"` runs for
-  as long as the bar does. Any `UnreadChanged` or `PropertiesChanged` line triggers a read.
-- A read every 30 seconds as a fallback. Today the daemon publishes `UnreadCount` once, at
-  start, and does not emit `UnreadChanged` yet (handoff T18, TODO at
-  `wa.(*Session).publishUnread`). Until T18 lands, the badge shows the count from when the
-  daemon started and only changes when the daemon restarts. Once T18 updates the property
-  (godbus `prop.EmitTrue` sends `PropertiesChanged`) or emits `UnreadChanged`, the monitor
-  picks it up right away.
+- `busctl --user monitor --match "type='signal',path='/io/github/pwn27sbx/nuncio'" --match
+  "type='signal',sender='org.freedesktop.DBus',member='NameOwnerChanged',arg0='io.github.pwn27sbx.nuncio'"`
+  runs for as long as the bar does. The daemon emits `PropertiesChanged` and `UnreadChanged`
+  whenever the total moves (recounted 200 ms after a change, so at most five times a second),
+  and the bus sends `NameOwnerChanged` when the daemon starts or stops; any of those lines
+  triggers a read right away. A monitor that ends is started again after 5 s, backing off to
+  5 min while it keeps failing.
+- A read every 5 minutes as a fallback, for the time the monitor is down.
+
+The count is the total of incoming messages not read yet across every chat, archived and muted ones
+included: the sum of the per-chat `unread` that `chats` lists, and the `unread` of `status`.
 
 ## Verify at home
 
@@ -83,9 +86,11 @@ Acceptance (plan, M4): "the bar widget shows and clears unread; the hotkey launc
    it comes back.
 4. Read by hand: the `get-property` command above prints `i <n>` while the daemon runs,
    and fails with the daemon stopped (it must not start it).
-5. Badge: with unread messages it shows the number (99+ above 99). Reading the chats in
-   the app and restarting nunciod brings it to 0 within 30 s, and the badge hides. After
-   T18 it should clear right away, without the restart.
+5. Badge: with unread messages it shows the number (99+ above 99). A new message raises it
+   and reading the chat in the app brings it down within a second, without a restart; at 0
+   the badge hides. Stopping nunciod hides it right away (the name loses its owner), and
+   starting it again shows the count. `busctl --user introspect io.github.pwn27sbx.nuncio
+   /io/github/pwn27sbx/nuncio` lists `UnreadCount` and `UnreadChanged`.
 6. Monitor: `busctl --user monitor --match "type='signal',path='/io/github/pwn27sbx/nuncio'"`
    runs without an error (it confirms the `--match` option and that monitoring the user bus
    needs no extra rights).

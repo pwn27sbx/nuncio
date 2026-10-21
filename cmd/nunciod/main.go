@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"github.com/godbus/dbus/v5/introspect"
 	"github.com/godbus/dbus/v5/prop"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
@@ -106,7 +107,8 @@ func run() error {
 	d.dataDir, d.keyring, d.socket = filepath.Dir(dbPath), store.SecretService{}, socket
 
 	if bus != nil {
-		if err := exportDBus(bus, d); err != nil {
+		emit, err := exportDBus(bus, d)
+		if err != nil {
 			return err
 		}
 		reply, err := bus.RequestName(ipc.DaemonName, dbus.NameFlagDoNotQueue)
@@ -117,6 +119,10 @@ func run() error {
 			log.Printf("another nunciod already owns %s; exiting", ipc.DaemonName)
 			return nil
 		}
+		// UnreadCount follows the store from here on; the notifier stops when run returns.
+		notifyCtx, stopNotify := context.WithCancel(context.Background())
+		defer stopNotify()
+		go d.notifyUnread(emit, unreadWindow).run(notifyCtx)
 	}
 
 	// Connect only once this process is the one instance, so a second daemon
@@ -194,29 +200,32 @@ func nameIsOwned(bus *dbus.Conn) bool {
 	return call.Store(&owner) == nil && owner != ""
 }
 
-func exportDBus(bus *dbus.Conn, d *daemon) error {
+// exportDBus exports the daemon's object and returns what keeps its UnreadCount current.
+func exportDBus(bus *dbus.Conn, d *daemon) (unreadEmitter, error) {
+	path := dbus.ObjectPath(ipc.ObjectPath)
 	// The D-Bus face is a separate type because godbus only exports methods
 	// whose last return value is *dbus.Error, and the daemon's ipc.Handler
 	// signature cannot carry that.
-	if err := bus.Export(&dbusFace{d}, dbus.ObjectPath(ipc.ObjectPath), ipc.Interface); err != nil {
-		return fmt.Errorf("export %s on the session bus: %w", ipc.ObjectPath, err)
+	if err := bus.Export(&dbusFace{d}, path, ipc.Interface); err != nil {
+		return nil, fmt.Errorf("export %s on the session bus: %w", ipc.ObjectPath, err)
 	}
-	// UnreadCount is the daemon's only property: the store's total unread at
-	// startup (0 while unlinked). Keeping it current and emitting the
-	// UnreadChanged signal the contract names come with event streaming.
-	if _, err := prop.Export(bus, dbus.ObjectPath(ipc.ObjectPath), map[string]map[string]*prop.Prop{
-		ipc.Interface: {
-			"UnreadCount": {Value: int32(d.Status().Unread), Writable: false, Emit: prop.EmitTrue},
-		},
-	}); err != nil {
-		return fmt.Errorf("export the D-Bus properties of %s: %w", ipc.ObjectPath, err)
+	// UnreadCount is the daemon's only property: the store's total unread (Status().Unread, 0
+	// while unlinked), kept current by notifyUnread, which also emits UnreadChanged.
+	props, err := prop.Export(bus, path, map[string]map[string]*prop.Prop{
+		ipc.Interface: {ipc.UnreadCountProperty: unreadProp(d.Status().Unread)},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("export the D-Bus properties of %s: %w", ipc.ObjectPath, err)
 	}
-	return nil
+	if err := bus.Export(introspect.NewIntrospectable(introspectNode()), path, "org.freedesktop.DBus.Introspectable"); err != nil {
+		return nil, fmt.Errorf("export the introspection data of %s: %w", ipc.ObjectPath, err)
+	}
+	return busUnread{conn: bus, props: props}, nil
 }
 
 // dbusFace is the thin session-bus face of the daemon: the Status method and,
-// through prop.Export, the UnreadCount property. Message bodies and media never
-// travel over D-Bus.
+// through prop.Export, the UnreadCount property, with the UnreadChanged signal
+// (unread.go). Message bodies and media never travel over D-Bus.
 type dbusFace struct {
 	d *daemon
 }
@@ -273,6 +282,9 @@ type daemon struct {
 	// closed is set once Wipe closed the session and its store: from then on nothing is served
 	// from the store, even if the wipe failed and the daemon keeps serving.
 	closed atomic.Bool
+	// unreadChanged, when not nil, flags the D-Bus face that the total unread may have moved
+	// (notifyUnread); it never blocks.
+	unreadChanged func()
 }
 
 // errClosed answers a store read after a wipe closed the store.
@@ -325,15 +337,21 @@ func (d *daemon) Status() ipc.Status {
 }
 
 func (d *daemon) unread() int {
-	if d.db == nil || d.closed.Load() {
-		return 0
-	}
-	n, err := store.TotalUnread(d.db)
+	n, err := d.unreadCount()
 	if err != nil {
 		log.Print(err)
 		return 0
 	}
 	return n
+}
+
+// unreadCount is the store's total unread: 0 without a store or once a wipe closed it, and the
+// store's error when it cannot count.
+func (d *daemon) unreadCount() (int, error) {
+	if d.db == nil || d.closed.Load() {
+		return 0, nil
+	}
+	return store.TotalUnread(d.db)
 }
 
 // Chats lists the stored chats, newest message first, each with its name, unread
@@ -508,6 +526,11 @@ func (d *daemon) Wipe(unlink bool) error {
 	}
 	d.session.Close()
 	d.closed.Store(true)
+	// The store is closed, so the total is 0 from now on: the bar's badge clears even when the
+	// deletion below fails and the daemon keeps serving.
+	if d.unreadChanged != nil {
+		d.unreadChanged()
+	}
 	if err := store.Wipe(d.dataDir, d.keyring); err != nil {
 		log.Print(err)
 		return errors.New("could not delete all of nuncio's local data; run nuncio purge --confirm to finish")

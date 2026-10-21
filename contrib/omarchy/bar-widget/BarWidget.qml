@@ -9,11 +9,11 @@
 // UPower), so the widget asks `busctl`, which ships with systemd:
 //   - `busctl get-property` reads the count; `--auto-start=no` keeps the bar from
 //     starting the daemon through D-Bus activation just to read a number.
-//   - `busctl monitor` watches the daemon's object for `UnreadChanged` and
-//     `PropertiesChanged` signals and triggers a read when one arrives.
-//   - A 30 s poll covers what the signals do not yet: until nunciod emits
-//     UnreadChanged and keeps UnreadCount live (handoff T18), the property is the
-//     count at the daemon's start, and the poll is what picks up a restart.
+//   - `busctl monitor` watches the daemon's object for the `UnreadChanged` and
+//     `PropertiesChanged` signals nunciod emits whenever the total changes (at most one
+//     per 200 ms), and the bus for the daemon's name changing owner (it started or
+//     stopped); any of them triggers a read right away.
+//   - A 5 min poll is only a fallback, for a monitor that is down while it backs off.
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -85,12 +85,14 @@ BarWidget {
     id: monitorProc
     running: true
     command: ["busctl", "--user", "monitor",
-      "--match", "type='signal',path='" + root.objectPath + "'"]
+      "--match", "type='signal',path='" + root.objectPath + "'",
+      "--match", "type='signal',sender='org.freedesktop.DBus',member='NameOwnerChanged',arg0='" + root.busName + "'"]
     stdout: SplitParser {
       onRead: function(line) {
         root.monitorDelay = root.monitorDelayMin
         var s = String(line)
-        if (s.indexOf("UnreadChanged") !== -1 || s.indexOf("PropertiesChanged") !== -1) root.refresh()
+        if (s.indexOf("UnreadChanged") !== -1 || s.indexOf("PropertiesChanged") !== -1 ||
+            s.indexOf("NameOwnerChanged") !== -1) root.refresh()
       }
     }
     // A monitor that ends (the bus restarted, busctl refused the match) is started again
@@ -109,8 +111,9 @@ BarWidget {
     onTriggered: monitorProc.running = true
   }
 
+  // The fallback poll: the monitor above is what keeps the badge current.
   Timer {
-    interval: 30000
+    interval: 300000
     running: true
     repeat: true
     triggeredOnStart: true

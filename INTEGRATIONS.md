@@ -48,16 +48,21 @@ Two names on the session bus, never mixed:
 
 | Name | Owner | What it offers |
 | --- | --- | --- |
-| `io.github.pwn27sbx.nuncio` | `nunciod` | object `/io/github/pwn27sbx/nuncio`, interface `io.github.pwn27sbx.nuncio`: the `Status` method and the read-only `UnreadCount` property (`int32`, the total unread) |
+| `io.github.pwn27sbx.nuncio` | `nunciod` | object `/io/github/pwn27sbx/nuncio`, interface `io.github.pwn27sbx.nuncio`: the `Status` method, the read-only `UnreadCount` property (`int32`, the total unread), the `UnreadChanged(int32 count)` signal, and introspection |
 | `io.github.pwn27sbx.nuncio.Desktop` | `nuncio-desktop` | its `GApplication` id (activate, open, `--gapplication-service`) |
 
 The daemon takes its name only after its socket listens, so owning the name means clients can
 connect. Messages and media never travel over D-Bus; the apps use the Unix socket
 (`$XDG_RUNTIME_DIR/nuncio/core.sock`, protocol in [proto/wire.md](proto/wire.md)).
 
-**Pending (T18):** `UnreadCount` is set once when the daemon starts and is not kept current, and
-the `UnreadChanged` signal is not emitted yet. Until then the bar badge polls every 30 s and only
-changes when the daemon restarts.
+`UnreadCount` is the total of incoming messages not read yet across every chat, archived and muted
+ones included: the sum of the per-chat `unread` that `chats` lists, and the `unread` of `status`; 0
+while unlinked. It is kept current: after a change (a message stored, a chat read here or on the
+phone, a contact's two chats merged into one) the daemon recounts once 200 ms have passed and, when
+the total moved, sets the property (`PropertiesChanged`) and emits `UnreadChanged` with the new
+total. A burst of changes within those 200 ms gives one emit, so the bus sees at most five a second,
+and an unchanged total (or a recount the store fails) sends nothing. The bar badge reads it on those
+signals; its 5 min poll is only a fallback.
 
 To read it by hand:
 

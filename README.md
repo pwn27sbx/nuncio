@@ -25,8 +25,7 @@ about.**
   is written but has **never been built or installed on Linux**. Acceptance on Arch/Omarchy is
   pending.
 - Not done yet: the Signal state still lives in `nuncio.db`, not behind the keyring (T17, see
-  [SECURITY.md](SECURITY.md)); the daemon's D-Bus `UnreadCount` is set once at start and not kept
-  current (T18); there is no app icon.
+  [SECURITY.md](SECURITY.md)).
 
 Linking an unofficial client is against WhatsApp's Terms of Service and accounts have been banned
 for it. Use a spare number, never the one that carries your two-factor authentication.

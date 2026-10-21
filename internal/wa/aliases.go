@@ -113,9 +113,10 @@ func (s *Session) mergeKnownAliases() {
 }
 
 // mergeAlias moves what is stored under the phone-number chat pn into the LID chat lid (one
-// transaction, see store.MergeChat) and publishes the merged chat as event_chat. It reports false
-// when the merge failed, now or earlier in this session: a failure leaves both chats as they were
-// and is logged once per chat for the life of the session, with neither JID in the log.
+// transaction, see store.MergeChat) and publishes the merged chat as event_chat, then its unread
+// counts as event_unread. It reports false when the merge failed, now or earlier in this session:
+// a failure leaves both chats as they were and is logged once per chat for the life of the
+// session, with neither JID in the log.
 func (s *Session) mergeAlias(pn, lid string) bool {
 	if s.db == nil {
 		return true
@@ -143,6 +144,9 @@ func (s *Session) mergeAlias(pn, lid string) bool {
 		// the name is resolved again before the one event_chat of the merge.
 		s.storeName(lid)
 		s.publishChat(lid)
+		// A message stored under both chats is kept once, its read state folded in, so the merge
+		// can lower the unread counts: publish them (and tell the D-Bus face) like any change.
+		s.publishUnread(lid)
 	}
 	return true
 }

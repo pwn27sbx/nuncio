@@ -217,9 +217,16 @@ func (s *Session) storeMessage(evt *waevents.Message) {
 	s.nameNewChat(m.ChatJID)
 }
 
-// publishUnread publishes the total unread count and that of chat jid.
-// TODO(T8 D-Bus unit): emit UnreadChanged on the session bus from the same point.
+// publishUnread publishes the total unread count and that of chat jid, and tells the unread hook
+// (SetUnreadChanged) that the total may have moved: the D-Bus face recounts and emits
+// UnreadChanged from its own goroutine, so this never waits for the bus.
 func (s *Session) publishUnread(jid string) {
+	s.mu.Lock()
+	changed := s.unreadChanged
+	s.mu.Unlock()
+	if changed != nil {
+		changed()
+	}
 	total, err := store.TotalUnread(s.db)
 	if err != nil {
 		log.Printf("wa: %v", err)

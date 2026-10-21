@@ -131,8 +131,16 @@ application). The daemon keeps `io.github.pwn27sbx.nuncio`; the app becomes
 **The code change (resolved):** `APP_ID` in `crates/nuncio-desktop/src/args.rs` is
 `io.github.pwn27sbx.nuncio.Desktop`, and `nuncio-desktop` accepts `--gapplication-service` (its
 argument parser used to reject every unknown flag), so the app's D-Bus service and the autostart
-entry start it; `check.sh`'s last group checks that `APP_ID` matches. Still open: there is no
-icon yet, so `Icon=io.github.pwn27sbx.nuncio.Desktop` names one that nothing installs.
+entry start it; `check.sh`'s last group checks that `APP_ID` matches.
+
+**The icon:** `Icon=io.github.pwn27sbx.nuncio.Desktop` in every `.desktop` file names the icon in
+`icons/hicolor/`, original artwork (a sealed envelope with an "n" on the wax seal; nuncio is not
+affiliated with WhatsApp and uses none of its marks): a full-colour
+`scalable/apps/io.github.pwn27sbx.nuncio.Desktop.svg` (128×128 viewBox) and a monochrome
+`symbolic/apps/io.github.pwn27sbx.nuncio.Desktop-symbolic.svg` (16×16) that GTK recolours.
+`package()` installs both under `/usr/share/icons/hicolor/`; pacman's hooks refresh the icon
+cache. `check.sh` checks that they parse as XML, have those viewBoxes, hold no `<image`,
+`<script` or remote `xlink:href`, and that every `Icon=` names an installed icon.
 
 ## What to test at home
 

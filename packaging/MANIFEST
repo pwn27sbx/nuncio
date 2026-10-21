@@ -12,6 +12,8 @@
 /usr/share/applications/io.github.pwn27sbx.nuncio.Desktop.desktop
 /usr/share/applications/nuncio-tui.desktop
 /etc/xdg/autostart/io.github.pwn27sbx.nuncio.Desktop.desktop
+/usr/share/icons/hicolor/scalable/apps/io.github.pwn27sbx.nuncio.Desktop.svg
+/usr/share/icons/hicolor/symbolic/apps/io.github.pwn27sbx.nuncio.Desktop-symbolic.svg
 /usr/share/licenses/nuncio/CREDITS.md
 /usr/share/doc/nuncio/README.md
 /usr/share/doc/nuncio/config.md

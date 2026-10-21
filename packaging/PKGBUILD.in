@@ -114,6 +114,12 @@ package() {
   # /etc/xdg; /usr/share is not one of them). It is not in backup=(), so pacman -R removes it.
   install -Dm644 packaging/nuncio-autostart.desktop \
     "$pkgdir/etc/xdg/autostart/io.github.pwn27sbx.nuncio.Desktop.desktop"
+  # The app icon every .desktop file names (Icon=io.github.pwn27sbx.nuncio.Desktop): a full-colour
+  # scalable SVG, and a -symbolic one that GTK recolours for panels and the Adwaita header bar.
+  install -Dm644 packaging/icons/hicolor/scalable/apps/io.github.pwn27sbx.nuncio.Desktop.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/io.github.pwn27sbx.nuncio.Desktop.svg"
+  install -Dm644 packaging/icons/hicolor/symbolic/apps/io.github.pwn27sbx.nuncio.Desktop-symbolic.svg \
+    "$pkgdir/usr/share/icons/hicolor/symbolic/apps/io.github.pwn27sbx.nuncio.Desktop-symbolic.svg"
 
   # GPL-3.0-only is in Arch's licenses package, so its text is not copied (Arch package
   # guidelines); CREDITS.md names the third-party code the static binaries carry.

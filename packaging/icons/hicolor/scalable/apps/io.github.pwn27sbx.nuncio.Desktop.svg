@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- nuncio: a sealed envelope (an envoy's message) with an "n" on the wax seal. Original artwork. -->
+  <rect x="12" y="32" width="104" height="76" rx="10" fill="#323c96"/>
+  <rect x="12" y="28" width="104" height="76" rx="10" fill="#4a58cf"/>
+  <path d="M12 38a10 10 0 0 1 10-10h84a10 10 0 0 1 10 10L72 72a13 13 0 0 1-16 0z" fill="#6d7be6"/>
+  <path d="M17 99l29-29M111 99L82 70" stroke="#3a46b0" stroke-width="4" stroke-linecap="round" fill="none"/>
+  <circle cx="64" cy="76" r="23" fill="#b8661a"/>
+  <circle cx="64" cy="74" r="23" fill="#f0a23b"/>
+  <circle cx="64" cy="74" r="17" fill="none" stroke="#d4831f" stroke-width="2.5"/>
+  <path d="M56 85V64m0 6c0-4 3.5-6 8-6s8 2 8 7v14" fill="none" stroke="#fff6e5" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

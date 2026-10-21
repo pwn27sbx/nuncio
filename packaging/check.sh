@@ -6,7 +6,8 @@
 # 1. PKGBUILD.in holds the required build options (Sealwax-style offline build).
 # 2. package() installs every path in MANIFEST, and MANIFEST lists every path package() installs.
 # 3. Every file package() copies from the source tree exists in this checkout.
-# 4. The unit, D-Bus service and desktop entries carry the lines nuncio depends on.
+# 4. The unit, D-Bus service and desktop entries carry the lines nuncio depends on; the app icon
+#    is valid, clean SVG, installed, and named by every Icon=.
 # 5. The shell scripts parse (bash -n), and shellcheck passes when it is installed.
 # Exits non-zero on the first failing group, after printing every failure in it.
 set -uo pipefail
@@ -150,6 +151,60 @@ else
 	printf 'skip systemd-analyze verify (not installed)\n'
 fi
 end_group "integration files"
+
+# --- 4b. the app icon ---
+# icon_check FILE VIEWBOX: parses as XML, has that viewBox on <svg>, and holds no raster, script
+# or remote reference (a hand-written icon needs none of them).
+icon_check() {
+	python3 -I -c '
+import sys, xml.etree.ElementTree as ET
+root = ET.parse(sys.argv[1]).getroot()
+if root.tag != "{http://www.w3.org/2000/svg}svg":
+    sys.exit("root element is %s, not svg" % root.tag)
+if root.get("viewBox") != sys.argv[2]:
+    sys.exit("viewBox is %r, expected %r" % (root.get("viewBox"), sys.argv[2]))
+' "$1" "$2"
+}
+icon_dir=$here/icons/hicolor
+# One "path|viewBox" per icon (a plain list: macOS's /bin/bash 3.2 has no associative arrays).
+for spec in "scalable/apps/$app_id.svg|0 0 128 128" "symbolic/apps/$app_id-symbolic.svg|0 0 16 16"; do
+	rel=${spec%%|*}
+	viewbox=${spec#*|}
+	icon=$icon_dir/$rel
+	if [[ ! -f $icon ]]; then
+		fail "icon missing: icons/hicolor/$rel"
+		continue
+	fi
+	if err=$(icon_check "$icon" "$viewbox" 2>&1); then
+		pass "icon $rel: valid SVG, viewBox $viewbox"
+	else
+		fail "icon $rel: ${err##*$'\n'}"
+	fi
+	if grep -qiE '<image|<script|xlink:href="http|href="http' "$icon"; then
+		fail "icon $rel: holds an <image>, a <script> or a remote reference"
+	else
+		pass "icon $rel: no raster, script or remote reference"
+	fi
+	if grep -qF "\"\$pkgdir/usr/share/icons/hicolor/$rel\"" <<<"$body"; then
+		pass "icon $rel: package() installs it"
+	else
+		fail "icon $rel: package() does not install it to /usr/share/icons/hicolor/$rel"
+	fi
+done
+# Every Icon= names an icon that package() installs (by its name, without the extension).
+installed_icons=$(grep -oE '^/usr/share/icons/hicolor/[^/]+/apps/[^/]+\.svg$' <<<"$installed" |
+	sed -E 's|.*/||; s|\.svg$||' | sort -u)
+for entry in "$here"/*.desktop; do
+	while read -r name; do
+		[[ -n $name ]] || continue
+		if grep -qxF -- "$name" <<<"$installed_icons"; then
+			pass "$(basename "$entry"): Icon=$name is installed"
+		else
+			fail "$(basename "$entry"): Icon=$name names no installed icon"
+		fi
+	done < <(sed -n 's/^Icon=//p' "$entry")
+done
+end_group "app icon"
 
 # --- 5. scripts parse ---
 for script in "$here"/*.sh; do

@@ -73,11 +73,9 @@ how to uninstall it.
    ```
 
    `--qr` draws a QR code in the terminal for Settings → Linked devices → Link a device;
-   `--phone` prints an 8-digit pairing code to enter on the phone instead. **Be aware:** this
-   command is still the first-milestone check. Once linked it waits up to 10 minutes for one
-   message from a one-to-one chat and **sends one reply to it** (`nuncio: mensaje recibido ✓`);
-   groups, statuses and channels are skipped. Stop it with Ctrl+C once it prints
-   `nuncio: connected; send one message …` if you do not want that reply sent.
+   `--phone` prints an 8-digit pairing code to enter on the phone instead. Once the phone accepts
+   it, the command prints `nuncio: linked as …` (the number masked to its last four digits), says
+   how to start the daemon, and exits. It never sends a message.
 
 2. Start the daemon again and check it:
 
@@ -131,8 +129,10 @@ A `<jid>` is a WhatsApp chat: `15551230001@s.whatsapp.net` (a person) or
   only reported.
 - `focus` prints how many running UIs got the request; 0 means no UI is running, and that is not
   an error.
-- `link` refuses to connect an already linked device while `nunciod` answers on `core.sock`: the
-  daemon owns that session.
+- `link` exits as soon as the device is linked, and never sends a message. Run on a device that is
+  already linked, it connects it once to check that WhatsApp still accepts it, reports it and
+  exits; it refuses to do even that while `nunciod` answers on `core.sock`: the daemon owns that
+  session.
 - `logout` and `purge` without `--confirm` only list what they would delete and exit 2. With it,
   the teardown runs in this order: (1) WhatsApp unlinks the device (`logout` only), (2) the
   keyring items under the service `nuncio` are deleted, (3) `nuncio.db` with its `-wal` and

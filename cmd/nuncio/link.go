@@ -5,14 +5,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
 	"time"
 
 	"go.mau.fi/whatsmeow"
-	"go.mau.fi/whatsmeow/proto/waE2E"
-	"go.mau.fi/whatsmeow/types"
-	waevents "go.mau.fi/whatsmeow/types/events"
-	"google.golang.org/protobuf/proto"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
 	"github.com/pwn27sbx/nuncio/internal/store"
@@ -22,6 +17,10 @@ import (
 // connectLinked connects the client of an already linked device; tests replace it so that no
 // test can reach WhatsApp.
 var connectLinked = func(c *whatsmeow.Client) error { return c.Connect() }
+
+// prepareLink wraps a client in the linking flows behind the consent gate; tests replace it with a
+// fake Linker so that no test can reach WhatsApp.
+var prepareLink = wa.Prepare
 
 // linkCommand is the S1–S3 entry point. It is prepared in full — the gate, the device store, the
 // whatsmeow client, both flows and the QR renderer — and it does nothing at all until --consent is
@@ -88,10 +87,16 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		defer client.Disconnect()
-		return listen(ctx, client, events)
+		select {
+		case <-events.connected:
+		case <-time.After(60 * time.Second):
+			fmt.Fprintln(stderr, "nuncio: still not connected after 60 s")
+			return 1
+		}
+		return linked(stdout, device.ID.User)
 	}
 
-	prepared, err := wa.Prepare(consent, client)
+	prepared, err := prepareLink(consent, client)
 	if err != nil {
 		fmt.Fprintln(stderr, "nuncio link:", err)
 		return 1
@@ -99,37 +104,52 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 	defer client.Disconnect()
 
 	if *qr {
-		if code := runQRLink(ctx, prepared.Linker); code != 0 {
+		if code := runQRLink(ctx, prepared.Linker, stdout, stderr); code != 0 {
 			return code
 		}
-	} else {
-		code, err := prepared.Linker.Phone(ctx, *phone)
-		if err != nil {
-			fmt.Fprintln(stderr, "nuncio link:", err)
-			return 1
+		user := ""
+		if client.Store.ID != nil {
+			user = client.Store.ID.User
 		}
-		fmt.Fprintf(stdout, "\nOn your phone: Settings → Linked devices → Link a device → Link with phone number instead, then enter:\n\n    %s\n\nWaiting up to 5 minutes...\n", code)
-		select {
-		case id := <-events.paired:
-			fmt.Fprintln(stdout, "nuncio: linked as", maskPhone(id))
-		case <-time.After(5 * time.Minute):
-			fmt.Fprintln(stderr, "nuncio: the code was not entered in time; nothing was linked")
-			return 1
-		}
+		return linked(stdout, user)
 	}
-	return listen(ctx, client, events)
+	code, err := prepared.Linker.Phone(ctx, *phone)
+	if err != nil {
+		fmt.Fprintln(stderr, "nuncio link:", err)
+		return 1
+	}
+	fmt.Fprintf(stdout, "\nOn your phone: Settings → Linked devices → Link a device → Link with phone number instead, then enter:\n\n    %s\n\nWaiting up to 5 minutes...\n", code)
+	select {
+	case id := <-events.paired:
+		return linked(stdout, id)
+	case <-time.After(5 * time.Minute):
+		fmt.Fprintln(stderr, "nuncio: the code was not entered in time; nothing was linked")
+		return 1
+	}
+}
+
+// linked reports a linked device and how to hand its session to the daemon, and ends the command.
+// nuncio link never sends a message: sending is one explicit action of its own (nuncio send or
+// an app), never a side effect of linking.
+func linked(stdout io.Writer, user string) int {
+	if user != "" {
+		fmt.Fprintln(stdout, "nuncio: linked as", maskPhone(user))
+	} else {
+		fmt.Fprintln(stdout, "nuncio: linked")
+	}
+	fmt.Fprintln(stdout, "nuncio: start the daemon, which owns the session from now on: systemctl --user start nunciod")
+	return 0
 }
 
 type linkEvents struct {
 	paired    chan string
 	connected chan struct{}
-	messages  chan *waevents.Message
 }
 
-// watch subscribes before Connect, so no pairing or message event can be missed. The event switch
-// itself is wa.Events, shared with the daemon's session.
+// watch subscribes before Connect, so no pairing or connection event can be missed. The event
+// switch itself is wa.Events, shared with the daemon's session.
 func watch(client *whatsmeow.Client) linkEvents {
-	ev := linkEvents{make(chan string, 1), make(chan struct{}, 1), make(chan *waevents.Message, 8)}
+	ev := linkEvents{make(chan string, 1), make(chan struct{}, 1)}
 	client.AddEventHandler(wa.Events{
 		Paired: func(user string) {
 			select {
@@ -143,83 +163,34 @@ func watch(client *whatsmeow.Client) linkEvents {
 			default:
 			}
 		},
-		Message: func(m *waevents.Message) {
-			if !m.Info.IsFromMe {
-				select {
-				case ev.messages <- m:
-				default:
-				}
-			}
-		},
 	}.Handle)
 	return ev
 }
 
-// listen is the S1 check: wait for the session to come up, then for one incoming message from a
-// one-to-one chat (see replyable), store it (whatsmeow already persisted the session state) and
-// send one short reply. Messages from groups, statuses, broadcast lists and channels are skipped
-// without ending the 10-minute wait. Nothing is sent unless an eligible message arrives first.
-func listen(ctx context.Context, client *whatsmeow.Client, ev linkEvents) int {
-	select {
-	case <-ev.connected:
-		fmt.Println("nuncio: connected; send one message to this number from another phone (waiting 10 minutes)")
-	case <-time.After(60 * time.Second):
-		fmt.Fprintln(os.Stderr, "nuncio: still not connected after 60 s")
-		return 1
-	}
-	deadline := time.After(10 * time.Minute)
-	for {
-		var m *waevents.Message
-		select {
-		case m = <-ev.messages:
-		case <-deadline:
-			fmt.Fprintln(os.Stderr, "nuncio: no message from a one-to-one chat arrived in 10 minutes")
-			return 1
-		}
-		if !replyable(m.Info) {
-			fmt.Println("nuncio: skipped a message that is not from a one-to-one chat; still waiting")
-			continue
-		}
-		text := m.Message.GetConversation()
-		if text == "" {
-			text = m.Message.GetExtendedTextMessage().GetText()
-		}
-		fmt.Printf("nuncio: received a message (%d bytes) from %s\n", len(text), maskPhone(m.Info.Sender.User))
-		reply := &waE2E.Message{Conversation: proto.String("nuncio: mensaje recibido ✓")}
-		if _, err := client.SendMessage(ctx, m.Info.Chat, reply); err != nil {
-			fmt.Fprintln(os.Stderr, "nuncio: reply failed:", err)
-			return 1
-		}
-		fmt.Println("nuncio: reply sent")
-		time.Sleep(3 * time.Second)
-		return 0
-	}
-}
-
-func runQRLink(ctx context.Context, linker wa.Linker) int {
+func runQRLink(ctx context.Context, linker wa.Linker, stdout, stderr io.Writer) int {
 	codes, err := linker.QR(ctx)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "nuncio link:", err)
+		fmt.Fprintln(stderr, "nuncio link:", err)
 		return 1
 	}
 	for code := range codes {
 		if code.Text != "" {
-			fmt.Printf("\nScan with WhatsApp → Settings → Linked devices (valid %s):\n\n",
+			fmt.Fprintf(stdout, "\nScan with WhatsApp → Settings → Linked devices (valid %s):\n\n",
 				code.Timeout.Round(time.Second))
-			if err := wa.RenderQR(os.Stdout, code.Text); err != nil {
-				fmt.Fprintln(os.Stderr, "nuncio link: cannot draw the QR code:", err)
+			if err := wa.RenderQR(stdout, code.Text); err != nil {
+				fmt.Fprintln(stderr, "nuncio link: cannot draw the QR code:", err)
 				return 1
 			}
 		}
 		if code.Done() {
-			fmt.Println("nuncio: link event:", code.Event)
 			if code.Event == "success" {
 				return 0
 			}
+			fmt.Fprintf(stderr, "nuncio: link event %s; nothing was linked\n", code.Event)
 			return 1
 		}
 	}
-	fmt.Fprintln(os.Stderr, "nuncio: the QR stream ended without a result")
+	fmt.Fprintln(stderr, "nuncio: the QR stream ended without a result")
 	return 1
 }
 
@@ -241,17 +212,3 @@ func daemonAnswers() bool {
 // maskPhone keeps only the last four digits of a phone number, so nothing this command prints can
 // put a full number into a log. A number of four digits or fewer is hidden entirely.
 func maskPhone(number string) string { return ipc.MaskPhone(number) }
-
-// replyable is an allow-list: only a one-to-one chat with a user, addressed by phone number or by
-// lid, may get the S1 reply. A group, a status update (status@broadcast), a broadcast list or a
-// channel (newsletter) would carry the reply to many people at once, which is a ban risk.
-func replyable(info types.MessageInfo) bool {
-	if info.IsFromMe {
-		return false
-	}
-	switch info.Chat.Server {
-	case types.DefaultUserServer, types.HiddenUserServer:
-		return true
-	}
-	return false
-}

@@ -67,8 +67,8 @@ and never touch a real keyring.
   arrives in the chat you have open and can see), and only as your WhatsApp read-receipt privacy
   setting allows. Read receipts are never queued while offline.
 - **Linking needs consent.** `nuncio link` does nothing without `--consent` and prints the ban
-  warning. Note that `nuncio link` is still the first-milestone check: once linked it waits for one
-  message from a one-to-one chat and sends one fixed reply to it ([README.md](README.md#first-run)).
+  warning. It never sends a message: once the device is linked it says so, says how to start the
+  daemon, and exits.
 
 ## The installer
 

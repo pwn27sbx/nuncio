@@ -238,33 +238,6 @@ func TestMaskPhoneKeepsOnlyTheLastFourDigits(t *testing.T) {
 	}
 }
 
-func TestReplyableOnlyAllowsDirectUserChats(t *testing.T) {
-	user := types.NewJID("15550001234", types.DefaultUserServer)
-	cases := []struct {
-		name string
-		info types.MessageInfo
-		want bool
-	}{
-		{"direct user chat", msgInfo(user, user, false, false), true},
-		{"direct chat addressed by lid", msgInfo(types.NewJID("123456789", types.HiddenUserServer), user, false, false), true},
-		{"group", msgInfo(types.NewJID("15550001234-1600000000", types.GroupServer), user, false, true), false},
-		{"group without the IsGroup flag", msgInfo(types.NewJID("15550001234-1600000000", types.GroupServer), user, false, false), false},
-		{"status update", msgInfo(types.StatusBroadcastJID, user, false, false), false},
-		{"broadcast list", msgInfo(types.NewJID("1600000000", types.BroadcastServer), user, false, true), false},
-		{"newsletter", msgInfo(types.NewJID("120363000000000000", types.NewsletterServer), user, false, false), false},
-		{"from me", msgInfo(user, user, true, false), false},
-	}
-	for _, c := range cases {
-		if got := replyable(c.info); got != c.want {
-			t.Errorf("%s: replyable(%s) = %v, want %v", c.name, c.info.Chat, got, c.want)
-		}
-	}
-}
-
-func msgInfo(chat, sender types.JID, fromMe, group bool) types.MessageInfo {
-	return types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: sender, IsFromMe: fromMe, IsGroup: group}}
-}
-
 // inUTC makes the CLI print local times as UTC for the duration of a test.
 func inUTC(t *testing.T) {
 	t.Helper()
@@ -979,5 +952,59 @@ func TestPurgeRefusesWhileSomethingListensButDoesNotAnswer(t *testing.T) {
 	}
 	if n := keys.count(); n != 4 {
 		t.Errorf("keyring holds %d items, want the 4 it had", n)
+	}
+}
+
+// qrLinker is a Linker whose QR flow reports success at once, as a scanned code would; it never
+// touches the network.
+type qrLinker struct{}
+
+func (qrLinker) QR(context.Context) (<-chan wa.Code, error) {
+	codes := make(chan wa.Code, 1)
+	codes <- wa.Code{Event: "success"}
+	close(codes)
+	return codes, nil
+}
+
+func (qrLinker) Phone(context.Context, string) (string, error) {
+	return "", errors.New("qrLinker: no phone flow")
+}
+
+// After pairing, link reports the device as linked, says how to start the daemon and exits: it
+// never waits for a message and never sends one.
+func TestLinkExitsAfterReportingLinkedAndSendsNothing(t *testing.T) {
+	isolateData(t)
+	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // no core.sock there
+	prepare := prepareLink
+	prepareLink = func(c wa.Consent, _ *whatsmeow.Client) (wa.Prepared, error) {
+		return wa.Prepared{Linker: qrLinker{}, Consent: c}, nil
+	}
+	t.Cleanup(func() { prepareLink = prepare })
+
+	type result struct {
+		code     int
+		out, err string
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, out, errOut := runCLI("link", "--qr", "--consent")
+		done <- result{code, out, errOut}
+	}()
+	var r result
+	select {
+	case r = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("nuncio link still running 5 s after the device was linked; it must exit")
+	}
+	if r.code != 0 {
+		t.Errorf("exit %d, stderr %q; want 0", r.code, r.err)
+	}
+	if !strings.Contains(r.out, "nuncio: linked") || !strings.HasSuffix(r.out, "systemctl --user start nunciod\n") {
+		t.Errorf("stdout %q, want the linked line and, last, how to start the daemon", r.out)
+	}
+	for _, s := range []string{r.out, r.err} {
+		if strings.Contains(s, "send one message") || strings.Contains(s, "reply") || strings.Contains(s, "mensaje recibido") {
+			t.Errorf("output %q mentions waiting for a message or a reply; link must send nothing", s)
+		}
 	}
 }

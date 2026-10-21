@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"testing"
@@ -279,7 +280,7 @@ func undeletableDataDir(t *testing.T, errno error) {
 // Under the sandbox the data dir is a mount point (EBUSY) in a read-only tree (EROFS): its
 // contents are gone and the dir itself cannot go, which is a complete wipe.
 func TestWipeAcceptsAnEmptyDataDirTheSandboxKeeps(t *testing.T) {
-	for _, errno := range []error{syscall.EBUSY, syscall.EROFS, syscall.EPERM, syscall.EACCES} {
+	for _, errno := range []error{syscall.EBUSY, syscall.EROFS} {
 		t.Run(errno.Error(), func(t *testing.T) {
 			dir := populatedDataDir(t)
 			kr := fullKeyring(t)
@@ -301,12 +302,21 @@ func TestWipeAcceptsAnEmptyDataDirTheSandboxKeeps(t *testing.T) {
 	}
 }
 
-// Any other failure to remove the emptied data dir is still reported.
+// Any other failure to remove the emptied data dir is still reported. EPERM and EACCES are not
+// what the sandbox does: they mean a parent nuncio cannot write to, a real permission problem.
 func TestWipeReportsAnOtherFailureToRemoveTheDataDir(t *testing.T) {
-	dir := populatedDataDir(t)
-	undeletableDataDir(t, syscall.EIO)
-	if err := Wipe(dir, newFakeKeyring()); err == nil {
-		t.Fatal("Wipe = nil, want the EIO from removing the data dir")
+	for _, errno := range []syscall.Errno{syscall.EIO, syscall.EPERM, syscall.EACCES} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			dir := populatedDataDir(t)
+			undeletableDataDir(t, errno)
+			err := Wipe(dir, newFakeKeyring())
+			if !errors.Is(err, errno) {
+				t.Fatalf("Wipe = %v, want the %v from removing the data dir", err, errno)
+			}
+			if !strings.Contains(err.Error(), "store: remove data dir: ") {
+				t.Errorf("Wipe = %q, want it to say it could not remove the data dir", err)
+			}
+		})
 	}
 }
 

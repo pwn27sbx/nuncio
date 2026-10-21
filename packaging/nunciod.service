@@ -50,7 +50,7 @@ ProtectSystem=strict
 # variables. With another XDG_DATA_HOME, add a drop-in (`systemctl --user edit nunciod`).
 # The directory is bind-mounted onto itself inside a read-only tree, so `nuncio logout` and
 # `nuncio purge` delete everything in it but cannot remove the directory itself; the wipe
-# accepts that an emptied directory stays.
+# accepts that an emptied directory stays when its rmdir fails with EBUSY or EROFS.
 ReadWritePaths=-%h/.local/share/nuncio
 # A private /tmp and /var/tmp (SQLite's temporary files land there).
 PrivateTmp=yes

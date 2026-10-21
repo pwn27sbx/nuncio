@@ -62,7 +62,7 @@ func (s *Session) React(jid, id, emoji string) error {
 	defer cancel()
 	if _, err := s.client.SendMessage(ctx, jid, msg, ""); err != nil {
 		// The error's type only: whatsmeow's text can carry a JID.
-		log.Printf("wa: a reaction failed (%T)", err)
+		log.Printf("wa: a reaction failed (%s)", ErrKind(err))
 		return errReactNotSent
 	}
 	if err := store.SetReaction(s.db, jid, id, "", true, emoji); err != nil {

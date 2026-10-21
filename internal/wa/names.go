@@ -85,7 +85,7 @@ func (s *Session) contactName(book Contacts, jid string) (name string, ok bool) 
 		c, err := book.Contact(ctx, u)
 		cancel()
 		if err != nil {
-			s.log("wa: cannot read a contact's name (%T)", err)
+			s.log("wa: cannot read a contact's name (%s)", ErrKind(err))
 			return "", false
 		}
 		found = append(found, c)
@@ -227,7 +227,7 @@ func (s *Session) syncGroupNames() {
 	defer cancel()
 	groups, err := book.JoinedGroups(ctx)
 	if err != nil {
-		s.log("wa: cannot read the group subjects (%T)", err)
+		s.log("wa: cannot read the group subjects (%s)", ErrKind(err))
 		return
 	}
 	for jid, subject := range groups {

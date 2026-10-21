@@ -384,9 +384,9 @@ func (s *Session) reconnect() {
 	if err := s.client.Connect(); err != nil {
 		// The error's type only: whatsmeow's text can carry a JID.
 		if delay, ok := s.reconnectLater(); ok {
-			logf("wa: reconnect attempt %d failed (%T); next attempt in %s", attempt, err, delay.Round(time.Millisecond))
+			logf("wa: reconnect attempt %d failed (%s); next attempt in %s", attempt, ErrKind(err), delay.Round(time.Millisecond))
 		} else {
-			logf("wa: reconnect attempt %d failed (%T); no further attempt", attempt, err)
+			logf("wa: reconnect attempt %d failed (%s); no further attempt", attempt, ErrKind(err))
 		}
 	}
 }
@@ -585,7 +585,7 @@ func (w whatsmeowClient) SendMessage(ctx context.Context, jid string, msg *waE2E
 	}
 	resp, err := w.c.SendMessage(ctx, to, msg, whatsmeow.SendRequestExtra{ID: id})
 	if err != nil {
-		return time.Time{}, err
+		return time.Time{}, fmt.Errorf("wa: sending a message: %w", err)
 	}
 	return resp.Timestamp, nil
 }
@@ -613,7 +613,7 @@ func (w whatsmeowClient) BuildReaction(chat, sender, id, emoji string) (*waE2E.M
 func (w whatsmeowClient) ReadReceiptsPrivacy(ctx context.Context) (string, error) {
 	settings, err := w.c.TryFetchPrivacySettings(ctx, false)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("wa: reading the privacy settings: %w", err)
 	}
 	return string(settings.ReadReceipts), nil
 }
@@ -633,7 +633,10 @@ func (w whatsmeowClient) MarkRead(ctx context.Context, chat, sender string, ids 
 	for i, id := range ids {
 		msgIDs[i] = id
 	}
-	return w.c.MarkRead(ctx, msgIDs, at, c, from, types.ReceiptType(receiptType))
+	if err := w.c.MarkRead(ctx, msgIDs, at, c, from, types.ReceiptType(receiptType)); err != nil {
+		return fmt.Errorf("wa: sending a read receipt: %w", err)
+	}
+	return nil
 }
 
 func (w whatsmeowClient) OwnJID() string {
@@ -696,7 +699,7 @@ func (w whatsmeowClient) Contact(ctx context.Context, jid string) (Contact, erro
 	}
 	info, err := w.c.Store.Contacts.GetContact(ctx, user.ToNonAD())
 	if err != nil {
-		return Contact{}, err
+		return Contact{}, fmt.Errorf("wa: reading a contact: %w", err)
 	}
 	return Contact{FullName: info.FullName, FirstName: info.FirstName, BusinessName: info.BusinessName,
 		PushName: info.PushName}, nil
@@ -707,7 +710,7 @@ func (w whatsmeowClient) Contact(ctx context.Context, jid string) (Contact, erro
 func (w whatsmeowClient) JoinedGroups(ctx context.Context) (map[string]string, error) {
 	groups, err := w.c.GetJoinedGroups(ctx)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("wa: querying the joined groups: %w", err)
 	}
 	out := make(map[string]string, len(groups))
 	for _, g := range groups {

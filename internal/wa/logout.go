@@ -30,7 +30,7 @@ func (s *Session) Logout(ctx context.Context) error {
 		s.mu.Lock()
 		logf := s.logf
 		s.mu.Unlock()
-		logf("wa: logout not confirmed (%T)", err)
+		logf("wa: logout not confirmed (%s)", ErrKind(err))
 		return ErrLogoutNotConfirmed
 	}
 	s.stop("logged out on request", StateUnlinked)

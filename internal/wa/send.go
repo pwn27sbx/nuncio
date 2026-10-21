@@ -225,7 +225,7 @@ func (s *Session) attempt(e store.OutboxEntry, live bool) (ipc.Sent, error) {
 			log.Print("wa: a send was not acknowledged in time")
 		} else {
 			// The error's type only: whatsmeow's text can carry a JID.
-			log.Printf("wa: a send failed (%T)", err)
+			log.Printf("wa: a send failed (%s)", ErrKind(err))
 		}
 		if err := store.SetOutboxState(s.db, e.ClientID, state, time.Time{}); err != nil {
 			log.Printf("wa: cannot record a failed send (%T)", err)

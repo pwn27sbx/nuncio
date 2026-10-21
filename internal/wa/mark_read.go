@@ -110,7 +110,7 @@ func (s *Session) MarkRead(jid string) (int, error) {
 	if len(senders) > 0 {
 		privacy, err := s.client.ReadReceiptsPrivacy(ctx)
 		if err != nil {
-			log.Printf("wa: cannot read the read-receipt privacy setting (%T)", err)
+			log.Printf("wa: cannot read the read-receipt privacy setting (%s)", ErrKind(err))
 			return 0, errReadPrivacy
 		}
 		receipt := string(types.ReceiptTypeRead)
@@ -122,7 +122,7 @@ func (s *Session) MarkRead(jid string) (int, error) {
 			for chunk := range slices.Chunk(bySender[sender], maxReceiptIDs) {
 				if err := s.client.MarkRead(ctx, jid, sender, chunk, now, receipt); err != nil {
 					// The error's type only: whatsmeow's text can carry a JID.
-					log.Printf("wa: a read receipt failed (%T)", err)
+					log.Printf("wa: a read receipt failed (%s)", ErrKind(err))
 					return 0, errReceiptNotSent
 				}
 			}

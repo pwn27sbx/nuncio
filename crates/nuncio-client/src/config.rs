@@ -114,6 +114,9 @@ pub enum SaveError {
     /// a wrong type, bad TOML, or it cannot be read): writing would destroy what the user wrote.
     #[error("not overwriting it: {0}")]
     Invalid(ConfigError),
+    /// The configuration could not be turned into TOML: nothing was written.
+    #[error("cannot serialise the configuration: {0}")]
+    Serialize(toml::ser::Error),
     #[error("cannot write {path}: {source}")]
     Write {
         path: PathBuf,
@@ -173,10 +176,9 @@ impl Config {
 
     /// The file's text: [`WRITTEN_HEADER`] and every known key (`image_protocol` only when one is
     /// chosen). [`Config::from_toml_str`] reads it back as the same configuration.
-    pub fn to_toml_string(&self) -> String {
-        // Plain structs of bools and strings: serialising them cannot fail.
-        let body = toml::to_string(self).unwrap_or_default();
-        format!("{WRITTEN_HEADER}\n{body}")
+    pub fn to_toml_string(&self) -> Result<String, toml::ser::Error> {
+        let body = toml::to_string(self)?;
+        Ok(format!("{WRITTEN_HEADER}\n{body}"))
     }
 
     /// Write the configuration to `path`, atomically: a temporary file in the same directory
@@ -185,7 +187,14 @@ impl Config {
     /// key, a wrong type, bad TOML) is never overwritten. A symlink is followed: its target is
     /// rewritten and the link stays.
     pub fn save(&self, path: &Path) -> Result<(), SaveError> {
+        Self::write_text(path, self.to_toml_string())
+    }
+
+    /// [`Config::save`] of an already serialised configuration: a serialisation error is
+    /// returned before anything on disk is touched.
+    fn write_text(path: &Path, text: Result<String, toml::ser::Error>) -> Result<(), SaveError> {
         Self::load(path).map_err(SaveError::Invalid)?;
+        let text = text.map_err(SaveError::Serialize)?;
         let write_error = |path: &Path| {
             let path = path.to_owned();
             move |source| SaveError::Write { path, source }
@@ -213,8 +222,7 @@ impl Config {
             .map_or_else(|| "config.toml".into(), OsStr::to_string_lossy);
         let (temp, file) = create_temp(&dir, &name).map_err(write_error(&dir))?;
         // From here the temporary file is this save's own: only it is removed on a failure.
-        let written = fill(file, self.to_toml_string().as_bytes())
-            .and_then(|()| std::fs::rename(&temp, &target));
+        let written = fill(file, text.as_bytes()).and_then(|()| std::fs::rename(&temp, &target));
         if let Err(source) = written {
             let _ = std::fs::remove_file(&temp);
             return Err(SaveError::Write {
@@ -500,7 +508,8 @@ mod tests {
             config.save(&path).expect("saves");
             assert_eq!(Config::load(&path).expect("loads"), config);
             assert_eq!(
-                Config::from_toml_str(&config.to_toml_string()).expect("parses"),
+                Config::from_toml_str(&config.to_toml_string().expect("serialises"))
+                    .expect("parses"),
                 config
             );
         }
@@ -510,7 +519,7 @@ mod tests {
     fn the_written_text_says_comments_are_not_kept_and_has_only_known_keys() {
         let mut config = Config::default();
         config.ui.image_protocol = Some(ImageProtocol::Kitty);
-        let text = config.to_toml_string();
+        let text = config.to_toml_string().expect("serialises");
         assert!(text.starts_with(WRITTEN_HEADER), "{text}");
         assert!(text.contains("comments"), "{text}");
         for key in [
@@ -529,6 +538,7 @@ mod tests {
         assert!(
             !Config::default()
                 .to_toml_string()
+                .expect("serialises")
                 .contains("image_protocol"),
             "an unset protocol is left out (it means: ask the terminal)"
         );
@@ -566,6 +576,26 @@ mod tests {
         }
         let names: Vec<_> = std::fs::read_dir(&dir).expect("dir").collect();
         assert_eq!(names.len(), 1, "no temporary file left: {names:?}");
+    }
+
+    #[test]
+    fn a_serialisation_error_writes_nothing() {
+        // `toml::to_string` cannot fail on these plain structs, so the error path is driven
+        // through the seam `save` uses, handing it the failed serialisation directly.
+        let failed = || Err(<toml::ser::Error as serde::ser::Error>::custom("boom"));
+        let dir = temp_dir("serialise");
+        let path = dir.join("config.toml");
+        let mine = "[app]\nstart_hidden = true\n";
+        std::fs::write(&path, mine).expect("write");
+        let err = Config::write_text(&path, failed()).expect_err("nothing to write");
+        assert!(matches!(err, SaveError::Serialize(_)), "{err}");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), mine);
+        let names: Vec<_> = std::fs::read_dir(&dir).expect("dir").collect();
+        assert_eq!(names.len(), 1, "no temporary file left: {names:?}");
+        // Nor is a missing file or its directory created.
+        let fresh = dir.join("nuncio").join("config.toml");
+        Config::write_text(&fresh, failed()).expect_err("nothing to write");
+        assert!(!dir.join("nuncio").exists());
     }
 
     #[test]

@@ -35,7 +35,6 @@ use gtk::{gdk, gio, glib};
 use nuncio_client::driver::open_externally;
 use nuncio_client::model::REACTIONS;
 
-use crate::ROOT_CLASS;
 use crate::controller::{Alert, Command, Controller, OPEN_CHAT_ACTION, notification_id};
 use crate::lifecycle::{Close, Lifecycle};
 use crate::palette::{self, Step};
@@ -43,6 +42,7 @@ use crate::pictures::{self, Cache, Decoded, Decoder, Variant};
 use crate::preferences::{Change, IMAGE_PROTOCOLS, Preferences, TITLE_BARS, Takes};
 use crate::present::{self, Bubble, ChatRow, PictureView};
 use crate::worker::{Backlog, EVENT_BACKLOG, Incoming, Settings, Worker};
+use crate::{ROOT_CLASS, WINDOW_CLASS};
 use nuncio_client::TitleBar;
 use nuncio_client::config::App;
 
@@ -151,6 +151,7 @@ impl Ui {
         if let Some(app) = app {
             window.set_application(Some(app));
         }
+        window.add_css_class(WINDOW_CLASS);
         if !title_bar {
             window.add_css_class("nuncio-no-title-bar");
         }
@@ -847,6 +848,7 @@ impl Ui {
             .default_height(620)
             .build();
         window.add_css_class(ROOT_CLASS);
+        window.add_css_class(WINDOW_CLASS);
         let page = adw::PreferencesPage::new();
         let problem = prefs.borrow().problem().map(str::to_owned);
         if let Some(problem) = &problem {

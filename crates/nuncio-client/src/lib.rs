@@ -2,7 +2,7 @@
 //!
 //! `nuncio-tui` and `nuncio-desktop` both talk to the Go daemon (`nunciod`) through this
 //! crate, so the client-side work — the NDJSON wire contract, the connection, Omarchy theme
-//! following, the config file, `whatsapp:` links, which message notifies, and the view models of
+//! and font following, the config file, `whatsapp:` links, which message notifies, and the view models of
 //! the chat list, the transcript and the composer ([`model`]) — has exactly one Rust implementation.
 //!
 //! The wire contract itself lives in `proto/wire.md` and is checked against the shared
@@ -11,6 +11,7 @@
 pub mod config;
 pub mod conn;
 pub mod driver;
+pub mod font;
 pub mod link;
 pub mod model;
 pub mod notify;
@@ -24,6 +25,7 @@ pub use conn::{
     ClientError, Connection, DEFAULT_READ_TIMEOUT, Snapshot, fetch, socket_path, socket_path_from,
 };
 pub use driver::{Host, Link, Outcome, is_loss, open_externally};
+pub use font::{FontError, FontWatcher, Run, RunError, current_font, parse_fc_match};
 pub use link::{LinkError, LinkTarget, MAX_DRAFT_CHARS, parse_link};
 pub use model::{
     ChatList, Composer, Download, Effect, Model, Search, Status, Transcript, chat_title,

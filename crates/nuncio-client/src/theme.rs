@@ -379,6 +379,14 @@ impl ThemeWatcher {
     ///
     /// The watch root is that file's parent's parent — `~/.local/state/omarchy/current`.
     pub fn start(colors_toml: &Path) -> Result<Self, ThemeError> {
+        Self::start_with(colors_toml, Palette::load)
+    }
+
+    /// [`ThemeWatcher::start`] with the palette reader passed in (tests make it fail).
+    fn start_with<L>(colors_toml: &Path, load: L) -> Result<Self, ThemeError>
+    where
+        L: Fn(&Path) -> Result<Palette, ThemeError> + Send + 'static,
+    {
         let theme_dir = colors_toml
             .parent()
             .ok_or_else(|| ThemeError::NoWatchRoot(colors_toml.to_owned()))?;
@@ -390,29 +398,43 @@ impl ThemeWatcher {
         let (tx, rx) = std::sync::mpsc::channel();
         let last = std::sync::Arc::new(std::sync::Mutex::new(None::<Palette>));
 
-        let palette_path = colors_toml.to_owned();
-        let seen = std::sync::Arc::clone(&last);
+        // The notify callback only signals; reading the palette happens on this crate's own
+        // thread, so a reader that panics ends that thread (and `recv` sees the channel close)
+        // instead of aborting the process inside notify's callback.
+        let (events_tx, events_rx) = std::sync::mpsc::channel::<()>();
         let mut watcher =
             notify::recommended_watcher(move |event: Result<notify::Event, notify::Error>| {
-                if event.is_err() {
-                    return;
+                if event.is_ok() {
+                    let _ = events_tx.send(());
                 }
-                std::thread::sleep(DEBOUNCE);
-                // Mid-switch the directory is briefly gone; the next event picks it up.
-                let Ok(palette) = Palette::load(&palette_path) else {
-                    return;
-                };
-                let mut seen = seen.lock().expect("theme watcher mutex");
-                if seen.as_ref() == Some(&palette) {
-                    return;
-                }
-                *seen = Some(palette.clone());
-                let _ = tx.send(palette);
             })
             .map_err(|source| ThemeError::Watch {
                 path: watch_root.clone(),
                 source,
             })?;
+
+        let palette_path = colors_toml.to_owned();
+        let seen = std::sync::Arc::clone(&last);
+        // Ends when this `ThemeWatcher` (and with it the watcher's event sender) is dropped.
+        std::thread::spawn(move || {
+            while events_rx.recv().is_ok() {
+                std::thread::sleep(DEBOUNCE);
+                while events_rx.try_recv().is_ok() {}
+                // Mid-switch the directory is briefly gone; the next event picks it up.
+                let Ok(palette) = load(&palette_path) else {
+                    continue;
+                };
+                let mut seen = seen.lock().expect("theme watcher mutex");
+                if seen.as_ref() == Some(&palette) {
+                    continue;
+                }
+                *seen = Some(palette.clone());
+                drop(seen);
+                if tx.send(palette).is_err() {
+                    return;
+                }
+            }
+        });
 
         watcher
             .watch(&watch_root, notify::RecursiveMode::NonRecursive)
@@ -426,6 +448,12 @@ impl ThemeWatcher {
             rx,
             last,
         })
+    }
+
+    /// Wait for the next palette. `None` means the watcher's thread has ended (nothing more will
+    /// ever arrive), so a forwarding loop stops instead of spinning.
+    pub fn recv(&self) -> Option<Palette> {
+        self.rx.recv().ok()
     }
 
     /// Wait up to `timeout` for the next palette. `None` means nothing changed in time.
@@ -507,6 +535,32 @@ mod watch_tests {
             palette.mode,
             palette.background.to_hex()
         );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn recv_returns_when_the_watcher_thread_ends() {
+        let root = unique_root("ended");
+        let current = root.join("omarchy/current");
+        let theme = current.join("theme");
+        write_palette(&theme, "dark", "#001419");
+        let watcher = ThemeWatcher::start_with(&theme.join("colors.toml"), |_| {
+            panic!("palette reader crashed")
+        })
+        .expect("watcher starts");
+        std::thread::sleep(Duration::from_millis(250));
+        // The first event ends the watcher's thread.
+        fs::write(current.join("theme.name"), "flexoki-light\n").expect("write theme.name");
+
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done_tx.send(watcher.recv());
+        });
+        let got = done_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("recv must return once the watcher's thread has ended, not wait forever");
+        assert_eq!(got, None);
 
         fs::remove_dir_all(&root).ok();
     }

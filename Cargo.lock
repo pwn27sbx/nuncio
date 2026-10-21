@@ -1359,6 +1359,7 @@ dependencies = [
  "image",
  "libadwaita",
  "nuncio-client",
+ "serde_json",
 ]
 
 [[package]]

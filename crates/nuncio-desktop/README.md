@@ -21,7 +21,12 @@ each send, and has a photo, stickers and a document to open. Stop the demo and s
 the header say `reconnecting…` and the app resync on its own.
 
 `--theme-dir DIR` follows `DIR/colors.toml` instead of Omarchy's theme; `--probe` runs the theme
-switch check without a window.
+switch check without a window. `GApplication`'s own `--gapplication-*` options are passed on to it
+(the app's D-Bus `.service` starts it with `nuncio-desktop --gapplication-service`); any other
+unknown option is a usage error.
+
+The app id is `io.github.pwn27sbx.nuncio.Desktop`, which `GApplication` also owns as a D-Bus name.
+It is deliberately not the daemon's bus name (`io.github.pwn27sbx.nuncio`): one name has one owner.
 
 Links: `XDG_RUNTIME_DIR=/tmp/nuncio-demo cargo run -p nuncio-desktop -- 'whatsapp://send?phone=15551230001&text=hola'`
 opens that chat with `hola` in the composer (see [Links](#links)).
@@ -163,6 +168,30 @@ hides them on Hyprland (`HYPRLAND_INSTANCE_SIGNATURE`, or Hyprland in `XDG_CURRE
 shows them elsewhere; `shown` and `hidden` force it. The header bars carry the `nuncio-headerbar`
 class and the window `nuncio-no-title-bar` when they are hidden, for your own CSS.
 
+## Font and corners
+
+The app follows the rest of an Omarchy desktop, as it follows the palette:
+
+- **Font.** Omarchy has one font setting, the system monospace font, and fontconfig holds it
+  (`omarchy-font-set` writes `~/.config/fontconfig/fonts.conf`; `omarchy-font-current` asks
+  `fc-match monospace`). Where Omarchy is installed (`~/.local/state/omarchy` exists), the app asks
+  `fc-match monospace -f '%{family}\n'` at start (at most 200 ms) and uses that family for its whole
+  UI, the settings window and the popovers included, as Omarchy uses it for the terminal and the
+  bar. When fontconfig is slower than that (a cold cache at login), it is asked once more in the
+  background (at most 2 s) and the font is applied when it arrives. Only the first instance asks:
+  a second launch that just hands over to the running app does not. A font switch is followed live: the app watches `~/.config/fontconfig` (and `~/.config`, for
+  the first switch, which creates it) and asks fontconfig again. Without Omarchy, or when fontconfig
+  gives no usable answer, libadwaita's font stays.
+- **Corners.** Under Hyprland (`HYPRLAND_INSTANCE_SIGNATURE` set) the app asks
+  `hyprctl -j getoption decoration:rounding` once at start, with a 200 ms limit, and gives its
+  windows that corner radius (Omarchy's default is 0: square corners, like its other windows). Not
+  on Hyprland, or with no `hyprctl`, a slow one or output that is not a rounding, libadwaita's
+  corners stay and one line says why. A change of the rounding is seen on the next start. Bubbles
+  keep their own radius.
+- **Title bar.** On Hyprland the window controls are hidden ([Layout](#layout)).
+
+The windows carry the `nuncio-window` class and their content `nuncio-root`, for your own CSS.
+
 ## Keys
 
 Tab moves between the chat list, the conversation and the composer.
@@ -201,7 +230,8 @@ sticker says `Photo` or `Sticker` instead of `[image]` / `[sticker]`).
 
 ## Tests
 
-`cargo test -p nuncio-desktop`: the view data, the controller (notifications, links), the
+`cargo test -p nuncio-desktop`: the command line, the Omarchy font and Hyprland rounding in the
+generated CSS, `hyprctl`'s answer (through a fake runner: never the real one), the view data, the controller (notifications, links), the
 lifecycle (background, start hidden), the palette's commands and matching, the settings' rules, the
 pictures (boxes, what is decoded when, the cache, two decoding threads) and the worker (against a
 fake daemon) are plain unit tests; `tests/smoke.rs` builds the real window on GTK's main thread (its own `main`,

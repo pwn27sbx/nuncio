@@ -47,7 +47,8 @@ func main() {
 	log.SetPrefix("nunciod: ")
 	log.SetFlags(0)
 	if err := run(); err != nil {
-		log.Print(err)
+		// The error's type only: its text names the runtime or data dir under the user's home.
+		log.Printf("cannot start (%T)", err)
 		os.Exit(1)
 	}
 }
@@ -62,7 +63,8 @@ func run() error {
 	// socket, and single instance falls back to the socket check in listen.
 	bus, err := dbus.SessionBus()
 	if err != nil {
-		log.Printf("no session bus (%v): the D-Bus face is off and single instance rests on the socket alone", err)
+		// The error's type only: its text names the bus address.
+		log.Printf("no session bus (%T): the D-Bus face is off and single instance rests on the socket alone", err)
 		bus = nil
 	} else if nameIsOwned(bus) {
 		log.Printf("another nunciod already owns %s; exiting", ipc.DaemonName)
@@ -129,7 +131,8 @@ func run() error {
 	// never opens a competing session. A failed connect leaves it offline and
 	// retries after the backoff delay.
 	if err := session.Start(); err != nil {
-		log.Print(err)
+		// The cause's type only: whatsmeow's text can carry the server or proxy address.
+		log.Printf("cannot connect the linked device (%T)", errors.Unwrap(err))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -259,7 +262,8 @@ func serve(ctx context.Context, ln net.Listener, h ipc.Handler, events *ipc.Brok
 				return
 			}
 			if err != nil {
-				log.Printf("connection: %v", err)
+				// The error's type only: a refusal quotes what the client sent.
+				log.Printf("a connection ended with an error (%T)", err)
 			}
 		}()
 	}
@@ -325,7 +329,8 @@ func newDaemon(session sessionState, db *sql.DB) (*daemon, error) {
 
 // Hello records the handshake and answers with the session's current state.
 func (d *daemon) Hello(client string) ipc.Status {
-	log.Printf("hello from %s", client)
+	// A fixed line: the client's name is its own text, so it is not logged.
+	log.Print("a client said hello")
 	return d.Status()
 }
 
@@ -339,7 +344,8 @@ func (d *daemon) Status() ipc.Status {
 func (d *daemon) unread() int {
 	n, err := d.unreadCount()
 	if err != nil {
-		log.Print(err)
+		// The error's type only: SQLite's text can quote a value.
+		log.Printf("cannot count the unread messages (%T)", err)
 		return 0
 	}
 	return n
@@ -368,7 +374,8 @@ func (d *daemon) Chats() []ipc.Chat {
 	}
 	rows, err := store.ListChats(d.db, ipc.MaxChatLimit)
 	if err != nil {
-		log.Print(err)
+		// The error's type only: SQLite's text can quote a value.
+		log.Printf("cannot list the chats (%T)", err)
 		return nil
 	}
 	chats := make([]ipc.Chat, 0, len(rows))
@@ -378,7 +385,8 @@ func (d *daemon) Chats() []ipc.Chat {
 	for _, r := range rows {
 		c, err := wa.WireChat(d.db, r, now)
 		if err != nil {
-			log.Print(err)
+			// The error's type only: SQLite's text can quote a value.
+			log.Printf("cannot read the last message of a chat (%T)", err)
 			return nil
 		}
 		if aliases != nil {
@@ -532,7 +540,8 @@ func (d *daemon) Wipe(unlink bool) error {
 		d.unreadChanged()
 	}
 	if err := store.Wipe(d.dataDir, d.keyring); err != nil {
-		log.Print(err)
+		// The error's type only: its text names the data dir's paths.
+		log.Printf("cannot delete all of the local data (%T)", err)
 		return errors.New("could not delete all of nuncio's local data; run nuncio purge --confirm to finish")
 	}
 	if err := os.Remove(d.socket); err != nil && !errors.Is(err, fs.ErrNotExist) {

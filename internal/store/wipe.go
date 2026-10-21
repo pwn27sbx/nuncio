@@ -83,7 +83,8 @@ func Wipe(dataDir string, kr Keyring) error {
 				if rerr == nil && sandboxKeeps(err) {
 					// The packaged systemd unit bind-mounts dataDir onto itself inside a
 					// read-only tree, so the emptied dir cannot be removed: the wipe is complete.
-					log.Printf("store: %s is empty and stays (%v)", dataDir, err)
+					// The error's type only: the path and the error's text name the user's home.
+					log.Printf("store: the emptied data dir stays (%T)", err)
 				} else {
 					errs = append(errs, fmt.Errorf("store: remove data dir: %w", err))
 				}

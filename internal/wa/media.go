@@ -160,15 +160,15 @@ func (s *Session) DownloadMedia(jid, id string) (string, string, error) {
 	case errors.Is(err, media.ErrClosed):
 		return "", "", ErrMediaWiped
 	case errors.Is(err, media.ErrCache):
-		// The error's type only: the path names the data dir.
-		log.Printf("wa: media %s could not be cached (%T)", id, errors.Unwrap(err))
+		// The error's type only: the path names the data dir. No message id either.
+		log.Printf("wa: media could not be cached (%T)", errors.Unwrap(err))
 		return "", "", ErrMediaCache
 	case errors.Is(err, media.ErrSHA256Mismatch):
-		log.Printf("wa: media %s does not match its SHA-256; nothing was cached", id)
+		log.Print("wa: media does not match its SHA-256; nothing was cached")
 		return "", "", ErrMediaCorrupt
 	}
 	// The error's type only: whatsmeow's text can carry a media URL.
-	log.Printf("wa: media %s was not downloaded (%T)", id, errors.Unwrap(err))
+	log.Printf("wa: media was not downloaded (%T)", errors.Unwrap(err))
 	return "", "", ErrMediaNotDownloaded
 }
 

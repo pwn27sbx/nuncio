@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -300,6 +301,28 @@ func TestWipeAcceptsAnEmptyDataDirTheSandboxKeeps(t *testing.T) {
 				t.Errorf("keyring holds %d items after Wipe, want 0", n)
 			}
 		})
+	}
+}
+
+// The emptied data dir the sandbox keeps is logged by a fixed line and the error's type: neither
+// its path (it names the user's home) nor the error's text, which repeats that path.
+func TestAKeptDataDirIsLoggedWithoutItsPath(t *testing.T) {
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	dir := populatedDataDir(t)
+	undeletableDataDir(t, syscall.EBUSY)
+	if err := Wipe(dir, fullKeyring(t)); err != nil {
+		t.Fatalf("Wipe = %v, want nil", err)
+	}
+	got := buf.String()
+	if !strings.Contains(got, "store: the emptied data dir stays (") {
+		t.Errorf("log = %q, want the kept data dir by its error type", got)
+	}
+	for _, leak := range []string{dir, "remove", syscall.EBUSY.Error()} {
+		if strings.Contains(got, leak) {
+			t.Errorf("log = %q carries %q", got, leak)
+		}
 	}
 }
 

@@ -67,7 +67,8 @@ func (b *Broker) Publish(frame any) int {
 	}
 	data, err := json.Marshal(frame)
 	if err != nil {
-		log.Printf("ipc: cannot encode a %T event: %v", frame, err)
+		// The error's type only: a marshaler's text can quote a value of the event.
+		log.Printf("ipc: cannot encode a %T event (%T)", frame, err)
 		return 0
 	}
 	data = append(data, '\n')

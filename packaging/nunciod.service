@@ -1,0 +1,84 @@
+# nunciod as a systemd --user service. Installed to /usr/lib/systemd/user/nunciod.service.
+# Enable it per user:  systemctl --user enable --now nunciod.service
+# (packaging/install.sh offers to do that). `nuncio` also starts it on demand through D-Bus
+# activation (/usr/share/dbus-1/services/io.github.pwn27sbx.nuncio.service names this unit).
+[Unit]
+Description=nuncio daemon (WhatsApp linked-device session)
+Documentation=file:///usr/share/doc/nuncio/README.md
+# Ban-risk rule: a restart is a new WhatsApp connection, so restarts are few and slow. At most 4
+# starts in 30 minutes; past that the unit stays failed until the user starts it again.
+StartLimitIntervalSec=30min
+StartLimitBurst=4
+
+[Service]
+# nunciod listens on $XDG_RUNTIME_DIR/nuncio/core.sock first and only then requests its bus
+# name (cmd/nunciod/main.go), so "the name is on the bus" means "the socket is ready": clients
+# ordered after this unit find it listening.
+Type=dbus
+BusName=io.github.pwn27sbx.nuncio
+ExecStart=/usr/bin/nunciod
+# Only a crash restarts it. A clean exit is never restarted: another nunciod already owns the
+# name or the socket, or `nuncio logout` / `nuncio purge` wiped the device and stopped it.
+Restart=on-failure
+# The daemon backs off its own WhatsApp reconnects; a process restart starts 30 s after the
+# crash and doubles each time up to 10 min (systemd >= 254), so nothing reconnects in a loop.
+RestartSec=30s
+RestartSteps=5
+RestartMaxDelaySec=10min
+
+# $XDG_RUNTIME_DIR/nuncio (0700): created by systemd before start and writable under
+# ProtectSystem=strict. Preserved on stop: nunciod removes its own socket, and a nunciod started
+# by hand that owns the directory must not lose its socket when this unit stops.
+RuntimeDirectory=nuncio
+RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
+
+# --- Hardening (each line checked against what nunciod needs) ---
+# Files it creates are the user's only (the store is 0600 already).
+UMask=0077
+# No setuid helper can raise its privileges.
+NoNewPrivileges=yes
+# The whole file system is read-only except the paths below and the API file systems. Reading
+# stays possible: /etc/ssl (TLS roots), /etc/resolv.conf (Go's resolver), the home directory.
+# Connecting to a Unix socket is allowed on a read-only mount, so the session bus
+# ($XDG_RUNTIME_DIR/bus) and with it the Secret Service (the keyring) keep working.
+ProtectSystem=strict
+# The data directory: nuncio.db (with -wal and -shm), the media cache and the exports. The `-`
+# skips it while it does not exist (nothing linked yet: nunciod creates nothing then, and
+# `nuncio link` refuses while the daemon runs, so the unit is restarted after linking).
+# Assumes the default XDG_DATA_HOME (~/.local/share): a unit file cannot read environment
+# variables. With another XDG_DATA_HOME, add a drop-in (`systemctl --user edit nunciod`).
+# The directory is bind-mounted onto itself inside a read-only tree, so `nuncio logout` and
+# `nuncio purge` delete everything in it but cannot remove the directory itself; the wipe
+# accepts that an emptied directory stays.
+ReadWritePaths=-%h/.local/share/nuncio
+# A private /tmp and /var/tmp (SQLite's temporary files land there).
+PrivateTmp=yes
+# The session bus and the socket are AF_UNIX; WhatsApp is TCP over IPv4 or IPv6. Nothing else
+# (no netlink, no raw or packet sockets).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# No access to physical devices; /dev/null, /dev/urandom and friends stay.
+PrivateDevices=yes
+# Kernel and system knobs it has no business with.
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+# No new namespaces, no realtime scheduling, no setuid/setgid files, no personality changes.
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Go and the pure-Go SQLite never map memory writable and executable at once.
+MemoryDenyWriteExecute=yes
+# Native system calls only, from the set ordinary services use.
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+# Deliberately absent: ProtectHome= (it would hide or make read-only the data directory above)
+# and PrivateNetwork= / IPAddressDeny= (WhatsApp is reached over the network).
+
+[Install]
+WantedBy=default.target

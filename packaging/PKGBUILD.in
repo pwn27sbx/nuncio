@@ -1,0 +1,125 @@
+# Maintainer: nuncio contributors
+# Generated from packaging/PKGBUILD.in by packaging/package-source.sh, which fills in the
+# version, the source tarball's SHA-256 and SOURCE_DATE_EPOCH (the time of the packaged commit).
+#
+# The approach is Sealwax's packaging/PKGBUILD.in (MIT, https://github.com/PixDevsApps/sealwax):
+# a tarball of the committed tree, every dependency fetched in prepare() (`cargo fetch --locked`,
+# here also `go mod download`), then an offline build and offline tests, with !debug and !lto.
+# Its approach was copied, not its file.
+pkgname=nuncio
+pkgver=@PKGVER@
+pkgrel=1
+pkgdesc='WhatsApp linked-device client for Omarchy: daemon, CLI, terminal and GTK apps'
+arch=('x86_64')
+url='https://github.com/pwn27sbx/nuncio'
+license=('GPL-3.0-only')
+# nunciod and nuncio are static Go binaries (CGO_ENABLED=0) and link nothing. nuncio-tui needs
+# only glibc and gcc-libs; nuncio-desktop needs GTK 4 >= 4.12 and libadwaita >= 1.4 (the gtk4
+# and libadwaita crate features, crates/nuncio-desktop/Cargo.toml). No version constraint is
+# written: Arch ships far newer ones, and a wrong epoch in a constraint would silently fail it.
+depends=('gtk4' 'libadwaita' 'glib2' 'gcc-libs' 'glibc')
+optdepends=(
+  'gnome-keyring: a Secret Service for the device keys (any org.freedesktop.secrets provider works)'
+)
+# rust >= 1.92 (workspace rust-version) and go >= 1.26 (go.mod): checked at build time by cargo
+# and by GOTOOLCHAIN=local below, not by a constraint, for the same epoch reason.
+makedepends=('go' 'rust' 'cargo' 'pkgconf')
+# The release profile carries no debug info, so a -debug package would be empty; makepkg's LTO
+# flags would turn C code inside crates into GCC LTO bytecode that Rust's linker cannot read
+# (Sealwax hit this with ring). Same reasons as Sealwax.
+options=('!debug' '!lto')
+source=("nuncio-${pkgver}.tar.gz")
+sha256sums=('@SHA256@')
+export SOURCE_DATE_EPOCH=@SOURCE_DATE_EPOCH@
+
+# The Go toolchain's settings for every step. Modules live under $srcdir, so the build never
+# reads or writes the builder's own module cache, and GOPROXY=off makes any module that
+# prepare() did not download a hard error instead of a network fetch.
+_go_env() {
+  export GOPATH="$srcdir/gopath"
+  export GOMODCACHE="$srcdir/gomodcache"
+  export GOCACHE="$srcdir/gocache"
+  # The toolchain installed by pacman, never one that go.mod's `go` line would download.
+  export GOTOOLCHAIN=local
+  export CGO_ENABLED=0
+  export GOFLAGS='-buildmode=pie -trimpath -mod=readonly -modcacherw -buildvcs=false'
+}
+
+# Panic locations name their files: the build folder and Cargo's registry in the builder's home
+# are mapped to fixed names, so the package holds no path of the machine that built it (as
+# Sealwax does; makepkg warns "Package contains reference to $srcdir" otherwise).
+_rust_env() {
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/usr/src/nuncio \
+--remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/usr/src/cargo"
+  export CARGO_TARGET_DIR=target
+}
+
+prepare() {
+  cd "$srcdir/nuncio-$pkgver"
+  _go_env
+  # The only network step for Go: every module go.sum pins, verified against go.sum.
+  GOPROXY=https://proxy.golang.org,direct GOFLAGS='-modcacherw' go mod download
+  # The only network step for Rust: the crates Cargo.lock pins, for this host only.
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/^host: //p')"
+}
+
+build() {
+  cd "$srcdir/nuncio-$pkgver"
+  _go_env
+  export GOPROXY=off
+  go build -o build/nunciod ./cmd/nunciod
+  go build -o build/nuncio ./cmd/nuncio
+  _rust_env
+  cargo build --frozen --release -p nuncio-tui -p nuncio-desktop
+}
+
+check() {
+  cd "$srcdir/nuncio-$pkgver"
+  _go_env
+  export GOPROXY=off
+  # The tests open Unix sockets, whose path must stay under 108 bytes: $srcdir is too deep.
+  local tmp
+  tmp=$(mktemp -d /tmp/nuncio-check.XXXXXX)
+  TMPDIR=$tmp go test ./... || { rm -rf "$tmp"; return 1; }
+  rm -rf "$tmp"
+  _rust_env
+  # The whole workspace: nuncio-desktop's GTK smoke test (tests/smoke.rs) says "skipped" and
+  # passes where GTK cannot start, as in a clean chroot without a display.
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd "$srcdir/nuncio-$pkgver"
+  install -Dm755 build/nunciod "$pkgdir/usr/bin/nunciod"
+  install -Dm755 build/nuncio "$pkgdir/usr/bin/nuncio"
+  install -Dm755 target/release/nuncio-tui "$pkgdir/usr/bin/nuncio-tui"
+  install -Dm755 target/release/nuncio-desktop "$pkgdir/usr/bin/nuncio-desktop"
+
+  # The daemon as a systemd --user service (not enabled by the package: each user enables it,
+  # packaging/install.sh asks first), and its D-Bus activation, which `nuncio` uses to start it.
+  install -Dm644 packaging/nunciod.service "$pkgdir/usr/lib/systemd/user/nunciod.service"
+  install -Dm644 packaging/io.github.pwn27sbx.nuncio.service \
+    "$pkgdir/usr/share/dbus-1/services/io.github.pwn27sbx.nuncio.service"
+
+  # The GTK app has its own app id and bus name, io.github.pwn27sbx.nuncio.Desktop, distinct
+  # from the daemon's io.github.pwn27sbx.nuncio. Its launcher (also the whatsapp: link handler,
+  # DBusActivatable=true) and its D-Bus activation, which starts it as a background service.
+  install -Dm644 packaging/io.github.pwn27sbx.nuncio.Desktop.desktop \
+    "$pkgdir/usr/share/applications/io.github.pwn27sbx.nuncio.Desktop.desktop"
+  install -Dm644 packaging/io.github.pwn27sbx.nuncio.Desktop.service \
+    "$pkgdir/usr/share/dbus-1/services/io.github.pwn27sbx.nuncio.Desktop.service"
+  install -Dm644 packaging/nuncio-tui.desktop "$pkgdir/usr/share/applications/nuncio-tui.desktop"
+  # XDG autostart of the GTK app at login, as a background service (no window). /etc/xdg/autostart
+  # is the only system-wide directory the XDG autostart spec reads ($XDG_CONFIG_DIRS defaults to
+  # /etc/xdg; /usr/share is not one of them). It is not in backup=(), so pacman -R removes it.
+  install -Dm644 packaging/nuncio-autostart.desktop \
+    "$pkgdir/etc/xdg/autostart/io.github.pwn27sbx.nuncio.Desktop.desktop"
+
+  # GPL-3.0-only is in Arch's licenses package, so its text is not copied (Arch package
+  # guidelines); CREDITS.md names the third-party code the static binaries carry.
+  install -Dm644 CREDITS.md "$pkgdir/usr/share/licenses/nuncio/CREDITS.md"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/nuncio/README.md"
+  install -Dm644 docs/config.md "$pkgdir/usr/share/doc/nuncio/config.md"
+  install -Dm644 crates/nuncio-desktop/README.md "$pkgdir/usr/share/doc/nuncio/nuncio-desktop.md"
+  install -Dm644 packaging/README.md "$pkgdir/usr/share/doc/nuncio/PACKAGING.md"
+}

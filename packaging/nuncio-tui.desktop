@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=nuncio (terminal)
+GenericName=WhatsApp Client
+Comment=Chat on WhatsApp as a linked device, in the terminal
+Exec=nuncio-tui
+Icon=io.github.pwn27sbx.nuncio.Desktop
+Terminal=true
+Categories=Network;InstantMessaging;Chat;ConsoleOnly;
+Keywords=whatsapp;chat;messages;tui;

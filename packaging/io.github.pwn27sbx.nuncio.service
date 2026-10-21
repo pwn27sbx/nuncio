@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=io.github.pwn27sbx.nuncio
+Exec=/usr/bin/nunciod
+SystemdService=nunciod.service

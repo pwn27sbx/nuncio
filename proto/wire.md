@@ -274,6 +274,8 @@ no change: a reply with fewer than `limit` messages was always valid.
 | `focus` with no subscribed UI | `focused` with `delivered: 0` |
 | `focus` with subscribed UIs | `event_focus` to every subscriber (the asking connection too, if it subscribed); `focused` with `delivered` = how many got it |
 | A subscriber that stops reading | dropped (connection closed) when an event finds its 64-frame queue full; never blocks the daemon or other clients |
+| Any request the daemon fails to answer because of a bug in nunciod (it panicked) | `error` / `internal` with the message `the daemon failed while answering this request, so it closed this connection`, then the connection closes (with no reply when it cannot be written safely). Only that connection: the daemon, its other connections and the WhatsApp session keep running. The log names the failure by the type of its value only, never its text |
+| An event the daemon fails to write to one subscriber because of a bug in nunciod (it panicked) | that subscriber is dropped (connection closed), as one that stops reading; the other subscribers still receive the event |
 | `wipe` with `unlink: true` | in this order: WhatsApp unlinks the device through the daemon's own session (never a second one); the keyring items, the database (with WAL/SHM), the media cache and the exports are deleted; the socket is removed; then `wiped` with `unlinked: true`, the connection closes and the daemon exits |
 | `wipe` with `unlink: false` | the same without contacting WhatsApp; `wiped` with `unlinked: false` |
 | `wipe` with `unlink: true` while `unlinked` | `error` / `not_linked`; nothing is deleted (a `wipe` with `unlink: false` deletes the data of a device that is already gone) |

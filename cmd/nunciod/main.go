@@ -261,7 +261,8 @@ func serve(ctx context.Context, ln net.Listener, h ipc.Handler, events *ipc.Brok
 				cancel()
 				return
 			}
-			if err != nil {
+			// A panicked request was already logged, by its value's type, in ipc.
+			if err != nil && !errors.Is(err, ipc.ErrPanicked) {
 				// The error's type only: a refusal quotes what the client sent.
 				log.Printf("a connection ended with an error (%T)", err)
 			}

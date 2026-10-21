@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"sync"
 	"time"
@@ -672,6 +673,14 @@ type envelope struct {
 	Op string `json:"op"`
 }
 
+// PanicMessage is the message of the internal error answered to a request whose handling
+// panicked; the connection closes after it.
+const PanicMessage = "the daemon failed while answering this request, so it closed this connection"
+
+// ErrPanicked is returned by ServeConnEvents when handling a request panicked. The panic was
+// already logged by the type of its value, and the connection is closed.
+var ErrPanicked = errors.New("ipc: a request panicked")
+
 // ServeConn serves one client connection until the peer closes it: hello
 // first, then requests. It returns nil for a clean close and an error
 // describing why it stopped otherwise.
@@ -683,7 +692,7 @@ func ServeConn(conn io.ReadWriteCloser, h Handler) error {
 // frame published to events, interleaved with its replies. A subscriber that falls
 // SubscriberQueue frames behind is dropped and its connection closed. With a nil events broker,
 // subscribe is answered and no event ever follows.
-func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
+func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) (err error) {
 	defer func() { _ = conn.Close() }()
 	rd := NewReader(conn)
 	// Replies and events interleave on one socket, so every frame is written whole under out's
@@ -694,6 +703,23 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
 		if cancel != nil {
 			cancel()
 		}
+	}()
+	// One recover for the whole connection: a bug while one request is answered ends this
+	// connection only, never the daemon, its other connections or the session.
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		// The value's type only, and no stack: its text or a stack's arguments can quote a
+		// message or a number.
+		log.Printf("ipc: a request panicked (%T); its connection was closed", r)
+		// A panic while out's lock was held (subscribe) leaves it locked: then no reply.
+		if out.mu.TryLock() {
+			_ = WriteFrame(out.w, Error{V: Version, Op: OpError, Code: CodeInternal, Message: PanicMessage})
+			out.mu.Unlock()
+		}
+		err = ErrPanicked
 	}()
 
 	first, err := rd.Next()
@@ -824,7 +850,7 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) error {
 			if cancel == nil {
 				var frames <-chan []byte
 				frames, cancel = events.Subscribe(func() { _ = conn.Close() })
-				go writeEvents(out, frames)
+				go writeEvents(out, frames, func() { _ = conn.Close() })
 			}
 			err := WriteFrame(out.w, Subscribed{V: Version, Op: OpSubscribed})
 			out.mu.Unlock()
@@ -1086,8 +1112,16 @@ func (l *lockedWriter) Write(p []byte) (int, error) {
 
 // writeEvents copies queued event frames to the connection until the subscription ends. A write
 // that blocks holds only this connection's lock; dropping the subscriber closes the connection,
-// which ends the write.
-func writeEvents(out *lockedWriter, frames <-chan []byte) {
+// which ends the write. A panic while one frame is written drops only this subscriber: drop closes
+// its connection, which ends the subscription.
+func writeEvents(out *lockedWriter, frames <-chan []byte, drop func()) {
+	defer func() {
+		if r := recover(); r != nil {
+			// The value's type only, and no stack: either can quote the event's text.
+			log.Printf("ipc: an event write panicked (%T); its subscriber was dropped", r)
+			drop()
+		}
+	}()
 	for frame := range frames {
 		if _, err := out.Write(frame); err != nil {
 			// The connection is broken; the read loop sees it too and ends the subscription.

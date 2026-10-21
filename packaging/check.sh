@@ -61,6 +61,7 @@ end_group "PKGBUILD options"
 
 # --- 2. MANIFEST <-> package() ---
 body=$(sed -n '/^package() {/,/^}/p' "$pkgbuild" | sed -e ':a' -e '/\\$/N; s/\\\n[[:space:]]*/ /; ta')
+# shellcheck disable=SC2016 # $pkgdir is the PKGBUILD's literal text, not a shell variable.
 installed=$(grep -oE '"\$pkgdir(/[^"]+)"' <<<"$body" | sed -E 's/^"\$pkgdir//; s/"$//' | sort)
 manifest=$(grep -vE '^[[:space:]]*(#|$)' "$here/MANIFEST" | sort)
 missing=$(comm -23 <(printf '%s\n' "$manifest") <(printf '%s\n' "$installed"))
@@ -256,7 +257,7 @@ fi
 # The bar widget reads the daemon's D-Bus face by the names internal/ipc/connect.go exports.
 widget=$root/contrib/omarchy/bar-widget/BarWidget.qml
 for const in DaemonName ObjectPath Interface UnreadCountProperty UnreadChangedSignal; do
-	value=$(sed -n "s/^[[:space:]]*$const[[:space:]]*= \"\(.*\)\"$/\1/p" "$root/internal/ipc/connect.go")
+	value=$(sed -n "s/^[[:space:]]*${const}[[:space:]]*= \"\(.*\)\"$/\1/p" "$root/internal/ipc/connect.go")
 	if [[ -z $value ]]; then
 		fail "internal/ipc/connect.go defines no $const"
 	else

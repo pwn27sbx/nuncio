@@ -16,7 +16,8 @@
 //!   that was not sent, `o` opens a media file, Enter, Menu or Shift+F10 opens the message's menu,
 //!   Escape goes to the composer;
 //! - composer: Enter sends, Shift+Enter starts a new line, Escape cancels the reply;
-//! - Ctrl+F searches the open chat; Escape closes the search.
+//! - Ctrl+F searches the open chat; Escape closes the search; Ctrl+Q quits (the app's
+//!   `app.quit`, also in the menu).
 
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
@@ -24,14 +25,16 @@ use std::sync::Arc;
 
 use adw::prelude::*;
 use gtk::accessible::Property;
-use gtk::{gdk, glib};
+use gtk::{gdk, gio, glib};
 use nuncio_client::driver::open_externally;
 use nuncio_client::model::REACTIONS;
 
 use crate::ROOT_CLASS;
-use crate::controller::{Command, Controller};
+use crate::controller::{Alert, Command, Controller, OPEN_CHAT_ACTION, notification_id};
+use crate::lifecycle::{Close, Lifecycle};
 use crate::present::{self, Bubble, ChatRow};
 use crate::worker::{Backlog, EVENT_BACKLOG, Incoming, Settings, Worker};
+use nuncio_client::config::App;
 
 /// Below this width the window shows one pane at a time, with back navigation.
 const NARROW: &str = "max-width: 600sp";
@@ -57,6 +60,12 @@ struct Inner {
     worker: RefCell<Option<Worker>>,
     /// Commands made with no worker attached (the smoke test reads them).
     undelivered: RefCell<Vec<Command>>,
+    /// Notifications made with no `GApplication` attached (the smoke test reads them).
+    undelivered_alerts: RefCell<Vec<Alert>>,
+    /// What closing the window does (`[app] background`).
+    lifecycle: RefCell<Lifecycle>,
+    /// Quit was chosen: closing the window really closes it.
+    quitting: Cell<bool>,
     offset_minutes: i32,
     window: adw::ApplicationWindow,
     split: adw::NavigationSplitView,
@@ -114,6 +123,16 @@ impl Ui {
         let sidebar_title = adw::WindowTitle::new("nuncio", "");
         let sidebar_header = header_bar(title_bar);
         sidebar_header.set_title_widget(Some(&sidebar_title));
+        // The app menu: Quit really quits, also in background mode (Ctrl+Q).
+        let menu = gio::Menu::new();
+        menu.append(Some("Quit"), Some("app.quit"));
+        let menu_button = gtk::MenuButton::builder()
+            .icon_name("open-menu-symbolic")
+            .tooltip_text("Menu")
+            .menu_model(&menu)
+            .build();
+        menu_button.update_property(&[Property::Label("Menu")]);
+        sidebar_header.pack_end(&menu_button);
         let chats = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
             .activate_on_single_click(true)
@@ -277,6 +296,13 @@ impl Ui {
             controller: RefCell::new(controller),
             worker: RefCell::new(None),
             undelivered: RefCell::new(Vec::new()),
+            undelivered_alerts: RefCell::new(Vec::new()),
+            // Until told otherwise, closing the window closes it (as before background mode).
+            lifecycle: RefCell::new(Lifecycle::new(&App {
+                background: false,
+                ..App::default()
+            })),
+            quitting: Cell::new(false),
             offset_minutes,
             window,
             split,
@@ -309,9 +335,17 @@ impl Ui {
         // (and its worker) lives exactly as long as the window, whoever else drops their `Ui`.
         // Closing the window lets the state go (and with it the worker's threads). Not on
         // `destroy`: that only comes once the last reference to the window goes, and the state
-        // holds one.
+        // holds one. In background mode closing only hides the window: the state, the worker and
+        // the notifications stay until Quit ([`Ui::quit`]).
         let owner = RefCell::new(Some(ui.clone()));
-        ui.0.window.connect_close_request(move |_| {
+        ui.0.window.connect_close_request(move |window| {
+            let hide = owner.borrow().as_ref().is_some_and(|ui| {
+                !ui.0.quitting.get() && ui.0.lifecycle.borrow().close() == Close::Hide
+            });
+            if hide {
+                window.set_visible(false);
+                return glib::Propagation::Stop;
+            }
             owner.borrow_mut().take();
             glib::Propagation::Proceed
         });
@@ -326,6 +360,70 @@ impl Ui {
 
     pub fn window(&self) -> &adw::ApplicationWindow {
         &self.0.window
+    }
+
+    /// Follow `lifecycle` when the window is closed (`[app] background`).
+    pub fn set_lifecycle(&self, lifecycle: Lifecycle) {
+        *self.0.lifecycle.borrow_mut() = lifecycle;
+    }
+
+    /// Close the window for good, also in background mode: the state and the worker go with it.
+    pub fn quit(&self) {
+        self.0.quitting.set(true);
+        // `close` only acts on a realized window, and a window started hidden never was.
+        WidgetExt::realize(&self.0.window);
+        self.0.window.close();
+    }
+
+    /// Whether the daemon worker is running (tests).
+    pub fn worker_running(&self) -> bool {
+        self.0.worker.borrow().is_some()
+    }
+
+    /// The notifications made while no `GApplication` was attached, oldest first (tests).
+    pub fn take_undelivered_alerts(&self) -> Vec<Alert> {
+        std::mem::take(&mut self.0.undelivered_alerts.borrow_mut())
+    }
+
+    /// The `open-chat` action a notification's `default` action names ([`OPEN_CHAT_ACTION`]),
+    /// for the application: its string target is the chat JID to open
+    /// ([`Controller::open_jid`]); `show` then brings the window up.
+    pub fn open_chat_action(&self, show: impl Fn(&Ui) + 'static) -> gio::SimpleAction {
+        let name = OPEN_CHAT_ACTION
+            .strip_prefix("app.")
+            .unwrap_or(OPEN_CHAT_ACTION);
+        let action = gio::SimpleAction::new(name, Some(glib::VariantTy::STRING));
+        let open = self.with(move |ui, jid: String| {
+            ui.open_jid(&jid);
+            show(ui);
+        });
+        action.connect_activate(move |_, target| {
+            if let Some(jid) = target.and_then(|t| t.str()) {
+                open(jid.to_owned());
+            }
+        });
+        action
+    }
+
+    /// Open the chat `jid` (a clicked notification), as [`Controller::open_jid`] does.
+    pub fn open_jid(&self, jid: &str) {
+        let commands = self.0.controller.borrow_mut().open_jid(jid);
+        self.show_conversation(commands);
+    }
+
+    /// Open a `whatsapp:` / `wa.me` link, as [`Controller::open_link`] does: its chat, its text in
+    /// the composer, never a send.
+    pub fn open_link(&self, link: &str) {
+        let commands = self.0.controller.borrow_mut().open_link(link);
+        self.show_conversation(commands);
+    }
+
+    fn show_conversation(&self, commands: Vec<Command>) {
+        if self.0.controller.borrow().model().is_open() {
+            self.0.split.set_show_content(true);
+        }
+        self.run(commands);
+        self.0.composer.grab_focus();
     }
 
     /// Start the daemon worker ([`Worker`]) and fold what it posts in on the GLib main loop, through
@@ -456,7 +554,32 @@ impl Ui {
                 }
             }
         }
+        let alerts = self.0.controller.borrow_mut().take_alerts();
+        self.deliver(alerts);
         self.render();
+    }
+
+    /// Show or withdraw notifications through the application (one id per chat, so a newer
+    /// message replaces the older one's notification); without one they are kept for the tests.
+    fn deliver(&self, alerts: Vec<Alert>) {
+        let Some(app) = self.0.window.application() else {
+            self.0.undelivered_alerts.borrow_mut().extend(alerts);
+            return;
+        };
+        for alert in alerts {
+            match alert {
+                Alert::Show(shown) => {
+                    let notification = gio::Notification::new(&shown.title);
+                    notification.set_body(Some(&shown.body));
+                    notification.set_default_action_and_target_value(
+                        OPEN_CHAT_ACTION,
+                        Some(&shown.chat_jid.to_variant()),
+                    );
+                    app.send_notification(Some(&notification_id(&shown.chat_jid)), &notification);
+                }
+                Alert::Withdraw(jid) => app.withdraw_notification(&notification_id(&jid)),
+            }
+        }
     }
 
     fn set_draft_text(&self, text: &str) {
@@ -885,7 +1008,14 @@ impl Ui {
             toast.set_timeout(4);
             inner.toasts.add_toast(toast);
         }
+        // A draft put there by the model (a link) is shown; a typed one is already there.
+        let draft = controller
+            .take_draft_changed()
+            .then(|| controller.model().composer().text().to_owned());
         drop(controller);
+        if let Some(draft) = draft {
+            self.set_draft_text(&draft);
+        }
         // Its notify handler closes the model's search, so the model must be free.
         if close_search_bar {
             inner.search_bar.set_search_mode(false);

@@ -26,9 +26,10 @@ enabled = true
 show_preview = false
 
 [app]
-# nuncio-desktop: closing the window keeps the app running in the background.
+# nuncio-desktop: closing the window only hides it; the app keeps running (connected, and
+# notifying) until Quit (Ctrl+Q or the menu). false: closing the window quits.
 background = true
-# nuncio-desktop: start with no window, in the background.
+# nuncio-desktop: start with no window, in the background; launching it again shows the window.
 start_hidden = false
 # nuncio-desktop: the window controls in the header bars. "auto" hides them on Hyprland
 # (HYPRLAND_INSTANCE_SIGNATURE set, or Hyprland in XDG_CURRENT_DESKTOP) and shows them elsewhere;
@@ -54,12 +55,15 @@ visible window, the same message was already notified (the daemon publishes a me
 a reaction on it changes), or `enabled = false`. An archived chat that is not muted still
 notifies, as WhatsApp does; a chat open in a hidden window notifies too. The title is the chat's
 name, else its number masked to the last four digits, else `hidden number` or `unnamed group`.
-Clicking the notification opens that chat (the daemon's `focus`); a message that arrived under a
-contact's phone number opens her merged chat.
+Clicking the notification shows nuncio-desktop's window and opens that chat (marking it read once
+its messages are shown); a message that arrived under a contact's phone number opens her merged
+chat. Each chat has one notification at a time (a newer message replaces it), and opening or
+reading the chat withdraws it.
 
 ## Links
 
 `whatsapp://send?phone=…&text=…`, `https://wa.me/<number>?text=…` and
 `https://api.whatsapp.com/send?phone=…&text=…` open the chat with that number and put `text` in
 the composer. A link never sends anything. Group invite links (`https://chat.whatsapp.com/…`) are
-not supported yet.
+not supported yet. nuncio-desktop opens them given as arguments (`nuncio-desktop LINK`) or through
+its `GApplication` `open`; see `crates/nuncio-desktop/README.md`.

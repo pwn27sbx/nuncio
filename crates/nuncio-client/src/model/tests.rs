@@ -248,3 +248,123 @@ fn a_new_message_in_the_open_chat_is_read_only_while_the_view_is_seen() {
     );
     assert_eq!(m.set_seen(true), None, "nothing unread, nothing to mark");
 }
+
+const CAL_PN: &str = "15551230003@s.whatsapp.net";
+
+#[test]
+fn opening_a_listed_jid_selects_and_opens_it() {
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), chat(BEN, "Ben", 2)]);
+    assert_eq!(
+        m.open_jid(BEN),
+        Some(ClientFrame::messages(BEN, MESSAGE_LIMIT))
+    );
+    assert_eq!(m.selected_jid(), Some(BEN));
+    assert!(m.is_open());
+    assert_eq!(m.chat_list().chats().len(), 2, "nothing is added");
+    assert_eq!(
+        m.apply_reply(
+            &ClientFrame::messages(BEN, MESSAGE_LIMIT),
+            &messages_frame(BEN, Vec::new())
+        ),
+        Some(Effect::Request(ClientFrame::mark_read(BEN))),
+        "opened as a click opens it: read once shown"
+    );
+}
+
+#[test]
+fn opening_a_number_merged_into_a_lid_chat_opens_the_lid_chat() {
+    let mut ana = chat(ANA_LID, "Ana", 0);
+    ana.aliases = vec![ANA_PN.to_owned()];
+    let mut m = model(vec![chat(BEN, "Ben", 0), ana]);
+    assert_eq!(
+        m.open_jid(ANA_PN),
+        Some(ClientFrame::messages(ANA_LID, MESSAGE_LIMIT))
+    );
+    assert_eq!(m.selected_jid(), Some(ANA_LID));
+    assert_eq!(m.chat_list().chats().len(), 2);
+}
+
+#[test]
+fn opening_an_unknown_number_adds_an_empty_chat_that_a_new_list_keeps() {
+    let mut archived = chat(BEN, "Ben", 0);
+    archived.archived = true;
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), archived.clone()]);
+    assert_eq!(
+        m.open_jid(CAL_PN),
+        Some(ClientFrame::messages(CAL_PN, MESSAGE_LIMIT))
+    );
+    assert_eq!(m.selected_jid(), Some(CAL_PN));
+    let order: Vec<&str> = m
+        .chat_list()
+        .chats()
+        .iter()
+        .map(|c| c.jid.as_str())
+        .collect();
+    assert_eq!(order, [ANA_PN, CAL_PN, BEN], "archived chats stay last");
+    type_draft(&mut m, "hola");
+    // A resync before the first send: the daemon does not list the new chat yet.
+    m.apply(&chats_frame(vec![chat(ANA_PN, "Ana", 0), archived.clone()]));
+    assert_eq!(
+        m.selected_jid(),
+        Some(CAL_PN),
+        "the new chat stays selected"
+    );
+    assert!(m.chat_list().orphan().is_none(), "it is not a merged chat");
+    assert_eq!(m.notice(), None);
+    let frame = m.send().expect("the first send goes to the new chat");
+    assert_eq!(frame, ClientFrame::send(CAL_PN, "hola", "t-1"));
+    // Once the daemon lists it, the listed entry is the one kept.
+    let mut listed = chat(CAL_PN, "Cal", 0);
+    listed.unread = 0;
+    m.apply(&chats_frame(vec![listed, chat(ANA_PN, "Ana", 0), archived]));
+    assert_eq!(m.chat_list().chats().len(), 3);
+    assert_eq!(m.selected_chat().map(|c| c.name.as_str()), Some("Cal"));
+}
+
+#[test]
+fn a_new_chat_answered_as_a_lid_chat_is_adopted() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    let request = m.open_jid(ANA_PN).expect("opens");
+    m.apply_reply(&request, &messages_frame(ANA_LID, Vec::new()));
+    assert_eq!(m.selected_jid(), Some(ANA_LID));
+    let mut ana = chat(ANA_LID, "Ana", 0);
+    ana.aliases = vec![ANA_PN.to_owned()];
+    m.apply(&chats_frame(vec![chat(BEN, "Ben", 0), ana]));
+    let jids: Vec<&str> = m
+        .chat_list()
+        .chats()
+        .iter()
+        .map(|c| c.jid.as_str())
+        .collect();
+    assert_eq!(jids, [BEN, ANA_LID], "no leftover entry for the number");
+    assert_eq!(m.selected_jid(), Some(ANA_LID));
+}
+
+#[test]
+fn a_new_chat_put_where_the_selected_chat_was_still_resets_the_view() {
+    let mut ben = chat(BEN, "Ben", 0);
+    ben.archived = true;
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), ben]);
+    m.select_chat(1);
+    m.open_selected();
+    m.apply(&messages_frame(BEN, vec![message("M1", false)]));
+    assert!(m.select_message(0));
+    m.take_view_reset();
+    // The new chat goes before the archived ones: at Ben's own index.
+    m.open_jid(CAL_PN);
+    assert_eq!(m.chat_list().selected(), 1);
+    assert!(m.take_view_reset(), "another chat: back to the newest");
+    assert_eq!(m.transcript().cursor(), None, "no message carried over");
+}
+
+#[test]
+fn a_new_chat_answered_as_a_lid_chat_stays_listed_until_the_daemon_lists_it() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    let request = m.open_jid(ANA_PN).expect("opens");
+    m.apply_reply(&request, &messages_frame(ANA_LID, Vec::new()));
+    type_draft(&mut m, "hola");
+    m.apply(&chats_frame(vec![chat(BEN, "Ben", 0)]));
+    assert_eq!(m.selected_jid(), Some(ANA_LID));
+    assert!(m.chat_list().orphan().is_none(), "not a merged chat");
+    assert_eq!(m.send(), Some(ClientFrame::send(ANA_LID, "hola", "t-1")));
+}

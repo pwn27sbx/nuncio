@@ -4,11 +4,14 @@
 //! comes back as [`Command`]s. The window calls these methods and draws
 //! [`crate::present`]'s view of the model afterwards.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use nuncio_client::driver::{self, Outcome};
+use nuncio_client::link::{LinkError, parse_link};
 use nuncio_client::model::Effect;
-use nuncio_client::{ClientFrame, Model, Session, Snapshot};
+use nuncio_client::notify::{Notification, ViewState, notification_for};
+use nuncio_client::{ClientFrame, Config, DaemonFrame, Model, Session, Snapshot};
 
 use crate::worker::Incoming;
 
@@ -27,6 +30,25 @@ pub enum Command {
     Open(PathBuf),
 }
 
+/// The application action a notification's `default` action names, with the chat JID as its
+/// string target: it shows the window and opens that chat.
+pub const OPEN_CHAT_ACTION: &str = "app.open-chat";
+
+/// The id a chat's notification is shown under: one per chat, so a newer message replaces the
+/// notification of an older one in the same chat, and opening the chat withdraws it.
+pub fn notification_id(jid: &str) -> String {
+    format!("chat:{jid}")
+}
+
+/// A desktop notification to show or take back (the window hands it to the `GApplication`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Alert {
+    /// Show this notification under its chat's [`notification_id`].
+    Show(Notification),
+    /// Withdraw the notification of this chat: it was opened or read.
+    Withdraw(String),
+}
+
 /// The model and what the window needs to drive it.
 #[derive(Debug, Clone)]
 pub struct Controller {
@@ -34,6 +56,19 @@ pub struct Controller {
     /// Whether the worker ever connected: the first connect says nothing, a later one says
     /// `reconnected to nunciod`.
     ever_connected: bool,
+    config: Config,
+    /// What the window shows, for [`notification_for`], and the messages already notified.
+    view: ViewState,
+    /// The chats with a notification shown and not withdrawn yet.
+    notifying: HashSet<String>,
+    alerts: Vec<Alert>,
+    /// Whether a chat list has arrived: a chat named before that (a notification clicked or a
+    /// link opened at a cold start) is opened once it has.
+    chats_loaded: bool,
+    /// The chat (and the link's draft) waiting for the first chat list.
+    waiting: Option<(String, Option<String>)>,
+    /// The draft was set here (a link), not typed: the composer widget must show it.
+    draft_changed: bool,
 }
 
 fn commands(effect: Option<Effect>) -> Vec<Command> {
@@ -65,18 +100,31 @@ impl Controller {
         model.set_connected(false);
         // Not seen until the window says it is active.
         model.set_seen(false);
-        Self {
-            model,
-            ever_connected: false,
-        }
+        Self::build(model, false, false)
     }
 
     /// A controller over an existing model (tests, the smoke test).
     pub fn with_model(model: Model) -> Self {
+        Self::build(model, true, true)
+    }
+
+    fn build(model: Model, ever_connected: bool, chats_loaded: bool) -> Self {
         Self {
             model,
-            ever_connected: true,
+            ever_connected,
+            config: Config::default(),
+            view: ViewState::default(),
+            notifying: HashSet::new(),
+            alerts: Vec::new(),
+            chats_loaded,
+            waiting: None,
+            draft_changed: false,
         }
+    }
+
+    /// Follow `config` (which messages notify and what their notifications say).
+    pub fn set_config(&mut self, config: &Config) {
+        self.config = config.clone();
     }
 
     pub fn model(&self) -> &Model {
@@ -97,20 +145,34 @@ impl Controller {
                 frames.into_iter().map(Command::Send).collect()
             }
             Incoming::Reply { request, result } => {
-                match driver::settle(&mut self.model, &request, result, CLIENT) {
+                let listed = matches!(result, Ok(DaemonFrame::Chats { .. }));
+                if let Ok(DaemonFrame::MarkedRead { jid, .. }) = &result {
+                    self.withdraw(jid);
+                }
+                let mut commands = match driver::settle(&mut self.model, &request, result, CLIENT) {
                     Outcome::Done => Vec::new(),
                     Outcome::Effect(effect) => commands(Some(effect)),
                     Outcome::Lost(error) => {
                         driver::lost(&mut self.model, &error);
                         Vec::new()
                     }
+                };
+                if listed {
+                    self.chats_loaded = true;
+                    if let Some((jid, draft)) = self.waiting.take() {
+                        commands.extend(self.open_now(&jid, draft));
+                    }
                 }
+                commands
             }
             Incoming::NotConnected(frame) => {
                 driver::not_connected(&mut self.model, &frame, CLIENT);
                 Vec::new()
             }
-            Incoming::Event(frame) => commands(self.model.apply(&frame)),
+            Incoming::Event(frame) => {
+                self.notify(&frame);
+                commands(self.model.apply(&frame))
+            }
             Incoming::Lost(error) => {
                 driver::lost(&mut self.model, &error);
                 Vec::new()
@@ -136,7 +198,105 @@ impl Controller {
         if other {
             self.model.composer_mut().cancel_reply();
         }
-        send(self.model.open_selected())
+        let frame = self.model.open_selected();
+        self.withdraw_selected();
+        send(frame)
+    }
+
+    /// Open the chat `jid` names from outside the list, as a click on its notification does
+    /// ([`OPEN_CHAT_ACTION`]): selected, opened and marked read as [`Controller::open_chat`] does;
+    /// a chat the list does not have gets an empty conversation of its own
+    /// ([`Model::open_jid`]). Before the first chat list arrives (a cold start), it waits for it.
+    pub fn open_jid(&mut self, jid: &str) -> Vec<Command> {
+        self.open_or_wait(jid, None)
+    }
+
+    /// Open a `whatsapp:` / `wa.me` link ([`parse_link`]): its chat as [`Controller::open_jid`]
+    /// does, and its text, if any, in the composer in place of the draft. Nothing is ever sent:
+    /// only the user's own send does. A group invite or an invalid link only says why.
+    pub fn open_link(&mut self, link: &str) -> Vec<Command> {
+        match parse_link(link) {
+            Ok(target) => self.open_or_wait(&target.jid, target.draft),
+            Err(LinkError::GroupInvite) => {
+                self.model.set_notice(LinkError::GroupInvite.to_string());
+                Vec::new()
+            }
+            Err(error) => {
+                self.model
+                    .set_notice(format!("cannot open the link: {error}"));
+                Vec::new()
+            }
+        }
+    }
+
+    fn open_or_wait(&mut self, jid: &str, draft: Option<String>) -> Vec<Command> {
+        if self.chats_loaded {
+            self.open_now(jid, draft)
+        } else {
+            self.waiting = Some((jid.to_owned(), draft));
+            Vec::new()
+        }
+    }
+
+    fn open_now(&mut self, jid: &str, draft: Option<String>) -> Vec<Command> {
+        let before = self.model.selected_jid().map(str::to_owned);
+        let frame = self.model.open_jid(jid);
+        if self.model.selected_jid() != before.as_deref() {
+            self.model.composer_mut().cancel_reply();
+        }
+        if let Some(draft) = draft {
+            self.model.composer_mut().set_text(&draft);
+            self.draft_changed = true;
+        }
+        self.withdraw_selected();
+        send(frame)
+    }
+
+    /// The notifications to show or withdraw since the last call, oldest first.
+    pub fn take_alerts(&mut self) -> Vec<Alert> {
+        std::mem::take(&mut self.alerts)
+    }
+
+    /// Whether the draft was replaced here (a link) since the last call.
+    pub fn take_draft_changed(&mut self) -> bool {
+        std::mem::take(&mut self.draft_changed)
+    }
+
+    /// The notification an event deserves ([`notification_for`], seen from what the window shows
+    /// now), and the withdrawal of a chat read elsewhere.
+    fn notify(&mut self, frame: &DaemonFrame) {
+        if let DaemonFrame::EventUnread {
+            jid,
+            chat_unread: 0,
+            ..
+        } = frame
+        {
+            self.withdraw(jid);
+        }
+        self.view.focused_chat = self
+            .model
+            .is_open()
+            .then(|| self.model.selected_jid().map(str::to_owned))
+            .flatten();
+        self.view.window_visible = self.model.is_seen();
+        let chats = self.model.chat_list().chats();
+        if let Some(notification) = notification_for(frame, chats, &self.view, &self.config) {
+            self.view.notified.record(&notification);
+            self.notifying.insert(notification.chat_jid.clone());
+            self.alerts.push(Alert::Show(notification));
+        }
+    }
+
+    fn withdraw_selected(&mut self) {
+        if let Some(jid) = self.model.selected_jid().map(str::to_owned) {
+            self.withdraw(&jid);
+        }
+    }
+
+    fn withdraw(&mut self, jid: &str) {
+        if self.notifying.remove(jid) {
+            self.alerts.push(Alert::Withdraw(jid.to_owned()));
+        }
     }
 
     /// The window became active and shown (`true`), or inactive, hidden or minimized: only a

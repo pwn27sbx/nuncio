@@ -388,3 +388,307 @@ fn a_send_answered_not_confirmed_is_shown_so_and_can_be_retried() {
     );
     assert_eq!(c.retry(0), [Command::Send(ClientFrame::retry("d-1"))]);
 }
+
+// Notifications, the `open-chat` action and links (D3b).
+
+use nuncio_client::Config;
+use nuncio_client::notify::Notification;
+
+const CAL: &str = "15551230003@s.whatsapp.net";
+
+fn incoming_message(jid: &str, id: &str) -> Incoming {
+    Incoming::Event(DaemonFrame::EventMessage {
+        v: PROTOCOL_VERSION,
+        jid: jid.to_owned(),
+        message: message(id, "text"),
+    })
+}
+
+fn shown(alerts: Vec<Alert>) -> Vec<Notification> {
+    alerts
+        .into_iter()
+        .map(|alert| match alert {
+            Alert::Show(n) => n,
+            other => panic!("expected only shown notifications, got {other:?}"),
+        })
+        .collect()
+}
+
+/// Every frame the commands would hand the worker.
+fn frames(commands: &[Command]) -> Vec<ClientFrame> {
+    commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::Send(frame) => Some(frame.clone()),
+            Command::Open(_) => None,
+        })
+        .collect()
+}
+
+fn is_a_send(frame: &ClientFrame) -> bool {
+    matches!(
+        frame,
+        ClientFrame::Send { .. } | ClientFrame::Retry { .. } | ClientFrame::React { .. }
+    )
+}
+
+#[test]
+fn an_incoming_message_shows_the_notification_the_client_computed() {
+    let mut c = connected(0);
+    c.incoming(incoming_message(BEN, "M1"));
+    assert_eq!(
+        shown(c.take_alerts()),
+        [Notification {
+            chat_jid: BEN.to_owned(),
+            title: "Ben".to_owned(),
+            body: "New message".to_owned(),
+            message_id: "M1".to_owned(),
+        }],
+        "no message text unless show_preview"
+    );
+    assert!(c.take_alerts().is_empty(), "alerts are handed out once");
+    assert_eq!(notification_id(BEN), notification_id(BEN));
+    assert_ne!(
+        notification_id(BEN),
+        notification_id(ANA),
+        "one id per chat"
+    );
+    assert_eq!(OPEN_CHAT_ACTION, "app.open-chat");
+}
+
+#[test]
+fn show_preview_and_disabled_notifications_follow_the_config() {
+    let mut config = Config::default();
+    config.notifications.show_preview = true;
+    let mut c = connected(0);
+    c.set_config(&config);
+    c.incoming(incoming_message(BEN, "M1"));
+    assert_eq!(shown(c.take_alerts())[0].body, "hello");
+    config.notifications.enabled = false;
+    c.set_config(&config);
+    c.incoming(incoming_message(BEN, "M2"));
+    assert!(c.take_alerts().is_empty());
+}
+
+#[test]
+fn the_open_chat_notifies_only_while_the_window_is_not_seen() {
+    let mut c = opened(Vec::new());
+    c.set_seen(true);
+    c.incoming(incoming_message(ANA, "M1"));
+    assert!(c.take_alerts().is_empty(), "the chat on screen");
+    c.incoming(incoming_message(BEN, "M2"));
+    assert_eq!(shown(c.take_alerts())[0].chat_jid, BEN, "another chat");
+    c.set_seen(false);
+    c.incoming(incoming_message(ANA, "M3"));
+    assert_eq!(
+        shown(c.take_alerts())[0].chat_jid,
+        ANA,
+        "a hidden window sees nothing"
+    );
+}
+
+#[test]
+fn a_message_republished_for_a_reaction_does_not_notify_again() {
+    let mut c = connected(0);
+    c.incoming(incoming_message(BEN, "M1"));
+    assert_eq!(shown(c.take_alerts()).len(), 1);
+    c.incoming(incoming_message(BEN, "M1"));
+    assert!(c.take_alerts().is_empty());
+    c.incoming(incoming_message(BEN, "M2"));
+    assert_eq!(shown(c.take_alerts()).len(), 1, "a newer one does");
+}
+
+#[test]
+fn opening_a_chat_withdraws_its_notification_and_only_its_own() {
+    let mut c = connected(0);
+    c.incoming(incoming_message(BEN, "M1"));
+    c.take_alerts();
+    c.open_chat(0);
+    assert!(c.take_alerts().is_empty(), "Ana had no notification");
+    c.open_chat(1);
+    assert_eq!(c.take_alerts(), [Alert::Withdraw(BEN.to_owned())]);
+    c.open_chat(1);
+    assert!(c.take_alerts().is_empty(), "withdrawn once");
+}
+
+#[test]
+fn a_chat_read_here_or_elsewhere_withdraws_its_notification() {
+    let mut c = connected(0);
+    c.incoming(incoming_message(BEN, "M1"));
+    c.incoming(incoming_message(ANA, "M2"));
+    c.take_alerts();
+    // Read on the phone: the daemon says the chat has nothing unread.
+    c.incoming(Incoming::Event(DaemonFrame::EventUnread {
+        v: PROTOCOL_VERSION,
+        unread: 1,
+        jid: BEN.to_owned(),
+        chat_unread: 0,
+    }));
+    assert_eq!(c.take_alerts(), [Alert::Withdraw(BEN.to_owned())]);
+    c.incoming(reply(
+        &ClientFrame::mark_read(ANA),
+        DaemonFrame::MarkedRead {
+            v: PROTOCOL_VERSION,
+            jid: ANA.to_owned(),
+            unread: 0,
+        },
+    ));
+    assert_eq!(c.take_alerts(), [Alert::Withdraw(ANA.to_owned())]);
+}
+
+#[test]
+fn the_open_chat_action_opens_and_reads_the_chat_it_names() {
+    let mut c = connected(0);
+    c.incoming(Incoming::Event(DaemonFrame::EventUnread {
+        v: PROTOCOL_VERSION,
+        unread: 2,
+        jid: BEN.to_owned(),
+        chat_unread: 2,
+    }));
+    c.incoming(incoming_message(BEN, "M1"));
+    c.take_alerts();
+    let request = sent(c.open_jid(BEN));
+    assert_eq!(request, ClientFrame::messages(BEN, 200));
+    assert_eq!(c.model().selected_jid(), Some(BEN));
+    assert!(c.model().is_open());
+    assert_eq!(c.take_alerts(), [Alert::Withdraw(BEN.to_owned())]);
+    let next = c.incoming(reply(
+        &request,
+        DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: BEN.to_owned(),
+            messages: vec![message("M1", "text")],
+        },
+    ));
+    assert_eq!(next, [Command::Send(ClientFrame::mark_read(BEN))]);
+}
+
+#[test]
+fn from_a_cold_start_the_chat_opens_once_the_chat_list_is_loaded() {
+    let mut c = Controller::new("d");
+    assert!(c.open_jid(BEN).is_empty(), "nothing to open yet");
+    let frames = frames(&c.incoming(Incoming::Connected));
+    assert!(!frames.contains(&ClientFrame::messages(BEN, 200)));
+    let loaded = c.incoming(reply(
+        &ClientFrame::chats(200),
+        DaemonFrame::Chats {
+            v: PROTOCOL_VERSION,
+            chats: vec![chat(ANA, "Ana", 0), chat(BEN, "Ben", 3)],
+        },
+    ));
+    assert_eq!(loaded, [Command::Send(ClientFrame::messages(BEN, 200))]);
+    assert_eq!(c.model().selected_jid(), Some(BEN));
+    let next = c.incoming(reply(
+        &ClientFrame::messages(BEN, 200),
+        DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: BEN.to_owned(),
+            messages: vec![message("M1", "text")],
+        },
+    ));
+    assert_eq!(
+        next,
+        [Command::Send(ClientFrame::mark_read(BEN))],
+        "read once shown"
+    );
+}
+
+#[test]
+fn a_link_opens_the_chat_and_puts_its_text_in_the_composer_without_sending() {
+    let mut c = connected(0);
+    let commands = c.open_link("https://wa.me/15551230002?text=on%20my%20way");
+    assert_eq!(frames(&commands), [ClientFrame::messages(BEN, 200)]);
+    assert!(!frames(&commands).iter().any(is_a_send), "never a send");
+    assert_eq!(c.model().selected_jid(), Some(BEN));
+    assert_eq!(c.model().composer().text(), "on my way");
+    assert!(c.take_draft_changed(), "the composer widget must show it");
+    assert!(!c.take_draft_changed());
+    // The messages arrive: still nothing is sent.
+    let next = c.incoming(reply(
+        &ClientFrame::messages(BEN, 200),
+        DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: BEN.to_owned(),
+            messages: Vec::new(),
+        },
+    ));
+    assert!(!frames(&next).iter().any(is_a_send));
+    assert_eq!(c.model().composer().text(), "on my way");
+}
+
+#[test]
+fn a_link_without_text_keeps_the_draft_and_cancels_a_reply_to_another_chat() {
+    let mut c = opened(vec![message("M1", "text")]);
+    c.set_draft("typed");
+    assert!(c.reply(0));
+    c.open_link("whatsapp://send?phone=15551230002");
+    assert_eq!(c.model().composer().text(), "typed");
+    assert_eq!(c.model().composer().reply_to(), None);
+    assert!(!c.take_draft_changed());
+}
+
+#[test]
+fn a_link_to_a_number_with_no_chat_opens_an_empty_conversation_for_it() {
+    let mut c = connected(0);
+    let commands = c.open_link("whatsapp://send?phone=%2B1%20555%20123%200003&text=hola");
+    assert_eq!(frames(&commands), [ClientFrame::messages(CAL, 200)]);
+    assert_eq!(c.model().selected_jid(), Some(CAL));
+    assert_eq!(c.model().composer().text(), "hola");
+    // Only the user's own send sends it, once.
+    let (sent_it, commands) = c.send();
+    assert!(sent_it);
+    assert_eq!(
+        commands,
+        [Command::Send(ClientFrame::send(CAL, "hola", "d-1"))]
+    );
+}
+
+#[test]
+fn a_link_from_a_cold_start_waits_for_the_chat_list() {
+    let mut c = Controller::new("d");
+    assert!(
+        c.open_link("https://api.whatsapp.com/send?phone=15551230002&text=hi")
+            .is_empty()
+    );
+    c.incoming(Incoming::Connected);
+    let loaded = c.incoming(reply(
+        &ClientFrame::chats(200),
+        DaemonFrame::Chats {
+            v: PROTOCOL_VERSION,
+            chats: vec![chat(ANA, "Ana", 0), chat(BEN, "Ben", 0)],
+        },
+    ));
+    assert_eq!(loaded, [Command::Send(ClientFrame::messages(BEN, 200))]);
+    assert_eq!(c.model().composer().text(), "hi");
+    assert!(c.take_draft_changed());
+}
+
+#[test]
+fn a_group_invite_link_says_it_is_not_supported_yet() {
+    let mut c = connected(0);
+    assert!(
+        c.open_link("https://chat.whatsapp.com/AbCdEf123")
+            .is_empty()
+    );
+    assert_eq!(
+        c.take_notice().as_deref(),
+        Some("group invite links are not supported yet")
+    );
+    assert_eq!(c.model().selected_jid(), Some(ANA), "nothing opened");
+    assert!(!c.model().is_open());
+}
+
+#[test]
+fn an_invalid_link_says_why() {
+    let mut c = connected(0);
+    assert!(c.open_link("whatsapp://send?phone=12").is_empty());
+    assert_eq!(
+        c.take_notice().as_deref(),
+        Some("cannot open the link: the link's phone number is not 7 to 15 digits")
+    );
+    assert!(c.open_link("https://example.com/").is_empty());
+    assert_eq!(
+        c.take_notice().as_deref(),
+        Some("cannot open the link: not a WhatsApp chat link")
+    );
+}

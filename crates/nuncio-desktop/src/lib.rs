@@ -4,6 +4,8 @@
 //!   [`present`]'s view of the shared `nuncio_client::Model`;
 //! - [`controller`]: what each user action and daemon answer does to the model, with the shared
 //!   driver's rules (`nuncio_client::driver`), without GTK;
+//! - [`lifecycle`]: when the window shows and what closing it does (`[app] background`,
+//!   `start_hidden`);
 //! - [`worker`]: the daemon connections on their own threads, posting into the main loop;
 //! - here: following Omarchy's live theme. The palette parser and the watcher live in
 //!   `nuncio-client`, because following the theme is client-side work the TUI needs too; what
@@ -11,6 +13,7 @@
 //!   colour scheme.
 
 pub mod controller;
+pub mod lifecycle;
 pub mod present;
 pub mod window;
 pub mod worker;

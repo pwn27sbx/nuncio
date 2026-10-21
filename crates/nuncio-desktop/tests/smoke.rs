@@ -12,9 +12,11 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use nuncio_client::config::App;
 use nuncio_client::wire::{MessageState, PROTOCOL_VERSION};
 use nuncio_client::{Backoff, Chat, ClientFrame, DaemonFrame, Message};
-use nuncio_desktop::controller::{Command, Controller};
+use nuncio_desktop::controller::{Alert, Command, Controller};
+use nuncio_desktop::lifecycle::Lifecycle;
 use nuncio_desktop::window::{Ui, WeakUi};
 use nuncio_desktop::worker::{Incoming, Settings};
 
@@ -162,7 +164,11 @@ fn main() {
         std::thread::sleep(Duration::from_millis(5));
     }
     check(not_sent(&ui), "the worker's answer reaches the main loop");
-    connects_and_loads_the_chats_with_no_ui_handle_kept(&fake_daemon(), "a fake daemon");
+    let daemon = fake_daemon();
+    connects_and_loads_the_chats_with_no_ui_handle_kept(&daemon, "a fake daemon");
+    notifications_and_the_open_chat_action();
+    a_link_fills_the_composer_and_sends_nothing();
+    closing_in_background_mode_hides_and_keeps_the_state_and_worker(&daemon);
     // The real demo daemon, when its binary is given (`go build -o DIR/nuncio-demo ./cmd/nuncio-demo`).
     if let Some(demo) = std::env::var_os("NUNCIO_DEMO_BIN") {
         let runtime = PathBuf::from(format!("/tmp/ndsd-{}", std::process::id()));
@@ -222,6 +228,144 @@ fn connects_and_loads_the_chats_with_no_ui_handle_kept(socket: &Path, what: &str
     check(
         weak.upgrade().is_none(),
         "closing the window lets its state go",
+    );
+}
+
+const BEN: &str = "15551230002@s.whatsapp.net";
+
+/// A window with no worker and Ana and Ben listed (the commands stay undelivered).
+fn listed() -> Ui {
+    let ui = Ui::new(None, Controller::new("smoke"), 0, true);
+    ui.incoming(Incoming::Connected);
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::chats(200),
+        result: Ok(DaemonFrame::Chats {
+            v: PROTOCOL_VERSION,
+            chats: vec![chat(ANA, "Ana"), chat(BEN, "Ben")],
+        }),
+    });
+    ui.take_undelivered();
+    ui
+}
+
+/// A new message gives a notification (kept, since no `GApplication` is attached: nothing is
+/// shown on this desktop), and the `open-chat` action its `default` action names opens that chat
+/// and withdraws it.
+fn notifications_and_the_open_chat_action() {
+    let ui = listed();
+    ui.incoming(Incoming::Event(DaemonFrame::EventMessage {
+        v: PROTOCOL_VERSION,
+        jid: BEN.to_owned(),
+        message: message("M9", "secret plans", false),
+    }));
+    let alerts = ui.take_undelivered_alerts();
+    check(
+        matches!(alerts.as_slice(), [Alert::Show(n)] if n.chat_jid == BEN && n.title == "Ben" && n.body == "New message"),
+        "a new message notifies with no text",
+    );
+
+    let shown = std::rc::Rc::new(std::cell::Cell::new(0));
+    let action = ui.open_chat_action({
+        let shown = std::rc::Rc::clone(&shown);
+        move |_| shown.set(shown.get() + 1)
+    });
+    check(
+        action.name() == "open-chat",
+        "the action is the one notifications name (app.open-chat)",
+    );
+    let group = gtk::gio::SimpleActionGroup::new();
+    group.add_action(&action);
+    group.activate_action("open-chat", Some(&BEN.to_variant()));
+    check(
+        ui.controller().model().selected_jid() == Some(BEN) && ui.controller().model().is_open(),
+        "the action opens the chat it names",
+    );
+    check(
+        ui.take_undelivered() == [Command::Send(ClientFrame::messages(BEN, 200))],
+        "and asks for its messages",
+    );
+    check(shown.get() == 1, "the window is shown");
+    check(
+        ui.conversation_title() == "Ben",
+        "the header names that chat",
+    );
+    check(
+        ui.take_undelivered_alerts() == [Alert::Withdraw(BEN.to_owned())],
+        "opening the chat withdraws its notification",
+    );
+}
+
+fn a_link_fills_the_composer_and_sends_nothing() {
+    // `HANDLES_OPEN` hands a command-line link over as a `GFile`: its URI must come back intact.
+    for link in [
+        "whatsapp://send?phone=15551230002&text=hola%20Ben",
+        "https://wa.me/15551230002?text=hola%20Ben",
+    ] {
+        check(
+            gtk::gio::File::for_commandline_arg(link).uri() == link,
+            &format!("the open handler gets the link as given: {link}"),
+        );
+    }
+    let ui = listed();
+    ui.open_link("https://wa.me/15551230002?text=hola%20Ben");
+    check(
+        ui.draft() == "hola Ben",
+        "the link's text is in the composer",
+    );
+    check(
+        ui.take_undelivered() == [Command::Send(ClientFrame::messages(BEN, 200))],
+        "the chat opens and nothing is sent",
+    );
+    ui.open_link("https://chat.whatsapp.com/AbCdEf123");
+    check(ui.draft() == "hola Ben", "a group invite changes nothing");
+    check(ui.take_undelivered().is_empty(), "and asks nothing");
+}
+
+/// `[app] background = true`: closing hides the window; the state and the worker stay until Quit.
+fn closing_in_background_mode_hides_and_keeps_the_state_and_worker(socket: &Path) {
+    let ui = Ui::new(None, Controller::new("bg"), 0, true);
+    ui.set_lifecycle(Lifecycle::new(&App::default()));
+    let window = ui.window().clone();
+    ui.start_worker(Settings {
+        path: socket.to_owned(),
+        client: "nuncio-desktop/smoke".to_owned(),
+        timeout: Duration::from_secs(5),
+        backoff: Backoff::default(),
+    });
+    let weak = ui.downgrade();
+    drop(ui);
+    gtk::prelude::WidgetExt::realize(&window);
+    window.close();
+    for _ in 0..50 {
+        glib::MainContext::default().iteration(false);
+    }
+    check(
+        !window.is_visible(),
+        "closing in background mode hides the window",
+    );
+    let alive = weak.upgrade();
+    check(alive.is_some(), "the hidden window keeps its state");
+    check(
+        alive.as_ref().is_some_and(Ui::worker_running),
+        "and its daemon worker",
+    );
+    // The worker still folds the daemon's answers in while hidden.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let loaded = |weak: &WeakUi| weak.upgrade().is_some_and(|ui| ui.drawn().0 > 0);
+    while !loaded(&weak) && Instant::now() < deadline {
+        glib::MainContext::default().iteration(false);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    check(loaded(&weak), "the hidden window still loads the chats");
+    if let Some(ui) = alive {
+        ui.quit();
+    }
+    for _ in 0..50 {
+        glib::MainContext::default().iteration(false);
+    }
+    check(
+        weak.upgrade().is_none(),
+        "Quit lets the state and the worker go",
     );
 }
 

@@ -4,20 +4,26 @@
 //!
 //! - normal: open the window (chat list, conversation, composer) on `nunciod` at
 //!   `$XDG_RUNTIME_DIR/nuncio/core.sock`, reconnecting when it goes away, and follow the live
-//!   Omarchy theme;
+//!   Omarchy theme; show notifications for new messages (a click opens that chat), keep running
+//!   in the background when the window is closed (`[app] background`) until Quit, and open the
+//!   `whatsapp:` / `wa.me` links given as arguments or through `open`;
 //! - `--probe`: the S5 acceptance check without a window on screen. It applies a palette, performs
 //!   the same atomic theme swap `omarchy-theme-set` does, and prints the colour GTK resolves
 //!   before and after plus how long the detection took. `--theme-dir` points it at a fixture tree
 //!   so the check never touches the running theme.
 
 use adw::prelude::*;
+use gtk::gio;
 use nuncio_client::{Backoff, Config, DEFAULT_READ_TIMEOUT, Palette, ThemeWatcher, socket_path};
 use nuncio_desktop::controller::Controller;
+use nuncio_desktop::lifecycle::Lifecycle;
 use nuncio_desktop::present::shows_title_bar;
-use nuncio_desktop::window::Ui;
+use nuncio_desktop::window::{Ui, WeakUi};
 use nuncio_desktop::worker::Settings;
 use nuncio_desktop::{ROOT_CLASS, apply_to_display, css_for, resolved_foreground};
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const APP_ID: &str = "io.github.pwn27sbx.nuncio";
@@ -26,12 +32,15 @@ const CLIENT_NAME: &str = concat!("nuncio-desktop/", env!("CARGO_PKG_VERSION"));
 struct Args {
     theme_dir: Option<PathBuf>,
     probe: bool,
+    /// `whatsapp:` / `wa.me` links to open (as a browser hands them over).
+    links: Vec<String>,
 }
 
 fn parse_args() -> Args {
     let mut args = Args {
         theme_dir: None,
         probe: false,
+        links: Vec::new(),
     };
     let mut argv = std::env::args().skip(1);
     while let Some(arg) = argv.next() {
@@ -40,12 +49,15 @@ fn parse_args() -> Args {
             "--theme-dir" => args.theme_dir = argv.next().map(PathBuf::from),
             "-h" | "--help" => {
                 println!(
-                    "usage: nuncio-desktop [--theme-dir DIR] [--probe]\n\n  \
+                    "usage: nuncio-desktop [--theme-dir DIR] [--probe] [LINK...]\n\n  \
                      --theme-dir DIR  directory holding colors.toml (default: Omarchy's)\n  \
-                     --probe          run the S5 theme-switch check and exit"
+                     --probe          run the S5 theme-switch check and exit\n  \
+                     LINK             a whatsapp://send?phone=... or https://wa.me/... link: opens\n                   \
+                     that chat with the link's text in the composer (never sent)"
                 );
                 std::process::exit(0);
             }
+            other if !other.starts_with('-') => args.links.push(other.to_owned()),
             other => {
                 eprintln!("nuncio-desktop: unexpected argument {other:?}");
                 std::process::exit(2);
@@ -86,29 +98,96 @@ fn main() -> glib::ExitCode {
         std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
     );
 
-    let app = adw::Application::builder().application_id(APP_ID).build();
-    app.connect_activate(move |app| {
-        // A second launch only brings the window back.
-        if let Some(window) = app.active_window() {
-            window.present();
-            return;
-        }
-        let ui = Ui::new(
-            Some(app),
-            Controller::new(client_prefix()),
-            local_offset_minutes(),
-            title_bar,
-        );
+    let app = adw::Application::builder()
+        .application_id(APP_ID)
+        // Links arrive as `open` (the command line's, or a desktop's D-Bus `Open`).
+        .flags(gio::ApplicationFlags::HANDLES_OPEN)
+        .build();
+    let shown: Rc<RefCell<Option<WeakUi>>> = Rc::default();
+    let lifecycle = Rc::new(RefCell::new(Lifecycle::new(&config.app)));
+    let hold: Rc<RefCell<Option<gio::ApplicationHoldGuard>>> = Rc::default();
 
-        let palette = Palette::load_or_default(Some(&palette_file));
-        apply_to_display(&gtk::gdk::Display::default().expect("a display"), &palette);
-        follow_theme(&palette_file);
-        connect(&ui);
-        ui.window().present();
+    // Everything is built at startup, before `activate`, `open` or an action (a notification
+    // clicked at a cold start activates `app.open-chat` with no `activate`).
+    app.connect_startup({
+        let shown = Rc::clone(&shown);
+        let lifecycle = Rc::clone(&lifecycle);
+        let hold = Rc::clone(&hold);
+        move |app| {
+            let mut controller = Controller::new(client_prefix());
+            controller.set_config(&config);
+            let ui = Ui::new(Some(app), controller, local_offset_minutes(), title_bar);
+            ui.set_lifecycle(Lifecycle::new(&config.app));
+            if lifecycle.borrow().holds() {
+                // Keep running with the window hidden; released by Quit.
+                *hold.borrow_mut() = Some(app.hold());
+            }
+
+            let palette = Palette::load_or_default(Some(&palette_file));
+            apply_to_display(&gtk::gdk::Display::default().expect("a display"), &palette);
+            follow_theme(&palette_file);
+            connect(&ui);
+
+            app.add_action(&ui.open_chat_action({
+                let lifecycle = Rc::clone(&lifecycle);
+                move |ui| {
+                    lifecycle.borrow_mut().shown();
+                    ui.window().present();
+                }
+            }));
+            let quit = gio::SimpleAction::new("quit", None);
+            quit.connect_activate({
+                let weak = ui.downgrade();
+                let hold = Rc::clone(&hold);
+                let app = app.downgrade();
+                move |_, _| {
+                    hold.borrow_mut().take();
+                    if let Some(ui) = weak.upgrade() {
+                        ui.quit();
+                    }
+                    if let Some(app) = app.upgrade() {
+                        app.quit();
+                    }
+                }
+            });
+            app.add_action(&quit);
+            app.set_accels_for_action("app.quit", &["<Control>q"]);
+            *shown.borrow_mut() = Some(ui.downgrade());
+        }
+    });
+    app.connect_activate({
+        let shown = Rc::clone(&shown);
+        let lifecycle = Rc::clone(&lifecycle);
+        move |_| {
+            // A second launch only brings the window back; `[app] start_hidden` keeps the first
+            // one hidden.
+            if let Some(ui) = shown.borrow().as_ref().and_then(WeakUi::upgrade)
+                && lifecycle.borrow_mut().activate()
+            {
+                ui.window().present();
+            }
+        }
+    });
+    app.connect_open({
+        let shown = Rc::clone(&shown);
+        let lifecycle = Rc::clone(&lifecycle);
+        move |_, files, _| {
+            let Some(ui) = shown.borrow().as_ref().and_then(WeakUi::upgrade) else {
+                return;
+            };
+            for file in files {
+                ui.open_link(&file.uri());
+            }
+            lifecycle.borrow_mut().shown();
+            ui.window().present();
+        }
     });
 
-    // GTK must not see this program's own options.
-    app.run_with_args(&[] as &[&str])
+    // GTK must not see this program's own options; the links go on as `open`.
+    let argv0 = std::env::args()
+        .next()
+        .unwrap_or_else(|| "nuncio-desktop".to_owned());
+    app.run_with_args(&std::iter::once(argv0).chain(args.links).collect::<Vec<_>>())
 }
 
 /// Start the daemon worker on the socket `nunciod` listens on.

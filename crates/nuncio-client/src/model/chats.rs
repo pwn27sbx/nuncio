@@ -69,6 +69,21 @@ pub fn sort_as_daemon(chats: &mut [Chat]) {
     chats.sort_by(|a, b| newest(b).cmp(newest(a)).then_with(|| a.jid.cmp(&b.jid)));
 }
 
+/// A chat for `jid` that nothing but its JID is known of yet.
+pub(crate) fn empty_chat(jid: &str) -> Chat {
+    Chat {
+        jid: jid.to_owned(),
+        name: String::new(),
+        unread: 0,
+        archived: false,
+        pinned: false,
+        muted: false,
+        aliases: Vec::new(),
+        phone: None,
+        last_message: None,
+    }
+}
+
 /// The chat list (see the module docs).
 #[derive(Debug, Clone, Default)]
 pub struct ChatList {
@@ -83,6 +98,9 @@ pub struct ChatList {
     pub(crate) aliases: HashMap<String, String>,
     /// JIDs of chats with a `mark_read` sent and not answered yet (at most one per chat).
     pub(crate) marking: HashSet<String>,
+    /// Chats opened from outside the list ([`Model::open_jid`](super::Model::open_jid)) that the
+    /// daemon does not list yet: kept listed until it does.
+    pub(crate) pending: HashSet<String>,
 }
 
 impl ChatList {
@@ -188,22 +206,18 @@ impl ChatList {
     pub(crate) fn with_new_chat(&self, jid: &str, message: &Message) -> Vec<Chat> {
         let mut chats = self.chats.clone();
         chats.push(Chat {
-            jid: jid.to_owned(),
-            name: String::new(),
-            unread: 0,
-            archived: false,
-            pinned: false,
-            muted: false,
-            aliases: Vec::new(),
-            phone: None,
             last_message: Some(message.clone()),
+            ..empty_chat(jid)
         });
         chats
     }
 
     /// The listed entry for the phone-number chat `alias` becomes `canonical`'s: renamed, or
-    /// dropped when `canonical` is already listed.
+    /// dropped when `canonical` is already listed. A pending `alias` is a pending `canonical`.
     pub(crate) fn rename_entry(&mut self, alias: &str, canonical: &str) {
+        if self.pending.remove(alias) {
+            self.pending.insert(canonical.to_owned());
+        }
         if self.chats.iter().any(|c| c.jid == canonical) {
             self.chats.retain(|c| c.jid != alias);
         } else if let Some(entry) = self.chats.iter_mut().find(|c| c.jid == alias) {

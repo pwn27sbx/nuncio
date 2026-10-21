@@ -270,6 +270,7 @@ impl Model {
     /// chooses a chat again: a draft never changes recipient.
     fn set_chats(&mut self, mut chats: Vec<Chat>) {
         self.adopt_listed(&chats);
+        self.keep_pending(&mut chats);
         let selected = self.chats.selected_jid().map(str::to_owned);
         let previous = self.chats.selected_chat().cloned();
         self.chats.orphan = None;
@@ -327,6 +328,25 @@ impl Model {
                 self.chats.aliases.insert(alias.clone(), canonical.clone());
                 self.rename_keys(&alias, &canonical);
             }
+        }
+    }
+
+    /// Keep in a new list `chats` the chats opened from outside the list that the daemon does
+    /// not list yet ([`Model::open_jid`]); one it lists now, or lists as an alias of another
+    /// chat, is no longer pending.
+    fn keep_pending(&mut self, chats: &mut Vec<Chat>) {
+        let aliases = &self.chats.aliases;
+        self.chats.pending.retain(|jid| {
+            !aliases.contains_key(jid)
+                && !chats
+                    .iter()
+                    .any(|chat| chat.jid == *jid || chat.aliases.contains(jid))
+        });
+        let mut pending: Vec<&String> = self.chats.pending.iter().collect();
+        pending.sort();
+        for jid in pending {
+            let entry = self.chats.get(jid).cloned();
+            chats.push(entry.unwrap_or_else(|| chats::empty_chat(jid)));
         }
     }
 
@@ -449,6 +469,53 @@ impl Model {
         self.transcript.search = None;
         self.transcript.opening = Some(jid.clone());
         Some(ClientFrame::messages(jid, MESSAGE_LIMIT))
+    }
+
+    /// Open the chat `jid` named from outside the chat list (a notification, a `whatsapp:` link):
+    /// the listed chat, else the listed chat it was merged into (an adopted alias, or one a chat
+    /// lists in its `aliases`), else a new empty entry for it, placed before the archived chats.
+    /// A new entry stays listed through every new chat list until the daemon lists the chat (the
+    /// first send creates it there) or a reply names the chat it became. Then it is opened as
+    /// [`Model::open_selected`] does, so it is marked read once its messages are shown.
+    pub fn open_jid(&mut self, jid: &str) -> Option<ClientFrame> {
+        let previous = self.chats.selected_jid().map(str::to_owned);
+        let index = match self.locate(jid) {
+            Some(index) => index,
+            None => {
+                let at = self
+                    .chats
+                    .chats
+                    .iter()
+                    .position(|chat| chat.archived)
+                    .unwrap_or(self.chats.chats.len());
+                self.chats.chats.insert(at, chats::empty_chat(jid));
+                self.chats.pending.insert(jid.to_owned());
+                at
+            }
+        };
+        self.select_chat(index);
+        if self.chats.selected_jid() != previous.as_deref() {
+            // An entry inserted at the old index is still another chat.
+            self.view_reset = true;
+            self.transcript.cursor = None;
+        }
+        self.open_selected()
+    }
+
+    /// The list position of the chat `jid` names: itself, else the chat it was merged into.
+    fn locate(&self, jid: &str) -> Option<usize> {
+        self.chats
+            .position(jid)
+            .or_else(|| {
+                self.chats
+                    .canonical(jid)
+                    .and_then(|canonical| self.chats.position(canonical))
+            })
+            .or_else(|| {
+                self.chats.chats.iter().position(|chat| {
+                    is_alias_pair(jid, &chat.jid) && chat.aliases.iter().any(|alias| alias == jid)
+                })
+            })
     }
 
     /// Mark chat `jid` read here and on WhatsApp, unless a `mark_read` for it is in flight.

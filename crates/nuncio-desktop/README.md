@@ -23,6 +23,56 @@ the header say `reconnecting…` and the app resync on its own.
 `--theme-dir DIR` follows `DIR/colors.toml` instead of Omarchy's theme; `--probe` runs the theme
 switch check without a window.
 
+Links: `XDG_RUNTIME_DIR=/tmp/nuncio-demo cargo run -p nuncio-desktop -- 'whatsapp://send?phone=15551230001&text=hola'`
+opens that chat with `hola` in the composer (see [Links](#links)).
+
+## Notifications
+
+A new message shows a desktop notification (through `GApplication`, so the desktop's own
+notification daemon draws it) when `nuncio_client::notify` says it deserves one: not for my own
+messages, a muted chat, a message already notified (the daemon publishes a message again when a
+reaction on it changes), the chat open in a window you can see, or with `[notifications] enabled =
+false`. The title is the chat's name (else its masked number); the body says only `New message`,
+`Photo`, `Sticker`, … unless `[notifications] show_preview = true`.
+
+- Each chat has one notification: a newer message replaces the older one's.
+- Clicking it (its `default` action, `app.open-chat` with the chat's JID) shows the window and
+  opens that chat, which marks it read once its messages are shown, as a click in the list does. A
+  message that came under a contact's phone number opens her merged chat. Clicked at a cold start
+  (the desktop starts the app to run the action), the chat opens as soon as the chat list arrives.
+- Opening the chat, or reading it here or on another device, withdraws its notification.
+
+## Background mode
+
+With `[app] background = true` (the default), closing the window only hides it: the app keeps
+running, connected to `nunciod`, and keeps notifying. Quit (Ctrl+Q, or Quit in the sidebar
+header's menu) really quits. Launching `nuncio-desktop` again, clicking a notification or opening a link brings the
+window back. With `background = false`, closing the window quits.
+
+`[app] start_hidden = true` starts with no window, in the background; the next launch shows it.
+
+## Links
+
+`nuncio-desktop LINK` (or a running app's `GApplication` `open`) opens a
+`whatsapp://send?phone=…&text=…`, `https://wa.me/<number>?text=…` or
+`https://api.whatsapp.com/send?phone=…&text=…` link (`nuncio_client::link`): the chat with that
+number opens (its merged chat for a contact the daemon knows by LID; an empty conversation for a
+number with no chat yet, which the first send creates), and the link's text replaces the draft in
+the composer. **A link never sends anything**: the message goes only when you press Enter. A group
+invite link (`https://chat.whatsapp.com/…`) says `group invite links are not supported yet`; any
+other link says why it was not opened. A link given at a cold start waits for the chat list.
+
+For a browser to hand `whatsapp:` links to the app, its desktop entry (packaging, M4) needs:
+
+```ini
+Exec=nuncio-desktop %U
+MimeType=x-scheme-handler/whatsapp;
+```
+
+(`https://wa.me` links stay with the browser unless you open them with `nuncio-desktop LINK`.)
+On a Mac nothing registers the scheme, so `open 'whatsapp://…'` does not reach the app: pass the
+link on the command line.
+
 ## Layout
 
 After [Sealwax](https://github.com/PixDevsApps/sealwax) (MIT; its design was copied, no code): the
@@ -61,6 +111,7 @@ Tab moves between the chat list, the conversation and the composer.
 | composer | Shift+Enter | new line |
 | composer | Escape | cancel the reply (else go to the conversation) |
 | anywhere | Ctrl+F | search the open chat (Enter searches, Escape closes) |
+| anywhere | Ctrl+Q | quit (closing the window only hides it in background mode) |
 
 Requests go to `nunciod` one at a time, in order, on one connection. Opening a media file waits up
 to 90 s for the daemon to fetch it, and a send or a chat opened meanwhile stays "sending" (or
@@ -74,6 +125,8 @@ Screen readers: the chat list and the transcript are named lists; each row reads
 
 ## Tests
 
-`cargo test -p nuncio-desktop`: the view data, the controller and the worker (against a fake daemon)
-are plain unit tests; `tests/smoke.rs` builds the real window on GTK's main thread (its own `main`,
-`harness = false`) and skips when GTK cannot start.
+`cargo test -p nuncio-desktop`: the view data, the controller (notifications, links), the
+lifecycle (background, start hidden) and the worker (against a fake daemon) are plain unit tests; `tests/smoke.rs` builds the real window on GTK's main thread (its own `main`,
+`harness = false`) and skips when GTK cannot start. It never shows a window or a real notification:
+no `GApplication` is attached, so notifications are only recorded, and the `open-chat` action is
+activated from a plain action group.

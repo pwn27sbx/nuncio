@@ -6,6 +6,14 @@ nuncio-tui and nuncio-desktop read one plain TOML file:
 - `~/.config/nuncio/config.toml` when `XDG_CONFIG_HOME` is unset or empty.
 
 Every key is optional and has the default shown below. A missing file means all the defaults.
+
+nuncio-desktop's settings (Ctrl+,) write this file after each change: atomically (a temporary file
+renamed over it), mode 0600, creating a missing directory with mode 0700 (the mode of a
+directory that already exists is not changed), following a symlink to its target. A `config.toml`
+symlink whose target does not exist makes saving fail with an error, and nothing is created. They write only the keys below, so **comments and blank lines in the file are not
+preserved** (the written file starts with a comment saying so). A file that does not load (an
+unknown key, a wrong type, bad TOML) is never overwritten: the settings show why and change
+nothing until it is fixed or removed.
 A key nuncio does not know (a typo such as `show_previews`) is an error that names it, and so is a
 value of the wrong type: nuncio-tui prints it and exits with status 2 instead of silently ignoring
 the setting.

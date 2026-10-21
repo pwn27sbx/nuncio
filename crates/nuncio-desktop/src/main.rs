@@ -6,7 +6,8 @@
 //!   `$XDG_RUNTIME_DIR/nuncio/core.sock`, reconnecting when it goes away, and follow the live
 //!   Omarchy theme; show notifications for new messages (a click opens that chat), keep running
 //!   in the background when the window is closed (`[app] background`) until Quit, and open the
-//!   `whatsapp:` / `wa.me` links given as arguments or through `open`;
+//!   `whatsapp:` / `wa.me` links given as arguments or through `open`; a command palette (F1,
+//!   Ctrl+K) and a settings window that writes `config.toml`;
 //! - `--probe`: the S5 acceptance check without a window on screen. It applies a palette, performs
 //!   the same atomic theme swap `omarchy-theme-set` does, and prints the colour GTK resolves
 //!   before and after plus how long the detection took. `--theme-dir` points it at a fixture tree
@@ -17,8 +18,7 @@ use gtk::gio;
 use nuncio_client::{Backoff, Config, DEFAULT_READ_TIMEOUT, Palette, ThemeWatcher, socket_path};
 use nuncio_desktop::controller::Controller;
 use nuncio_desktop::lifecycle::Lifecycle;
-use nuncio_desktop::present::shows_title_bar;
-use nuncio_desktop::window::{Ui, WeakUi};
+use nuncio_desktop::window::{Ui, WeakUi, title_bar_here};
 use nuncio_desktop::worker::Settings;
 use nuncio_desktop::{ROOT_CLASS, apply_to_display, css_for, resolved_foreground};
 use std::cell::RefCell;
@@ -92,11 +92,7 @@ fn main() -> glib::ExitCode {
             return glib::ExitCode::from(2);
         }
     };
-    let title_bar = shows_title_bar(
-        config.app.title_bar,
-        std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").as_deref(),
-        std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
-    );
+    let title_bar = title_bar_here(config.app.title_bar);
 
     let app = adw::Application::builder()
         .application_id(APP_ID)
@@ -118,6 +114,8 @@ fn main() -> glib::ExitCode {
             controller.set_config(&config);
             let ui = Ui::new(Some(app), controller, local_offset_minutes(), title_bar);
             ui.set_lifecycle(Lifecycle::new(&config.app));
+            // The settings window (Ctrl+, or the command palette) edits this file.
+            ui.set_config_path(Config::default_path());
             if lifecycle.borrow().holds() {
                 // Keep running with the window hidden; released by Quit.
                 *hold.borrow_mut() = Some(app.hold());

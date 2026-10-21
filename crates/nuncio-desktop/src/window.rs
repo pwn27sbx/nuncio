@@ -17,9 +17,12 @@
 //!   Escape goes to the composer;
 //! - composer: Enter sends, Shift+Enter starts a new line, Escape cancels the reply;
 //! - Ctrl+F searches the open chat; Escape closes the search; Ctrl+Q quits (the app's
-//!   `app.quit`, also in the menu).
+//!   `app.quit`, also in the menu);
+//! - F1 or Ctrl+K opens the command palette ([`crate::palette`]): type to filter, Up/Down choose,
+//!   Enter runs, Escape closes; Ctrl+, opens the settings ([`crate::preferences`]).
 
 use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
@@ -32,8 +35,11 @@ use nuncio_client::model::REACTIONS;
 use crate::ROOT_CLASS;
 use crate::controller::{Alert, Command, Controller, OPEN_CHAT_ACTION, notification_id};
 use crate::lifecycle::{Close, Lifecycle};
+use crate::palette::{self, Step};
+use crate::preferences::{Change, IMAGE_PROTOCOLS, Preferences, TITLE_BARS, Takes};
 use crate::present::{self, Bubble, ChatRow};
 use crate::worker::{Backlog, EVENT_BACKLOG, Incoming, Settings, Worker};
+use nuncio_client::TitleBar;
 use nuncio_client::config::App;
 
 /// Below this width the window shows one pane at a time, with back navigation.
@@ -68,6 +74,14 @@ struct Inner {
     quitting: Cell<bool>,
     offset_minutes: i32,
     window: adw::ApplicationWindow,
+    sidebar_header: adw::HeaderBar,
+    content_header: adw::HeaderBar,
+    /// The window's own shortcuts (Ctrl+F, F1, Ctrl+K, Ctrl+,).
+    shortcuts: gtk::ShortcutController,
+    /// The command palette while it is open.
+    palette: RefCell<Option<Rc<PaletteView>>>,
+    /// The configuration file the settings edit (`None`: there is none).
+    config_path: RefCell<Option<PathBuf>>,
     split: adw::NavigationSplitView,
     toasts: adw::ToastOverlay,
     sidebar_title: adw::WindowTitle,
@@ -125,6 +139,8 @@ impl Ui {
         sidebar_header.set_title_widget(Some(&sidebar_title));
         // The app menu: Quit really quits, also in background mode (Ctrl+Q).
         let menu = gio::Menu::new();
+        menu.append(Some("Command palette"), Some("win.command-palette"));
+        menu.append(Some("Settings"), Some("win.settings"));
         menu.append(Some("Quit"), Some("app.quit"));
         let menu_button = gtk::MenuButton::builder()
             .icon_name("open-menu-symbolic")
@@ -292,6 +308,10 @@ impl Ui {
             window.add_breakpoint(narrow);
         }
 
+        let shortcuts = gtk::ShortcutController::new();
+        shortcuts.set_scope(gtk::ShortcutScope::Global);
+        window.add_controller(shortcuts.clone());
+
         let ui = Self(Rc::new(Inner {
             controller: RefCell::new(controller),
             worker: RefCell::new(None),
@@ -305,6 +325,11 @@ impl Ui {
             quitting: Cell::new(false),
             offset_minutes,
             window,
+            sidebar_header,
+            content_header,
+            shortcuts,
+            palette: RefCell::new(None),
+            config_path: RefCell::new(None),
             split,
             toasts,
             sidebar_title,
@@ -523,6 +548,461 @@ impl Ui {
         self.run(commands);
     }
 
+    /// The configuration file the settings edit ([`nuncio_client::Config::default_path`] in the
+    /// app; a temporary file in the tests).
+    pub fn set_config_path(&self, path: Option<PathBuf>) {
+        *self.0.config_path.borrow_mut() = path;
+    }
+
+    /// Follow a configuration saved in the settings: notifications at once, and the header bars
+    /// when the title bar choice changed.
+    fn reconfigure(&self, config: &nuncio_client::Config) {
+        let title_bar = self.0.controller.borrow_mut().reconfigure(config);
+        if let Some(choice) = title_bar {
+            self.set_title_bar(title_bar_here(choice));
+        }
+    }
+
+    /// Show or hide the window controls in both header bars.
+    pub fn set_title_bar(&self, shown: bool) {
+        for header in [&self.0.sidebar_header, &self.0.content_header] {
+            header.set_show_start_title_buttons(shown);
+            header.set_show_end_title_buttons(shown);
+        }
+        if shown {
+            self.0.window.remove_css_class("nuncio-no-title-bar");
+        } else {
+            self.0.window.add_css_class("nuncio-no-title-bar");
+        }
+    }
+
+    /// Whether the header bars show the window controls (tests).
+    pub fn title_bar_shown(&self) -> bool {
+        self.0.sidebar_header.shows_end_title_buttons()
+    }
+
+    /// Activate the window shortcut with this trigger (`"F1"`, `"<Control>k"`), as pressing it
+    /// does; false when there is none (tests).
+    pub fn press(&self, trigger: &str) -> bool {
+        let shortcuts = &self.0.shortcuts;
+        let found = (0..shortcuts.n_items())
+            .filter_map(|i| shortcuts.item(i)?.downcast::<gtk::Shortcut>().ok())
+            .find(|shortcut| {
+                shortcut
+                    .trigger()
+                    .is_some_and(|t| t.to_str().as_str() == trigger)
+            });
+        let Some(action) = found.and_then(|shortcut| shortcut.action()) else {
+            return false;
+        };
+        action.activate(gtk::ShortcutActionFlags::empty(), &self.0.window, None)
+    }
+
+    /// Open the command palette (F1, Ctrl+K): every command that applies now, filtered as you
+    /// type. The focused message, if any, is the one its message commands act on.
+    pub fn open_palette(&self) {
+        if let Some(view) = self.0.palette.borrow().as_ref() {
+            view.entry.grab_focus();
+            return;
+        }
+        // Only a message the user can see is chosen: the focused bubble.
+        let message = self.focused_message().map(|(index, _)| index);
+        let (entries, conversation) = {
+            let controller = self.0.controller.borrow();
+            let model = controller.model();
+            (palette::entries(model, message), open_conversation(model))
+        };
+        let view = Rc::new(PaletteView::new(entries, conversation));
+        view.popover.set_parent(&self.0.toasts);
+        let width = self.0.toasts.width();
+        view.popover
+            .set_pointing_to(Some(&gdk::Rectangle::new(width / 2, 12, 1, 1)));
+
+        view.entry.connect_changed({
+            let view = Rc::downgrade(&view);
+            move |entry| {
+                if let Some(view) = view.upgrade() {
+                    view.filter(&entry.text());
+                }
+            }
+        });
+        let run_selected = Rc::new(self.with(|ui, (): ()| ui.palette_enter()));
+        view.entry.connect_activate({
+            let run = Rc::clone(&run_selected);
+            move |_| run(())
+        });
+        view.entry.connect_stop_search({
+            let close = self.with(|ui, (): ()| ui.close_palette());
+            move |_| close(())
+        });
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        keys.connect_key_pressed({
+            let view = Rc::downgrade(&view);
+            move |_, key, _, _| {
+                let step = match key {
+                    gdk::Key::Down | gdk::Key::KP_Down => 1,
+                    gdk::Key::Up | gdk::Key::KP_Up => -1,
+                    _ => return glib::Propagation::Proceed,
+                };
+                if let Some(view) = view.upgrade() {
+                    view.move_selection(step);
+                }
+                glib::Propagation::Stop
+            }
+        });
+        view.entry.add_controller(keys);
+        view.list.connect_row_activated({
+            let run = self.with(|ui, position: usize| ui.palette_run(position));
+            move |_, row| run(usize::try_from(row.index()).unwrap_or(usize::MAX))
+        });
+        view.popover.connect_closed({
+            let weak = self.weak();
+            move |popover| {
+                if let Some(inner) = weak.upgrade() {
+                    let mut open = inner.palette.borrow_mut();
+                    if open.as_ref().is_some_and(|view| &view.popover == popover) {
+                        open.take();
+                    }
+                }
+                let popover = popover.clone();
+                glib::idle_add_local_once(move || popover.unparent());
+            }
+        });
+
+        view.filter("");
+        *self.0.palette.borrow_mut() = Some(Rc::clone(&view));
+        view.popover.popup();
+        view.entry.grab_focus();
+    }
+
+    /// Whether the command palette is open (tests).
+    pub fn palette_open(&self) -> bool {
+        self.0.palette.borrow().is_some()
+    }
+
+    /// Close the command palette, if it is open.
+    fn close_palette(&self) {
+        let Some(view) = self.0.palette.borrow_mut().take() else {
+            return;
+        };
+        view.popover.popdown();
+        // A palette never mapped (a hidden window) is not `closed`: let it go here too.
+        let popover = view.popover.clone();
+        glib::idle_add_local_once(move || popover.unparent());
+    }
+
+    /// Type `query` into the open palette's search, replacing what was there.
+    pub fn palette_type(&self, query: &str) {
+        let entry = self.0.palette.borrow().as_ref().map(|v| v.entry.clone());
+        if let Some(entry) = entry {
+            entry.set_text(query);
+        }
+    }
+
+    /// The titles the open palette lists now, in order (tests).
+    pub fn palette_titles(&self) -> Vec<String> {
+        self.0
+            .palette
+            .borrow()
+            .as_ref()
+            .map(|view| {
+                view.shown
+                    .borrow()
+                    .iter()
+                    .map(|&i| view.entries[i].title.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Run the palette's selected command, as Enter in its search does.
+    pub fn palette_enter(&self) {
+        let position = self.0.palette.borrow().as_ref().map(|view| {
+            view.list
+                .selected_row()
+                .and_then(|row| usize::try_from(row.index()).ok())
+                .unwrap_or(0)
+        });
+        if let Some(position) = position {
+            self.palette_run(position);
+        }
+    }
+
+    /// Close the palette, as Escape does.
+    pub fn palette_escape(&self) {
+        let entry = self.0.palette.borrow().as_ref().map(|v| v.entry.clone());
+        if let Some(entry) = entry {
+            entry.emit_stop_search();
+        }
+    }
+
+    /// Close the palette and run the command listed at `position`, once it is closed.
+    fn palette_run(&self, position: usize) {
+        let Some(view) = self.0.palette.borrow().clone() else {
+            return;
+        };
+        let action = view
+            .shown
+            .borrow()
+            .get(position)
+            .map(|&i| view.entries[i].action.clone());
+        let Some(action) = action else {
+            return;
+        };
+        self.close_palette();
+        let run = self.with(move |ui, (): ()| ui.palette_step(&action));
+        glib::idle_add_local_once(move || run(()));
+    }
+
+    fn palette_step(&self, action: &palette::Action) {
+        let step = palette::run(&mut self.0.controller.borrow_mut(), action);
+        match step {
+            Step::Opened(commands) => self.show_conversation(commands),
+            Step::Commands(commands) => self.run(commands),
+            Step::Reply(index) => self.reply(index),
+            Step::React(index) => {
+                if let Some(row) = i32::try_from(index)
+                    .ok()
+                    .and_then(|i| self.0.transcript.row_at_index(i))
+                {
+                    row.grab_focus();
+                    self.reaction_picker(&row, index);
+                }
+            }
+            Step::Search => self.start_search(),
+            Step::Settings => self.open_settings(),
+            Step::Quit => {
+                // No application in the tests: nothing to quit.
+                let _ = WidgetExt::activate_action(&self.0.window, "app.quit", None);
+            }
+            Step::Gone => {
+                let toast = adw::Toast::new("that message is no longer shown; nothing was done");
+                toast.set_use_markup(false);
+                toast.set_timeout(4);
+                self.0.toasts.add_toast(toast);
+            }
+        }
+    }
+
+    /// Show the settings window over the configuration file.
+    pub fn open_settings(&self) {
+        self.settings_view().window.present();
+    }
+
+    /// Build the settings window (not shown): the file is read now. A file that does not load is
+    /// shown as the problem, with every setting insensitive, and is never overwritten.
+    pub fn settings_view(&self) -> SettingsView {
+        let prefs = Rc::new(RefCell::new(Preferences::load(
+            self.0.config_path.borrow().clone(),
+        )));
+        let config = prefs.borrow().config().clone();
+        let window = adw::PreferencesWindow::builder()
+            .title("Settings")
+            .modal(true)
+            .transient_for(&self.0.window)
+            .search_enabled(false)
+            .default_width(560)
+            .default_height(620)
+            .build();
+        window.add_css_class(ROOT_CLASS);
+        let page = adw::PreferencesPage::new();
+        let problem = prefs.borrow().problem().map(str::to_owned);
+        if let Some(problem) = &problem {
+            let group = adw::PreferencesGroup::builder()
+                .title("The configuration file cannot be changed here")
+                .build();
+            let text = plain_label(problem);
+            text.add_css_class("nuncio-error");
+            group.add(&text);
+            page.add(&group);
+        }
+
+        let switch = |title: &str, subtitle: &str, active: bool| {
+            adw::SwitchRow::builder()
+                .title(title)
+                .subtitle(subtitle)
+                .use_markup(false)
+                .active(active)
+                .build()
+        };
+        let combo = |title: &str, subtitle: &str, names: &[&str], selected: usize| {
+            adw::ComboRow::builder()
+                .title(title)
+                .subtitle(subtitle)
+                .use_markup(false)
+                .model(&gtk::StringList::new(names))
+                .selected(u32::try_from(selected).unwrap_or(0))
+                .build()
+        };
+        let notifications = switch(
+            "Notifications",
+            "A desktop notification for each new message",
+            config.notifications.enabled,
+        );
+        let show_preview = switch(
+            "Show the message text",
+            "Off: a notification says only New message, Photo, Sticker…",
+            config.notifications.show_preview,
+        );
+        let title_bar = combo(
+            "Title bar",
+            "The window controls in the header bars",
+            &TITLE_BARS.map(|(_, name)| name),
+            TITLE_BARS
+                .iter()
+                .position(|(c, _)| *c == config.app.title_bar)
+                .unwrap_or(0),
+        );
+        let background = switch(
+            "Run in the background",
+            "Closing the window keeps nuncio connected and notifying until Quit. Takes effect on next start",
+            config.app.background,
+        );
+        let start_hidden = switch(
+            "Start hidden",
+            "Start with no window; launching it again shows it. Takes effect on next start",
+            config.app.start_hidden,
+        );
+        let image_protocol = combo(
+            "Pictures in nuncio-tui",
+            "How the terminal client draws pictures, at its next start (NUNCIO_IMAGE_PROTOCOL wins)",
+            &IMAGE_PROTOCOLS.map(|(_, name)| name),
+            IMAGE_PROTOCOLS
+                .iter()
+                .position(|(p, _)| *p == config.ui.image_protocol)
+                .unwrap_or(0),
+        );
+        let view = SettingsView {
+            window,
+            notifications,
+            show_preview,
+            background,
+            start_hidden,
+            title_bar,
+            image_protocol,
+            problem,
+        };
+
+        let editable = view.problem.is_none();
+        for (title, rows) in [
+            (
+                "Notifications",
+                vec![
+                    view.notifications.clone().upcast::<gtk::Widget>(),
+                    view.show_preview.clone().upcast(),
+                ],
+            ),
+            (
+                "Window",
+                vec![
+                    view.title_bar.clone().upcast(),
+                    view.background.clone().upcast(),
+                    view.start_hidden.clone().upcast(),
+                ],
+            ),
+            (
+                "Terminal client",
+                vec![view.image_protocol.clone().upcast()],
+            ),
+        ] {
+            let group = adw::PreferencesGroup::builder().title(title).build();
+            for row in rows {
+                group.add(&row);
+            }
+            group.set_sensitive(editable);
+            page.add(&group);
+        }
+        let saved_to = match prefs.borrow().path() {
+            Some(path) => format!(
+                "Saved to {} after each change. Comments in that file are not kept.",
+                path.display()
+            ),
+            None => "There is no configuration file.".to_owned(),
+        };
+        let footer = adw::PreferencesGroup::new();
+        let footer_text = plain_label(&saved_to);
+        footer_text.add_css_class("dim-label");
+        footer.add(&footer_text);
+        page.add(&footer);
+        view.window.add(&page);
+
+        // Each change is written at once; a refused or failed one puts the rows back and says why.
+        let syncing = Rc::new(Cell::new(false));
+        // The rows' handlers hold the rows only until the window goes, so nothing keeps it alive.
+        let held = Rc::new(RefCell::new(Some(view.clone())));
+        view.window.connect_destroy({
+            let held = Rc::clone(&held);
+            move |_| {
+                held.borrow_mut().take();
+            }
+        });
+        let apply = Rc::new(self.with(move |ui, change: Change| {
+            let Some(rows) = held.borrow().clone() else {
+                return;
+            };
+            if syncing.get() {
+                return;
+            }
+            let result = prefs.borrow_mut().change(change);
+            match result {
+                Ok(true) => {
+                    let config = prefs.borrow().config().clone();
+                    ui.reconfigure(&config);
+                    // A hand edit to another key, read back with this change, shows too.
+                    syncing.set(true);
+                    rows.show(&config);
+                    syncing.set(false);
+                    if change.takes() == Takes::NextStart {
+                        rows.toast("Saved; takes effect on next start");
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    syncing.set(true);
+                    rows.show(prefs.borrow().config());
+                    syncing.set(false);
+                    rows.toast(&error);
+                }
+            }
+        }));
+        for (row, make) in [
+            (
+                &view.notifications,
+                Change::Notifications as fn(bool) -> Change,
+            ),
+            (&view.show_preview, Change::ShowPreview),
+            (&view.background, Change::Background),
+            (&view.start_hidden, Change::StartHidden),
+        ] {
+            let apply = Rc::clone(&apply);
+            row.connect_active_notify(move |row| apply(make(row.is_active())));
+        }
+        view.title_bar.connect_selected_notify({
+            let apply = Rc::clone(&apply);
+            move |row| {
+                if let Some((choice, _)) = usize::try_from(row.selected())
+                    .ok()
+                    .and_then(|i| TITLE_BARS.get(i))
+                {
+                    apply(Change::TitleBar(*choice));
+                }
+            }
+        });
+        view.image_protocol.connect_selected_notify({
+            let apply = Rc::clone(&apply);
+            move |row| {
+                if let Some((protocol, _)) = usize::try_from(row.selected())
+                    .ok()
+                    .and_then(|i| IMAGE_PROTOCOLS.get(i))
+                {
+                    apply(Change::ImageProtocol(*protocol));
+                }
+            }
+        });
+        view
+    }
+
     fn weak(&self) -> Weak<Inner> {
         Rc::downgrade(&self.0)
     }
@@ -721,22 +1201,46 @@ impl Ui {
             let f = self.with(|ui, index: usize| ui.jump_to_result(index));
             move |_, row| f(usize::try_from(row.index()).unwrap_or(usize::MAX))
         });
-        let shortcuts = gtk::ShortcutController::new();
-        shortcuts.set_scope(gtk::ShortcutScope::Global);
-        let open_search = self.with(|ui, (): ()| {
-            if ui.0.controller.borrow().model().selected_chat().is_some() {
-                ui.0.search_bar.set_search_mode(true);
-                ui.0.search_entry.grab_focus();
-            }
-        });
-        shortcuts.add_shortcut(gtk::Shortcut::new(
+        let open_search = self.with(|ui, (): ()| ui.start_search());
+        inner.shortcuts.add_shortcut(gtk::Shortcut::new(
             gtk::ShortcutTrigger::parse_string("<Control>f"),
             Some(gtk::CallbackAction::new(move |_, _| {
                 open_search(());
                 glib::Propagation::Stop
             })),
         ));
-        inner.window.add_controller(shortcuts);
+
+        // The command palette and the settings: window actions (also in the menu) with keys.
+        for (name, triggers, run) in [
+            (
+                "command-palette",
+                &["F1", "<Control>k"][..],
+                Box::new(self.with(|ui, (): ()| ui.open_palette())) as Box<dyn Fn(())>,
+            ),
+            (
+                "settings",
+                &["<Control>comma"][..],
+                Box::new(self.with(|ui, (): ()| ui.open_settings())),
+            ),
+        ] {
+            let action = gio::SimpleAction::new(name, None);
+            action.connect_activate(move |_, _| run(()));
+            inner.window.add_action(&action);
+            for trigger in triggers {
+                inner.shortcuts.add_shortcut(gtk::Shortcut::new(
+                    gtk::ShortcutTrigger::parse_string(trigger),
+                    Some(gtk::NamedAction::new(&format!("win.{name}"))),
+                ));
+            }
+        }
+    }
+
+    /// Open the search of the selected chat (Ctrl+F).
+    fn start_search(&self) {
+        if self.0.controller.borrow().model().selected_chat().is_some() {
+            self.0.search_bar.set_search_mode(true);
+            self.0.search_entry.grab_focus();
+        }
     }
 
     fn composer_key(&self, key: gdk::Key, _state: gdk::ModifierType) {
@@ -1008,6 +1512,14 @@ impl Ui {
             toast.set_timeout(4);
             inner.toasts.add_toast(toast);
         }
+        // Another conversation opened (a notification clicked, a link): the palette's commands
+        // were for the one before, so it closes.
+        let conversation = open_conversation(controller.model());
+        let stale_palette = inner
+            .palette
+            .borrow()
+            .as_ref()
+            .is_some_and(|view| view.conversation != conversation);
         // A draft put there by the model (a link) is shown; a typed one is already there.
         let draft = controller
             .take_draft_changed()
@@ -1016,11 +1528,205 @@ impl Ui {
         if let Some(draft) = draft {
             self.set_draft_text(&draft);
         }
+        if stale_palette {
+            self.close_palette();
+        }
         // Its notify handler closes the model's search, so the model must be free.
         if close_search_bar {
             inner.search_bar.set_search_mode(false);
         }
     }
+}
+
+/// Whether the window shows its title bar for `choice` on this desktop
+/// ([`present::shows_title_bar`] with this process's environment).
+pub fn title_bar_here(choice: TitleBar) -> bool {
+    present::shows_title_bar(
+        choice,
+        std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").as_deref(),
+        std::env::var("XDG_CURRENT_DESKTOP").ok().as_deref(),
+    )
+}
+
+/// The chat whose conversation is open, if one is.
+fn open_conversation(model: &nuncio_client::Model) -> Option<String> {
+    model
+        .is_open()
+        .then(|| model.selected_jid().map(str::to_owned))
+        .flatten()
+}
+
+/// The settings window and its rows.
+#[derive(Clone)]
+pub struct SettingsView {
+    pub window: adw::PreferencesWindow,
+    pub notifications: adw::SwitchRow,
+    pub show_preview: adw::SwitchRow,
+    pub background: adw::SwitchRow,
+    pub start_hidden: adw::SwitchRow,
+    pub title_bar: adw::ComboRow,
+    pub image_protocol: adw::ComboRow,
+    /// Why the file cannot be changed (shown at the top; every row is insensitive).
+    pub problem: Option<String>,
+}
+
+impl SettingsView {
+    /// Put every row back to `config`.
+    fn show(&self, config: &nuncio_client::Config) {
+        self.notifications.set_active(config.notifications.enabled);
+        self.show_preview
+            .set_active(config.notifications.show_preview);
+        self.background.set_active(config.app.background);
+        self.start_hidden.set_active(config.app.start_hidden);
+        let at = |found: Option<usize>| u32::try_from(found.unwrap_or(0)).unwrap_or(0);
+        self.title_bar.set_selected(at(TITLE_BARS
+            .iter()
+            .position(|(c, _)| *c == config.app.title_bar)));
+        self.image_protocol.set_selected(at(IMAGE_PROTOCOLS
+            .iter()
+            .position(|(p, _)| *p == config.ui.image_protocol)));
+    }
+
+    fn toast(&self, text: &str) {
+        let toast = adw::Toast::new(text);
+        toast.set_use_markup(false);
+        toast.set_timeout(5);
+        self.window.add_toast(toast);
+    }
+}
+
+/// A wrapping, selectable label of plain text (no markup).
+fn plain_label(text: &str) -> gtk::Label {
+    let label = gtk::Label::builder()
+        .label(text)
+        .use_markup(false)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .selectable(true)
+        .xalign(0.0)
+        .build();
+    label.update_property(&[Property::Label(text)]);
+    label
+}
+
+/// The command palette's widgets and what it lists.
+struct PaletteView {
+    popover: gtk::Popover,
+    entry: gtk::SearchEntry,
+    list: gtk::ListBox,
+    scroll: gtk::ScrolledWindow,
+    entries: Vec<palette::Entry>,
+    /// The conversation open when the palette opened: another one opening closes the palette.
+    conversation: Option<String>,
+    /// The positions in `entries` listed now, in order.
+    shown: RefCell<Vec<usize>>,
+}
+
+impl PaletteView {
+    fn new(entries: Vec<palette::Entry>, conversation: Option<String>) -> Self {
+        let entry = gtk::SearchEntry::builder()
+            .placeholder_text("Type a command or a chat name")
+            .hexpand(true)
+            .build();
+        entry.update_property(&[Property::Label("Command palette: type to filter")]);
+        let list = gtk::ListBox::builder()
+            .selection_mode(gtk::SelectionMode::Single)
+            .activate_on_single_click(true)
+            .accessible_role(gtk::AccessibleRole::List)
+            .build();
+        list.add_css_class("navigation-sidebar");
+        list.update_property(&[Property::Label("Commands")]);
+        list.set_placeholder(Some(&label("No matching command", "dim-label")));
+        let scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .propagate_natural_height(true)
+            .max_content_height(360)
+            .min_content_width(420)
+            .child(&list)
+            .build();
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
+        column.append(&entry);
+        column.append(&scroll);
+        let popover = gtk::Popover::builder()
+            .child(&column)
+            .has_arrow(false)
+            .autohide(true)
+            .position(gtk::PositionType::Bottom)
+            .build();
+        popover.add_css_class(ROOT_CLASS);
+        popover.update_property(&[Property::Label("Command palette")]);
+        Self {
+            popover,
+            entry,
+            list,
+            scroll,
+            entries,
+            conversation,
+            shown: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// List the commands `query` matches, best first, and select the first.
+    fn filter(&self, query: &str) {
+        let shown = palette::filter(&self.entries, query);
+        while let Some(row) = self.list.row_at_index(0) {
+            self.list.remove(&row);
+        }
+        for &index in &shown {
+            self.list.append(&palette_row(&self.entries[index]));
+        }
+        *self.shown.borrow_mut() = shown;
+        if let Some(first) = self.list.row_at_index(0) {
+            self.list.select_row(Some(&first));
+        }
+    }
+
+    /// Move the selection `step` rows (the focus stays in the search).
+    fn move_selection(&self, step: i32) {
+        let count = i32::try_from(self.shown.borrow().len()).unwrap_or(0);
+        if count == 0 {
+            return;
+        }
+        let at = self.list.selected_row().map_or(0, |row| row.index());
+        let next = (at + step).clamp(0, count - 1);
+        if let Some(row) = self.list.row_at_index(next) {
+            self.list.select_row(Some(&row));
+            // Keep it in view; the focus stays in the search.
+            if let Some(bounds) = row.compute_bounds(&self.list) {
+                let adjustment = self.scroll.vadjustment();
+                let (top, bottom) = (
+                    f64::from(bounds.y()),
+                    f64::from(bounds.y() + bounds.height()),
+                );
+                if top < adjustment.value() {
+                    adjustment.set_value(top);
+                } else if bottom > adjustment.value() + adjustment.page_size() {
+                    adjustment.set_value(bottom - adjustment.page_size());
+                }
+            }
+        }
+    }
+}
+
+fn palette_row(entry: &palette::Entry) -> gtk::ListBoxRow {
+    let title = label(&entry.title, "");
+    title.set_hexpand(true);
+    title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    line.set_margin_top(4);
+    line.set_margin_bottom(4);
+    line.append(&title);
+    if let Some(key) = entry.shortcut {
+        let key = label(key, "dim-label");
+        key.add_css_class("caption");
+        line.append(&key);
+    }
+    let row = gtk::ListBoxRow::builder()
+        .accessible_role(gtk::AccessibleRole::ListItem)
+        .child(&line)
+        .build();
+    row.update_property(&[Property::Label(&entry.label())]);
+    row
 }
 
 /// A header bar; without the title bar it shows no window controls.

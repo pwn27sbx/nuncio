@@ -73,6 +73,38 @@ MimeType=x-scheme-handler/whatsapp;
 On a Mac nothing registers the scheme, so `open 'whatsapp://…'` does not reach the app: pass the
 link on the command line.
 
+## Command palette
+
+F1 or Ctrl+K (or Command palette in the sidebar header's menu) opens a search box over the window
+listing what can be done now, each with its key:
+
+- `Chat: <name>` for every chat (named as the list names it): opens it, as a click does;
+- `Search in this chat` (Ctrl+F), while a chat is open;
+- for the focused message, only what its menu enables: `Reply to the selected message` (`r`),
+  `React to the selected message…` (`e`, opens the picker), `Retry the selected message`
+  (Shift+R, a send that ended not sent) and `Open the selected media` (`o`);
+- `Settings` (Ctrl+,) and `Quit` (Ctrl+Q).
+
+Typing filters the list: the commands holding the typed letters in order, ignoring case and spaces
+(`bn` finds `Chat: Ben`), best matches first. Up and Down choose, Enter runs, Escape closes. The
+palette never sends a message: there is no send command, and a draft stays in the composer.
+
+## Settings
+
+Ctrl+, (or Settings in the menu or the palette) opens the settings over the configuration file
+([`docs/config.md`](../../docs/config.md)): notifications and their text, the title bar, background
+mode, starting hidden, and nuncio-tui's picture protocol. Each change is written at once
+(atomically: a temporary file renamed over it, mode 0600, in a 0700 directory), keeping only the
+known keys, so **comments in the file are not kept**.
+
+- Notifications and the title bar change at once; background mode and start hidden take effect on
+  the next start; the picture protocol is read by nuncio-tui at its next start.
+- A change that cannot be written keeps the old file and the old value, and a toast says why.
+- A file the app cannot read (a key it does not know, a wrong type, bad TOML) is shown at the top
+  of the settings with every setting disabled, and is never overwritten: fix or remove it.
+- A `config.toml` that is a symlink (a dotfiles repository) is followed: its target is rewritten
+  and the link stays; a link to nothing makes saving fail and creates nothing.
+
 ## Layout
 
 After [Sealwax](https://github.com/PixDevsApps/sealwax) (MIT; its design was copied, no code): the
@@ -111,6 +143,8 @@ Tab moves between the chat list, the conversation and the composer.
 | composer | Shift+Enter | new line |
 | composer | Escape | cancel the reply (else go to the conversation) |
 | anywhere | Ctrl+F | search the open chat (Enter searches, Escape closes) |
+| anywhere | F1, Ctrl+K | the command palette (type to filter, Up/Down, Enter runs, Escape closes) |
+| anywhere | Ctrl+, | the settings |
 | anywhere | Ctrl+Q | quit (closing the window only hides it in background mode) |
 
 Requests go to `nunciod` one at a time, in order, on one connection. Opening a media file waits up
@@ -126,7 +160,9 @@ Screen readers: the chat list and the transcript are named lists; each row reads
 ## Tests
 
 `cargo test -p nuncio-desktop`: the view data, the controller (notifications, links), the
-lifecycle (background, start hidden) and the worker (against a fake daemon) are plain unit tests; `tests/smoke.rs` builds the real window on GTK's main thread (its own `main`,
+lifecycle (background, start hidden), the palette's commands and matching, the settings' rules and
+the worker (against a fake daemon) are plain unit tests; `tests/smoke.rs` builds the real window on GTK's main thread (its own `main`,
 `harness = false`) and skips when GTK cannot start. It never shows a window or a real notification:
 no `GApplication` is attached, so notifications are only recorded, and the `open-chat` action is
-activated from a plain action group.
+activated from a plain action group. The palette is opened through its F1 shortcut's action and the
+settings window is built (not shown) over a temporary `config.toml`, never yours.

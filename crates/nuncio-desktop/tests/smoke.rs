@@ -6,7 +6,7 @@
 //! (`harness = false`). Where GTK cannot start (no display), it says so and passes: the logic it
 //! drives is covered by the unit tests.
 
-use gtk::prelude::*;
+use adw::prelude::*;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -169,6 +169,8 @@ fn main() {
     notifications_and_the_open_chat_action();
     a_link_fills_the_composer_and_sends_nothing();
     closing_in_background_mode_hides_and_keeps_the_state_and_worker(&daemon);
+    the_palette_opens_on_f1_and_jumps_to_a_chat();
+    the_settings_write_the_file_and_apply_at_once();
     // The real demo daemon, when its binary is given (`go build -o DIR/nuncio-demo ./cmd/nuncio-demo`).
     if let Some(demo) = std::env::var_os("NUNCIO_DEMO_BIN") {
         let runtime = PathBuf::from(format!("/tmp/ndsd-{}", std::process::id()));
@@ -319,6 +321,160 @@ fn a_link_fills_the_composer_and_sends_nothing() {
     ui.open_link("https://chat.whatsapp.com/AbCdEf123");
     check(ui.draft() == "hola Ben", "a group invite changes nothing");
     check(ui.take_undelivered().is_empty(), "and asks nothing");
+}
+
+fn iterate() {
+    for _ in 0..20 {
+        glib::MainContext::default().iteration(false);
+    }
+}
+
+/// F1 (and Ctrl+K) open the palette; typing filters it, Enter runs the chosen command, Escape
+/// closes it. Choosing a chat opens it as a click does, and nothing is sent.
+fn the_palette_opens_on_f1_and_jumps_to_a_chat() {
+    let ui = listed();
+    check(!ui.palette_open(), "no palette at first");
+    check(ui.press("F1"), "F1 is a window shortcut");
+    check(ui.palette_open(), "F1 opens the palette");
+    let all = ui.palette_titles();
+    for wanted in ["Settings", "Quit", "Chat: Ana", "Chat: Ben"] {
+        check(
+            all.iter().any(|t| t == wanted),
+            &format!("the palette lists {wanted}: {all:?}"),
+        );
+    }
+    check(
+        !all.iter().any(|t| t.starts_with("Send")),
+        "the palette has no send",
+    );
+    ui.palette_type("BEN");
+    check(
+        ui.palette_titles().first().map(String::as_str) == Some("Chat: Ben"),
+        "typing filters the palette, ignoring case",
+    );
+    ui.type_draft("half a thought");
+    ui.palette_enter();
+    iterate();
+    check(!ui.palette_open(), "Enter closes the palette");
+    check(
+        ui.controller().model().selected_jid() == Some(BEN) && ui.controller().model().is_open(),
+        "and opens the chat chosen",
+    );
+    check(ui.conversation_title() == "Ben", "the header names it");
+    check(
+        ui.take_undelivered() == [Command::Send(ClientFrame::messages(BEN, 200))],
+        "it asks for its messages and sends nothing",
+    );
+    check(ui.draft() == "half a thought", "the draft stays unsent");
+
+    check(
+        ui.press("<Control>k") && ui.palette_open(),
+        "Ctrl+K opens the palette too",
+    );
+    ui.palette_type("zzzz");
+    check(ui.palette_titles().is_empty(), "nothing matches");
+    ui.palette_enter();
+    iterate();
+    check(
+        ui.take_undelivered().is_empty(),
+        "Enter on nothing does nothing",
+    );
+    ui.palette_escape();
+    iterate();
+    check(!ui.palette_open(), "Escape closes the palette");
+    // Another chat opening while the palette is open (a notification click, a link) closes it,
+    // so none of its commands runs on the other conversation.
+    ui.open_jid(ANA);
+    ui.take_undelivered();
+    check(
+        ui.press("F1") && ui.palette_open(),
+        "F1 opens the palette over Ana",
+    );
+    ui.open_jid(BEN);
+    iterate();
+    check(
+        !ui.palette_open(),
+        "opening another chat closes the palette",
+    );
+    ui.take_undelivered();
+    check(
+        ui.press("<Control>comma"),
+        "Ctrl+, is the settings shortcut",
+    );
+}
+
+/// The settings over a temporary `config.toml` (never the owner's): a change is written at once
+/// and reaches the running app; a file that does not load is shown and never overwritten.
+fn the_settings_write_the_file_and_apply_at_once() {
+    let dir = std::env::temp_dir().join(format!("nuncio-smoke-settings-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let path = dir.join("nuncio").join("config.toml");
+    let ui = listed();
+    ui.set_config_path(Some(path.clone()));
+
+    let view = ui.settings_view();
+    check(view.problem.is_none(), "a missing file can be edited");
+    check(!path.exists(), "opening the settings writes nothing");
+    view.show_preview.set_active(true);
+    let written = std::fs::read_to_string(&path).unwrap_or_default();
+    check(
+        written.contains("show_preview = true") && written.starts_with('#'),
+        &format!("the change is written with its header: {written}"),
+    );
+    check(
+        ui.controller().config().notifications.show_preview,
+        "and the running app follows it",
+    );
+    check(ui.title_bar_shown(), "the title bar is shown at first");
+    view.title_bar.set_selected(2);
+    check(!ui.title_bar_shown(), "choosing Hidden hides it at once");
+    view.title_bar.set_selected(1);
+    check(ui.title_bar_shown(), "choosing Shown shows it again");
+    // A hand edit to another key while the window is open is kept, and shown.
+    let edited = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .replace("start_hidden = false", "start_hidden = true");
+    std::fs::write(&path, edited).expect("hand edit");
+    view.background.set_active(false);
+    let written = std::fs::read_to_string(&path).unwrap_or_default();
+    check(
+        written.contains("background = false") && written.contains("start_hidden = true"),
+        &format!("the change and the hand edit are both in the file: {written}"),
+    );
+    check(
+        view.start_hidden.is_active(),
+        "the window shows the hand edit",
+    );
+    view.window.destroy();
+
+    let mine = "# my own notes\n[notifications]\nshow_previews = true\n";
+    std::fs::write(&path, mine).expect("write");
+    let view = ui.settings_view();
+    check(
+        view.problem
+            .as_deref()
+            .is_some_and(|p| p.contains("show_previews")),
+        "a file with an unknown key is shown as the problem",
+    );
+    check(
+        !view.notifications.is_sensitive(),
+        "and its settings cannot be changed",
+    );
+    view.notifications.set_active(false);
+    check(
+        std::fs::read_to_string(&path).ok().as_deref() == Some(mine),
+        "the file is never overwritten",
+    );
+    check(
+        view.notifications.is_active(),
+        "the refused switch goes back to the saved value",
+    );
+    check(
+        ui.controller().config().notifications.enabled,
+        "and the app keeps its settings",
+    );
+    view.window.destroy();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `[app] background = true`: closing hides the window; the state and the worker stay until Quit.

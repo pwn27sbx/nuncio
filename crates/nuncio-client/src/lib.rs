@@ -18,7 +18,7 @@ pub mod reconnect;
 pub mod theme;
 pub mod wire;
 
-pub use config::{Config, ConfigError, ImageProtocol, TitleBar, config_path_from};
+pub use config::{Config, ConfigError, ImageProtocol, SaveError, TitleBar, config_path_from};
 pub use conn::{
     ClientError, Connection, DEFAULT_READ_TIMEOUT, Snapshot, fetch, socket_path, socket_path_from,
 };

@@ -127,6 +127,21 @@ impl Controller {
         self.config = config.clone();
     }
 
+    /// The configuration followed now.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Follow a configuration changed while running (the settings window): which messages notify
+    /// and what their notifications say change at once. Returns the new `[app] title_bar` choice
+    /// when it changed, for the window to redraw its header bars.
+    pub fn reconfigure(&mut self, config: &Config) -> Option<nuncio_client::TitleBar> {
+        let title_bar =
+            (config.app.title_bar != self.config.app.title_bar).then_some(config.app.title_bar);
+        self.config = config.clone();
+        title_bar
+    }
+
     pub fn model(&self) -> &Model {
         &self.model
     }

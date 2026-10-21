@@ -6,6 +6,8 @@
 //!   driver's rules (`nuncio_client::driver`), without GTK;
 //! - [`lifecycle`]: when the window shows and what closing it does (`[app] background`,
 //!   `start_hidden`);
+//! - [`palette`]: the command palette's commands, matching and actions, without GTK;
+//! - [`preferences`]: the settings window's rules over `config.toml`, without GTK;
 //! - [`worker`]: the daemon connections on their own threads, posting into the main loop;
 //! - here: following Omarchy's live theme. The palette parser and the watcher live in
 //!   `nuncio-client`, because following the theme is client-side work the TUI needs too; what
@@ -14,6 +16,8 @@
 
 pub mod controller;
 pub mod lifecycle;
+pub mod palette;
+pub mod preferences;
 pub mod present;
 pub mod window;
 pub mod worker;

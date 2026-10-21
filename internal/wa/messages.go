@@ -197,9 +197,10 @@ func (s *Session) storeMessage(evt *waevents.Message) {
 		m.Sender = m.ChatJID
 	}
 	s.mergeAliasOf(m.ChatJID)
+	// A store failure is logged by its error type only: SQLite's text could quote a value.
 	inserted, err := store.InsertMessage(s.db, m)
 	if err != nil {
-		log.Printf("wa: cannot store message %s: %v", m.ID, err)
+		log.Printf("wa: cannot store a message (%T)", err)
 		return
 	}
 	if !inserted {
@@ -207,7 +208,7 @@ func (s *Session) storeMessage(evt *waevents.Message) {
 	}
 	// A reaction can arrive before its target; the target's first event already carries it.
 	if m.Reactions, err = store.MessageReactions(s.db, m.ChatJID, m.ID); err != nil {
-		log.Printf("wa: %v", err)
+		log.Printf("wa: cannot read a message's reactions (%T)", err)
 	}
 	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: m.ChatJID, Message: wireMessage(m, s.Senders())})
 	if !m.FromMe {

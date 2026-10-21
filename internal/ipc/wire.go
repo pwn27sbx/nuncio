@@ -281,14 +281,15 @@ type HelloOK struct {
 	Unread  int    `json:"unread"`
 }
 
-// StatusResponse answers a StatusRequest.
+// StatusResponse answers a StatusRequest. StopReason is as in EventConnection.
 type StatusResponse struct {
-	V       int    `json:"v"`
-	Op      string `json:"op"`
-	Daemon  string `json:"daemon"`
-	Linked  bool   `json:"linked"`
-	Session string `json:"session"`
-	Unread  int    `json:"unread"`
+	V          int    `json:"v"`
+	Op         string `json:"op"`
+	Daemon     string `json:"daemon"`
+	Linked     bool   `json:"linked"`
+	Session    string `json:"session"`
+	Unread     int    `json:"unread"`
+	StopReason string `json:"stop_reason,omitempty"`
 }
 
 // ChatsResponse answers a ChatsRequest.
@@ -367,12 +368,27 @@ type EventMessage struct {
 	Message Message `json:"message"`
 }
 
-// EventConnection is pushed to subscribers when the session state changes.
+// EventConnection is pushed to subscribers when the session state changes. StopReason is set
+// once WhatsApp stopped the session for good (one of the Stop* values) and omitted otherwise, so
+// a frame without a stop is the same bytes as before it existed.
 type EventConnection struct {
-	V       int    `json:"v"`
-	Op      string `json:"op"`
-	Session string `json:"session"`
+	V          int    `json:"v"`
+	Op         string `json:"op"`
+	Session    string `json:"session"`
+	StopReason string `json:"stop_reason,omitempty"`
 }
+
+// The stop_reason values: why WhatsApp stopped the session, fixed words chosen here and never
+// WhatsApp's own text, codes or ban expiry.
+const (
+	StopLoggedOut       = "logged_out"
+	StopTemporaryBan    = "temporary_ban"
+	StopStreamReplaced  = "stream_replaced"
+	StopClientOutdated  = "client_outdated"
+	StopConnectRejected = "connect_rejected"
+	// StopOther is any other stop.
+	StopOther = "other"
+)
 
 // EventUnread is pushed to subscribers when an unread count changes: Unread is the total,
 // ChatUnread the count of the chat JID.
@@ -487,6 +503,9 @@ type Status struct {
 	Linked  bool
 	Session string
 	Unread  int
+	// StopReason is the socket's stop_reason ("" while not stopped). It is not part of the D-Bus
+	// Status reply, whose signature stays (sbsi).
+	StopReason string `dbus:"-"`
 }
 
 // Handler serves the requests of one connection.
@@ -776,7 +795,7 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) (err er
 			st := h.Status()
 			if err := WriteFrame(out, StatusResponse{
 				V: Version, Op: OpStatus, Daemon: st.Daemon,
-				Linked: st.Linked, Session: st.Session, Unread: st.Unread,
+				Linked: st.Linked, Session: st.Session, Unread: st.Unread, StopReason: st.StopReason,
 			}); err != nil {
 				return err
 			}

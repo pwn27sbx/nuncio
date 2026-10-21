@@ -232,6 +232,7 @@ fn app() -> App {
         session: Session::Linked,
         unread: 0,
         chats: vec![chat(ADA, "Ada Lovelace"), chat(GRACE, "Grace Hopper")],
+        stop_reason: None,
     };
     App::new(snapshot, Source::Daemon, Palette::default()).with_client_prefix("t")
 }

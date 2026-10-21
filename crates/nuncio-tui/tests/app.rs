@@ -65,6 +65,7 @@ fn app_with(chats: Vec<Chat>) -> App {
         session: Session::Linked,
         unread,
         chats,
+        stop_reason: None,
     };
     App::new(snapshot, Source::Daemon, Palette::default())
 }
@@ -544,6 +545,7 @@ fn unread_message_connection_and_focus_events_update_the_model() {
     app.apply(&DaemonFrame::EventConnection {
         v: 1,
         session: Session::Offline,
+        stop_reason: None,
     });
     assert!(render(&mut app, 80, 24).text().contains("offline"));
 

@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use nuncio_client::wire::{MessageState, Reaction};
 use nuncio_client::{
     Chat, ClientFrame, DaemonFrame, ErrorCode, MAX_FRAME_BYTES, Media, Message, PROTOCOL_VERSION,
-    SendState, Session,
+    SendState, Session, StopReason,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -86,12 +86,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_forty_four_documented_files() {
+fn fixture_directory_holds_the_forty_six_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 44, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 46, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -293,6 +293,15 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
         &DaemonFrame::EventConnection {
             v: PROTOCOL_VERSION,
             session: Session::Offline,
+            stop_reason: None,
+        },
+    );
+    assert_frame(
+        &dir.join("event_connection_stopped.json"),
+        &DaemonFrame::EventConnection {
+            v: PROTOCOL_VERSION,
+            session: Session::Offline,
+            stop_reason: Some(StopReason::TemporaryBan),
         },
     );
     assert_frame(
@@ -367,6 +376,18 @@ fn constructed_daemon_frames_match_their_fixtures() {
             linked: false,
             session: Session::Unlinked,
             unread: 0,
+            stop_reason: None,
+        },
+    );
+    assert_frame(
+        &dir.join("status_stopped_response.json"),
+        &DaemonFrame::Status {
+            v: PROTOCOL_VERSION,
+            daemon: "nunciod/0.1.0".to_owned(),
+            linked: false,
+            session: Session::Unlinked,
+            unread: 0,
+            stop_reason: Some(StopReason::LoggedOut),
         },
     );
 
@@ -503,6 +524,7 @@ fn sessions_and_error_codes_accept_states_this_client_does_not_know_yet() {
             linked: true,
             session: Session::Unknown,
             unread: 3,
+            stop_reason: None,
         }
     );
 
@@ -782,7 +804,7 @@ fn every_daemon_fixture_parses_to_its_own_variant_not_the_catch_all() {
             Err(_) => assert!(is_client, "{name}: a daemon fixture does not parse"),
         }
     }
-    assert_eq!(daemon_fixtures, 29, "every daemon fixture was checked");
+    assert_eq!(daemon_fixtures, 31, "every daemon fixture was checked");
 }
 
 /// ADR 0001: `event_chat` (and `chats`) name the phone-number chats merged into a chat in

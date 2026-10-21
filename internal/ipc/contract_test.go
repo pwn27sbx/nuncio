@@ -123,6 +123,13 @@ func fixtureCases() []fixtureCase {
 			},
 		},
 		{
+			file: "status_stopped_response.json",
+			into: func() any { return &StatusResponse{} },
+			build: func() any {
+				return StatusResponse{V: 1, Op: OpStatus, Daemon: "nunciod/0.1.0", Session: SessionUnlinked, StopReason: StopLoggedOut}
+			},
+		},
+		{
 			file:  "chats_response.json",
 			into:  func() any { return &ChatsResponse{} },
 			build: func() any { return ChatsResponse{V: 1, Op: OpChats, Chats: fixtureChatList()} },
@@ -298,6 +305,13 @@ func fixtureCases() []fixtureCase {
 			file:  "event_connection.json",
 			into:  func() any { return &EventConnection{} },
 			build: func() any { return EventConnection{V: 1, Op: OpEventConnection, Session: SessionOffline} },
+		},
+		{
+			file: "event_connection_stopped.json",
+			into: func() any { return &EventConnection{} },
+			build: func() any {
+				return EventConnection{V: 1, Op: OpEventConnection, Session: SessionOffline, StopReason: StopTemporaryBan}
+			},
 		},
 		{
 			file: "event_unread.json",

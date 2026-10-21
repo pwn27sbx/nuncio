@@ -180,7 +180,7 @@ func TestAFailedStartAfterALogoutStaysUnlinked(t *testing.T) {
 		t.Errorf("State() = %q, want %q", got, StateUnlinked)
 	}
 	got := events()
-	if n := len(got); n == 0 || got[n-1] != `{"v":1,"op":"event_connection","session":"unlinked"}` {
+	if n := len(got); n == 0 || got[n-1] != `{"v":1,"op":"event_connection","session":"unlinked","stop_reason":"logged_out"}` {
 		t.Errorf("events = %v, want the last one unlinked", got)
 	}
 }
@@ -232,10 +232,12 @@ func TestAConnectedAfterAStopOrCloseKeepsTheStopState(t *testing.T) {
 		name string
 		stop func(s *Session, f *fakeClient)
 		want State
+		// reason is the stop_reason the last frame carries ("" for none: Close is not a stop).
+		reason string
 	}{
-		{"logout", func(_ *Session, f *fakeClient) { f.emit(&waevents.LoggedOut{}) }, StateUnlinked},
-		{"temporary ban", func(_ *Session, f *fakeClient) { f.emit(&waevents.TemporaryBan{}) }, StateOffline},
-		{"close", func(s *Session, _ *fakeClient) { s.Close() }, StateOffline},
+		{"logout", func(_ *Session, f *fakeClient) { f.emit(&waevents.LoggedOut{}) }, StateUnlinked, "logged_out"},
+		{"temporary ban", func(_ *Session, f *fakeClient) { f.emit(&waevents.TemporaryBan{}) }, StateOffline, "temporary_ban"},
+		{"close", func(s *Session, _ *fakeClient) { s.Close() }, StateOffline, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -248,7 +250,11 @@ func TestAConnectedAfterAStopOrCloseKeepsTheStopState(t *testing.T) {
 				t.Errorf("State() = %q, want %q", got, tc.want)
 			}
 			got := events()
-			want := `{"v":1,"op":"event_connection","session":"` + string(tc.want) + `"}`
+			want := `{"v":1,"op":"event_connection","session":"` + string(tc.want) + `"`
+			if tc.reason != "" {
+				want += `,"stop_reason":"` + tc.reason + `"`
+			}
+			want += `}`
 			if n := len(got); n == 0 || got[n-1] != want {
 				t.Errorf("events = %v, want the last one %s", got, want)
 			}

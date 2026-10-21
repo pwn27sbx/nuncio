@@ -97,6 +97,7 @@ impl Controller {
                 session: Session::Unknown,
                 unread: 0,
                 chats: Vec::new(),
+                stop_reason: None,
             },
             client_prefix,
         );

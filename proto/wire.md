@@ -52,7 +52,7 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `op` | Fields | Fixture |
 |---|---|---|
 | `hello_ok` | `v`, `op`, `daemon` (string), `session` (see below), `unread` (int) | `hello_ok_daemon.json` |
-| `status` | `v`, `op`, `daemon`, `linked` (bool), `session`, `unread` (int) | `status_response.json` |
+| `status` | `v`, `op`, `daemon`, `linked` (bool), `session`, `unread` (int), `stop_reason` (string or absent, see "`stop_reason`"; added in Q6) | `status_response.json`, `status_stopped_response.json` |
 | `chats` | `v`, `op`, `chats` (array of Chat, at most `limit`; fewer when they do not all fit in one frame, see "Replies too long for one frame") | `chats_response.json` |
 | `error` | `v`, `op`, `code` (string), `message` (string) | `error_version_mismatch.json`, `error_not_linked.json` |
 | `messages` | `v`, `op`, `jid`, `messages` (array of Message, newest first, at most `limit`; fewer when they do not all fit in one frame, see "Replies too long for one frame"); answers `messages` and `search` | `messages_response.json`, `search_response.json`, `messages_group_response.json` |
@@ -82,7 +82,7 @@ because events were lost; to avoid it, a UI drains every queued event on each ti
 | `op` | Fields | Fixture |
 |---|---|---|
 | `event_message` | `v`, `op`, `jid`, `message` (Message); also published when a send of mine changes state (queued, sent, not sent): a client replaces the message with the same `id` | `event_message.json`, `event_message_not_sent.json`, `event_message_image.json`, `event_message_sticker.json`, `event_message_group.json` |
-| `event_connection` | `v`, `op`, `session` | `event_connection.json` |
+| `event_connection` | `v`, `op`, `session`, `stop_reason` (string or absent, see "`stop_reason`"; added in Q6) | `event_connection.json`, `event_connection_stopped.json` |
 | `event_unread` | `v`, `op`, `unread` (int, total), `jid`, `chat_unread` (int) | `event_unread.json` |
 | `event_focus` | `v`, `op`, `jid` | `event_focus.json` |
 | `event_chat` | `v`, `op`, `chat` (Chat): published when app-state sync from another device changes a chat's pin, archive or mute; `chat` is the chat as it now is, as `chats` would list it (its unread count and `last_message` included), so a client replaces the chat with the same `jid` or adds it (added in M2). Also published after every merge of a contact's phone-number chat into her LID chat, with `aliases` (T15, see "One chat per contact"): a client then drops or renames the entries named in `aliases`. Also published when a chat's `name` changes (see "Chat names") | `event_chat.json`, `event_chat_aliases.json`, `event_chat_phone.json` |
@@ -100,6 +100,30 @@ before, and the last one a subscriber received is always the session's current s
 logout or a ban lands while a drop's `offline` is being published (the client ends on `unlinked`
 or `offline` as the stop says, never on a stale frame). A change undone before it was published
 (`offline` then `linked` again at once) may not be published at all.
+
+### `stop_reason`
+
+Why WhatsApp stopped the session for good, on `status` and `event_connection` (added in Q6). It is
+absent while the session runs, reconnects or is simply unlinked, so those frames are the same bytes
+as before it existed, and an older client that ignores unknown keys keeps working. Once set it stays
+set, with the first stop's value, until nunciod restarts: a stopped session never reconnects on its
+own. A stop that leaves `session` as it was (a temporary ban while already `offline`) is still
+published, as an `event_connection` that differs from the one before by its `stop_reason` only.
+`hello_ok` does not carry it; a client reads it from `status`.
+
+The value is one of these fixed words, chosen by nuncio: never WhatsApp's text, codes, ban expiry,
+numbers, ids or names.
+
+| Value | Meaning | Text the clients show |
+|---|---|---|
+| `logged_out` | the device was unlinked: from the phone, by WhatsApp, or by `nuncio logout` (`session` is `unlinked`) | `WhatsApp logged this device out` |
+| `temporary_ban` | WhatsApp banned the account for a while | `WhatsApp temporarily banned this account` |
+| `stream_replaced` | another connection of this same device took the session over | `another connection of this device took over` |
+| `client_outdated` | WhatsApp no longer accepts this client's version | `WhatsApp says this client is out of date` |
+| `connect_rejected` | WhatsApp refused the connection | `WhatsApp rejected the connection` |
+| `other` | any other stop; a client also reads a value it does not know as `other` | `WhatsApp stopped the session` |
+
+Example: `{"v":1,"op":"event_connection","session":"offline","stop_reason":"temporary_ban"}`.
 
 ### Chat (M0 shape)
 

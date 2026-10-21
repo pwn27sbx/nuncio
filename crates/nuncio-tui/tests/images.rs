@@ -78,6 +78,7 @@ fn snapshot() -> Snapshot {
         session: Session::Linked,
         unread: 0,
         chats: vec![chat(ADA, "Ada Lovelace"), chat(GRACE, "Grace Hopper")],
+        stop_reason: None,
     }
 }
 

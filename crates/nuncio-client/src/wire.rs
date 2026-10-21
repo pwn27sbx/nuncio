@@ -246,6 +246,9 @@ pub enum DaemonFrame {
         linked: bool,
         session: Session,
         unread: u32,
+        /// Why WhatsApp stopped the session; absent while it runs (and from an older daemon).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<StopReason>,
     },
     Chats {
         v: u8,
@@ -324,6 +327,9 @@ pub enum DaemonFrame {
     EventConnection {
         v: u8,
         session: Session,
+        /// As in [`DaemonFrame::Status`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stop_reason: Option<StopReason>,
     },
     /// `unread` is the total; `chat_unread` the count of chat `jid`.
     EventUnread {
@@ -451,6 +457,54 @@ impl Session {
             Self::Linked => "linked",
             Self::Offline => "offline",
             Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Why WhatsApp stopped the session for good (`stop_reason` on `status` and `event_connection`).
+///
+/// The daemon sends fixed words, never WhatsApp's own text; a value this build does not know
+/// becomes [`StopReason::Other`]. [`StopReason::describe`] is what a client shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopReason {
+    /// The device was unlinked (from the phone, by WhatsApp, or by `nuncio logout`).
+    LoggedOut,
+    /// WhatsApp banned the account for a while.
+    TemporaryBan,
+    /// Another connection of this same device took the session over.
+    StreamReplaced,
+    /// WhatsApp no longer accepts this client's version.
+    ClientOutdated,
+    /// WhatsApp refused the connection.
+    ConnectRejected,
+    /// Any other stop, or one this build does not know yet.
+    #[serde(other)]
+    Other,
+}
+
+impl StopReason {
+    /// The wire spelling, as used in `proto/wire.md`.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::LoggedOut => "logged_out",
+            Self::TemporaryBan => "temporary_ban",
+            Self::StreamReplaced => "stream_replaced",
+            Self::ClientOutdated => "client_outdated",
+            Self::ConnectRejected => "connect_rejected",
+            Self::Other => "other",
+        }
+    }
+
+    /// The fixed English text a client shows for it.
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::LoggedOut => "WhatsApp logged this device out",
+            Self::TemporaryBan => "WhatsApp temporarily banned this account",
+            Self::StreamReplaced => "another connection of this device took over",
+            Self::ClientOutdated => "WhatsApp says this client is out of date",
+            Self::ConnectRejected => "WhatsApp rejected the connection",
+            Self::Other => "WhatsApp stopped the session",
         }
     }
 }

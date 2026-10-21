@@ -837,9 +837,14 @@ impl App {
             ),
             Source::Daemon => Span::styled(
                 format!(
-                    " · {} · {} · {} unread",
+                    " · {} · {}{} · {} unread",
                     self.model.status().daemon,
                     self.model.status().session.as_str(),
+                    // Why WhatsApp stopped the session, as fixed text (never WhatsApp's own).
+                    self.model
+                        .status()
+                        .stop_reason
+                        .map_or_else(String::new, |r| format!(" · {}", r.describe())),
                     self.model.status().unread
                 ),
                 self.muted(),

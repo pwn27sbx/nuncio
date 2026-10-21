@@ -45,6 +45,7 @@ fn a_group_message_header_names_its_sender_and_falls_back_to_the_group() {
         session: Session::Linked,
         unread: 0,
         chats: vec![chat],
+        stop_reason: None,
     };
     let mut app = App::new(snapshot, Source::Daemon, Palette::default());
     assert_eq!(

@@ -35,5 +35,5 @@ pub use reconnect::{Backoff, Reconnect};
 pub use theme::{Mode, Palette, Rgb, ThemeError, ThemeWatcher, default_path_from};
 pub use wire::{
     Chat, ClientFrame, DaemonFrame, ErrorCode, MAX_FRAME_BYTES, Media, Message, PROTOCOL_VERSION,
-    Reaction, SendState, Session,
+    Reaction, SendState, Session, StopReason,
 };

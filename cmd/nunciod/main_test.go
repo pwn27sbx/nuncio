@@ -279,6 +279,8 @@ type fixedSession wa.State
 
 func (s fixedSession) State() wa.State { return wa.State(s) }
 
+func (s fixedSession) StopKind() string { return "" }
+
 func (s fixedSession) Send(string, string, string) (ipc.Sent, error) {
 	return ipc.Sent{}, errors.New("a fixed session cannot send")
 }

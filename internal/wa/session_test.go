@@ -367,7 +367,7 @@ func TestSessionPublishesEachConnectionChangeOnce(t *testing.T) {
 		`{"v":1,"op":"event_connection","session":"offline"}`,
 		`{"v":1,"op":"event_connection","session":"linked"}`,
 		`{"v":1,"op":"event_connection","session":"offline"}`,
-		`{"v":1,"op":"event_connection","session":"unlinked"}`,
+		`{"v":1,"op":"event_connection","session":"unlinked","stop_reason":"logged_out"}`,
 	)
 }
 

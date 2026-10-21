@@ -27,7 +27,7 @@ pub use composer::Composer;
 pub use transcript::{Search, Transcript, is_picture, quoted};
 
 use crate::conn::Snapshot;
-use crate::wire::{Chat, ClientFrame, DaemonFrame, Message, MessageState, Session};
+use crate::wire::{Chat, ClientFrame, DaemonFrame, Message, MessageState, Session, StopReason};
 
 /// How many messages a conversation loads (the wire maximum).
 pub const MESSAGE_LIMIT: u16 = 200;
@@ -55,6 +55,8 @@ pub struct Status {
     pub session: Session,
     /// Unread messages in all chats.
     pub unread: u32,
+    /// Why WhatsApp stopped the session, as the last `status` or `event_connection` said.
+    pub stop_reason: Option<StopReason>,
 }
 
 /// A media download asked for by [`Model::download_selected`].
@@ -104,6 +106,7 @@ impl Model {
             session,
             unread,
             chats,
+            stop_reason,
         } = snapshot;
         let mut model = Self {
             chats: ChatList::default(),
@@ -114,6 +117,7 @@ impl Model {
                 linked,
                 session,
                 unread,
+                stop_reason,
             },
             notice: None,
             open: false,
@@ -801,12 +805,14 @@ impl Model {
                 linked,
                 session,
                 unread,
+                stop_reason,
                 ..
             } => {
                 self.status.daemon = daemon.clone();
                 self.status.linked = *linked;
                 self.status.session = session.clone();
                 self.status.unread = *unread;
+                self.status.stop_reason = *stop_reason;
             }
             DaemonFrame::Chats { chats, .. } => self.set_chats(chats.clone()),
             DaemonFrame::Messages { jid, messages, .. }
@@ -892,8 +898,13 @@ impl Model {
                 self.status.unread = *unread;
                 self.chats.set_unread(jid, *chat_unread);
             }
-            DaemonFrame::EventConnection { session, .. } => {
+            DaemonFrame::EventConnection {
+                session,
+                stop_reason,
+                ..
+            } => {
                 self.status.session = session.clone();
+                self.status.stop_reason = *stop_reason;
             }
             // App-state sync changed a chat's pin, archive or mute: take the chat as it now is and
             // sort the list again as the daemon lists it (so an unarchived chat goes back to its

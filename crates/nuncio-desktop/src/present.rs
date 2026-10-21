@@ -397,12 +397,16 @@ fn picture_view(model: &Model, message: &Message) -> Option<PictureView> {
     })
 }
 
-/// The connection as the headers say it: `reconnecting…` while the driver is, else the session.
+/// The connection as the headers say it: `reconnecting…` while the driver is, else the session,
+/// followed by why WhatsApp stopped it when it did (fixed text, never WhatsApp's own).
 pub fn connection(model: &Model) -> String {
-    if model.connected() {
-        model.status().session.as_str().to_owned()
-    } else {
-        "reconnecting…".to_owned()
+    if !model.connected() {
+        return "reconnecting…".to_owned();
+    }
+    let status = model.status();
+    match status.stop_reason {
+        Some(reason) => format!("{} · {}", status.session.as_str(), reason.describe()),
+        None => status.session.as_str().to_owned(),
     }
 }
 

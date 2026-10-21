@@ -219,6 +219,7 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
                 sender: None,
             }),
         }],
+        stop_reason: None,
     };
     let mut app = App::new(snapshot, Source::Daemon, Palette::default());
     let screen = render(&mut app, 80, 24);
@@ -241,6 +242,7 @@ fn an_empty_chat_list_renders_at_eighty_by_twenty_four() {
         session: Session::Unlinked,
         unread: 0,
         chats: Vec::new(),
+        stop_reason: None,
     };
     let mut app = App::new(snapshot, Source::Daemon, Palette::default());
     let screen = render(&mut app, 80, 24);
@@ -290,6 +292,7 @@ fn a_lid_chat_with_no_name_and_no_phone_never_shows_its_lid_digits() {
             chat("120363000000000001@g.us".to_owned(), "", None),
             chat("15551230005@s.whatsapp.net".to_owned(), "", None),
         ],
+        stop_reason: None,
     };
     let mut app = App::new(snapshot, Source::Daemon, Palette::default());
     // The LID chat is selected, so its title heads the conversation too.

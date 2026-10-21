@@ -39,6 +39,7 @@ fn model(chats: Vec<Chat>) -> Model {
             session: Session::Linked,
             unread: 0,
             chats,
+            stop_reason: None,
         },
         "t",
     )

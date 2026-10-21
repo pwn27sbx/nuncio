@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -77,8 +78,8 @@ type Client interface {
 // time, and each failed attempt is logged once with its number, the next delay and the error's
 // type (never its text, which can carry a JID). A logout, a temporary ban, a replaced stream, an
 // outdated client or a connection WhatsApp rejects (any other ConnectFailure) stops reconnecting
-// for good, and StopReason says why; the daemon logs that reason once. Surfacing it to clients (a
-// wire field) is a follow-up.
+// for good, and StopReason says why; the daemon logs that reason once. Clients get it as StopKind,
+// a fixed word (stop_reason on event_connection and status), never the reason's text.
 //
 // A connection can also die silently (a NAT timeout or a network change drops the TCP stream with
 // no FIN or RST), and then no Disconnected ever arrives. whatsmeow notices only through its
@@ -105,10 +106,12 @@ type Session struct {
 	// or Close), so a send can tell that its connection died while it waited (see leftLinked).
 	drops   uint64
 	started bool
-	// published is, under mu, the state of the last event_connection published; publishing is set
-	// while one caller publishes state frames (publishState).
-	published  State
-	publishing bool
+	// published and publishedStop are, under mu, the state and stop_reason of the last
+	// event_connection published; publishing is set while one caller publishes state frames
+	// (publishState).
+	published     State
+	publishedStop string
+	publishing    bool
 	// events is where the session publishes (an *ipc.Broker outside tests).
 	events publisher
 	// unreadChanged, when not nil, runs after every change that may move the total unread count
@@ -169,6 +172,35 @@ func (s *Session) StopReason() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.backoff.Stopped()
+}
+
+// StopKind is the stop reason as clients get it (status and event_connection's stop_reason): one
+// of the fixed ipc.Stop* values, or "" while the session reconnects.
+func (s *Session) StopKind() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return stopKind(s.backoff.Stopped())
+}
+
+// stopKind maps a reason given to stop (Start's handlers, Logout) to its ipc.Stop* value, so no
+// text of WhatsApp's (ban codes, expiry, failure codes) ever reaches a client; a reason it does
+// not know is ipc.StopOther. The prefixes are the reasons as Events and Logout write them.
+func stopKind(reason string) string {
+	switch {
+	case reason == "":
+		return ""
+	case strings.HasPrefix(reason, "logged out"):
+		return ipc.StopLoggedOut
+	case strings.Contains(reason, "temporarily banned"):
+		return ipc.StopTemporaryBan
+	case strings.HasPrefix(reason, "stream replaced"):
+		return ipc.StopStreamReplaced
+	case strings.HasPrefix(reason, "client is out of date"):
+		return ipc.StopClientOutdated
+	case strings.HasPrefix(reason, "connect rejected"):
+		return ipc.StopConnectRejected
+	}
+	return ipc.StopOther
 }
 
 // SetEvents makes the session publish its events to b: event_connection when the state changes,
@@ -446,13 +478,14 @@ func (s *Session) publishState() {
 			s.mu.Unlock()
 		}
 	}()
-	for s.published != s.state {
-		st := s.state
-		s.published = st
+	// A stop that keeps the state (a ban while offline) still differs by its stop_reason.
+	for s.published != s.state || s.publishedStop != stopKind(s.backoff.Stopped()) {
+		st, stop := s.state, stopKind(s.backoff.Stopped())
+		s.published, s.publishedStop = st, stop
 		b := s.events
 		s.mu.Unlock()
 		if b != nil {
-			b.Publish(ipc.EventConnection{V: ipc.Version, Op: ipc.OpEventConnection, Session: string(st)})
+			b.Publish(ipc.EventConnection{V: ipc.Version, Op: ipc.OpEventConnection, Session: string(st), StopReason: stop})
 		}
 		s.mu.Lock()
 	}

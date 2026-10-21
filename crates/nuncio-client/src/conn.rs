@@ -19,7 +19,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::wire::{Chat, ClientFrame, DaemonFrame, MAX_FRAME_BYTES, Session};
+use crate::wire::{Chat, ClientFrame, DaemonFrame, MAX_FRAME_BYTES, Session, StopReason};
 
 /// The socket path, relative to `$XDG_RUNTIME_DIR`.
 const SOCKET_RELATIVE: &str = "nuncio/core.sock";
@@ -62,6 +62,8 @@ pub struct Snapshot {
     pub session: Session,
     pub unread: u32,
     pub chats: Vec<Chat>,
+    /// Why WhatsApp stopped the session, as `status` said; `None` while it runs.
+    pub stop_reason: Option<StopReason>,
 }
 
 impl Snapshot {
@@ -79,6 +81,7 @@ impl Snapshot {
                 session: Session::Unlinked,
                 unread: chats.iter().map(|chat| chat.unread).sum(),
                 chats,
+                stop_reason: None,
             }),
             other => Err(ClientError::Unexpected {
                 expected: "chats",
@@ -280,21 +283,23 @@ pub fn fetch(path: &Path, client: &str, limit: u16) -> Result<Snapshot, ClientEr
     let mut connection = Connection::connect(path)?;
     connection.handshake(client)?;
 
-    let (daemon, linked, session, unread) = match connection.request(&ClientFrame::status())? {
-        DaemonFrame::Status {
-            daemon,
-            linked,
-            session,
-            unread,
-            ..
-        } => (daemon, linked, session, unread),
-        other => {
-            return Err(ClientError::Unexpected {
-                expected: "status",
-                got: other.op().to_owned(),
-            });
-        }
-    };
+    let (daemon, linked, session, unread, stop_reason) =
+        match connection.request(&ClientFrame::status())? {
+            DaemonFrame::Status {
+                daemon,
+                linked,
+                session,
+                unread,
+                stop_reason,
+                ..
+            } => (daemon, linked, session, unread, stop_reason),
+            other => {
+                return Err(ClientError::Unexpected {
+                    expected: "status",
+                    got: other.op().to_owned(),
+                });
+            }
+        };
 
     let chats = match connection.request(&ClientFrame::chats(limit))? {
         DaemonFrame::Chats { chats, .. } => chats,
@@ -312,6 +317,7 @@ pub fn fetch(path: &Path, client: &str, limit: u16) -> Result<Snapshot, ClientEr
         session,
         unread,
         chats,
+        stop_reason,
     })
 }
 

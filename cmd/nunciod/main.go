@@ -298,6 +298,9 @@ var errClosed = errors.New("the local data is being deleted; run nuncio purge --
 // sessionState is what the daemon reads from, and sends through, its WhatsApp session.
 type sessionState interface {
 	State() wa.State
+	// StopKind is why WhatsApp stopped the session, a fixed ipc.Stop* value, or "" (status's
+	// stop_reason).
+	StopKind() string
 	// Send sends one text message through the outbox under the client's client_id; Retry sends a
 	// not-sent one again by its client_id.
 	Send(jid, text, clientID string) (ipc.Sent, error)
@@ -339,7 +342,8 @@ func (d *daemon) Hello(client string) ipc.Status {
 // offline session is still linked. Unread is the store's total, 0 without one.
 func (d *daemon) Status() ipc.Status {
 	st := d.session.State()
-	return ipc.Status{Daemon: d.version, Linked: st != wa.StateUnlinked, Session: string(st), Unread: d.unread()}
+	return ipc.Status{Daemon: d.version, Linked: st != wa.StateUnlinked, Session: string(st), Unread: d.unread(),
+		StopReason: d.session.StopKind()}
 }
 
 func (d *daemon) unread() int {

@@ -265,6 +265,7 @@ mod tests {
                 session: Session::Linked,
                 unread: 0,
                 chats: vec![chat],
+                stop_reason: None,
             },
             "t",
         )

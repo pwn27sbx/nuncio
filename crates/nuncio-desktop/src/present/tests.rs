@@ -48,6 +48,7 @@ fn model(chats: Vec<Chat>) -> Model {
             session: Session::Linked,
             unread: 0,
             chats,
+            stop_reason: None,
         },
         "d",
     )
@@ -407,4 +408,39 @@ fn a_group_bubble_and_its_label_name_the_sender_and_fall_back_to_the_group() {
         "no sender: the group, as before"
     );
     assert_eq!(shown[1].label, "Climbing, 10:05: an old one");
+}
+
+/// Q6: the headers say why WhatsApp stopped the session, in fixed text mapped from
+/// `stop_reason`; without one they are as before.
+#[test]
+fn the_headers_name_the_stop_reason() {
+    use nuncio_client::wire::StopReason;
+    let mut m = model(vec![chat(ANA, "Ana")]);
+    assert_eq!(connection(&m), "linked");
+    m.apply(&DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: Session::Offline,
+        stop_reason: None,
+    });
+    assert_eq!(connection(&m), "offline");
+    m.apply(&DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: Session::Offline,
+        stop_reason: Some(StopReason::StreamReplaced),
+    });
+    assert_eq!(
+        connection(&m),
+        "offline · another connection of this device took over"
+    );
+    assert_eq!(
+        sidebar_header(&m).subtitle,
+        "offline · another connection of this device took over"
+    );
+    assert_eq!(
+        conversation_header(&m).subtitle,
+        "offline · another connection of this device took over"
+    );
+    // Lost daemon connection wins: the stop is the daemon's news, reconnecting is ours.
+    m.set_connected(false);
+    assert_eq!(connection(&m), "reconnecting…");
 }

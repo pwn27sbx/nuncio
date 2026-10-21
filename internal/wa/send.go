@@ -62,20 +62,21 @@ func (s *Session) SendReply(jid, text, clientID, replyTo string) (ipc.Sent, erro
 		if e, err := store.GetOutbox(s.db, clientID); err == nil {
 			return storedReply(e)
 		} else if !errors.Is(err, store.ErrNoOutboxEntry) {
-			log.Printf("wa: cannot read a send: %v", err)
+			// A store failure is logged by its error type only: SQLite's text could quote a value.
+			log.Printf("wa: cannot read a send (%T)", err)
 			return ipc.Sent{}, errOutbox
 		}
 		if _, err := store.GetMessage(s.db, jid, replyTo); errors.Is(err, store.ErrNoMessage) {
 			return ipc.Sent{}, ErrNoQuote
 		} else if err != nil {
-			log.Printf("wa: cannot read a quoted message: %v", err)
+			log.Printf("wa: cannot read a quoted message (%T)", err)
 			return ipc.Sent{}, errOutbox
 		}
 	}
 	e, inserted, err := store.Enqueue(s.db, store.OutboxEntry{ClientID: clientID, ChatJID: jid, Text: text,
 		MessageID: s.client.NewMessageID(), Created: time.Now().UTC(), ReplyTo: replyTo})
 	if err != nil {
-		log.Printf("wa: cannot queue a send: %v", err)
+		log.Printf("wa: cannot queue a send (%T)", err)
 		return ipc.Sent{}, errOutbox
 	}
 	if !inserted {
@@ -98,7 +99,7 @@ func (s *Session) Retry(clientID string) (ipc.Sent, error) {
 	}
 	requeued, err := store.RequeueFailed(s.db, clientID)
 	if err != nil {
-		log.Printf("wa: cannot queue a retry: %v", err)
+		log.Printf("wa: cannot queue a retry (%T)", err)
 		return ipc.Sent{}, errOutbox
 	}
 	e, err := store.GetOutbox(s.db, clientID)
@@ -106,7 +107,7 @@ func (s *Session) Retry(clientID string) (ipc.Sent, error) {
 		return ipc.Sent{}, ErrNoSend
 	}
 	if err != nil {
-		log.Printf("wa: cannot read a send to retry: %v", err)
+		log.Printf("wa: cannot read a send to retry (%T)", err)
 		return ipc.Sent{}, errOutbox
 	}
 	if !requeued {
@@ -152,7 +153,7 @@ func (s *Session) deliver(clientID string, live bool) (ipc.Sent, error) {
 	defer s.sendMu.Unlock()
 	queued, err := store.QueuedOutbox(s.db)
 	if err != nil {
-		log.Printf("wa: cannot read the outbox: %v", err)
+		log.Printf("wa: cannot read the outbox (%T)", err)
 		return ipc.Sent{}, errOutbox
 	}
 	for _, e := range queued {
@@ -166,7 +167,7 @@ func (s *Session) deliver(clientID string, live bool) (ipc.Sent, error) {
 	}
 	e, err := store.GetOutbox(s.db, clientID)
 	if err != nil {
-		log.Printf("wa: cannot read a queued send: %v", err)
+		log.Printf("wa: cannot read a queued send (%T)", err)
 		return ipc.Sent{}, errOutbox
 	}
 	if e.State == store.OutboxQueued {
@@ -227,7 +228,7 @@ func (s *Session) attempt(e store.OutboxEntry, live bool) (ipc.Sent, error) {
 			log.Printf("wa: a send failed (%T)", err)
 		}
 		if err := store.SetOutboxState(s.db, e.ClientID, state, time.Time{}); err != nil {
-			log.Printf("wa: cannot record a failed send: %v", err)
+			log.Printf("wa: cannot record a failed send (%T)", err)
 		}
 		e.State = state
 		s.publishEntry(e)
@@ -239,7 +240,7 @@ func (s *Session) attempt(e store.OutboxEntry, live bool) (ipc.Sent, error) {
 	}
 	ts = ts.UTC()
 	if err := store.SetOutboxState(s.db, e.ClientID, store.OutboxSent, ts); err != nil {
-		log.Printf("wa: cannot record a sent message %s: %v", e.MessageID, err)
+		log.Printf("wa: cannot record a sent message (%T)", err)
 	}
 	// whatsmeow may have learnt the LID during this very send (GetUserInfo, user.go:265-276): the
 	// message is then stored in the LID chat and the entry, with anything else, moves there.
@@ -247,7 +248,7 @@ func (s *Session) attempt(e store.OutboxEntry, live bool) (ipc.Sent, error) {
 	m := store.Message{ID: e.MessageID, ChatJID: e.ChatJID, Kind: store.KindText, Text: e.Text, FromMe: true, Timestamp: ts,
 		ReplyTo: e.ReplyTo}
 	if _, err := store.InsertMessage(s.db, m); err != nil {
-		log.Printf("wa: cannot store sent message %s: %v", m.ID, err)
+		log.Printf("wa: cannot store a sent message (%T)", err)
 	}
 	s.publish(ipc.EventMessage{V: ipc.Version, Op: ipc.OpEventMessage, JID: m.ChatJID, Message: WireMessage(m)})
 	return ipc.Sent{State: ipc.SendSent, ID: m.ID, Timestamp: ipc.Timestamp(ts)}, nil
@@ -263,7 +264,7 @@ func (s *Session) textMessage(e store.OutboxEntry) *waE2E.Message {
 	}
 	q, err := store.GetMessage(s.db, e.ChatJID, e.ReplyTo)
 	if err != nil {
-		log.Printf("wa: a reply's quoted message %s cannot be read, so it is sent unquoted: %v", e.ReplyTo, err)
+		log.Printf("wa: a reply's quoted message cannot be read, so it is sent unquoted (%T)", err)
 		return &waE2E.Message{Conversation: proto.String(e.Text)}
 	}
 	ci := &waE2E.ContextInfo{StanzaID: proto.String(q.ID), QuotedMessage: quotedOf(q)}
@@ -379,7 +380,7 @@ func (s *Session) publishEntry(e store.OutboxEntry) {
 func (s *Session) drain() {
 	queued, err := store.QueuedOutbox(s.db)
 	if err != nil {
-		log.Printf("wa: cannot read the outbox: %v", err)
+		log.Printf("wa: cannot read the outbox (%T)", err)
 		return
 	}
 	for _, e := range queued {

@@ -24,3 +24,4 @@ Branch: `feat/m4-omarchy` (continues from `a028a65`). Delivery: `single-pr`. Run
 - L3 G3 left: a failed recount keeps the last value with no retry until the next change; the notifier is not awaited at shutdown (harmless); dbus-broker delivery of NameOwnerChanged to busctl monitor unverified (home, contrib README step 5); BarWidget.qml not linted (no qmllint on the Mac).
 - L4 G4 left: internal/wa/messages.go storeMessage still logs a MessageReactions error with %v (pre-existing, same class).
 - L5 (owner, 2026-10-21): "si" to logging storeMessage store errors by type only and pushing. Found 19 more %v store-error logs in internal/wa send.go (12), react.go (2), appstate.go (5) — left, owner to decide.
+- L6 The 19 store-error logs in send.go, react.go and appstate.go now log by type only, without JIDs or ids (RED via SQLite RAISE triggers; send.go 109 and 169 not reachable by a test). Left: messages.go:54 logs a proto.Marshal error with the message id.

@@ -66,7 +66,8 @@ func (s *Session) React(jid, id, emoji string) error {
 		return errReactNotSent
 	}
 	if err := store.SetReaction(s.db, jid, id, "", true, emoji); err != nil {
-		log.Printf("wa: cannot store a sent reaction on %s: %v", id, err)
+		// A store failure is logged by its error type only: SQLite's text could quote a value.
+		log.Printf("wa: cannot store a sent reaction (%T)", err)
 		return nil
 	}
 	s.publishStored(jid, id)
@@ -95,7 +96,7 @@ func (s *Session) storeReaction(evt *waevents.Message) {
 		}
 	}
 	if err := store.SetReaction(s.db, chat, target, sender, evt.Info.IsFromMe, rm.GetText()); err != nil {
-		log.Printf("wa: cannot store a reaction on %s: %v", target, err)
+		log.Printf("wa: cannot store a reaction (%T)", err)
 		return
 	}
 	s.publishStored(chat, target)

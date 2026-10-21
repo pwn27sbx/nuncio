@@ -19,7 +19,8 @@ import (
 //
 // A pin, archive or mute that is applied publishes the chat as `event_chat`, as `chats` would list
 // it now, so a UI updates its markers at once. A read state publishes only its `event_unread`. A
-// failure is logged without the chat JID and the session goes on.
+// failure is logged by its error type only (the store's text could quote a JID) and the session
+// goes on.
 
 // appStateChat is the chat JID of an app-state event, or false when it is not a chat JID.
 func (s *Session) appStateChat(jid types.JID) (string, bool) {
@@ -36,7 +37,7 @@ func (s *Session) applyPin(evt *waevents.Pin) {
 		return
 	}
 	if err := store.SetChatPinned(s.db, chat, evt.Action.GetPinned()); err != nil {
-		log.Printf("wa: cannot apply a pin from app state: %v", err)
+		log.Printf("wa: cannot apply a pin from app state (%T)", err)
 		return
 	}
 	s.publishChat(chat)
@@ -48,7 +49,7 @@ func (s *Session) applyArchive(evt *waevents.Archive) {
 		return
 	}
 	if err := store.SetChatArchived(s.db, chat, evt.Action.GetArchived()); err != nil {
-		log.Printf("wa: cannot apply an archive from app state: %v", err)
+		log.Printf("wa: cannot apply an archive from app state (%T)", err)
 		return
 	}
 	s.publishChat(chat)
@@ -69,7 +70,7 @@ func (s *Session) applyMute(evt *waevents.Mute) {
 		}
 	}
 	if err := store.SetChatMutedUntil(s.db, chat, until); err != nil {
-		log.Printf("wa: cannot apply a mute from app state: %v", err)
+		log.Printf("wa: cannot apply a mute from app state (%T)", err)
 		return
 	}
 	s.publishChat(chat)
@@ -84,7 +85,7 @@ func (s *Session) applyMarkChatAsRead(evt *waevents.MarkChatAsRead) {
 		return
 	}
 	if err := s.MarkChatRead(chat); err != nil {
-		log.Printf("wa: cannot apply a read state from app state: %v", err)
+		log.Printf("wa: cannot apply a read state from app state (%T)", err)
 	}
 }
 
@@ -93,7 +94,7 @@ func (s *Session) applyMarkChatAsRead(evt *waevents.MarkChatAsRead) {
 func (s *Session) publishChat(jid string) {
 	c, err := StoredChat(s.db, jid, time.Now())
 	if err != nil {
-		log.Printf("wa: cannot publish a chat changed by app state: %v", err)
+		log.Printf("wa: cannot publish a chat changed by app state (%T)", err)
 		return
 	}
 	c.Aliases = s.ChatAliases(jid)

@@ -4,8 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/pwn27sbx/nuncio/internal/media"
 )
@@ -24,9 +26,16 @@ const (
 // nuncio's and stays.
 var owned = []string{DBFile, DBFile + "-wal", DBFile + "-shm", MediaDir, ExportsDir}
 
+// removeDataDir removes the emptied data dir itself. Tests replace it to reproduce what a
+// sandbox does to that last rmdir.
+var removeDataDir = os.Remove
+
 // Wipe deletes everything nuncio keeps on this machine for the device, in this order: the device
 // keys in kr (service KeyringService), then the database with its WAL and SHM files, the media
 // cache and the exports in dataDir, and finally dataDir itself when nothing else is left in it.
+// An emptied dataDir that the system refuses to remove (EBUSY, EROFS, EPERM or EACCES, as under
+// the packaged systemd unit's sandbox) stays and is not an error; a file of nuncio's that could
+// not be deleted always is.
 // Close the database before calling it. It first closes the media cache (media.Close): a
 // download still running in this process then fails with media.ErrClosed and creates nothing.
 //
@@ -67,11 +76,25 @@ func Wipe(dataDir string, kr Keyring) error {
 	}
 	if len(errs) == 0 {
 		// Remove fails on a directory that still holds something; that is left alone.
-		if err := os.Remove(dataDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := removeDataDir(dataDir); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			if entries, rerr := os.ReadDir(dataDir); rerr != nil || len(entries) == 0 {
-				errs = append(errs, fmt.Errorf("store: %w", err))
+				if rerr == nil && sandboxKeeps(err) {
+					// The packaged systemd unit bind-mounts dataDir onto itself inside a
+					// read-only tree, so the emptied dir cannot be removed: the wipe is complete.
+					log.Printf("store: %s is empty and stays (%v)", dataDir, err)
+				} else {
+					errs = append(errs, fmt.Errorf("store: %w", err))
+				}
 			}
 		}
 	}
 	return errors.Join(errs...)
+}
+
+// sandboxKeeps reports whether err is how Linux refuses to remove a directory that is a mount
+// point (EBUSY) or that sits in a read-only tree (EROFS), or whose parent is not writable (EPERM,
+// EACCES).
+func sandboxKeeps(err error) bool {
+	return errors.Is(err, syscall.EBUSY) || errors.Is(err, syscall.EROFS) ||
+		errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES)
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"go.mau.fi/whatsmeow"
@@ -264,4 +265,90 @@ func TestADownloadRacingAWipeLeavesNothingBehind(t *testing.T) {
 		t.Errorf("Fetch racing a Wipe = %v; want media.ErrClosed", err)
 	}
 	assertGone(t, dir)
+}
+
+// undeletableDataDir makes the final rmdir of the data dir fail with errno, as it does under the
+// packaged systemd unit (ReadWritePaths bind-mounts the dir onto itself inside a read-only tree).
+func undeletableDataDir(t *testing.T, errno error) {
+	t.Helper()
+	orig := removeDataDir
+	removeDataDir = func(name string) error { return &os.PathError{Op: "remove", Path: name, Err: errno} }
+	t.Cleanup(func() { removeDataDir = orig })
+}
+
+// Under the sandbox the data dir is a mount point (EBUSY) in a read-only tree (EROFS): its
+// contents are gone and the dir itself cannot go, which is a complete wipe.
+func TestWipeAcceptsAnEmptyDataDirTheSandboxKeeps(t *testing.T) {
+	for _, errno := range []error{syscall.EBUSY, syscall.EROFS, syscall.EPERM, syscall.EACCES} {
+		t.Run(errno.Error(), func(t *testing.T) {
+			dir := populatedDataDir(t)
+			kr := fullKeyring(t)
+			undeletableDataDir(t, errno)
+			if err := Wipe(dir, kr); err != nil {
+				t.Fatalf("Wipe = %v, want nil", err)
+			}
+			entries, err := os.ReadDir(dir)
+			if err != nil {
+				t.Fatalf("read the kept data dir: %v", err)
+			}
+			if len(entries) != 0 {
+				t.Errorf("the kept data dir still holds %d entries", len(entries))
+			}
+			if n := kr.count(); n != 0 {
+				t.Errorf("keyring holds %d items after Wipe, want 0", n)
+			}
+		})
+	}
+}
+
+// Any other failure to remove the emptied data dir is still reported.
+func TestWipeReportsAnOtherFailureToRemoveTheDataDir(t *testing.T) {
+	dir := populatedDataDir(t)
+	undeletableDataDir(t, syscall.EIO)
+	if err := Wipe(dir, newFakeKeyring()); err == nil {
+		t.Fatal("Wipe = nil, want the EIO from removing the data dir")
+	}
+}
+
+// A file of nuncio's that could not be deleted is a failure, even when the data dir itself is one
+// the sandbox keeps.
+func TestWipeReportsAFileItCouldNotDeleteUnderTheSandbox(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := populatedDataDir(t)
+	locked := filepath.Join(dir, MediaDir, "ab")
+	stuck := filepath.Join(locked, "0f3b.jpg")
+	writeFile(t, stuck)
+	if err := os.Chmod(locked, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o700) })
+	undeletableDataDir(t, syscall.EBUSY)
+
+	if err := Wipe(dir, newFakeKeyring()); err == nil {
+		t.Fatal("Wipe = nil, want an error for the file it could not delete")
+	}
+	if _, err := os.Lstat(stuck); err != nil {
+		t.Fatalf("precondition: %s should still exist: %v", stuck, err)
+	}
+}
+
+// A kept data dir whose emptiness cannot be checked is not accepted as wiped.
+func TestWipeReportsAKeptDataDirItCannotRead(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores directory permissions")
+	}
+	dir := populatedDataDir(t)
+	orig := removeDataDir
+	removeDataDir = func(name string) error {
+		if err := os.Chmod(name, 0o300); err != nil {
+			t.Fatal(err)
+		}
+		return &os.PathError{Op: "remove", Path: name, Err: syscall.EBUSY}
+	}
+	t.Cleanup(func() { removeDataDir = orig; _ = os.Chmod(dir, 0o700) })
+	if err := Wipe(dir, newFakeKeyring()); err == nil {
+		t.Fatal("Wipe = nil, want an error: the kept data dir could not be read")
+	}
 }

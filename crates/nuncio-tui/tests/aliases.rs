@@ -37,6 +37,15 @@ fn socket_path() -> PathBuf {
     path
 }
 
+/// Removes the socket file when dropped, so a failed test leaves nothing in /tmp.
+struct Socket(PathBuf);
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 fn send_line(stream: &mut UnixStream, value: &Value) {
     stream
         .write_all(format!("{value}\n").as_bytes())
@@ -319,6 +328,7 @@ fn pairs(list: &[(&str, &str)]) -> Vec<(String, String)> {
 #[test]
 fn a_draft_kept_in_the_chat_list_goes_to_the_lid_chat_after_a_restart_that_merged_it() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let listener = UnixListener::bind(&path).expect("bind");
     let (ready, go) = mpsc::channel::<()>();
     let server_path = path.clone();
@@ -385,6 +395,7 @@ const NEW_LID: &str = "100000000000002@lid";
 /// another contact.
 fn restart_unlisted(chats: Vec<Chat>, index: usize, listed: Value, lid: &'static str) {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let listener = UnixListener::bind(&path).expect("bind");
     let (ready, go) = mpsc::channel::<()>();
     let (served, seen) = mpsc::channel::<Vec<Value>>();
@@ -474,6 +485,7 @@ fn a_draft_never_goes_to_a_recycled_numbers_old_lid_chat_after_a_restart() {
 #[test]
 fn a_live_merge_moves_the_open_chat_to_the_lid_chat_with_its_reply_and_later_sends() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let listener = UnixListener::bind(&path).expect("bind");
     let (ready, go) = mpsc::channel::<()>();
     let server = thread::spawn(move || {
@@ -531,6 +543,7 @@ fn a_live_merge_moves_the_open_chat_to_the_lid_chat_with_its_reply_and_later_sen
 #[test]
 fn a_send_to_the_number_answered_before_the_merge_events_lands_in_the_open_lid_chat() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let listener = UnixListener::bind(&path).expect("bind");
     let server = thread::spawn(move || {
         let mut life = Life::accept(&listener, false);

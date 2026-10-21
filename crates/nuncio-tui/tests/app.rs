@@ -593,6 +593,15 @@ fn socket_path() -> PathBuf {
     path
 }
 
+/// Removes the socket file when dropped, so a failed test leaves nothing in /tmp.
+struct Socket(PathBuf);
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 fn frame_line(value: serde_json::Value) -> String {
     format!("{value}\n")
 }
@@ -600,6 +609,7 @@ fn frame_line(value: serde_json::Value) -> String {
 #[test]
 fn the_daemon_driver_sends_and_follows_events() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let listener = UnixListener::bind(&path).expect("bind");
     let server = thread::spawn(move || {
         let hello_ok = frame_line(serde_json::json!(
@@ -942,6 +952,7 @@ fn fake_daemon(
 #[test]
 fn a_refused_reaction_shows_the_daemons_error_and_changes_nothing() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let server = fake_daemon(path.clone(), |request| {
         assert_eq!(request["op"], "react");
         serde_json::json!({"v":1,"op":"error","code":"internal",
@@ -981,6 +992,7 @@ fn media_message(id: &str) -> Message {
 #[test]
 fn o_downloads_the_media_and_opens_it_exactly_once_and_nothing_opens_without_it() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let server = fake_daemon(path.clone(), |request| match request["op"].as_str() {
         Some("download_media") => {
             assert_eq!(request["id"], "IMG1");
@@ -1061,6 +1073,7 @@ fn a_search_result_far_up_the_conversation_is_scrolled_into_view() {
 #[test]
 fn a_refused_download_shows_the_error_and_a_later_media_ready_opens_nothing() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let server = fake_daemon(path.clone(), |request| {
         assert_eq!(request["op"], "download_media");
         serde_json::json!({"v":1,"op":"error","code":"internal",
@@ -1101,6 +1114,7 @@ fn a_refused_download_shows_the_error_and_a_later_media_ready_opens_nothing() {
 #[test]
 fn a_refused_search_ends_searching_shows_the_error_and_stays_open_for_editing() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let server = fake_daemon(path.clone(), |request| {
         assert_eq!(request["op"], "search");
         serde_json::json!({"v":1,"op":"error","code":"bad_frame",
@@ -1420,6 +1434,7 @@ fn opening_a_chat_with_nothing_unread_sends_no_mark_read() {
 fn the_daemon_driver_marks_an_opened_chat_read_and_a_refusal_keeps_the_count() {
     for refuse in [false, true] {
         let path = socket_path();
+        let _socket = Socket(path.clone());
         let server = fake_daemon(path.clone(), move |request| match request["op"].as_str() {
             Some("messages") => serde_json::json!({"v":1,"op":"messages","jid":ADA,
                 "messages":[{"id":"A1","kind":"text","text":"first","from_me":false,
@@ -1588,6 +1603,7 @@ fn event_chat_updates_the_chats_markers_and_resorts_the_list_keeping_the_selecti
 #[test]
 fn a_not_confirmed_send_says_so_and_r_retries_it_under_the_same_client_id() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let answers = std::sync::Mutex::new(0);
     let server = fake_daemon(path.clone(), move |request| {
         let mut n = answers.lock().expect("lock");
@@ -1651,6 +1667,7 @@ fn a_not_confirmed_send_says_so_and_r_retries_it_under_the_same_client_id() {
 #[test]
 fn a_not_confirmed_send_stays_not_confirmed_after_its_event_message() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let listener = UnixListener::bind(&path).expect("bind");
     let server = thread::spawn(move || {
         let hello_ok = frame_line(
@@ -1785,6 +1802,7 @@ fn an_event_this_tui_does_not_know_is_ignored_and_the_event_connection_stays() {
                  "timestamp":"2026-10-18T17:40:00Z"}}),
         ],
     );
+    let _socket = Socket(path.clone());
     let mut daemon = Daemon::connect(&path, "nuncio-tui/test").expect("connect");
     let mut app = two_chats();
     let deadline = Instant::now() + Duration::from_secs(2);
@@ -1816,6 +1834,7 @@ fn a_reply_this_tui_does_not_know_is_a_footer_error_and_the_send_is_not_confirme
         ],
         Vec::new(),
     );
+    let _socket = Socket(path.clone());
     let mut daemon = Daemon::connect(&path, "nuncio-tui/test").expect("connect");
     let mut app = two_chats().with_client_prefix("t");
     app.handle_key(key(KeyCode::Char('i')));
@@ -2430,6 +2449,7 @@ fn typing_through_a_merge_never_sends_the_draft_to_another_chat() {
 #[test]
 fn the_daemon_driver_adopts_the_chat_its_own_reply_names() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let listener = UnixListener::bind(&path).expect("bind");
     let server = thread::spawn(move || {
         let hello_ok = frame_line(serde_json::json!(

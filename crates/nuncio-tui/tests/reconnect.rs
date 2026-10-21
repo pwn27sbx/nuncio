@@ -105,6 +105,15 @@ fn socket_path() -> PathBuf {
     path
 }
 
+/// Removes the socket file when dropped, so a failed test leaves nothing in /tmp.
+struct Socket(PathBuf);
+
+impl Drop for Socket {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 fn send_line(stream: &mut UnixStream, value: Value) {
     stream
         .write_all(format!("{value}\n").as_bytes())
@@ -300,6 +309,7 @@ fn drain_until(
 #[test]
 fn after_a_daemon_restart_the_tui_reconnects_resyncs_and_keeps_the_draft_and_selection() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let listener = UnixListener::bind(&path).expect("bind");
     let (ready, go) = mpsc::channel::<()>();
     let (finished, done) = mpsc::channel::<()>();
@@ -384,6 +394,7 @@ fn after_a_daemon_restart_the_tui_reconnects_resyncs_and_keeps_the_draft_and_sel
 #[test]
 fn a_send_while_disconnected_is_not_sent_says_so_and_is_never_retried() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let listener = UnixListener::bind(&path).expect("bind");
     let (ready, go) = mpsc::channel::<()>();
     let (finished, done) = mpsc::channel::<()>();
@@ -461,6 +472,7 @@ fn a_send_while_disconnected_is_not_sent_says_so_and_is_never_retried() {
 #[test]
 fn a_request_that_timed_out_reconnects_instead_of_leaving_the_tui_without_a_daemon() {
     let path = socket_path();
+    let _socket = Socket(path.clone());
     let listener = UnixListener::bind(&path).expect("bind");
     let server = thread::spawn(move || {
         let mut first = Life::accept(&listener);

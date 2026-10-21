@@ -95,6 +95,12 @@ A string, not a boolean, so it can grow without a protocol break:
 - `"linked"` — paired and connected.
 - `"offline"` — paired but not currently connected.
 
+`event_connection` frames follow the session's changes in order, each one differs from the one
+before, and the last one a subscriber received is always the session's current state, also when a
+logout or a ban lands while a drop's `offline` is being published (the client ends on `unlinked`
+or `offline` as the stop says, never on a stale frame). A change undone before it was published
+(`offline` then `linked` again at once) may not be published at all.
+
 ### Chat (M0 shape)
 
 | Field | Type | Notes |

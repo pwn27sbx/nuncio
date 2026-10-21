@@ -132,7 +132,7 @@ func run() error {
 	// retries after the backoff delay.
 	if err := session.Start(); err != nil {
 		// The cause's type only: whatsmeow's text can carry the server or proxy address.
-		log.Printf("cannot connect the linked device (%T)", errors.Unwrap(err))
+		log.Printf("cannot connect the linked device (%s)", wa.ErrKind(err))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

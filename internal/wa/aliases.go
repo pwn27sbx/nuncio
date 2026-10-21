@@ -44,7 +44,7 @@ func (s *Session) lookup(jid string, f func(LIDMapper, context.Context, string) 
 	defer cancel()
 	got, err := f(m, ctx, jid)
 	if err != nil {
-		s.log("wa: cannot read the LID map (%T)", err)
+		s.log("wa: cannot read the LID map (%s)", ErrKind(err))
 		return ""
 	}
 	if !want(got) || !ipc.ValidJID(got) {

@@ -105,7 +105,12 @@ type Session struct {
 	// or Close), so a send can tell that its connection died while it waited (see leftLinked).
 	drops   uint64
 	started bool
-	events  *ipc.Broker
+	// published is, under mu, the state of the last event_connection published; publishing is set
+	// while one caller publishes state frames (publishState).
+	published  State
+	publishing bool
+	// events is where the session publishes (an *ipc.Broker outside tests).
+	events publisher
 	// unreadChanged, when not nil, runs after every change that may move the total unread count
 	// (SetUnreadChanged); it must not block.
 	unreadChanged func()
@@ -139,11 +144,14 @@ type Session struct {
 	groupsSynced bool
 }
 
+// publisher is the slice of *ipc.Broker the session publishes to; it never blocks.
+type publisher interface{ Publish(frame any) int }
+
 // NewSession wraps client, which may be nil for "no device store at all". db is the message
 // store that incoming messages are saved to, nil for none. closeStore, when not nil, runs on Close
 // after the client is disconnected.
 func NewSession(client Client, db *sql.DB, closeStore func() error) *Session {
-	return &Session{client: client, db: db, closeStore: closeStore, state: StateUnlinked,
+	return &Session{client: client, db: db, closeStore: closeStore, state: StateUnlinked, published: StateUnlinked,
 		backoff: NewBackoff(), after: afterFunc, logf: log.Printf, markReadSem: make(chan struct{}, 1)}
 }
 
@@ -162,7 +170,10 @@ func (s *Session) StopReason() string {
 // Call it before Start.
 func (s *Session) SetEvents(b *ipc.Broker) {
 	s.mu.Lock()
-	s.events = b
+	s.events = nil
+	if b != nil {
+		s.events = b
+	}
 	s.mu.Unlock()
 }
 
@@ -181,7 +192,9 @@ func (s *Session) publish(frame any) {
 	s.mu.Lock()
 	b := s.events
 	s.mu.Unlock()
-	b.Publish(frame)
+	if b != nil {
+		b.Publish(frame)
+	}
 }
 
 // Store is the message store, or nil when there is no database (unlinked).
@@ -225,7 +238,7 @@ func (s *Session) Start() error {
 	s.set(StateOffline)
 	s.markConnect()
 	if err := s.client.Connect(); err != nil {
-		s.set(StateOffline)
+		s.offlineUnlessStopped()
 		s.reconnectLater()
 		return fmt.Errorf("wa: connecting the linked device: %w", err)
 	}
@@ -233,12 +246,21 @@ func (s *Session) Start() error {
 }
 
 // connected records a connection that came up; one that lasts resets the backoff. With a store,
-// it starts the outbox's one drain pass for this connection, off whatsmeow's event goroutine.
+// it starts the outbox's one drain pass for this connection, off whatsmeow's event goroutine. After
+// a stop or Close it changes nothing, checked under the lock that sets linked, so a late Connected
+// never overwrites the stop's state.
 func (s *Session) connected() {
 	s.mu.Lock()
-	s.backoff.Connected()
+	act := s.started && s.backoff.Stopped() == ""
+	if act {
+		s.backoff.Connected()
+		s.setLocked(StateLinked)
+	}
 	s.mu.Unlock()
-	s.set(StateLinked)
+	if !act {
+		return
+	}
+	s.publishState()
 	s.syncGroupNamesOnce()
 	if s.db != nil {
 		s.drains.Add(1)
@@ -252,14 +274,24 @@ func (s *Session) connected() {
 // dropped handles a lost or failed connection: offline, and one reconnect after the backoff
 // delay. After a stop it changes nothing, so the stop's state and reason stay visible.
 func (s *Session) dropped() {
-	s.mu.Lock()
-	stopped := s.backoff.Stopped() != ""
-	s.mu.Unlock()
-	if stopped {
-		return
+	if s.offlineUnlessStopped() {
+		s.reconnectLater()
 	}
-	s.set(StateOffline)
-	s.reconnectLater()
+}
+
+// offlineUnlessStopped reports offline unless the session is stopped, checked under the same lock
+// that sets the state, so a stop racing it keeps its own state. It reports whether it acted.
+func (s *Session) offlineUnlessStopped() bool {
+	s.mu.Lock()
+	act := s.backoff.Stopped() == ""
+	if act {
+		s.setLocked(StateOffline)
+	}
+	s.mu.Unlock()
+	if act {
+		s.publishState()
+	}
+	return act
 }
 
 // keepAliveFailed handles whatsmeow's KeepAliveTimeout (see the Session doc). Only a linked,
@@ -271,15 +303,14 @@ func (s *Session) keepAliveFailed(lastSuccess time.Time) {
 	act := gap > whatsmeow.KeepAliveMaxFailTime && !lastSuccess.Before(s.connectAt) && s.started && s.state == StateLinked &&
 		s.backoff.Stopped() == "" && s.cancel == nil
 	if act {
-		s.state = StateOffline
-		s.drops++
+		s.setLocked(StateOffline)
 	}
 	logf := s.logf
 	s.mu.Unlock()
 	if !act {
 		return
 	}
-	s.publish(ipc.EventConnection{V: ipc.Version, Op: ipc.OpEventConnection, Session: string(StateOffline)})
+	s.publishState()
 	logf("wa: keepalive failed for %s; dropping the connection and reconnecting", gap.Round(time.Second))
 	// whatsmeow's Disconnect marks the disconnect as expected, so it emits no Disconnected event
 	// (client.go:695-704, :608-618); the reconnect is scheduled here instead.
@@ -369,15 +400,56 @@ func (s *Session) State() State {
 
 func (s *Session) set(st State) {
 	s.mu.Lock()
-	changed := s.state != st
+	s.setLocked(st)
+	s.mu.Unlock()
+	s.publishState()
+}
+
+// setLocked sets the state; the caller holds mu and calls publishState after releasing it.
+func (s *Session) setLocked(st State) {
 	if s.state == StateLinked && st != StateLinked {
 		s.drops++
 	}
 	s.state = st
-	s.mu.Unlock()
-	if changed {
-		s.publish(ipc.EventConnection{V: ipc.Version, Op: ipc.OpEventConnection, Session: string(st)})
+}
+
+// publishState publishes event_connection until the last state published is the current one. One
+// caller publishes at a time, outside mu (Publish never blocks); a caller that changes the state
+// meanwhile returns at once and the publishing one picks its change up. So subscribers get the
+// changes in order, each frame differs from the one before, and the last one is always the
+// session's final state, even when a logout lands between a drop's offline and its publish. A
+// change undone before it was published (offline then linked again) may never be published. A
+// Publish that panics (whatsmeow recovers its handlers' panics) loses only its own frame: the flag
+// is cleared on the way out, so the next change is published again.
+func (s *Session) publishState() {
+	s.mu.Lock()
+	if s.publishing {
+		s.mu.Unlock()
+		return
 	}
+	s.publishing = true
+	done := false
+	defer func() {
+		if !done { // Publish panicked, outside mu
+			s.mu.Lock()
+			s.publishing = false
+			s.mu.Unlock()
+		}
+	}()
+	for s.published != s.state {
+		st := s.state
+		s.published = st
+		b := s.events
+		s.mu.Unlock()
+		if b != nil {
+			b.Publish(ipc.EventConnection{V: ipc.Version, Op: ipc.OpEventConnection, Session: string(st)})
+		}
+		s.mu.Lock()
+	}
+	// Cleared under the same lock as the last check, so a change made after it publishes itself.
+	s.publishing = false
+	done = true
+	s.mu.Unlock()
 }
 
 // Close cancels a pending reconnect, disconnects a started session, waits for a running outbox
@@ -400,11 +472,11 @@ func (s *Session) Close() {
 		s.connMu.Unlock()
 	}
 	s.mu.Lock()
-	linked := s.state == StateLinked
-	s.mu.Unlock()
-	if linked {
-		s.set(StateOffline)
+	if s.state == StateLinked {
+		s.setLocked(StateOffline)
 	}
+	s.mu.Unlock()
+	s.publishState()
 	// A running drain finishes (its sends fail fast once disconnected) before the store closes.
 	s.drains.Wait()
 	if s.closeStore != nil {
@@ -580,8 +652,11 @@ func (w whatsmeowClient) LIDForPN(ctx context.Context, pn string) (string, error
 		return "", errors.New("wa: the chat JID does not parse")
 	}
 	lid, err := w.c.Store.LIDs.GetLIDForPN(ctx, jid.ToNonAD())
-	if err != nil || lid.IsEmpty() {
-		return "", err
+	if err != nil {
+		return "", fmt.Errorf("wa: reading the LID of a phone number: %w", err)
+	}
+	if lid.IsEmpty() {
+		return "", nil
 	}
 	return lid.ToNonAD().String(), nil
 }
@@ -592,8 +667,11 @@ func (w whatsmeowClient) PNForLID(ctx context.Context, lid string) (string, erro
 		return "", errors.New("wa: the chat JID does not parse")
 	}
 	pn, err := w.c.Store.LIDs.GetPNForLID(ctx, jid.ToNonAD())
-	if err != nil || pn.IsEmpty() {
-		return "", err
+	if err != nil {
+		return "", fmt.Errorf("wa: reading the phone number of a LID: %w", err)
+	}
+	if pn.IsEmpty() {
+		return "", nil
 	}
 	return pn.ToNonAD().String(), nil
 }

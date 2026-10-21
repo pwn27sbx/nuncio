@@ -2,6 +2,7 @@ package wa
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,7 +38,9 @@ func TestAMediaTheCacheCannotHoldIsLoggedWithoutItsMessageID(t *testing.T) {
 	if _, _, err := s.DownloadMedia(ada.String(), mediaLogID); !errors.Is(err, ErrMediaCache) {
 		t.Fatalf("DownloadMedia = %v, want ErrMediaCache", err)
 	}
-	assertMediaLog(t, logs.String(), "wa: media could not be cached (")
+	// The type of the innermost cause (the read-only directory's errno), never "<nil>" nor a
+	// wrapper's type.
+	assertMediaLog(t, logs.String(), "wa: media could not be cached (syscall.Errno)")
 }
 
 func TestAMediaWithTheWrongSHA256IsLoggedWithoutItsMessageID(t *testing.T) {
@@ -52,11 +55,16 @@ func TestAMediaWithTheWrongSHA256IsLoggedWithoutItsMessageID(t *testing.T) {
 
 func TestAMediaThatFailsToDownloadIsLoggedWithoutItsMessageID(t *testing.T) {
 	s, fake, dl, _ := mediaSession(t)
-	dl.err = errors.New("media host said 404 for https://mmg.example/v/t62.fake/0001")
+	dl.err = fmt.Errorf("media host said 404 for https://mmg.example/v/t62.fake/0001: %w", mediaHostError{})
 	fake.emit(messageEvent(ada, mediaLogID, false, t0, imageMessage(sum(mediaBytes))))
 	logs := captureLog(t)
 	if _, _, err := s.DownloadMedia(ada.String(), mediaLogID); !errors.Is(err, ErrMediaNotDownloaded) {
 		t.Fatalf("DownloadMedia = %v, want ErrMediaNotDownloaded", err)
 	}
-	assertMediaLog(t, logs.String(), "wa: media was not downloaded (")
+	assertMediaLog(t, logs.String(), "wa: media was not downloaded (wa.mediaHostError)")
 }
+
+// mediaHostError is a download failure's innermost cause, as whatsmeow wraps its HTTP errors.
+type mediaHostError struct{}
+
+func (mediaHostError) Error() string { return "404 from mmg.example" }

@@ -214,7 +214,9 @@ func fitReply(jid string, msgs []ipc.Message, limit int) []ipc.Message {
 					return msgs[:0]
 				}
 			}
-			enc, _ = json.Marshal(msgs[0])
+			if enc, err = json.Marshal(msgs[0]); err != nil {
+				return msgs[:0] // a message that does not encode does not fit
+			}
 			cost = len(enc)
 		}
 		if cost > room {

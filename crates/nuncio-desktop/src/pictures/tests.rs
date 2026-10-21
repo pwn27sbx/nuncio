@@ -1,0 +1,565 @@
+use std::sync::{Condvar, mpsc};
+use std::time::Duration;
+
+use base64::Engine;
+use image::{ImageEncoder, Rgba, RgbaImage};
+use nuncio_client::wire::PROTOCOL_VERSION;
+use nuncio_client::{Chat, ClientFrame, DaemonFrame, Message};
+
+use super::*;
+use crate::controller::{Command, Controller};
+use crate::present::bubbles;
+use crate::worker::Incoming;
+
+const ANA: &str = "15551230001@s.whatsapp.net";
+const WAIT: Duration = Duration::from_secs(10);
+
+fn chat(jid: &str, name: &str) -> Chat {
+    Chat {
+        jid: jid.to_owned(),
+        name: name.to_owned(),
+        unread: 0,
+        archived: false,
+        pinned: false,
+        muted: false,
+        aliases: Vec::new(),
+        phone: None,
+        last_message: None,
+    }
+}
+
+fn message(id: &str, kind: &str, text: &str) -> Message {
+    Message {
+        id: id.to_owned(),
+        kind: kind.to_owned(),
+        text: text.to_owned(),
+        from_me: false,
+        timestamp: "2026-10-20T10:00:00Z".to_owned(),
+        media: None,
+        state: None,
+        client_id: None,
+        reply_to: None,
+        reactions: Vec::new(),
+        thumb: None,
+        thumb_mime: None,
+        width: None,
+        height: None,
+        animated: false,
+    }
+}
+
+/// A `width` x `height` JPEG gradient, as the demo's photo thumbnail is.
+fn jpeg(width: u32, height: u32) -> Vec<u8> {
+    let picture = image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([(x * 5) as u8, (y * 7) as u8, 160])
+    });
+    let mut bytes = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 70)
+        .write_image(
+            picture.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgb8,
+        )
+        .expect("encode a jpeg");
+    bytes
+}
+
+/// A `width` x `height` PNG, transparent but for its centre pixel.
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut picture = RgbaImage::from_pixel(width, height, Rgba([0, 0, 0, 0]));
+    picture.put_pixel(width / 2, height / 2, Rgba([250, 200, 40, 255]));
+    let mut bytes = Vec::new();
+    image::codecs::png::PngEncoder::new(&mut bytes)
+        .write_image(
+            picture.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .expect("encode a png");
+    bytes
+}
+
+fn base64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// The demo's photo: a 480x320 picture whose message embeds a 48x32 JPEG thumbnail.
+fn photo(id: &str) -> Message {
+    let mut m = message(id, "image", "the beach");
+    m.thumb = Some(base64(&jpeg(48, 32)));
+    m.thumb_mime = Some("image/jpeg".to_owned());
+    m.width = Some(480);
+    m.height = Some(320);
+    m
+}
+
+fn reply(request: &ClientFrame, frame: DaemonFrame) -> Incoming {
+    Incoming::Reply {
+        request: request.clone(),
+        result: Ok(frame),
+    }
+}
+
+/// Connected, Ana listed and opened with `messages` (newest first) loaded; every command the
+/// controller made on the way is returned too.
+fn opened(messages: Vec<Message>) -> (Controller, Vec<Command>) {
+    let mut c = Controller::new("d");
+    let mut made = c.incoming(Incoming::Connected);
+    let more = c.incoming(reply(
+        &ClientFrame::chats(200),
+        DaemonFrame::Chats {
+            v: PROTOCOL_VERSION,
+            chats: vec![chat(ANA, "Ana")],
+        },
+    ));
+    made.extend(more);
+    let open = c.open_chat(0);
+    made.extend(open);
+    let more = c.incoming(reply(
+        &ClientFrame::messages(ANA, 200),
+        DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: ANA.to_owned(),
+            messages,
+        },
+    ));
+    made.extend(more);
+    (c, made)
+}
+
+fn is_download(command: &Command) -> bool {
+    matches!(command, Command::Send(ClientFrame::DownloadMedia { .. }))
+}
+
+fn ready(id: &str, path: &str) -> Incoming {
+    reply(
+        &ClientFrame::download_media(ANA, id),
+        DaemonFrame::MediaReady {
+            v: PROTOCOL_VERSION,
+            jid: ANA.to_owned(),
+            id: id.to_owned(),
+            path: path.to_owned(),
+            mime: "image/png".to_owned(),
+        },
+    )
+}
+
+fn temp_dir(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("nuncio-pictures-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    dir
+}
+
+#[test]
+fn a_bubble_reserves_its_box_from_the_size_the_message_states() {
+    assert_eq!(picture_box(480, 320, false), (300, 200));
+    assert_eq!(picture_box(512, 512, true), (160, 160));
+    assert_eq!(
+        picture_box(48, 32, false),
+        (48, 32),
+        "never larger than itself"
+    );
+    assert_eq!(picture_box(1000, 4000, false), (75, 300));
+    let (c, _) = opened(vec![photo("P1")]);
+    let shown = bubbles(c.model(), 0);
+    let picture = shown[0].picture.as_ref().expect("a photo has a picture");
+    assert_eq!(picture.size, Some((300, 200)));
+    let mut no_size = photo("P2");
+    no_size.width = None;
+    let (c, _) = opened(vec![no_size]);
+    assert_eq!(
+        bubbles(c.model(), 0)[0].picture.as_ref().unwrap().size,
+        None
+    );
+}
+
+#[test]
+fn a_picture_bubble_is_labelled_photo_or_sticker_and_other_messages_have_no_picture() {
+    let mut sticker = message("S1", "sticker", "");
+    sticker.animated = true;
+    sticker.width = Some(512);
+    sticker.height = Some(512);
+    let (c, _) = opened(vec![
+        message("T1", "text", "hi"),
+        message("D1", "document", ""),
+        sticker,
+        photo("P1"),
+    ]);
+    let shown = bubbles(c.model(), 0);
+    // Newest first on the wire: the conversation is P1, S1, D1, T1.
+    let photo = shown[0].picture.as_ref().expect("photo");
+    assert_eq!(
+        (photo.alt.as_str(), photo.sticker, photo.thumb),
+        ("Photo, the beach", false, true)
+    );
+    let sticker = shown[1].picture.as_ref().expect("sticker");
+    assert_eq!(
+        (
+            sticker.alt.as_str(),
+            sticker.sticker,
+            sticker.animated,
+            sticker.thumb
+        ),
+        ("Sticker", true, true, false)
+    );
+    assert_eq!(shown[1].media.as_deref(), Some("[sticker] ▶"));
+    assert!(shown[2].picture.is_none() && shown[3].picture.is_none());
+    // A screen reader hears what the picture is, then its caption.
+    assert_eq!(shown[0].label, "Ana, 10:00: Photo, the beach");
+    assert_eq!(shown[1].label, "Ana, 10:00: Sticker");
+    assert_eq!(
+        shown[2].label, "Ana, 10:00: [document]",
+        "other media as before"
+    );
+}
+
+#[test]
+fn a_thumbnail_is_asked_for_at_once_and_nothing_is_ever_downloaded_by_itself() {
+    let (mut c, made) = opened(vec![photo("P1")]);
+    assert!(!made.iter().any(is_download), "{made:?}");
+    let cache = Cache::<u8>::default();
+    let shown = bubbles(c.model(), 0);
+    assert_eq!(
+        requests(c.model(), &shown[0], &cache),
+        [Request {
+            key: Key::new(ANA, "P1", Variant::Thumb),
+            origin: Origin::Base64(base64(&jpeg(48, 32))),
+            target: (300, 200),
+        }]
+    );
+    // Events, a resync and the window being seen fetch nothing.
+    let mut later = c.incoming(Incoming::Event(DaemonFrame::EventMessage {
+        v: PROTOCOL_VERSION,
+        jid: ANA.to_owned(),
+        message: photo("P2"),
+    }));
+    later.extend(c.set_seen(true));
+    later.extend(c.incoming(Incoming::Connected));
+    assert!(!later.iter().any(is_download), "{later:?}");
+    for bubble in bubbles(c.model(), 0) {
+        assert!(
+            requests(c.model(), &bubble, &cache)
+                .iter()
+                .all(|r| r.key.variant == Variant::Thumb),
+            "only thumbnails before a click"
+        );
+    }
+}
+
+#[test]
+fn the_full_picture_is_fetched_only_when_asked_and_shown_in_the_bubble() {
+    let (mut c, _) = opened(vec![photo("P1")]);
+    let mut cache = Cache::<u8>::default();
+    let thumb = Key::new(ANA, "P1", Variant::Thumb);
+    assert!(cache.start(&thumb));
+    assert!(cache.finish(thumb, Ok((1, 4, (48, 32)))));
+    let asked = c.open_media(0);
+    assert_eq!(
+        asked,
+        [Command::Send(ClientFrame::download_media(ANA, "P1"))]
+    );
+    let shown = bubbles(c.model(), 0);
+    assert_eq!(shown[0].media.as_deref(), Some("[image] downloading…"));
+    assert_eq!(shown[0].label, "Ana, 10:00: Photo, downloading…, the beach");
+    assert!(requests(c.model(), &shown[0], &cache).is_empty());
+    let path = "/tmp/nuncio-media/P1.png";
+    assert!(
+        c.incoming(ready("P1", path)).is_empty(),
+        "shown here, not opened outside"
+    );
+    let shown = bubbles(c.model(), 0);
+    let picture = shown[0].picture.as_ref().unwrap();
+    assert_eq!(picture.full, Some(PathBuf::from(path)));
+    assert_eq!(
+        requests(c.model(), &shown[0], &cache),
+        [Request {
+            key: Key::new(ANA, "P1", Variant::Full),
+            origin: Origin::File(PathBuf::from(path)),
+            target: (300, 200),
+        }]
+    );
+    // Open externally keeps today's behaviour: the file is opened outside the app.
+    assert_eq!(
+        c.open_externally(0),
+        [Command::Send(ClientFrame::download_media(ANA, "P1"))]
+    );
+    assert_eq!(
+        c.incoming(ready("P1", path)),
+        [Command::Open(PathBuf::from(path))]
+    );
+}
+
+#[test]
+fn a_cached_picture_is_not_decoded_again_and_the_full_one_replaces_the_thumbnail() {
+    let (mut c, _) = opened(vec![photo("P1")]);
+    let mut cache = Cache::<&str>::default();
+    let thumb = Key::new(ANA, "P1", Variant::Thumb);
+    let full = Key::new(ANA, "P1", Variant::Full);
+    let shown = bubbles(c.model(), 0);
+    assert!(cache.start(&thumb));
+    assert!(
+        requests(c.model(), &shown[0], &cache).is_empty(),
+        "being decoded"
+    );
+    assert!(!cache.start(&thumb), "not twice");
+    cache.finish(thumb.clone(), Ok(("thumb", 10, (48, 32))));
+    assert_eq!(cache.best(ANA, "P1"), Some(("thumb", Variant::Thumb)));
+    assert!(requests(c.model(), &shown[0], &cache).is_empty(), "a hit");
+    c.open_media(0);
+    c.incoming(ready("P1", "/tmp/nuncio-media/P1.png"));
+    let shown = bubbles(c.model(), 0);
+    assert!(cache.start(&full));
+    cache.finish(full, Ok(("full", 10, (480, 320))));
+    assert_eq!(cache.best(ANA, "P1"), Some(("full", Variant::Full)));
+    assert_eq!(cache.full_pixels(ANA, "P1"), Some((480, 320)));
+    assert!(requests(c.model(), &shown[0], &cache).is_empty());
+    // With the full picture there, the thumbnail is not wanted even when the cache has none.
+    let mut only_full = Cache::<&str>::default();
+    let full = Key::new(ANA, "P1", Variant::Full);
+    assert!(only_full.start(&full));
+    only_full.finish(full, Ok(("full", 10, (480, 320))));
+    assert!(requests(c.model(), &shown[0], &only_full).is_empty());
+}
+
+#[test]
+fn a_full_picture_that_cannot_be_shown_says_why() {
+    let (mut c, _) = opened(vec![photo("P1")]);
+    c.picture_failed("the picture could not be decoded");
+    assert_eq!(
+        c.take_notice().as_deref(),
+        Some("cannot show the picture: the picture could not be decoded")
+    );
+}
+
+#[test]
+fn the_least_recently_used_pictures_are_evicted_by_count_and_by_bytes() {
+    let key = |id: &str| Key::new(ANA, id, Variant::Thumb);
+    let mut cache = Cache::<u32>::with_limits(2, 100);
+    for (n, id) in ["A", "B"].into_iter().enumerate() {
+        assert!(cache.start(&key(id)));
+        cache.finish(key(id), Ok((n as u32, 10, (1, 1))));
+    }
+    assert_eq!(cache.get(&key("A")), Some(0), "A used after B");
+    assert!(cache.start(&key("C")));
+    cache.finish(key("C"), Ok((2, 10, (1, 1))));
+    assert_eq!(cache.len(), 2);
+    assert!(cache.contains(&key("A")) && cache.contains(&key("C")));
+    assert!(!cache.contains(&key("B")), "the least recently used goes");
+    assert!(cache.wants(&key("B")), "and can be decoded again");
+    // Over the bytes: the older ones go, the newest stays even alone.
+    assert!(cache.start(&key("D")));
+    cache.finish(key("D"), Ok((3, 150, (1, 1))));
+    assert_eq!((cache.len(), cache.bytes()), (1, 150));
+    assert!(cache.contains(&key("D")));
+}
+
+#[test]
+fn a_picture_that_fails_is_not_asked_for_again_until_its_full_one_is_retried() {
+    let (c, _) = opened(vec![photo("P1")]);
+    let mut cache = Cache::<u8>::default();
+    let thumb = Key::new(ANA, "P1", Variant::Thumb);
+    let full = Key::new(ANA, "P1", Variant::Full);
+    assert!(cache.start(&thumb));
+    assert!(cache.finish(thumb.clone(), Err("bad".to_owned())));
+    assert!(cache.has_failed(&thumb) && cache.best(ANA, "P1").is_none());
+    let shown = bubbles(c.model(), 0);
+    assert!(requests(c.model(), &shown[0], &cache).is_empty());
+    assert!(cache.start(&full));
+    cache.finish(full.clone(), Err("bad".to_owned()));
+    assert!(!cache.wants(&full));
+    cache.retry_full(ANA, "P1");
+    assert!(cache.wants(&full) && !cache.wants(&thumb));
+    assert!(
+        !cache.finish(Key::new(ANA, "P9", Variant::Thumb), Ok((1, 1, (1, 1)))),
+        "a result nobody waits for is dropped"
+    );
+    assert!(cache.is_empty());
+}
+
+#[test]
+fn a_thumbnail_decodes_to_its_own_size_and_a_large_picture_shrinks_to_twice_its_box() {
+    let request = |variant, origin| Request {
+        key: Key::new(ANA, "P1", variant),
+        origin,
+        target: (300, 200),
+    };
+    let thumb = decode_picture(&request(
+        Variant::Thumb,
+        Origin::Base64(base64(&jpeg(48, 32))),
+    ))
+    .expect("the demo thumbnail");
+    assert_eq!(
+        (thumb.width, thumb.height, thumb.source),
+        (48, 32, (48, 32))
+    );
+    assert_eq!(thumb.rgba.len(), 48 * 32 * 4);
+    let dir = temp_dir("shrink");
+    let file = dir.join("big.jpg");
+    std::fs::write(&file, jpeg(1200, 800)).expect("write");
+    let full = decode_picture(&request(Variant::Full, Origin::File(file))).expect("full");
+    assert_eq!(
+        (full.width, full.height, full.source),
+        (600, 400, (1200, 800))
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_sticker_keeps_its_transparency_and_bad_bytes_are_an_error() {
+    let sticker = decode_picture(&Request {
+        key: Key::new(ANA, "S1", Variant::Thumb),
+        origin: Origin::Base64(base64(&png(64, 64))),
+        target: (160, 160),
+    })
+    .expect("a png sticker thumbnail");
+    assert_eq!(sticker.rgba[3], 0, "a transparent corner stays transparent");
+    let centre = ((32 * 64 + 32) * 4) as usize;
+    assert_eq!(&sticker.rgba[centre..centre + 4], &[250, 200, 40, 255]);
+    for origin in [
+        Origin::Base64("not base64!".to_owned()),
+        Origin::Base64(base64(b"not a picture")),
+        Origin::File(PathBuf::from("/nonexistent/nuncio/picture.png")),
+    ] {
+        let request = Request {
+            key: Key::new(ANA, "S1", Variant::Thumb),
+            origin,
+            target: (160, 160),
+        };
+        assert!(decode_picture(&request).is_err(), "{request:?}");
+    }
+    // A thumbnail whose header declares more than a thumbnail may be.
+    let mut big = jpeg(1100, 8);
+    big.truncate(big.len() - 2);
+    assert_eq!(
+        decode_picture(&Request {
+            key: Key::new(ANA, "S1", Variant::Thumb),
+            origin: Origin::Base64(base64(&big)),
+            target: (160, 160),
+        }),
+        Err("the picture is larger than nuncio draws".to_owned())
+    );
+}
+
+#[test]
+fn at_most_two_pictures_are_decoded_at_once_and_every_one_is_answered() {
+    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let (tx, rx) = mpsc::channel();
+    let post = {
+        let gate = Arc::clone(&gate);
+        move |decoded: Decoded| {
+            let _ = tx.send(decoded);
+            let (open, opened) = &*gate;
+            let mut open = open.lock().unwrap();
+            while !*open {
+                open = opened.wait(open).unwrap();
+            }
+        }
+    };
+    let decoder = Decoder::spawn(post);
+    for id in ["A", "B", "C"] {
+        decoder.decode(Request {
+            key: Key::new(ANA, id, Variant::Thumb),
+            origin: Origin::Base64(base64(&jpeg(8, 8))),
+            target: (8, 8),
+        });
+    }
+    let first = rx.recv_timeout(WAIT).expect("one");
+    let second = rx.recv_timeout(WAIT).expect("two");
+    assert!(first.outcome.is_ok() && second.outcome.is_ok());
+    assert!(
+        rx.recv_timeout(Duration::from_millis(300)).is_err(),
+        "both threads are busy: the third waits"
+    );
+    let (open, opened) = &*gate;
+    *open.lock().unwrap() = true;
+    opened.notify_all();
+    let third = rx.recv_timeout(WAIT).expect("three");
+    let mut ids = [first.key.id, second.key.id, third.key.id];
+    ids.sort();
+    assert_eq!(ids, ["A", "B", "C"]);
+}
+
+#[test]
+fn a_picture_with_no_stated_size_takes_its_box_once_from_its_first_image() {
+    // A thumbnail is smaller than its picture: its shape, scaled up to the caps.
+    assert_eq!(first_image_box(Variant::Thumb, (48, 32), false), (300, 200));
+    assert_eq!(first_image_box(Variant::Thumb, (64, 64), true), (160, 160));
+    // A full picture: its own box, never larger than itself.
+    assert_eq!(first_image_box(Variant::Full, (100, 80), false), (100, 80));
+    assert_eq!(first_image_box(Variant::Full, (0, 0), false), (1, 1));
+    let mut cache = Cache::<u8>::default();
+    let thumb = Key::new(ANA, "P2", Variant::Thumb);
+    let full = Key::new(ANA, "P2", Variant::Full);
+    assert_eq!(cache.known_box(ANA, "P2"), None);
+    assert_eq!(cache.settle_box(&thumb, (48, 32), false), (300, 200));
+    assert_eq!(
+        cache.settle_box(&full, (600, 200), false),
+        (300, 200),
+        "the full picture keeps the box"
+    );
+    cache.clear();
+    assert_eq!(
+        cache.known_box(ANA, "P2"),
+        Some((300, 200)),
+        "kept once the cache let its pictures go"
+    );
+    let first_full = Key::new(ANA, "P3", Variant::Full);
+    assert_eq!(cache.settle_box(&first_full, (100, 80), false), (100, 80));
+    assert_eq!(
+        cache.settle_box(&Key::new(ANA, "P3", Variant::Thumb), (48, 32), false),
+        (100, 80)
+    );
+    // The box it settled on is what its pictures are decoded for.
+    let mut no_size = photo("P2");
+    no_size.width = None;
+    let (c, _) = opened(vec![no_size]);
+    let shown = bubbles(c.model(), 0);
+    assert_eq!(requests(c.model(), &shown[0], &cache)[0].target, (300, 200));
+}
+
+#[test]
+fn while_the_full_picture_downloads_an_evicted_thumbnail_is_asked_for_again() {
+    let (mut c, _) = opened(vec![photo("P1")]);
+    let mut cache = Cache::<u8>::default();
+    let thumb = Key::new(ANA, "P1", Variant::Thumb);
+    assert!(cache.start(&thumb));
+    cache.finish(thumb.clone(), Ok((1, 4, (48, 32))));
+    c.open_media(0);
+    let shown = bubbles(c.model(), 0);
+    assert!(
+        shown[0]
+            .media
+            .as_deref()
+            .is_some_and(|m| m.ends_with("downloading…"))
+    );
+    assert_eq!(
+        cache.best(ANA, "P1"),
+        Some((1, Variant::Thumb)),
+        "drawn meanwhile"
+    );
+    cache.clear();
+    assert_eq!(
+        requests(c.model(), &shown[0], &cache)
+            .into_iter()
+            .map(|r| r.key)
+            .collect::<Vec<_>>(),
+        [thumb]
+    );
+}
+
+#[test]
+fn opening_a_picture_asks_for_its_retry_and_other_media_do_not() {
+    let (mut c, _) = opened(vec![message("D1", "document", ""), photo("P1")]);
+    assert_eq!(c.take_picture_retries(), Vec::<(String, String)>::new());
+    c.open_media(0);
+    assert_eq!(
+        c.take_picture_retries(),
+        [(ANA.to_owned(), "P1".to_owned())]
+    );
+    assert!(c.take_picture_retries().is_empty(), "taken once");
+    c.open_media(1);
+    c.open_externally(0);
+    assert!(c.take_picture_retries().is_empty());
+}

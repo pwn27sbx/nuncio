@@ -10,17 +10,16 @@
 //! decode keeps its box with a label, and nothing panics.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{Cursor, Read};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use base64::Engine;
-use image::{DynamicImage, ImageFormat, ImageReader, Limits, Rgba, RgbaImage, imageops};
+use image::{DynamicImage, Rgba, RgbaImage, imageops};
 use nuncio_client::ImageProtocol;
+use nuncio_client::pictures::{self, Bounds, decode, fit_box, read_capped, thumb_bytes};
 use ratatui::layout::Size;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::sliced::SlicedProtocol;
@@ -37,27 +36,8 @@ pub const CACHE_ENTRIES: usize = 48;
 pub const CACHE_BYTES: usize = 96 << 20;
 /// How many pictures are encoded at once, each on its own worker thread.
 const WORKERS: usize = 2;
-/// A full picture file larger than this is not decoded (WhatsApp sends far smaller ones).
-const MAX_FILE: u64 = 64 << 20;
-/// The largest side a picture may have, as the wire bounds `width` and `height`.
-const MAX_SIDE: u32 = 16_384;
-/// What a decode may cost: its largest side and its allocation. A thumbnail is tiny on the wire
-/// but its header can declare any size, so it gets far tighter bounds than a full picture (a
-/// 4096x4096 RGBA photo is 64 MiB).
-#[derive(Clone, Copy)]
-struct Bounds {
-    side: u32,
-    alloc: u64,
-}
-
-const THUMB_BOUNDS: Bounds = Bounds {
-    side: 1024,
-    alloc: 16 << 20,
-};
-const FULL_BOUNDS: Bounds = Bounds {
-    side: MAX_SIDE,
-    alloc: 160 << 20,
-};
+// The decode rules (formats, header size check, per-variant bounds, the file cap) are
+// `nuncio_client::pictures`, shared with nuncio-desktop.
 /// The cell size assumed when the terminal reports none.
 const FALLBACK_FONT: FontSize = FontSize::new(10, 20);
 
@@ -268,28 +248,20 @@ pub fn box_size(width: u32, height: u32, columns: u16, font: FontSize) -> Size {
     } else {
         font
     };
-    let (cell_w, cell_h) = (u64::from(font.width), u64::from(font.height));
-    let w = u64::from(width.clamp(1, MAX_SIDE));
-    let h = u64::from(height.clamp(1, MAX_SIDE));
-    let mut cols = w.div_ceil(cell_w).min(u64::from(columns.max(1))).max(1);
-    let mut rows = (h * cols * cell_w)
-        .div_ceil(w * cell_h)
-        .clamp(1, h.div_ceil(cell_h).max(1));
-    let cap = u64::from(IMAGE_ROWS);
-    if rows > cap {
-        rows = cap;
-        cols = (rows * cell_h * w).div_ceil(h * cell_w).clamp(1, cols);
-    }
+    let (cols, rows) = fit_box(
+        width,
+        height,
+        u32::from(columns),
+        u32::from(IMAGE_ROWS),
+        u32::from(font.width),
+        u32::from(font.height),
+    );
     // Both are bounded by `columns` and IMAGE_ROWS, so they fit.
     Size::new(cols as u16, rows as u16)
 }
 
 /// Which picture of a message: the embedded thumbnail or the full file fetched with `o`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum Variant {
-    Thumb,
-    Full,
-}
+pub(crate) use pictures::Variant;
 
 /// One encoded picture in the cache: a message's picture at a transcript width.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -632,10 +604,7 @@ impl Worker {
                 ..
             } = job;
             let columns = key.columns;
-            let bounds = match key.variant {
-                Variant::Thumb => THUMB_BOUNDS,
-                Variant::Full => FULL_BOUNDS,
-            };
+            let bounds = key.variant.bounds();
             // The decoders are meant never to panic on bad input; if one does, this worker
             // survives and the picture keeps its label.
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -661,9 +630,7 @@ fn encode(
     backdrop: Option<[u8; 3]>,
 ) -> Result<Encoded, String> {
     let bytes = match origin {
-        Origin::Base64(text) => base64::engine::general_purpose::STANDARD
-            .decode(text.trim())
-            .map_err(|_| "the thumbnail is not base64".to_owned())?,
+        Origin::Base64(text) => thumb_bytes(&text)?,
         Origin::File(path) => read_capped(&path)?,
     };
     let picture = decode(&bytes, bounds)?;
@@ -705,55 +672,6 @@ fn encode(
         pixels,
         size,
     })
-}
-
-/// Read a downloaded picture, refusing one larger than [`MAX_FILE`].
-fn read_capped(path: &Path) -> Result<Vec<u8>, String> {
-    let file = std::fs::File::open(path)
-        .map_err(|error| format!("the picture could not be read: {error}"))?;
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("the picture could not be read: {error}"))?;
-    if bytes.len() as u64 > MAX_FILE {
-        return Err("the picture is larger than 64 MiB".to_owned());
-    }
-    Ok(bytes)
-}
-
-/// Decode untrusted bytes: only JPEG, PNG and WebP (an animated WebP gives its first frame), within
-/// `bounds`. The size the header declares is checked first, so a small file declaring a huge
-/// picture is refused without decoding anything.
-fn decode(bytes: &[u8], bounds: Bounds) -> Result<DynamicImage, String> {
-    let too_large = || "the picture is larger than nuncio draws".to_owned();
-    let (width, height) = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|_| "the picture could not be read".to_owned())?
-        .into_dimensions()
-        .map_err(|error| format!("the picture could not be read: {error}"))?;
-    if width > bounds.side
-        || height > bounds.side
-        || u64::from(width) * u64::from(height) * 4 > bounds.alloc
-    {
-        return Err(too_large());
-    }
-    let mut reader = ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|_| "the picture could not be read".to_owned())?;
-    if !matches!(
-        reader.format(),
-        Some(ImageFormat::Jpeg | ImageFormat::Png | ImageFormat::WebP)
-    ) {
-        return Err("not a JPEG, PNG or WebP picture".to_owned());
-    }
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(bounds.side);
-    limits.max_image_height = Some(bounds.side);
-    limits.max_alloc = Some(bounds.alloc);
-    reader.limits(limits);
-    reader
-        .decode()
-        .map_err(|error| format!("the picture could not be decoded: {error}"))
 }
 
 #[cfg(test)]

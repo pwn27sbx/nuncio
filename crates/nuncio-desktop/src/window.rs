@@ -13,8 +13,10 @@
 //!
 //! - chat list: Up/Down move, Enter opens the chat (and only opening marks it read);
 //! - conversation: Up/Down move between messages; `r` replies, `e` reacts, Shift+R retries a send
-//!   that was not sent, `o` opens a media file, Enter, Menu or Shift+F10 opens the message's menu,
-//!   Escape goes to the composer;
+//!   that was not sent, `o` opens a media file (a picture's full file is shown in its bubble),
+//!   Shift+O opens it with the desktop's opener, Enter shows a picture in full (on any other
+//!   message it opens the menu), Menu or Shift+F10 opens the message's menu, Escape goes to the
+//!   composer;
 //! - composer: Enter sends, Shift+Enter starts a new line, Escape cancels the reply;
 //! - Ctrl+F searches the open chat; Escape closes the search; Ctrl+Q quits (the app's
 //!   `app.quit`, also in the menu);
@@ -22,6 +24,7 @@
 //!   Enter runs, Escape closes; Ctrl+, opens the settings ([`crate::preferences`]).
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
@@ -36,8 +39,9 @@ use crate::ROOT_CLASS;
 use crate::controller::{Alert, Command, Controller, OPEN_CHAT_ACTION, notification_id};
 use crate::lifecycle::{Close, Lifecycle};
 use crate::palette::{self, Step};
+use crate::pictures::{self, Cache, Decoded, Decoder, Variant};
 use crate::preferences::{Change, IMAGE_PROTOCOLS, Preferences, TITLE_BARS, Takes};
-use crate::present::{self, Bubble, ChatRow};
+use crate::present::{self, Bubble, ChatRow, PictureView};
 use crate::worker::{Backlog, EVENT_BACKLOG, Incoming, Settings, Worker};
 use nuncio_client::TitleBar;
 use nuncio_client::config::App;
@@ -110,6 +114,24 @@ struct Inner {
     searching: Cell<bool>,
     /// The draft is being set from code, not typed.
     setting_draft: Cell<bool>,
+    /// The decoded pictures, as textures ([`crate::pictures`]).
+    pictures: RefCell<Cache<gdk::Texture>>,
+    /// The threads that decode pictures; what they decode comes back on the main loop.
+    decoder: Decoder,
+    /// The picture widgets drawn now, by chat and message id, to put a texture in once decoded.
+    live: RefCell<HashMap<(String, String), Vec<Slot>>>,
+    /// The bubbles the render in progress (re)built: their pictures are asked for.
+    built: RefCell<Vec<Bubble>>,
+    /// The last toast shown (tests).
+    last_toast: RefCell<Option<String>>,
+}
+
+/// A picture widget drawn now.
+struct Slot {
+    picture: glib::WeakRef<gtk::Picture>,
+    sticker: bool,
+    /// Its box came from the size the message states; else from the picture once decoded.
+    sized: bool,
 }
 
 impl Ui {
@@ -312,6 +334,11 @@ impl Ui {
         shortcuts.set_scope(gtk::ShortcutScope::Global);
         window.add_controller(shortcuts.clone());
 
+        let (post_picture, mut decoded) = futures_channel::mpsc::unbounded::<Decoded>();
+        let decoder = Decoder::spawn(move |done| {
+            // The receiver only goes with the main loop, at exit.
+            let _ = post_picture.unbounded_send(done);
+        });
         let ui = Self(Rc::new(Inner {
             controller: RefCell::new(controller),
             worker: RefCell::new(None),
@@ -354,8 +381,22 @@ impl Ui {
             highlighted: Cell::new(None),
             searching: Cell::new(false),
             setting_draft: Cell::new(false),
+            pictures: RefCell::new(Cache::default()),
+            decoder,
+            live: RefCell::new(HashMap::new()),
+            built: RefCell::new(Vec::new()),
+            last_toast: RefCell::new(None),
         }));
         ui.connect(&send_button, &cancel_reply);
+        let weak = ui.weak();
+        glib::spawn_future_local(async move {
+            while let Ok(done) = decoded.recv().await {
+                match weak.upgrade() {
+                    Some(inner) => Ui(inner).picture_decoded(done),
+                    None => return,
+                }
+            }
+        });
         // Every signal handler holds the state weakly; the window holds it strongly, so the state
         // (and its worker) lives exactly as long as the window, whoever else drops their `Ui`.
         // Closing the window lets the state go (and with it the worker's threads). Not on
@@ -1019,6 +1060,12 @@ impl Ui {
 
     /// Carry out what an action or an answer asks for, then redraw.
     fn run(&self, commands: Vec<Command>) {
+        // A picture asked for again (a click, a key, the menu or the palette): one that could not
+        // be shown may be decoded once more.
+        let retries = self.0.controller.borrow_mut().take_picture_retries();
+        for (chat, id) in retries {
+            self.0.pictures.borrow_mut().retry_full(&chat, &id);
+        }
         for command in commands {
             match command {
                 Command::Send(frame) => match self.0.worker.borrow().as_ref() {
@@ -1159,8 +1206,17 @@ impl Ui {
             }
         });
         inner.transcript.add_controller(keys);
+        // Enter on a picture shows it in full; on any other message it opens the menu.
         inner.transcript.connect_row_activated({
-            let f = self.with(|ui, row: gtk::ListBoxRow| ui.message_menu(&row));
+            let f = self.with(|ui, row: gtk::ListBoxRow| {
+                let picture = usize::try_from(row.index())
+                    .ok()
+                    .filter(|&index| ui.bubble(index).is_some_and(|b| b.picture.is_some()));
+                match picture {
+                    Some(index) => ui.open_picture(index),
+                    None => ui.message_menu(&row),
+                }
+            });
             move |_, row| f(row.clone())
         });
         let adjustment = inner.transcript_scroll.vadjustment();
@@ -1290,8 +1346,9 @@ impl Ui {
                 let commands = self.0.controller.borrow_mut().retry(index);
                 self.run(commands);
             }
-            gdk::Key::o => {
-                let commands = self.0.controller.borrow_mut().open_media(index);
+            gdk::Key::o => self.open_picture(index),
+            gdk::Key::O => {
+                let commands = self.0.controller.borrow_mut().open_externally(index);
                 self.run(commands);
             }
             gdk::Key::Menu => self.message_menu(&row),
@@ -1300,6 +1357,112 @@ impl Ui {
             }
             _ => {}
         }
+    }
+
+    /// Open media message `index` ([`Controller::open_media`]): a picture's full file is fetched
+    /// and shown in its bubble (one that could not be shown is tried again), any other file is
+    /// opened outside.
+    fn open_picture(&self, index: usize) {
+        // The retry of a picture that could not be shown is taken in by `run`, as for the
+        // palette's Open.
+        let commands = self.0.controller.borrow_mut().open_media(index);
+        self.run(commands);
+    }
+
+    /// A picture was decoded (or could not be): its texture goes into the cache and into every
+    /// widget drawing that message now, a full picture over its thumbnail. A full picture that
+    /// cannot be shown says why; a thumbnail just keeps its label.
+    fn picture_decoded(&self, done: Decoded) {
+        let Decoded { key, outcome } = done;
+        let outcome = outcome.map(|pixels| (pixels.rgba.len(), pixels.source, texture(pixels)));
+        let outcome = outcome.map(|(bytes, source, texture)| (texture, bytes, source));
+        let shown = match &outcome {
+            Ok((texture, _, source)) => Ok((texture.clone(), *source)),
+            Err(error) => Err(error.clone()),
+        };
+        if !self.0.pictures.borrow_mut().finish(key.clone(), outcome) {
+            return;
+        }
+        match shown {
+            Ok((texture, source)) => {
+                let mut live = self.0.live.borrow_mut();
+                let Some(slots) = live.get_mut(&(key.chat.clone(), key.id.clone())) else {
+                    return;
+                };
+                slots.retain(|slot| slot.picture.upgrade().is_some());
+                for slot in slots.iter() {
+                    let Some(picture) = slot.picture.upgrade() else {
+                        continue;
+                    };
+                    let full = key.variant == Variant::Full;
+                    if !full && picture.paintable().is_some() {
+                        continue;
+                    }
+                    if !slot.sized {
+                        // Its first image fixes its box; later ones keep it (one resize).
+                        let fixed =
+                            self.0
+                                .pictures
+                                .borrow_mut()
+                                .settle_box(&key, source, slot.sticker);
+                        reserve(&picture, fixed);
+                    }
+                    picture.set_paintable(Some(&texture));
+                }
+            }
+            Err(error) if key.variant == Variant::Full => {
+                self.0.controller.borrow_mut().picture_failed(&error);
+                self.render();
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// The picture drawn in bubble `index` (tests): the box it reserves, the size of the texture
+    /// in it, and its alternative text.
+    pub fn picture(&self, index: usize) -> Option<PictureState> {
+        let row = self.0.transcript.row_at_index(i32::try_from(index).ok()?)?;
+        let picture = find_picture(row.upcast_ref())?;
+        let paintable = picture.paintable();
+        // The box around it (its two clamps), as GTK would lay it out: its natural width, and its
+        // natural height at that width.
+        let outer = picture
+            .parent()
+            .and_then(|tall| tall.parent())
+            .unwrap_or_else(|| picture.clone().upcast());
+        let (_, width, _, _) = outer.measure(gtk::Orientation::Horizontal, -1);
+        let (_, height, _, _) = outer.measure(gtk::Orientation::Vertical, width);
+        Some(PictureState {
+            reserved: picture.size_request(),
+            laid_out: (width, height),
+            texture: paintable.map(|p| (p.intrinsic_width(), p.intrinsic_height())),
+            alt: picture.alternative_text().map(|t| t.to_string()),
+        })
+    }
+
+    /// Show media message `index` as a click on its picture does (tests).
+    pub fn click_picture(&self, index: usize) {
+        self.open_picture(index);
+    }
+
+    /// The text of the last toast shown (tests).
+    pub fn last_toast(&self) -> Option<String> {
+        self.0.last_toast.borrow().clone()
+    }
+
+    /// Let every decoded picture go, as eviction does (tests).
+    pub fn evict_pictures(&self) {
+        self.0.pictures.borrow_mut().clear();
+    }
+
+    /// Run a palette command as choosing it does (tests).
+    pub fn run_palette_action(&self, action: &palette::Action) {
+        self.palette_step(action);
+    }
+
+    /// How many decoded pictures the cache holds (tests).
+    pub fn pictures_cached(&self) -> usize {
+        self.0.pictures.borrow().len()
     }
 
     fn reply(&self, index: usize) {
@@ -1380,11 +1543,19 @@ impl Ui {
             "Open",
             "o",
             bubble.can_open,
-            Box::new(move |ui| {
-                let commands = ui.0.controller.borrow_mut().open_media(index);
-                ui.run(commands);
-            }),
+            Box::new(move |ui| ui.open_picture(index)),
         );
+        if bubble.picture.is_some() {
+            item(
+                "Open externally",
+                "Shift+O",
+                bubble.can_open,
+                Box::new(move |ui| {
+                    let commands = ui.0.controller.borrow_mut().open_externally(index);
+                    ui.run(commands);
+                }),
+            );
+        }
         popover.popup();
     }
 
@@ -1462,8 +1633,28 @@ impl Ui {
             &inner.transcript,
             &mut inner.shown_bubbles.borrow_mut(),
             present::bubbles(model, offset),
-            |bubble| bubble_row(&weak, bubble),
+            |bubble| {
+                inner.built.borrow_mut().push(bubble.clone());
+                bubble_row(&weak, bubble)
+            },
         );
+        // Only a bubble just (re)built asks for its pictures: one drawn already keeps its texture
+        // even once the cache let it go, so nothing is decoded over and over.
+        let built = std::mem::take(&mut *inner.built.borrow_mut());
+        {
+            let mut cache = inner.pictures.borrow_mut();
+            for bubble in &built {
+                for request in pictures::requests(model, bubble, &cache) {
+                    if cache.start(&request.key) {
+                        inner.decoder.decode(request);
+                    }
+                }
+            }
+        }
+        inner.live.borrow_mut().retain(|_, slots| {
+            slots.retain(|slot| slot.picture.upgrade().is_some());
+            !slots.is_empty()
+        });
 
         let composer = present::composer_view(model);
         inner.reply_bar.set_visible(composer.replying.is_some());
@@ -1511,6 +1702,7 @@ impl Ui {
             toast.set_use_markup(false);
             toast.set_timeout(4);
             inner.toasts.add_toast(toast);
+            *inner.last_toast.borrow_mut() = Some(notice);
         }
         // Another conversation opened (a notification clicked, a link): the palette's commands
         // were for the one before, so it closes.
@@ -1755,6 +1947,7 @@ fn message_key_handled(key: gdk::Key, state: gdk::ModifierType) -> bool {
                 | gdk::Key::R
                 | gdk::Key::e
                 | gdk::Key::o
+                | gdk::Key::O
                 | gdk::Key::Menu
                 | gdk::Key::Escape
         )
@@ -1927,6 +2120,9 @@ fn bubble_row(ui: &Weak<Inner>, bubble: &Bubble) -> gtk::ListBoxRow {
     if let Some(media) = &bubble.media {
         column.append(&label(media, "nuncio-media"));
     }
+    if let Some(picture) = &bubble.picture {
+        column.append(&picture_widget(ui, bubble.index, picture));
+    }
     if !bubble.text.is_empty() {
         let text = label(&bubble.text, "nuncio-text");
         text.set_wrap(true);
@@ -2011,4 +2207,146 @@ fn bubble_row(ui: &Weak<Inner>, bubble: &Bubble) -> gtk::ListBoxRow {
     });
     row.add_controller(click);
     row
+}
+
+/// What a bubble's picture widget shows ([`Ui::picture`], tests).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PictureState {
+    /// The box it reserves; `(-1, -1)` before it has one.
+    pub reserved: (i32, i32),
+    /// The size its box takes in the bubble: the reserved box, whatever the texture's size.
+    pub laid_out: (i32, i32),
+    /// The size of the texture drawn in it, once one is.
+    pub texture: Option<(i32, i32)>,
+    pub alt: Option<String>,
+}
+
+/// A decoded picture as a texture: RGBA, not premultiplied, so a sticker's transparent pixels show
+/// the bubble behind it.
+fn texture(pixels: pictures::Pixels) -> gdk::Texture {
+    let width = i32::try_from(pixels.width).unwrap_or(1);
+    let height = i32::try_from(pixels.height).unwrap_or(1);
+    let stride = pixels.width as usize * 4;
+    gdk::MemoryTexture::new(
+        width,
+        height,
+        gdk::MemoryFormat::R8g8b8a8,
+        &glib::Bytes::from_owned(pixels.rgba),
+        stride,
+    )
+    .upcast()
+}
+
+/// Give `picture` a box of exactly `width` x `height`: at least that (its size request) and at
+/// most that (the two clamps around it), whatever the texture's own size.
+fn reserve(picture: &gtk::Picture, (width, height): (u32, u32)) {
+    let (width, height) = (
+        i32::try_from(width).unwrap_or(1),
+        i32::try_from(height).unwrap_or(1),
+    );
+    picture.set_size_request(width, height);
+    let tall = picture.parent().and_downcast::<adw::Clamp>();
+    let wide = tall
+        .as_ref()
+        .and_then(WidgetExt::parent)
+        .and_downcast::<adw::Clamp>();
+    for (clamp, side) in [(tall, height), (wide, width)] {
+        if let Some(clamp) = clamp {
+            clamp.set_maximum_size(side);
+            clamp.set_tightening_threshold(side);
+        }
+    }
+}
+
+/// The picture inside an image or sticker bubble: its box reserved at once from the size the
+/// message states, the best texture the cache has (the full picture, else the thumbnail), and a
+/// click that shows the full picture ([`Ui::open_picture`]). Without a texture it stays empty
+/// under the bubble's `[image]` / `[sticker]` label.
+fn picture_widget(ui: &Weak<Inner>, index: usize, view: &PictureView) -> gtk::Widget {
+    let picture = gtk::Picture::builder()
+        .can_shrink(true)
+        .content_fit(gtk::ContentFit::Contain)
+        .alternative_text(view.alt.as_str())
+        .build();
+    picture.add_css_class("nuncio-picture");
+    let tall = adw::Clamp::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .child(&picture)
+        .build();
+    let wide = adw::Clamp::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .halign(gtk::Align::Start)
+        .child(&tall)
+        .build();
+    if let Some(size) = view.size {
+        reserve(&picture, size);
+    }
+    if let Some(inner) = ui.upgrade() {
+        let mut cache = inner.pictures.borrow_mut();
+        // A picture with no stated size keeps the box its first image gave it, even once its
+        // pictures left the cache.
+        let known = view
+            .size
+            .is_none()
+            .then(|| cache.known_box(&view.chat, &view.id))
+            .flatten();
+        if let Some(size) = known {
+            reserve(&picture, size);
+        }
+        if let Some((texture, variant)) = cache.best(&view.chat, &view.id) {
+            if view.size.is_none() && known.is_none() {
+                let source = match variant {
+                    Variant::Full => cache.full_pixels(&view.chat, &view.id),
+                    Variant::Thumb => None,
+                }
+                .unwrap_or((
+                    u32::try_from(texture.width()).unwrap_or(1),
+                    u32::try_from(texture.height()).unwrap_or(1),
+                ));
+                let key = pictures::Key::new(&view.chat, &view.id, variant);
+                reserve(&picture, cache.settle_box(&key, source, view.sticker));
+            }
+            picture.set_paintable(Some(&texture));
+        }
+        drop(cache);
+        inner
+            .live
+            .borrow_mut()
+            .entry((view.chat.clone(), view.id.clone()))
+            .or_default()
+            .push(Slot {
+                picture: picture.downgrade(),
+                sticker: view.sticker,
+                sized: view.size.is_some(),
+            });
+    }
+    let click = gtk::GestureClick::new();
+    click.set_button(gdk::BUTTON_PRIMARY);
+    let ui = ui.clone();
+    click.connect_released(move |gesture, presses, _, _| {
+        if presses != 1 {
+            return;
+        }
+        gesture.set_state(gtk::EventSequenceState::Claimed);
+        if let Some(inner) = ui.upgrade() {
+            Ui(inner).open_picture(index);
+        }
+    });
+    picture.add_controller(click);
+    wide.upcast()
+}
+
+/// The first picture widget inside `widget`.
+fn find_picture(widget: &gtk::Widget) -> Option<gtk::Picture> {
+    if let Some(picture) = widget.downcast_ref::<gtk::Picture>() {
+        return Some(picture.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = find_picture(&current) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
 }

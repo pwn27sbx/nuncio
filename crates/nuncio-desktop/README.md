@@ -105,6 +105,44 @@ known keys, so **comments in the file are not kept**.
 - A `config.toml` that is a symlink (a dotfiles repository) is followed: its target is rewritten
   and the link stays; a link to nothing makes saving fail and creates nothing.
 
+## Pictures
+
+Photos and stickers are drawn inside their bubble, under their `[image]` / `[sticker]` label, with
+nuncio-tui's rules (the decode rules are shared: `nuncio_client::pictures`):
+
+- **Thumbnail first.** The small picture WhatsApp embeds in the message (the wire's `thumb`) is drawn
+  at once: nothing is downloaded for it. It is decoded off the main loop, two pictures at a time, and
+  kept in a cache of decoded pictures (the 256 last used, about 64 MiB).
+- **No jumps.** The bubble reserves the picture's box from the `width` and `height` the message states
+  (a photo at most 300x300 px, a sticker at most 160x160, never larger than the picture) before
+  anything is decoded, and the thumbnail and later the full picture are drawn in that same box. A
+  picture whose message carries no size takes its box when its first image arrives (a thumbnail's
+  shape scaled up to those caps, or the full picture's own size) and keeps it from then on, also
+  for the full picture and after the cache let its pictures go: it changes size once.
+- **While the full picture downloads** (`downloading…` in its label) the thumbnail stays in the box;
+  one the cache let go is decoded again.
+- **Full picture on request only.** A click on the picture, Enter or `o` on it, or Open in its menu
+  fetches the full file (`download_media`) and draws it in the same box; nothing is ever downloaded by
+  itself. The palette's `Open the selected media` does the same, and asking again for a full picture
+  that could not be shown tries it once more. Open externally (Shift+O) hands the file to the desktop's opener, as before. There is no
+  separate viewer: open it externally to see it at full size.
+- **Untrusted bytes.** Only JPEG, PNG and WebP are decoded; the size a picture's header declares is
+  checked before anything is decoded (a thumbnail may be at most 1024 px a side, a full picture
+  16384, and a downloaded file at most 64 MiB). A picture that is corrupt, too large or another format
+  is not drawn: the label stays, and for a full picture a toast says why.
+- **Stickers.** The first frame (an animated sticker's label says `▶`); transparent pixels show the
+  bubble behind them.
+- **Screen readers.** A picture bubble reads as what it is, then its caption: `Ana, 10:05: Photo,
+  the beach`, `Ana, 10:05: Sticker`; the picture itself says the same (`Photo, the beach`).
+
+To try it, run the demo daemon and the app as in [Run it](#run-it-against-the-demo-daemon): the
+demo's `Travel group (demo)` chat has a photo, `The view from the hotel` (a 480x320 PNG colour
+gradient, its thumbnail a 48x32 JPEG of it), and three stickers (a yellow disc, an animated pink
+one, and a blue one with no thumbnail, which shows only its label and an empty box until you click
+it; each sticker's file is a 128x128 WebP of its own disc). Each thumbnail shows at once, blurry, in a box that does not move;
+click the photo (or select it and press Enter or `o`) and the sharp gradient replaces it; click a
+sticker and its own disc replaces the thumbnail. Shift+O opens the file with the desktop's opener.
+
 ## Layout
 
 After [Sealwax](https://github.com/PixDevsApps/sealwax) (MIT; its design was copied, no code): the
@@ -115,7 +153,8 @@ pane at a time below 600 px, flat surfaces in the live Omarchy palette, toasts f
   last message and its time.
 - **Conversation:** my messages on the right in the accent colour, theirs on the left with the
   sender; time and send state under each; the quoted message (`↪`), reactions, and `[image]`,
-  `[sticker]`, `[document]` labels (pictures are not drawn yet: open them).
+  `[sticker]`, `[document]` labels; photos and stickers are drawn in their bubble (see
+  [Pictures](#pictures)).
 - **Composer:** several lines; a "Replying to" bar with a cancel button; a banner when the open chat
   was merged away, which blocks the send until you choose the chat again.
 
@@ -136,8 +175,10 @@ Tab moves between the chat list, the conversation and the composer.
 | conversation | `r` | reply |
 | conversation | `e` | react (👍 ❤️ 😂 😮 😢 🙏, or remove mine) |
 | conversation | Shift+R | retry a send that was not sent |
-| conversation | `o` | open the media file with the desktop's opener |
-| conversation | Enter, Menu, Shift+F10, right click | the message's menu |
+| conversation | `o`, click on a picture | a photo or sticker: show the full picture in its bubble; any other media: open the file with the desktop's opener |
+| conversation | Shift+O | open the media file (a picture too) with the desktop's opener |
+| conversation | Enter | on a photo or sticker, show it in full; on any other message, its menu |
+| conversation | Menu, Shift+F10, right click | the message's menu |
 | conversation | Escape | go to the composer |
 | composer | Enter | send |
 | composer | Shift+Enter | new line |
@@ -155,14 +196,18 @@ A new message in the open chat is marked read only while the window is active an
 window comes back, the open chat's unread messages are marked read then.
 
 Screen readers: the chat list and the transcript are named lists; each row reads its whole content
-(for a message: sender, time, send state, the quoted line, the text and the reactions).
+(for a message: sender, time, send state, the quoted line, the text and the reactions; a photo or
+sticker says `Photo` or `Sticker` instead of `[image]` / `[sticker]`).
 
 ## Tests
 
 `cargo test -p nuncio-desktop`: the view data, the controller (notifications, links), the
-lifecycle (background, start hidden), the palette's commands and matching, the settings' rules and
-the worker (against a fake daemon) are plain unit tests; `tests/smoke.rs` builds the real window on GTK's main thread (its own `main`,
+lifecycle (background, start hidden), the palette's commands and matching, the settings' rules, the
+pictures (boxes, what is decoded when, the cache, two decoding threads) and the worker (against a
+fake daemon) are plain unit tests; `tests/smoke.rs` builds the real window on GTK's main thread (its own `main`,
 `harness = false`) and skips when GTK cannot start. It never shows a window or a real notification:
 no `GApplication` is attached, so notifications are only recorded, and the `open-chat` action is
 activated from a plain action group. The palette is opened through its F1 shortcut's action and the
-settings window is built (not shown) over a temporary `config.toml`, never yours.
+settings window is built (not shown) over a temporary `config.toml`, never yours. A photo and a
+sticker bubble are checked to reserve their box before decoding, to get a texture of the
+thumbnail's size, and to take the full picture only after a click.

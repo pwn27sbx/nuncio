@@ -257,10 +257,10 @@ fn media_shows_its_label_and_reactions_are_listed_mine_marked() {
             }
         ]
     );
-    assert_eq!(shown[0].label, "Ana, 10:05: [sticker] ▶. Reactions: 👍 😂");
+    assert_eq!(shown[0].label, "Ana, 10:05: Sticker. Reactions: 👍 😂");
     assert_eq!(shown[1].media.as_deref(), Some("[image]"));
     assert_eq!(shown[1].text, "the beach");
-    assert_eq!(shown[1].label, "Ana, 10:05: [image] the beach");
+    assert_eq!(shown[1].label, "Ana, 10:05: Photo, the beach");
 }
 
 #[test]

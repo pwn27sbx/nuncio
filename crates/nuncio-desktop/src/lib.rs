@@ -7,6 +7,8 @@
 //! - [`lifecycle`]: when the window shows and what closing it does (`[app] background`,
 //!   `start_hidden`);
 //! - [`palette`]: the command palette's commands, matching and actions, without GTK;
+//! - [`pictures`]: the pictures inside image and sticker bubbles (boxes, decoding, the cache),
+//!   without GTK;
 //! - [`preferences`]: the settings window's rules over `config.toml`, without GTK;
 //! - [`worker`]: the daemon connections on their own threads, posting into the main loop;
 //! - here: following Omarchy's live theme. The palette parser and the watcher live in
@@ -17,6 +19,7 @@
 pub mod controller;
 pub mod lifecycle;
 pub mod palette;
+pub mod pictures;
 pub mod preferences;
 pub mod present;
 pub mod window;

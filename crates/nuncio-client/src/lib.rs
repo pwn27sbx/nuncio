@@ -14,6 +14,7 @@ pub mod driver;
 pub mod link;
 pub mod model;
 pub mod notify;
+pub mod pictures;
 pub mod reconnect;
 pub mod theme;
 pub mod wire;

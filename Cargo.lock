@@ -1338,6 +1338,8 @@ dependencies = [
 name = "nuncio-client"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "image",
  "notify",
  "serde",
  "serde_json",
@@ -1350,9 +1352,11 @@ dependencies = [
 name = "nuncio-desktop"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "futures-channel",
  "glib",
  "gtk4",
+ "image",
  "libadwaita",
  "nuncio-client",
 ]

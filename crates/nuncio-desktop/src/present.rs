@@ -5,8 +5,9 @@
 //! and the wording is tested without GTK.
 
 use std::ffi::OsStr;
+use std::path::PathBuf;
 
-use nuncio_client::model::{MERGED_NOTICE, Model, chat_title, quoted};
+use nuncio_client::model::{MERGED_NOTICE, Model, chat_title, is_picture, quoted};
 use nuncio_client::wire::MessageState;
 use nuncio_client::{Chat, Message, TitleBar};
 
@@ -89,8 +90,30 @@ pub struct Bubble {
     pub can_retry: bool,
     /// A media message whose file can be fetched and opened outside the app.
     pub can_open: bool,
+    /// The picture an image or sticker message draws inside the bubble.
+    pub picture: Option<PictureView>,
     /// What a screen reader says for the bubble.
     pub label: String,
+}
+
+/// The picture inside an image or sticker bubble: the thumbnail the message embeds at once, the
+/// full file only once the user asked for it ([`Model::download_selected`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PictureView {
+    pub chat: String,
+    pub id: String,
+    pub sticker: bool,
+    /// An animated sticker: its first frame is drawn, and the label says `▶`.
+    pub animated: bool,
+    /// The box the bubble reserves before anything is decoded ([`crate::pictures::picture_box`]),
+    /// from the size the message states; `None` when it states none.
+    pub size: Option<(u32, u32)>,
+    /// The message embeds a thumbnail.
+    pub thumb: bool,
+    /// The full file, once fetched on request.
+    pub full: Option<PathBuf>,
+    /// The picture's alternative text: `Photo` or `Sticker`, and the caption.
+    pub alt: String,
 }
 
 /// A header's two lines.
@@ -256,7 +279,8 @@ pub fn bubbles(model: &Model, offset_minutes: i32) -> Vec<Bubble> {
                     None => "(a message not loaded)".to_owned(),
                 });
             let media = media_label(message).map(|label| {
-                if model.transcript().is_downloading(&message.id) {
+                let transcript = model.transcript();
+                if transcript.is_downloading(&message.id) || transcript.is_showing(&message.id) {
                     format!("{label} downloading…")
                 } else {
                     label
@@ -278,9 +302,26 @@ pub fn bubbles(model: &Model, offset_minutes: i32) -> Vec<Bubble> {
                 label.push_str(&format!(", replying to: {quote}"));
             }
             label.push_str(": ");
-            label.push_str(&match (&media, message.text.is_empty()) {
+            // A picture reads as what it is (`Photo`, `Sticker`), then its caption.
+            let spoken = match picture_word(message) {
+                Some(word)
+                    if media
+                        .as_deref()
+                        .is_some_and(|m| m.ends_with("downloading…")) =>
+                {
+                    Some(format!("{word}, downloading…"))
+                }
+                Some(word) => Some(word.to_owned()),
+                None => media.clone(),
+            };
+            let separator = if picture_word(message).is_some() {
+                ", "
+            } else {
+                " "
+            };
+            label.push_str(&match (&spoken, message.text.is_empty()) {
                 (Some(media), true) => media.clone(),
-                (Some(media), false) => format!("{media} {}", message.text),
+                (Some(media), false) => format!("{media}{separator}{}", message.text),
                 (None, _) => message.text.clone(),
             });
             if !reactions.is_empty() {
@@ -305,10 +346,53 @@ pub fn bubbles(model: &Model, offset_minutes: i32) -> Vec<Bubble> {
                     && message.client_id.is_some()
                     && mark != Some(SendMark::Sending),
                 can_open: message.kind != "text" && !message.id.is_empty(),
+                picture: picture_view(model, message),
                 label,
             }
         })
         .collect()
+}
+
+/// What a screen reader calls a picture message: `Photo` or `Sticker`; `None` for any other.
+fn picture_word(message: &Message) -> Option<&'static str> {
+    match message.kind.as_str() {
+        "image" => Some("Photo"),
+        "sticker" => Some("Sticker"),
+        _ => None,
+    }
+}
+
+/// The picture of an image or sticker message of the open chat; `None` for any other message,
+/// and for a picture with no id yet (nothing can be fetched for it).
+fn picture_view(model: &Model, message: &Message) -> Option<PictureView> {
+    if !is_picture(&message.kind) || message.id.is_empty() {
+        return None;
+    }
+    let chat = model.selected_jid()?.to_owned();
+    let sticker = message.kind == "sticker";
+    let size = match (message.width, message.height) {
+        (Some(width), Some(height)) => Some(crate::pictures::picture_box(width, height, sticker)),
+        _ => None,
+    };
+    let kind = if sticker { "Sticker" } else { "Photo" };
+    let alt = if message.text.is_empty() {
+        kind.to_owned()
+    } else {
+        format!("{kind}, {}", message.text)
+    };
+    Some(PictureView {
+        full: model
+            .transcript()
+            .full_picture(&chat, &message.id)
+            .map(PathBuf::from),
+        chat,
+        id: message.id.clone(),
+        sticker,
+        animated: sticker && message.animated,
+        size,
+        thumb: message.thumb.is_some(),
+        alt,
+    })
 }
 
 /// The connection as the headers say it: `reconnecting…` while the driver is, else the session.

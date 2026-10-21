@@ -69,6 +69,9 @@ pub struct Controller {
     waiting: Option<(String, Option<String>)>,
     /// The draft was set here (a link), not typed: the composer widget must show it.
     draft_changed: bool,
+    /// Pictures whose full file was asked for again ([`Controller::open_media`]), by chat and
+    /// id: one that could not be shown may be decoded once more.
+    picture_retries: Vec<(String, String)>,
 }
 
 fn commands(effect: Option<Effect>) -> Vec<Command> {
@@ -119,6 +122,7 @@ impl Controller {
             chats_loaded,
             waiting: None,
             draft_changed: false,
+            picture_retries: Vec::new(),
         }
     }
 
@@ -368,16 +372,49 @@ impl Controller {
         send(self.model.retry_selected())
     }
 
-    /// Fetch media message `index`'s file to open it outside the app (no inline pictures here).
+    /// Open media message `index` (a click on its picture, Enter, `o`, or Open in its menu): a
+    /// picture's full file is fetched to show it in its bubble ([`crate::pictures`]); any other
+    /// media file is fetched to open it outside the app. Only this asks for a download.
     pub fn open_media(&mut self, index: usize) -> Vec<Command> {
+        let commands = self.download(index, false);
+        if let [Command::Send(ClientFrame::DownloadMedia { jid, id, .. })] = commands.as_slice()
+            && self
+                .model
+                .selected_message()
+                .is_some_and(|m| nuncio_client::model::is_picture(&m.kind))
+        {
+            self.picture_retries.push((jid.clone(), id.clone()));
+        }
+        commands
+    }
+
+    /// The pictures asked for again since the last call (the window lets a failed full picture
+    /// be decoded once more), oldest first.
+    pub fn take_picture_retries(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.picture_retries)
+    }
+
+    /// Fetch media message `index`'s file to open it outside the app, a picture too (Shift+O, or
+    /// Open externally in its menu).
+    pub fn open_externally(&mut self, index: usize) -> Vec<Command> {
+        self.download(index, true)
+    }
+
+    fn download(&mut self, index: usize, external: bool) -> Vec<Command> {
         if !self.model.select_message(index) {
             return Vec::new();
         }
         send(
             self.model
-                .download_selected(false, true)
+                .download_selected(true, external)
                 .map(|download| download.frame()),
         )
+    }
+
+    /// A full picture fetched to show could not be shown: the notice says why (its label stays).
+    pub fn picture_failed(&mut self, error: &str) {
+        self.model
+            .set_notice(format!("cannot show the picture: {error}"));
     }
 
     /// Search the open chat for `query` (a blank one asks nothing).

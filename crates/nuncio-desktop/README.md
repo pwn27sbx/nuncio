@@ -4,7 +4,9 @@ The GTK 4 + libadwaita client. It draws the shared view model (`nuncio_client::M
 transcript, composer and their rules) and talks to `nunciod` with the shared driver rules
 (`nuncio_client::driver`), so it behaves as `nuncio-tui` does: one chat per contact, a draft never
 changes recipient, sends marked sending, queued, sent, not sent or not confirmed, a retry only when
-you ask, read receipts only when you open a chat.
+you ask, read receipts only when you open a chat. A connection that dies silently still counts as
+linked for up to 3 minutes, until its keepalive fails, so a send in that window is marked not
+confirmed rather than queued.
 
 ## Run it against the demo daemon
 

@@ -36,7 +36,9 @@ A <jid> is a WhatsApp chat: 15551230001@s.whatsapp.net (a person) or 12036300000
 send prints "sent", "queued", "not sent: <reason>" or "not confirmed: …; it may have been delivered"
 (no acknowledgement in time), and exits non-zero unless it was sent or queued. Offline, or when the
 connection drops before WhatsApp acknowledges it, a message is queued and sent once when the session
-reconnects. Nothing else is ever retried on its own: unless it was sent, send prints the message's
+reconnects. A connection that dies silently still counts as linked for up to 3 minutes, until its
+keepalive fails, so a send in that window ends not confirmed rather than queued. Nothing else is
+ever retried on its own: unless it was sent, send prints the message's
 client_id, and nuncio retry <client_id> sends it again under the same WhatsApp message id, so it
 cannot arrive twice.
 Nothing links a device without --consent. link never sends a message: once linked it says so and

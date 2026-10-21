@@ -563,6 +563,15 @@ func TestHelpDocumentsEveryCommand(t *testing.T) {
 	}
 }
 
+// The help names the silent window of a dead connection: up to 3 minutes (whatsmeow's
+// KeepAliveMaxFailTime) in which a send still ends not confirmed instead of queued.
+func TestHelpNamesTheSilentConnectionWindow(t *testing.T) {
+	const want = "up to 3 minutes"
+	if !strings.Contains(usage, want) {
+		t.Errorf("usage does not mention %q:\n%s", want, usage)
+	}
+}
+
 // linkedDevice stores a whatsmeow device with an ID in the isolated data dir, as a finished
 // link would. Nothing here touches the network.
 func linkedDevice(t *testing.T) {

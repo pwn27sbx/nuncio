@@ -51,7 +51,7 @@ func messageRow(evt *waevents.Message) (store.Message, bool) {
 	}
 	ref, err := proto.Marshal(sub)
 	if err != nil {
-		log.Printf("wa: cannot keep the media reference of %s: %v", m.ID, err)
+		log.Printf("wa: cannot keep a media reference (%T)", err)
 		return store.Message{}, false
 	}
 	m.Kind, m.Text, m.FileName, m.MediaRef = kind, caption, fileName, ref

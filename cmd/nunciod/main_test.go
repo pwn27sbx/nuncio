@@ -548,8 +548,10 @@ func startPrivateBus(t *testing.T, runtimeDir string) *privateBus {
 	}
 }
 
-// stopProcessGroup kills the process group cmd leads (cmd started with Setpgid) and waits until
-// no process of it is left: the bus and every daemon it activated.
+// stopProcessGroup kills the process group cmd leads (cmd started with Setpgid), reaps cmd, and
+// waits until no process of the group is still running: the bus and every daemon it activated.
+// The others are not this test's children, so whoever adopts them reaps them; a container's PID 1
+// may never do that, and a zombie left there counts as gone (kill(-pgid, 0) would still succeed).
 func stopProcessGroup(t *testing.T, cmd *exec.Cmd) {
 	t.Helper()
 	pgid := cmd.Process.Pid
@@ -557,12 +559,12 @@ func stopProcessGroup(t *testing.T, cmd *exec.Cmd) {
 	_ = cmd.Wait()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		err := syscall.Kill(-pgid, 0)
-		if errors.Is(err, syscall.ESRCH) {
+		members := runningGroupMembers(t, pgid)
+		if len(members) == 0 {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Errorf("process group %d of the private bus is still alive 5s after SIGKILL (kill 0 = %v)", pgid, err)
+			t.Errorf("processes %v of the private bus's group %d still run 5s after SIGKILL", members, pgid)
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"net"
 	"syscall"
 	"testing"
@@ -54,8 +53,8 @@ func TestPrivateBusLeavesNoActivatedDaemonBehind(t *testing.T) {
 	if pid == 0 {
 		t.Fatal("the activation subtest learned no daemon PID")
 	}
-	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+	if processRunning(t, pid) {
 		_ = syscall.Kill(pid, syscall.SIGKILL) // ours: started by this test's bus
-		t.Fatalf("activated nunciod %d is still alive after its test ended (kill 0 = %v)", pid, err)
+		t.Fatalf("activated nunciod %d still runs after its test ended", pid)
 	}
 }

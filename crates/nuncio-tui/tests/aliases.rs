@@ -62,6 +62,10 @@ struct Life {
     merged: bool,
     /// When set, the `chats` reply and the chat a request about Ada's number is served as.
     served: Option<(Value, &'static str)>,
+    /// Where the outbox connection, opened at the TUI's first send, is accepted.
+    listener: UnixListener,
+    /// The outbox connection, once accepted: sends are answered there.
+    outbox: Option<(BufReader<UnixStream>, UnixStream)>,
 }
 
 impl Life {
@@ -93,7 +97,50 @@ impl Life {
             _events_reader: events_reader,
             merged,
             served: None,
+            listener: listener.try_clone().expect("clone the listener"),
+            outbox: None,
         }
+    }
+
+    /// The outbox connection, accepted and handshaken the first time.
+    fn outbox(&mut self) -> &mut (BufReader<UnixStream>, UnixStream) {
+        let listener = &self.listener;
+        self.outbox.get_or_insert_with(|| {
+            let (stream, _) = listener.accept().expect("outbox connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("timeout");
+            let mut writer = stream.try_clone().expect("clone");
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("hello");
+            assert!(line.contains("\"hello\""), "{line}");
+            send_line(
+                &mut writer,
+                &json!({"v":1,"op":"hello_ok","daemon":"fake","session":"linked","unread":0}),
+            );
+            (reader, writer)
+        })
+    }
+
+    /// The next send, from the outbox connection.
+    fn read_send(&mut self) -> Value {
+        let mut line = String::new();
+        self.outbox().0.read_line(&mut line).expect("a send");
+        serde_json::from_str(&line).expect("json")
+    }
+
+    /// Answer the send just read.
+    fn reply_send(&mut self, value: &Value) {
+        send_line(&mut self.outbox().1, value);
+    }
+
+    /// Answer the next send `sent`, returning it.
+    fn serve_send(&mut self) -> Value {
+        let send = self.read_send();
+        assert_eq!(send["op"], "send");
+        self.reply_send(&sent_json(&send["client_id"], "3EB0S1"));
+        send
     }
 
     /// Serve `chats` as the chat list and Ada's number as the chat `lid`.
@@ -143,7 +190,6 @@ impl Life {
                 "jid":self.canonical(&request["jid"]),"messages":[
                 message_json("3EB0B", "the newest one", 31),
                 message_json("3EB0A", "an older one", 30)]}),
-            Some("send") => sent_json(&request["client_id"], "3EB0S1"),
             Some("mark_read") => {
                 json!({"v":1,"op":"marked_read","jid":self.canonical(&request["jid"]),"unread":0})
             }
@@ -339,8 +385,10 @@ fn a_draft_kept_in_the_chat_list_goes_to_the_lid_chat_after_a_restart_that_merge
         go.recv().expect("the TUI is ready");
         let listener = restart(listener, first, &server_path);
         let mut second = Life::accept(&listener, true);
-        // status, chats, messages of the selected chat, then the send.
-        (0..4).map(|_| second.serve()).collect::<Vec<Value>>()
+        // status, chats, messages of the selected chat, then the send (on the outbox).
+        let mut requests = (0..3).map(|_| second.serve()).collect::<Vec<Value>>();
+        requests.push(second.serve_send());
+        requests
     });
 
     let mut daemon = connect(&path);
@@ -499,7 +547,7 @@ fn a_live_merge_moves_the_open_chat_to_the_lid_chat_with_its_reply_and_later_sen
         life.push(&json!({"v":1,"op":"event_message","jid":ADA_LID,"message":reply}));
         // The reply is read at once in the open chat: mark_read, then the send.
         let mark_read = life.serve();
-        let send = life.serve();
+        let send = life.serve_send();
         life.push(&json!({"v":1,"op":"event_message","jid":ADA_LID,
             "message":mine_json("3EB0S1", "see you there", "t-1")}));
         [mark_read, send]
@@ -550,12 +598,12 @@ fn a_send_to_the_number_answered_before_the_merge_events_lands_in_the_open_lid_c
         let mut life = Life::accept(&listener, false);
         assert_eq!(life.serve()["op"], "messages");
         // The send is what teaches the daemon the LID: it merges, publishes, then answers.
-        let send = life.read();
+        let send = life.read_send();
         assert_eq!(send["jid"], ADA_PN);
         let mine = mine_json("3EB0S1", "lunch?", "t-1");
         life.push(&json!({"v":1,"op":"event_chat","chat":ada_lid_json(mine.clone())}));
         life.push(&json!({"v":1,"op":"event_message","jid":ADA_LID,"message":mine}));
-        life.reply(&sent_json(&send["client_id"], "3EB0S1"));
+        life.reply_send(&sent_json(&send["client_id"], "3EB0S1"));
     });
 
     let mut daemon = connect(&path);

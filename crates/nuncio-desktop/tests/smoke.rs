@@ -149,6 +149,7 @@ fn main() {
         path: std::path::PathBuf::from(format!("/tmp/nds-{}.sock", std::process::id())),
         client: "nuncio-desktop/smoke".to_owned(),
         timeout: Duration::from_secs(1),
+        send_wait: nuncio_client::driver::SEND_WAIT,
         backoff: Backoff::default(),
     });
     ui.type_draft("are you there?");
@@ -206,6 +207,7 @@ fn connects_and_loads_the_chats_with_no_ui_handle_kept(socket: &Path, what: &str
         path: socket.to_owned(),
         client: "nuncio-desktop/smoke".to_owned(),
         timeout: Duration::from_secs(5),
+        send_wait: nuncio_client::driver::SEND_WAIT,
         backoff: Backoff::default(),
     });
     let weak = ui.downgrade();
@@ -832,6 +834,7 @@ fn closing_in_background_mode_hides_and_keeps_the_state_and_worker(socket: &Path
         path: socket.to_owned(),
         client: "nuncio-desktop/smoke".to_owned(),
         timeout: Duration::from_secs(5),
+        send_wait: nuncio_client::driver::SEND_WAIT,
         backoff: Backoff::default(),
     });
     let weak = ui.downgrade();

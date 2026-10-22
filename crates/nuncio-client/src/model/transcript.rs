@@ -214,8 +214,14 @@ impl Transcript {
         match state {
             SendState::Sent => {
                 let id = id.unwrap_or_default();
-                // Its event may have come first: then the message is already listed.
-                if !id.is_empty() && messages.iter().any(|m| m.id == id) {
+                // Its event may have come first: then the message is already listed, as another
+                // entry (the event of a send published under another chat) or as this one.
+                if !id.is_empty()
+                    && messages
+                        .iter()
+                        .enumerate()
+                        .any(|(i, m)| i != index && m.id == id)
+                {
                     messages.remove(index);
                     return;
                 }

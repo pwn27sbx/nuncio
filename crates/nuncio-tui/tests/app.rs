@@ -3,9 +3,10 @@
 //! through `Daemon` against a scripted fake daemon on a Unix socket.
 
 use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -608,11 +609,47 @@ fn frame_line(value: serde_json::Value) -> String {
     format!("{value}\n")
 }
 
+/// The fake daemon's side of the outbox connection the TUI opens at its first send or retry,
+/// handshaken: sends and retries are answered there, never on the request connection.
+fn accept_outbox(listener: &UnixListener, hello_ok: &str) -> (BufReader<UnixStream>, UnixStream) {
+    let (stream, _) = listener.accept().expect("outbox connection");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
+    let mut writer = stream.try_clone().expect("clone");
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("hello");
+    assert!(line.contains("\"hello\""), "{line}");
+    writer.write_all(hello_ok.as_bytes()).expect("w");
+    (reader, writer)
+}
+
+/// Whether a send of the open chat still waits for its answer.
+fn sending(app: &App) -> bool {
+    let model = app.model();
+    model
+        .loaded()
+        .iter()
+        .any(|m| model.transcript().is_sending(m))
+}
+
+/// Tick (drain) until no send of the open chat waits for its answer any more.
+fn settle_sends(daemon: &mut Daemon, app: &mut App) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while sending(app) {
+        assert!(Instant::now() < deadline, "a send was never answered");
+        daemon.drain_events(app).expect("drain");
+        thread::sleep(Duration::from_millis(2));
+    }
+}
+
 #[test]
 fn the_daemon_driver_sends_and_follows_events() {
     let path = socket_path();
     let _socket = Socket(path.clone());
     let listener = UnixListener::bind(&path).expect("bind");
+    let (shown, go) = std::sync::mpsc::channel::<()>();
     let server = thread::spawn(move || {
         let hello_ok = frame_line(serde_json::json!(
             {"v":1,"op":"hello_ok","daemon":"fake","session":"offline","unread":0}
@@ -638,6 +675,8 @@ fn the_daemon_driver_sends_and_follows_events() {
             .write_all(frame_line(serde_json::json!({"v":1,"op":"subscribed"})).as_bytes())
             .expect("w");
 
+        // The send comes on the outbox connection.
+        let (mut reader, mut writer) = accept_outbox(&listener, &hello_ok);
         line.clear();
         reader.read_line(&mut line).expect("send");
         let send: serde_json::Value = serde_json::from_str(&line).expect("json");
@@ -653,7 +692,9 @@ fn the_daemon_driver_sends_and_follows_events() {
                 .as_bytes(),
             )
             .expect("w");
-        // As the daemon does: the queued send is published, then its drained outcome.
+        // As the daemon does: the queued send is published, then its drained outcome (once the
+        // TUI has shown the queued reply).
+        go.recv().expect("the TUI showed the reply");
         for message in [
             serde_json::json!({"id":"3EB0X","kind":"text","text":"hello there","from_me":true,
                 "timestamp":"2026-10-18T17:29:00Z","state":"queued","client_id":client_id}),
@@ -680,8 +721,10 @@ fn the_daemon_driver_sends_and_follows_events() {
         panic!("sends");
     };
     daemon.perform(&mut app, &frame).expect("perform");
+    settle_sends(&mut daemon, &mut app);
     let screen = render(&mut app, 80, 24).text();
     assert!(screen.contains("· queued"), "{screen}");
+    shown.send(()).expect("the fake daemon waits");
 
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -912,7 +955,7 @@ fn search_sends_search_lists_results_newest_first_and_esc_closes() {
 /// connection is answered by `answer`, until the client hangs up.
 fn fake_daemon(
     path: PathBuf,
-    mut answer: impl FnMut(serde_json::Value) -> serde_json::Value + Send + 'static,
+    answer: impl FnMut(serde_json::Value) -> serde_json::Value + Send + 'static,
 ) -> thread::JoinHandle<Vec<String>> {
     let listener = UnixListener::bind(&path).expect("bind");
     thread::spawn(move || {
@@ -936,18 +979,48 @@ fn fake_daemon(
         events_writer
             .write_all(frame_line(serde_json::json!({"v":1,"op":"subscribed"})).as_bytes())
             .expect("w");
-        let mut ops = Vec::new();
-        loop {
-            line.clear();
-            if reader.read_line(&mut line).unwrap_or(0) == 0 {
-                return ops;
+        // The request connection, and every outbox connection after it, answered by `answer`.
+        let answer = Arc::new(Mutex::new(answer));
+        let ops = Arc::new(Mutex::new(Vec::new()));
+        let serve = |mut reader: BufReader<UnixStream>, mut writer: UnixStream| {
+            let (answer, ops) = (Arc::clone(&answer), Arc::clone(&ops));
+            thread::spawn(move || {
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    let request: serde_json::Value = serde_json::from_str(&line).expect("json");
+                    let op = request["op"].as_str().unwrap_or_default().to_owned();
+                    ops.lock().expect("lock").push(op);
+                    let reply = (answer.lock().expect("lock"))(request);
+                    writer.write_all(frame_line(reply).as_bytes()).expect("w");
+                    line.clear();
+                }
+            })
+        };
+        let requests = serve(reader, writer);
+        listener.set_nonblocking(true).expect("nonblocking");
+        let mut outboxes = Vec::new();
+        while !requests.is_finished() {
+            match listener.accept() {
+                Ok((stream, _)) => {
+                    stream.set_nonblocking(false).expect("blocking");
+                    let mut writer = stream.try_clone().expect("clone");
+                    let mut reader = BufReader::new(stream);
+                    line.clear();
+                    reader.read_line(&mut line).expect("hello");
+                    writer.write_all(hello_ok.as_bytes()).expect("w");
+                    outboxes.push(serve(reader, writer));
+                }
+                Err(_) => thread::sleep(Duration::from_millis(2)),
             }
-            let request: serde_json::Value = serde_json::from_str(&line).expect("json");
-            ops.push(request["op"].as_str().unwrap_or_default().to_owned());
-            writer
-                .write_all(frame_line(answer(request)).as_bytes())
-                .expect("w");
         }
+        for outbox in outboxes {
+            outbox.join().expect("outbox");
+        }
+        requests.join().expect("requests");
+        Arc::try_unwrap(ops)
+            .expect("served")
+            .into_inner()
+            .expect("lock")
     })
 }
 
@@ -1629,6 +1702,7 @@ fn a_not_confirmed_send_says_so_and_r_retries_it_under_the_same_client_id() {
             &ClientFrame::send(GRACE, "on my way", client_id.clone()),
         )
         .expect("perform");
+    settle_sends(&mut daemon, &mut app);
     let screen = render(&mut app, 80, 24).conversation();
     assert!(screen.contains("· not confirmed"), "{screen}");
     assert!(!screen.contains("not sent"), "{screen}");
@@ -1642,6 +1716,7 @@ fn a_not_confirmed_send_says_so_and_r_retries_it_under_the_same_client_id() {
     daemon
         .perform(&mut app, &ClientFrame::retry(client_id))
         .expect("perform");
+    settle_sends(&mut daemon, &mut app);
     app.handle_key(key(KeyCode::Esc));
     let screen = render(&mut app, 80, 24).conversation();
     assert!(!screen.contains("not confirmed"), "{screen}");
@@ -1654,6 +1729,7 @@ fn a_not_confirmed_send_says_so_and_r_retries_it_under_the_same_client_id() {
         panic!("Enter sends");
     };
     daemon.perform(&mut app, &send).expect("perform");
+    settle_sends(&mut daemon, &mut app);
     let screen = render(&mut app, 80, 24).conversation();
     assert!(screen.contains("· not sent"), "{screen}");
     assert_eq!(screen.matches("not confirmed").count(), 0, "{screen}");
@@ -1692,6 +1768,7 @@ fn a_not_confirmed_send_stays_not_confirmed_after_its_event_message() {
         events_writer
             .write_all(frame_line(serde_json::json!({"v":1,"op":"subscribed"})).as_bytes())
             .expect("w");
+        let (mut reader, mut writer) = accept_outbox(&listener, &hello_ok);
         line.clear();
         reader.read_line(&mut line).expect("send");
         let request: serde_json::Value = serde_json::from_str(&line).expect("json");
@@ -1709,6 +1786,7 @@ fn a_not_confirmed_send_stays_not_confirmed_after_its_event_message() {
     daemon
         .perform(&mut app, &ClientFrame::send(GRACE, "on my wayy", client_id))
         .expect("perform");
+    settle_sends(&mut daemon, &mut app);
     thread::sleep(Duration::from_millis(100));
     daemon.drain_events(&mut app).expect("drain");
     let screen = render(&mut app, 80, 24).conversation();
@@ -1749,10 +1827,12 @@ fn the_not_confirmed_mark_survives_either_order_and_a_queued_state_clears_it() {
 
 // --- U15: a newer daemon's unknown ops (L15) -----------------------------------------------
 
-/// A fake daemon whose request connection answers each request with the next of `replies` and
+/// A fake daemon whose request connection answers each request with the next of `replies`, whose
+/// outbox connection (when `sends` is not empty) answers each send with the next of `sends`, and
 /// whose event connection pushes `events` once subscribed, then stays open a while.
 fn newer_daemon(
     replies: Vec<serde_json::Value>,
+    sends: Vec<serde_json::Value>,
     events: Vec<serde_json::Value>,
 ) -> (PathBuf, thread::JoinHandle<()>) {
     let path = socket_path();
@@ -1783,6 +1863,14 @@ fn newer_daemon(
                 .write_all(frame_line(event).as_bytes())
                 .expect("w");
         }
+        if !sends.is_empty() {
+            let (mut reader, mut writer) = accept_outbox(&listener, &hello_ok);
+            for reply in sends {
+                line.clear();
+                reader.read_line(&mut line).expect("send");
+                writer.write_all(frame_line(reply).as_bytes()).expect("w");
+            }
+        }
         for reply in replies {
             line.clear();
             reader.read_line(&mut line).expect("request");
@@ -1796,6 +1884,7 @@ fn newer_daemon(
 #[test]
 fn an_event_this_tui_does_not_know_is_ignored_and_the_event_connection_stays() {
     let (path, server) = newer_daemon(
+        Vec::new(),
         Vec::new(),
         vec![
             serde_json::json!({"v":1,"op":"event_typing","jid":ADA,"typing":true}),
@@ -1830,10 +1919,8 @@ fn an_event_this_tui_does_not_know_is_ignored_and_the_event_connection_stays() {
 #[test]
 fn a_reply_this_tui_does_not_know_is_a_footer_error_and_the_send_is_not_confirmed() {
     let (path, server) = newer_daemon(
-        vec![
-            serde_json::json!({"v":1,"op":"sent_later","client_id":"t-1"}),
-            serde_json::json!({"v":1,"op":"subscribed"}),
-        ],
+        vec![serde_json::json!({"v":1,"op":"subscribed"})],
+        vec![serde_json::json!({"v":1,"op":"sent_later","client_id":"t-1"})],
         Vec::new(),
     );
     let _socket = Socket(path.clone());
@@ -1847,6 +1934,7 @@ fn a_reply_this_tui_does_not_know_is_a_footer_error_and_the_send_is_not_confirme
     daemon
         .perform(&mut app, &frame)
         .expect("an unknown reply keeps the connection");
+    settle_sends(&mut daemon, &mut app);
     let screen = render(&mut app, 120, 24).text();
     assert!(
         screen.contains("unknown reply `sent_later`"),

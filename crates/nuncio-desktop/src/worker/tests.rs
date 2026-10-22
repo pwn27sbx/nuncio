@@ -87,12 +87,21 @@ impl Life {
 }
 
 fn spawn(path: &std::path::Path) -> (Worker, mpsc::Receiver<Incoming>) {
+    spawn_with(path, Duration::from_secs(2), Duration::from_secs(2))
+}
+
+fn spawn_with(
+    path: &std::path::Path,
+    timeout: Duration,
+    send_wait: Duration,
+) -> (Worker, mpsc::Receiver<Incoming>) {
     let (tx, rx) = mpsc::channel();
     let worker = Worker::spawn(
         Settings {
             path: path.to_owned(),
             client: "nuncio-desktop/test".to_owned(),
-            timeout: Duration::from_secs(2),
+            timeout,
+            send_wait,
             backoff: Backoff::new(Duration::from_millis(20), Duration::from_millis(80)),
         },
         move |incoming| {
@@ -216,6 +225,115 @@ fn a_request_on_a_broken_connection_is_answered_with_the_loss_and_not_sent_again
             Ok(other) => panic!("nothing resends it, got {other:?}"),
         }
     }
+}
+
+/// The outbox connection the worker opens at a life's first send or retry, handshaken.
+fn accept_outbox(listener: &UnixListener) -> (BufReader<UnixStream>, UnixStream) {
+    let stream = accept(listener);
+    let mut writer = stream.try_clone().expect("clone");
+    let mut reader = BufReader::new(stream);
+    assert!(line(&mut reader).contains("\"hello\""));
+    reply(&mut writer, HELLO_OK);
+    (reader, writer)
+}
+
+fn sent_line(client_id: &str) -> String {
+    format!(
+        r#"{{"v":1,"op":"sent","client_id":"{client_id}","state":"sent","id":"M1","timestamp":"2026-10-22T10:00:00Z"}}"#
+    )
+}
+
+/// D1 (scaled, 40 ms for 1 s): a send answered at "19 s", past the "5 s" read bound, is sent; it
+/// waits on its own connection, so a status asked after it is answered first.
+#[test]
+fn a_send_answered_past_the_read_bound_is_sent_and_other_requests_do_not_wait_for_it() {
+    let path = socket("sendwait");
+    let listener = UnixListener::bind(&path).expect("bind");
+    let (worker, rx) = spawn_with(&path, Duration::from_millis(200), Duration::from_secs(1));
+    let mut life = Life::accept(&listener);
+    assert!(matches!(next(&rx), Incoming::Connected));
+
+    worker.send(ClientFrame::send("15551230001@s.whatsapp.net", "hi", "d-1"));
+    worker.send(ClientFrame::status());
+    let (mut outbox, mut outbox_out) = accept_outbox(&listener);
+    assert!(line(&mut outbox).contains("\"d-1\""));
+    let asked = Instant::now();
+    assert!(life.serve().contains("\"status\""));
+    assert!(
+        matches!(
+            next(&rx),
+            Incoming::Reply {
+                request: ClientFrame::Status { .. },
+                result: Ok(_)
+            }
+        ),
+        "the status is answered while the send waits"
+    );
+    thread::sleep(Duration::from_millis(760).saturating_sub(asked.elapsed()));
+    reply(&mut outbox_out, &sent_line("d-1"));
+    match next(&rx) {
+        Incoming::Reply {
+            request: ClientFrame::Send { client_id, .. },
+            result: Ok(DaemonFrame::Sent { .. }),
+        } => assert_eq!(client_id, "d-1"),
+        other => panic!("expected the send's reply, got {other:?}"),
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
+/// F3 kept: no reply within the send wait is `SendUnanswered` (not confirmed), a loss of this
+/// life: both connections are dropped and the worker reconnects.
+#[test]
+fn a_send_unanswered_within_the_wait_is_a_loss_and_the_worker_reconnects() {
+    let path = socket("unanswered");
+    let listener = UnixListener::bind(&path).expect("bind");
+    let wait = Duration::from_millis(300);
+    let (worker, rx) = spawn_with(&path, Duration::from_millis(100), wait);
+    let _life = Life::accept(&listener);
+    assert!(matches!(next(&rx), Incoming::Connected));
+    worker.send(ClientFrame::send("15551230001@s.whatsapp.net", "hi", "d-1"));
+    let (mut outbox, _outbox_out) = accept_outbox(&listener);
+    assert!(line(&mut outbox).contains("\"send\""));
+    match next(&rx) {
+        Incoming::Reply {
+            result: Err(ClientError::SendUnanswered(waited)),
+            ..
+        } => assert_eq!(waited, wait),
+        other => panic!("expected an unanswered send, got {other:?}"),
+    }
+    let _second = Life::accept(&listener);
+    assert!(matches!(next(&rx), Incoming::Connected));
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A send still waiting when its life ends (the event connection broke) is answered all the same,
+/// as a late reply, after the new life connected.
+#[test]
+fn a_send_answered_after_its_life_ended_is_a_late_reply() {
+    let path = socket("late-reply");
+    let listener = UnixListener::bind(&path).expect("bind");
+    let (worker, rx) = spawn_with(&path, Duration::from_millis(500), Duration::from_secs(2));
+    let life = Life::accept(&listener);
+    assert!(matches!(next(&rx), Incoming::Connected));
+    worker.send(ClientFrame::send("15551230001@s.whatsapp.net", "hi", "d-1"));
+    let (mut outbox, mut outbox_out) = accept_outbox(&listener);
+    assert!(line(&mut outbox).contains("\"send\""));
+    drop(life);
+    assert!(matches!(next(&rx), Incoming::Lost(_)));
+    let _second = Life::accept(&listener);
+    assert!(matches!(next(&rx), Incoming::Connected));
+    reply(&mut outbox_out, &sent_line("d-1"));
+    assert!(
+        matches!(
+            next(&rx),
+            Incoming::LateReply {
+                result: Ok(DaemonFrame::Sent { .. }),
+                ..
+            }
+        ),
+        "answered, as a late reply"
+    );
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]

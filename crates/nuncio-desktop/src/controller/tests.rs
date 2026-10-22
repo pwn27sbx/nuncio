@@ -390,6 +390,50 @@ fn a_send_answered_not_confirmed_is_shown_so_and_can_be_retried() {
     assert_eq!(c.retry(0), [Command::Send(ClientFrame::retry("d-1"))]);
 }
 
+/// D1: a send whose life ended while it waited is answered as a late reply: unanswered, it is not
+/// confirmed, and the link that came back meanwhile stays connected; sent, it settles its send.
+#[test]
+fn a_late_reply_marks_its_own_send_and_is_no_loss_of_the_current_link() {
+    let mut c = opened(Vec::new());
+    c.set_draft("hi");
+    let frame = sent(c.send().1);
+    c.set_draft("again");
+    let second = sent(c.send().1);
+    c.incoming(Incoming::LateReply {
+        request: frame,
+        result: Err(ClientError::SendUnanswered(std::time::Duration::from_secs(
+            25,
+        ))),
+    });
+    assert!(
+        c.model().connected(),
+        "the old life's loss was already shown"
+    );
+    let first = &c.model().loaded()[0];
+    assert!(c.model().transcript().is_unconfirmed(first));
+    assert!(c.model().transcript().is_sending(&c.model().loaded()[1]));
+    let ClientFrame::Send { client_id, .. } = &second else {
+        panic!("a send");
+    };
+    c.incoming(Incoming::LateReply {
+        request: second.clone(),
+        result: Ok(DaemonFrame::Sent {
+            v: PROTOCOL_VERSION,
+            client_id: client_id.clone(),
+            state: nuncio_client::SendState::Sent,
+            id: Some("M2".to_owned()),
+            timestamp: Some("2026-10-22T10:00:00Z".to_owned()),
+        }),
+    });
+    assert_eq!(c.model().loaded()[1].id, "M2");
+    assert!(
+        c.model()
+            .transcript()
+            .is_unconfirmed(&c.model().loaded()[0])
+    );
+    assert!(c.model().connected());
+}
+
 // Notifications, the `open-chat` action and links (D3b).
 
 use nuncio_client::Config;

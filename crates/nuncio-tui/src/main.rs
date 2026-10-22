@@ -1,8 +1,9 @@
 //! `nuncio-tui` — the nuncio terminal client.
 //!
-//! Connects to `nunciod` over `$XDG_RUNTIME_DIR/nuncio/core.sock` (one request connection and
-//! one subscribed event connection), renders the chat list and conversations, sends one message
-//! at a time from the (multi-line) composer, and follows the daemon's events and the Omarchy theme. **If the
+//! Connects to `nunciod` over `$XDG_RUNTIME_DIR/nuncio/core.sock` (one request connection, one
+//! subscribed event connection, and one for sends, whose answers are awaited off the loop),
+//! renders the chat list and conversations, sends one message at a time from the (multi-line)
+//! composer, and follows the daemon's events and the Omarchy theme. **If the
 //! daemon is not reachable it still runs**, rendering `proto/fixtures/chats_response.json`
 //! instead and saying so on screen; sends are then shown as not sent. A connection lost later (a
 //! daemon restart) is retried on a capped backoff while the header says `reconnecting…`.

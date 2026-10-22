@@ -15,6 +15,7 @@
 
 use adw::prelude::*;
 use gtk::gio;
+use nuncio_client::driver::SEND_WAIT;
 use nuncio_client::font::{self, FontWatcher, System};
 use nuncio_client::{Backoff, Config, DEFAULT_READ_TIMEOUT, Palette, ThemeWatcher, socket_path};
 use nuncio_desktop::args::{self, APP_ID, Args, Parsed};
@@ -190,6 +191,7 @@ fn connect(ui: &Ui) {
             path,
             client: CLIENT_NAME.to_owned(),
             timeout: DEFAULT_READ_TIMEOUT,
+            send_wait: SEND_WAIT,
             backoff: Backoff::default(),
         }),
         Err(error) => eprintln!("nuncio-desktop: cannot reach nunciod: {error}"),

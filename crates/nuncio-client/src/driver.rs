@@ -29,6 +29,11 @@ use crate::wire::{ClientFrame, DaemonFrame, ErrorCode, PROTOCOL_VERSION};
 pub const NOT_CONNECTED: &str = "not connected to nunciod";
 /// How long a `download_media` reply may take (the Go client's bound too).
 pub const MEDIA_WAIT: Duration = Duration::from_secs(90);
+/// How long a `send` or `retry` reply may take: longer than nunciod's own send timeout (20 s,
+/// `internal/wa/send.go`), so the daemon's own answer (`sent`, `send_failed`, `not_confirmed`)
+/// arrives before the client gives up, and shorter than the Go client's 30 s. A client waits for
+/// it off its UI loop ([`crate::outbox::Outbox`]).
+pub const SEND_WAIT: Duration = Duration::from_secs(25);
 
 /// How a client names itself in the driver's notices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,13 +113,28 @@ impl Link {
     }
 }
 
-/// Send `frame` on `requests` and read its reply, a `download_media` allowed [`MEDIA_WAIT`].
+/// How long the reply to `frame` may take on a connection whose reads are bounded by `bound`: a
+/// `download_media` [`MEDIA_WAIT`], a `send` or `retry` [`SEND_WAIT`], anything else `bound`.
+pub fn reply_wait(frame: &ClientFrame, bound: Duration) -> Duration {
+    match frame {
+        ClientFrame::DownloadMedia { .. } => MEDIA_WAIT,
+        ClientFrame::Send { .. } | ClientFrame::Retry { .. } => SEND_WAIT,
+        _ => bound,
+    }
+}
+
+/// Send `frame` on `requests` and read its reply within [`reply_wait`].
 pub fn request_on(
     requests: &mut Connection,
     frame: &ClientFrame,
 ) -> Result<DaemonFrame, ClientError> {
     match frame {
-        ClientFrame::DownloadMedia { .. } => requests.request_within(frame, MEDIA_WAIT),
+        ClientFrame::DownloadMedia { .. }
+        | ClientFrame::Send { .. }
+        | ClientFrame::Retry { .. } => {
+            let wait = reply_wait(frame, requests.read_bound());
+            requests.request_within(frame, wait)
+        }
         _ => requests.request(frame),
     }
 }
@@ -255,7 +275,7 @@ pub fn open_externally(path: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::conn::Snapshot;
-    use crate::wire::{Chat, MessageState, SendState, Session};
+    use crate::wire::{Chat, Message, MessageState, SendState, Session};
 
     const ANA: &str = "15551230001@s.whatsapp.net";
     const X: Client = Client {
@@ -297,6 +317,139 @@ mod tests {
             model.transcript().is_sending(message),
             model.transcript().is_unconfirmed(message),
         )
+    }
+
+    /// D1: only a send or retry waits 25 s for its reply (nunciod's own bound is 20 s); a
+    /// download keeps its 90 s and every other request the read bound.
+    #[test]
+    fn only_sends_and_retries_wait_the_send_wait() {
+        let bound = Duration::from_secs(5);
+        assert_eq!(SEND_WAIT, Duration::from_secs(25));
+        let send = ClientFrame::send(ANA, "hi", "t-1");
+        assert_eq!(reply_wait(&send, bound), SEND_WAIT);
+        assert_eq!(reply_wait(&ClientFrame::retry("t-1"), bound), SEND_WAIT);
+        assert_eq!(reply_wait(&ClientFrame::status(), bound), bound);
+        assert_eq!(reply_wait(&ClientFrame::chats(5), bound), bound);
+        let download = ClientFrame::DownloadMedia {
+            v: PROTOCOL_VERSION,
+            jid: ANA.to_owned(),
+            id: "M1".to_owned(),
+        };
+        assert_eq!(reply_wait(&download, bound), MEDIA_WAIT);
+    }
+
+    const GRACE: &str = "15551230002@s.whatsapp.net";
+
+    fn sent_reply(client_id: &str, id: &str) -> DaemonFrame {
+        DaemonFrame::Sent {
+            v: PROTOCOL_VERSION,
+            client_id: client_id.to_owned(),
+            state: SendState::Sent,
+            id: Some(id.to_owned()),
+            timestamp: Some("2026-10-22T10:00:00Z".to_owned()),
+        }
+    }
+
+    /// D1: a late answer (sent, not confirmed, unanswered, not connected) for a client id no
+    /// message has (its chat reloaded without it, another run's) changes no message: the send
+    /// still waiting stays sending, untouched.
+    #[test]
+    fn a_late_answer_for_an_unknown_client_id_changes_no_message() {
+        let (mut model, _) = sent("hi");
+        let before = model.loaded().to_vec();
+        let other = ClientFrame::send(ANA, "elsewhere", "t-9");
+        settle(&mut model, &other, Ok(sent_reply("t-9", "M9")), X);
+        settle(
+            &mut model,
+            &other,
+            Err(ClientError::SendUnanswered(SEND_WAIT)),
+            X,
+        );
+        settle(
+            &mut model,
+            &other,
+            Err(ClientError::Daemon {
+                code: "not_confirmed".to_owned(),
+                message: "m".to_owned(),
+            }),
+            X,
+        );
+        not_connected(&mut model, &other, X);
+        assert_eq!(model.loaded(), before.as_slice());
+        assert_eq!(state(&model), (None, true, false), "still sending");
+    }
+
+    /// D1: a send's answer that arrives after the user moved to another chat is applied to that
+    /// send, in its own chat, and to nothing in the chat now open.
+    #[test]
+    fn an_answer_after_leaving_the_chat_is_applied_to_its_own_send_only() {
+        let chat = |jid: &str, name: &str| -> Chat {
+            serde_json::from_value(serde_json::json!({
+                "jid": jid, "name": name, "unread": 0, "archived": false, "pinned": false,
+                "muted": false,
+            }))
+            .expect("a chat")
+        };
+        let mut model = Model::new(
+            Snapshot {
+                daemon: "test".to_owned(),
+                linked: true,
+                session: Session::Linked,
+                unread: 0,
+                chats: vec![chat(ANA, "Ana"), chat(GRACE, "Grace")],
+                stop_reason: None,
+            },
+            "t",
+        );
+        "to ana"
+            .chars()
+            .for_each(|c| model.composer_mut().insert(c));
+        let to_ana = model.send().expect("a send");
+        model.select_chat(1);
+        let open = model.open_selected().expect("open Grace");
+        settle(
+            &mut model,
+            &open,
+            Ok(DaemonFrame::Messages {
+                v: PROTOCOL_VERSION,
+                jid: GRACE.to_owned(),
+                messages: Vec::new(),
+            }),
+            X,
+        );
+        "to grace"
+            .chars()
+            .for_each(|c| model.composer_mut().insert(c));
+        model.send().expect("a second send");
+        settle(&mut model, &to_ana, Ok(sent_reply("t-1", "M1")), X);
+        let grace = &model.loaded()[0];
+        assert_eq!(grace.text, "to grace");
+        assert!(grace.id.is_empty() && model.transcript().is_sending(grace));
+        model.select_chat(0);
+        let ana = &model.loaded()[0];
+        assert_eq!((ana.id.as_str(), ana.state.clone()), ("M1", None));
+        assert!(!model.transcript().is_sending(ana));
+    }
+
+    /// D1: a send's reply now comes on its own connection, so its `event_message` (carrying its
+    /// client id) can be folded in first: the reply then settles that one message, which stays.
+    #[test]
+    fn a_reply_after_its_own_event_message_keeps_the_one_message() {
+        let (mut model, frame) = sent("hi");
+        let mine: Message = serde_json::from_value(serde_json::json!({
+            "id": "M1", "kind": "text", "text": "hi", "from_me": true,
+            "timestamp": "2026-10-22T10:00:00Z", "client_id": "t-1",
+        }))
+        .expect("a message");
+        model.apply(&DaemonFrame::EventMessage {
+            v: PROTOCOL_VERSION,
+            jid: ANA.to_owned(),
+            message: mine,
+        });
+        settle(&mut model, &frame, Ok(sent_reply("t-1", "M1")), X);
+        let ids: Vec<&str> = model.loaded().iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, ["M1"]);
+        assert_eq!(state(&model), (None, false, false));
     }
 
     #[test]

@@ -185,6 +185,14 @@ impl Controller {
                 }
                 commands
             }
+            // A send from a life that has ended: it marks its own send, and its loss (if any) was
+            // the old link's, already shown.
+            Incoming::LateReply { request, result } => {
+                match driver::settle(&mut self.model, &request, result, CLIENT) {
+                    Outcome::Effect(effect) => commands(Some(effect)),
+                    Outcome::Done | Outcome::Lost(_) => Vec::new(),
+                }
+            }
             Incoming::NotConnected(frame) => {
                 driver::not_connected(&mut self.model, &frame, CLIENT);
                 Vec::new()

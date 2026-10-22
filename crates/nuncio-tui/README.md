@@ -5,7 +5,8 @@ The ratatui terminal client. It talks to `nunciod` over `$XDG_RUNTIME_DIR/nuncio
 events. With no daemon it still starts, shows `proto/fixtures/chats_response.json` and says
 `FIXTURE DATA`; a send then shows as not sent.
 
-If the daemon goes away later (it restarted, a read hit the 5 s bound), the header says
+If the daemon goes away later (it restarted, a read hit the 5 s bound, a send's answer the 25 s
+one), the header says
 `reconnecting…` instead of the session and the footer says `daemon connection lost: …`. The TUI
 tries again after 0.5 s, doubling up to every 5 s; once back it says `reconnected to nunciod`,
 says hello and subscribes again, and reloads the status, the chat list and the selected chat's
@@ -78,7 +79,11 @@ nuncio-tui [--image <png>]
   A send shows `sending` until the daemon
   answers, then `queued` (offline, waiting for the reconnect), nothing (sent), `not sent`
   (it waits for a manual retry) or `not confirmed` (WhatsApp's acknowledgement or the daemon's
-  answer timed out, so it may have been delivered). The TUI keeps that mark in memory only:
+  answer timed out, so it may have been delivered). The TUI waits up to 25 s for that answer
+  (nunciod's own send timeout is 20 s) on a connection and a thread of its own, so the screen
+  never freezes meanwhile: you keep typing, scrolling and opening chats, and the answer lands on
+  that send even in a chat you left. Sends made in a row go out once each, in order, each with
+  its own answer; one not answered within 25 s is `not confirmed` and the TUI reconnects. The TUI keeps that mark in memory only:
   after a restart the daemon lists such a send as `not sent`, since the wire has no not-confirmed
   message state. A connection that dies silently still counts as linked for up to 3 minutes,
   until its keepalive fails, so a send in that window shows `not confirmed` rather than `queued`.

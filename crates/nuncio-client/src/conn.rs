@@ -141,6 +141,11 @@ impl Connection {
         Self::connect(&socket_path()?)
     }
 
+    /// The bound on every read of this connection.
+    pub fn read_bound(&self) -> Duration {
+        self.timeout
+    }
+
     /// Send one frame as a single NDJSON line.
     pub fn send(&mut self, frame: &ClientFrame) -> Result<(), ClientError> {
         let mut line = serde_json::to_string(frame)?;

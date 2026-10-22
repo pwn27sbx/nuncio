@@ -15,6 +15,7 @@ pub mod font;
 pub mod link;
 pub mod model;
 pub mod notify;
+pub mod outbox;
 pub mod pictures;
 pub mod reconnect;
 pub mod theme;

@@ -14,10 +14,12 @@ tests until both agree.
   which activates the daemon; it must not start a second daemon itself.
 - Clients bound every read with a timeout (5 s by default in both the Go and the Rust client),
   the handshake included, so a wedged daemon cannot wedge a client. A read that hits the bound
-  is an error and the client drops the connection. A `send` or `retry` whose reply did not come
-  within the bound was written in full, so the daemon may already have handed it to WhatsApp: a
-  client reports it not confirmed (it may have been delivered; a `retry` reuses its WhatsApp id),
-  never not sent.
+  is an error and the client drops the connection. A `send` or `retry` reply is allowed longer
+  than the daemon's own 20 s send timeout, so its `sent`, `send_failed` or `not_confirmed` arrives
+  first: 30 s in the Go client, 25 s in the Rust clients, which wait for it on a connection of
+  their own off their UI loop. A `send` or `retry` whose reply did not come within that bound was
+  written in full, so the daemon may already have handed it to WhatsApp: a client reports it not
+  confirmed (it may have been delivered; a `retry` reuses its WhatsApp id), never not sent.
 
 ## Versioning
 

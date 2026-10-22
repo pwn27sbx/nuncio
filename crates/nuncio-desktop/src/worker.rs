@@ -2,7 +2,10 @@
 //!
 //! Two threads per [`Worker`]: the request thread owns the request connection and the reconnect
 //! schedule ([`Reconnect`]), and sends each request it is handed, one at a time, in order; an
-//! event thread per connection life reads the subscribed connection. Neither touches the view:
+//! event thread per connection life reads the subscribed connection. Sends and retries go to that
+//! life's [`Outbox`] instead (a thread and a connection of its own, opened at the first send),
+//! which waits up to 25 s for each reply, so other requests never queue behind one; its answers
+//! come back through the request thread. None of them touches the view:
 //! everything they learn is posted as an [`Incoming`] (through the `post` callback, which the app
 //! points at a channel into the main loop) and folded into the model there
 //! ([`crate::controller::Controller::incoming`]), with the shared driver's rules.
@@ -10,7 +13,8 @@
 //! A loss on either connection drops both and schedules a reconnect on the shared capped backoff
 //! (0.5 s doubling to 5 s); a request made meanwhile is answered [`Incoming::NotConnected`] and
 //! never sent later by itself. A reconnect posts [`Incoming::Connected`], after which the main loop
-//! resyncs.
+//! resyncs. A send still in flight when its life ended is answered all the same, as
+//! [`Incoming::LateReply`]: it marks that send (by its client id) and is no loss of the new link.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,6 +24,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use nuncio_client::driver::{self, Link};
+use nuncio_client::outbox::{self, Outbox, Posted};
 use nuncio_client::{Backoff, ClientError, ClientFrame, Connection, DaemonFrame, Reconnect};
 
 /// How long the event thread waits for an event before it checks whether its life ended.
@@ -32,6 +37,12 @@ pub enum Incoming {
     Connected,
     /// The answer to `request` (or why there is none). A loss in it already dropped the link.
     Reply {
+        request: ClientFrame,
+        result: Result<DaemonFrame, ClientError>,
+    },
+    /// The answer to a send or retry made in a connection life that has ended since (the link
+    /// was lost while it waited): it marks that send, and a loss in it is not the current link's.
+    LateReply {
         request: ClientFrame,
         result: Result<DaemonFrame, ClientError>,
     },
@@ -99,6 +110,8 @@ enum Command {
     Request(ClientFrame),
     /// The event thread of life `life` lost its connection with this error.
     EventsLost(u64, ClientError),
+    /// The outbox of life `life` posted this (boxed: a reply is far larger than the others).
+    Posted(u64, Box<Posted>),
     /// The handle was dropped: close both connections and end.
     Stop,
 }
@@ -125,6 +138,8 @@ pub struct Settings {
     pub client: String,
     /// The bound on every read.
     pub timeout: Duration,
+    /// How long a send or retry reply is awaited ([`driver::SEND_WAIT`]).
+    pub send_wait: Duration,
     pub backoff: Backoff,
 }
 
@@ -153,6 +168,8 @@ struct Life {
     id: u64,
     requests: Connection,
     over: Arc<AtomicBool>,
+    /// This life's sends and retries, started at its first one.
+    outbox: Option<Outbox>,
 }
 
 impl Drop for Life {
@@ -189,6 +206,26 @@ fn run(
             }
         };
         match command {
+            Some(Command::Request(
+                frame @ (ClientFrame::Send { .. } | ClientFrame::Retry { .. }),
+            )) => match life.as_mut() {
+                Some(current) => {
+                    let (id, back) = (current.id, back.clone());
+                    let settings = outbox::Settings {
+                        send_wait: settings.send_wait,
+                        ..outbox::Settings::new(&settings.path, &settings.client, settings.timeout)
+                    };
+                    current
+                        .outbox
+                        .get_or_insert_with(|| {
+                            Outbox::start(settings, move |posted| {
+                                let _ = back.send(Command::Posted(id, Box::new(posted)));
+                            })
+                        })
+                        .push(frame);
+                }
+                None => post(Incoming::NotConnected(frame)),
+            },
             Some(Command::Request(frame)) => match life.as_mut() {
                 Some(current) => {
                     let result = driver::request_on(&mut current.requests, &frame);
@@ -213,6 +250,24 @@ fn run(
                 reconnect.lost(Instant::now());
                 post(Incoming::Lost(error));
             }
+            Some(Command::Posted(id, posted)) => match *posted {
+                Posted::NotConnected(frame) => post(Incoming::NotConnected(frame)),
+                // This life's answer: a loss in it ends the life, as on the request connection.
+                Posted::Reply { request, result }
+                    if life.as_ref().is_some_and(|current| current.id == id) =>
+                {
+                    if let Err(error) = &result
+                        && driver::is_loss(error)
+                    {
+                        life = None;
+                        reconnect.lost(Instant::now());
+                    }
+                    post(Incoming::Reply { request, result });
+                }
+                Posted::Reply { request, result } => {
+                    post(Incoming::LateReply { request, result });
+                }
+            },
             // Dropping the life closes the request connection and ends its event thread.
             Some(Command::Stop) => return,
             Some(Command::EventsLost(..)) | None => {}
@@ -246,7 +301,12 @@ fn connect(
         .spawn(move || read_events(events, id, &flag, &back, &events_post))
         .ok()?;
     post(Incoming::Connected);
-    Some(Life { id, requests, over })
+    Some(Life {
+        id,
+        requests,
+        over,
+        outbox: None,
+    })
 }
 
 /// Read events until the connection breaks or its life is over.

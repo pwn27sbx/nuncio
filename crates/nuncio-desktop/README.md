@@ -232,8 +232,12 @@ Tab moves between the chat list, the conversation and the composer.
 | anywhere | Ctrl+Q | quit (closing the window only hides it in background mode) |
 
 Requests go to `nunciod` one at a time, in order, on one connection. Opening a media file waits up
-to 90 s for the daemon to fetch it, and a send or a chat opened meanwhile stays "sending" (or
-loading) until that download is answered. Events keep arriving on their own connection.
+to 90 s for the daemon to fetch it, and a chat opened meanwhile stays loading until that download
+is answered. Sends and retries go on a connection of their own, one at a time, in order, each
+answer awaited up to 25 s (nunciod's own send timeout is 20 s): the message shows "sending" until
+then, and other requests never wait for it. A send not answered within 25 s is marked not
+confirmed and the app reconnects; one still waiting when the connection is lost is answered all
+the same and marks only that send. Events keep arriving on their own connection.
 
 A new message in the open chat is marked read only while the window is active and shown; when the
 window comes back, the open chat's unread messages are marked read then.

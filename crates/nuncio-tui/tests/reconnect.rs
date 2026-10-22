@@ -190,6 +190,25 @@ impl Life {
     }
 }
 
+/// The outbox connection the TUI opens at a life's first send or retry, handshaken: sends and
+/// retries come and are answered there.
+fn accept_outbox(listener: &UnixListener) -> (BufReader<UnixStream>, UnixStream) {
+    let (stream, _) = listener.accept().expect("outbox connection");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("timeout");
+    let mut writer = stream.try_clone().expect("clone");
+    let mut reader = BufReader::new(stream);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("hello");
+    assert!(line.contains("\"hello\""), "{line}");
+    send_line(
+        &mut writer,
+        json!({"v":1,"op":"hello_ok","daemon":"fake","session":"linked","unread":0}),
+    );
+    (reader, writer)
+}
+
 fn chat_json(jid: &str, name: &str) -> Value {
     json!({"jid":jid,"name":name,"unread":0,"archived":false,"pinned":false,"muted":false})
 }
@@ -514,10 +533,10 @@ fn a_request_that_timed_out_reconnects_instead_of_leaving_the_tui_without_a_daem
     let _ = std::fs::remove_file(&path);
 }
 
-/// F3: a send whose reply did not come within the read bound was written in full, so the daemon
-/// may already have handed it to WhatsApp. It is shown as not confirmed, never as not sent, the
-/// footer says it may have been delivered, the TUI still reconnects, and `R` retries it under the
-/// same client_id, so the daemon reuses its WhatsApp id.
+/// F3: a send whose reply did not come within the send wait (25 s; 400 ms here) was written in
+/// full, so the daemon may already have handed it to WhatsApp. It is shown as not confirmed,
+/// never as not sent, the footer says it may have been delivered, the TUI still reconnects, and
+/// `R` retries it under the same client_id, so the daemon reuses its WhatsApp id.
 #[test]
 fn a_send_whose_reply_timed_out_is_not_confirmed_and_r_retries_it_under_the_same_client_id() {
     let path = socket_path();
@@ -526,17 +545,19 @@ fn a_send_whose_reply_timed_out_is_not_confirmed_and_r_retries_it_under_the_same
     let server = thread::spawn(move || {
         let mut first = Life::accept(&listener);
         assert_eq!(first.serve()["op"], "messages");
-        // The send arrives whole and gets no answer within the TUI's read bound.
+        // The send arrives whole, on the outbox connection, and gets no answer within the wait.
+        let (mut outbox, _first_outbox) = accept_outbox(&listener);
         let mut line = String::new();
-        first.reader.read_line(&mut line).expect("the send");
+        outbox.read_line(&mut line).expect("the send");
         let send: Value = serde_json::from_str(&line).expect("json");
         let mut second = Life::accept(&listener);
         let mut ops: Vec<Value> = (0..3).map(|_| second.serve()).collect();
+        let (mut outbox, mut outbox_writer) = accept_outbox(&listener);
         line.clear();
-        second.reader.read_line(&mut line).expect("the retry");
+        outbox.read_line(&mut line).expect("the retry");
         let retry: Value = serde_json::from_str(&line).expect("json");
         send_line(
-            &mut second.writer,
+            &mut outbox_writer,
             json!({"v":1,"op":"sent","client_id":retry["client_id"],"state":"sent",
                 "id":"3EB0D","timestamp":"2026-10-18T17:33:00Z"}),
         );
@@ -547,6 +568,7 @@ fn a_send_whose_reply_timed_out_is_not_confirmed_and_r_retries_it_under_the_same
 
     let mut daemon = Daemon::connect_with_timeout(&path, "nuncio-tui/test", ms(150))
         .expect("connect")
+        .with_send_wait(ms(400))
         .with_backoff(Backoff::new(ms(20), ms(80)));
     let mut app = app();
     open_ada(&mut daemon, &mut app);
@@ -559,20 +581,23 @@ fn a_send_whose_reply_timed_out_is_not_confirmed_and_r_retries_it_under_the_same
         panic!("a send: {frame:?}");
     };
     let client_id = client_id.clone();
-    assert!(
-        daemon.perform(&mut app, &frame).is_err(),
-        "the read timed out"
-    );
-    assert!(!daemon.is_connected(), "a timeout is still a loss");
+    daemon
+        .perform(&mut app, &frame)
+        .expect("handed to the outbox");
+    assert!(render(&mut app, 160, 24).contains("· sending"));
+    drain_until(&mut daemon, &mut app, "the unanswered send", |s| {
+        s.contains("· not confirmed")
+    });
     let screen = render(&mut app, 160, 24);
     assert!(screen.contains("on my way"), "{screen}");
-    assert!(screen.contains("· not confirmed"), "{screen}");
     assert!(!screen.contains("not sent"), "{screen}");
+    // A timeout is still a loss: the footer says so, or (when the reconnect was already due, in
+    // the same tick) that the TUI reconnected; the fake daemon's second life proves it below.
     let footer = last_line(&screen);
     assert!(
         footer.contains(
-            "not confirmed: the daemon did not answer within 150ms; it may have been delivered"
-        ),
+            "not confirmed: the daemon did not answer within 400ms; it may have been delivered"
+        ) || footer.contains("reconnected to nunciod"),
         "{footer}"
     );
 
@@ -594,7 +619,10 @@ fn a_send_whose_reply_timed_out_is_not_confirmed_and_r_retries_it_under_the_same
     };
     daemon
         .perform(&mut app, &retry)
-        .expect("the retry is answered");
+        .expect("handed to the outbox");
+    drain_until(&mut daemon, &mut app, "the retry's answer", |s| {
+        !s.contains("sending")
+    });
     let screen = render(&mut app, 160, 24);
     assert!(!screen.contains("not confirmed"), "{screen}");
     assert!(!screen.contains("not sent"), "{screen}");

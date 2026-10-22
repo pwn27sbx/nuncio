@@ -9,7 +9,9 @@
 //!   been delivered); one it refuses with any other `error` is not sent; every `error` becomes
 //!   the notice;
 //! - a broken connection (closed, timed out, malformed) marks a send it carried not sent, and the
-//!   client reconnects ([`crate::Reconnect`]) and resyncs;
+//!   client reconnects ([`crate::Reconnect`]) and resyncs; but a send (or retry) written in full
+//!   whose reply timed out ([`ClientError::SendUnanswered`]) is shown as not confirmed, since the
+//!   daemon may already have handed it to WhatsApp (a retry reuses its WhatsApp id);
 //! - while disconnected nothing is sent: a send is shown as not sent and is never retried by
 //!   itself;
 //! - a reply whose op this build does not know (a newer daemon) becomes the notice, and a send it
@@ -188,6 +190,15 @@ pub fn settle(
             host.request_failed(frame, format!("daemon: {code}: {message}"));
             Outcome::Done
         }
+        // Written in full and not answered in time: it may be with WhatsApp already.
+        Err(error @ ClientError::SendUnanswered(_)) => {
+            if let ClientFrame::Send { client_id, .. } | ClientFrame::Retry { client_id, .. } =
+                frame
+            {
+                host.send_not_confirmed(client_id);
+            }
+            Outcome::Lost(error)
+        }
         Err(error) => {
             failed_send(host, frame, error.to_string());
             Outcome::Lost(error)
@@ -334,6 +345,119 @@ mod tests {
             "{outcome:?}"
         );
         assert_eq!(state(&model), (Some(MessageState::NotSent), false, false));
+    }
+
+    /// F3: a send (or retry) written in full whose reply did not come in time may be with
+    /// WhatsApp: not confirmed, like the daemon's `not_confirmed`, and still a loss that
+    /// reconnects; a retry of it keeps the same client_id, so the same WhatsApp id.
+    #[test]
+    fn an_unanswered_send_is_not_confirmed_and_lost_and_its_retry_keeps_the_client_id() {
+        let (mut model, frame) = sent("hi");
+        let ClientFrame::Send { client_id, .. } = &frame else {
+            panic!("a send");
+        };
+        let client_id = client_id.clone();
+        let error = ClientError::SendUnanswered(Duration::from_secs(5));
+        assert!(is_loss(&error));
+        let outcome = settle(&mut model, &frame, Err(error), X);
+        assert!(
+            matches!(outcome, Outcome::Lost(ClientError::SendUnanswered(_))),
+            "{outcome:?}"
+        );
+        assert_eq!(state(&model), (Some(MessageState::NotSent), false, true));
+        let Outcome::Lost(error) = outcome else {
+            unreachable!()
+        };
+        lost(&mut model, &error);
+        assert_eq!(
+            model.notice(),
+            Some(
+                "daemon connection lost: not confirmed: the daemon did not answer within 5s; \
+                 it may have been delivered; reconnecting…"
+            )
+        );
+        reconnected(&mut model);
+        assert_eq!(state(&model), (Some(MessageState::NotSent), false, true));
+        model.select_older();
+        let retry = model.retry_selected();
+        assert_eq!(retry, Some(ClientFrame::retry(client_id.clone())));
+        let retry = retry.expect("a retry");
+        settle(
+            &mut model,
+            &retry,
+            Err(ClientError::SendUnanswered(Duration::from_secs(5))),
+            X,
+        );
+        assert_eq!(state(&model), (Some(MessageState::NotSent), false, true));
+    }
+
+    /// A send that failed before (or while) it was written never reached the daemon: not sent,
+    /// and a loss.
+    #[test]
+    fn a_send_that_failed_before_it_was_written_is_not_sent() {
+        let errors = [
+            ClientError::Connect {
+                path: "/nonexistent/core.sock".into(),
+                source: std::io::Error::from(std::io::ErrorKind::NotFound),
+            },
+            ClientError::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe)),
+            ClientError::Closed,
+            ClientError::Timeout(Duration::from_secs(5)),
+        ];
+        for error in errors {
+            let (mut model, frame) = sent("hi");
+            let shown = format!("{error:?}");
+            let outcome = settle(&mut model, &frame, Err(error), X);
+            assert!(matches!(outcome, Outcome::Lost(_)), "{shown}: {outcome:?}");
+            assert_eq!(
+                state(&model),
+                (Some(MessageState::NotSent), false, false),
+                "{shown}"
+            );
+        }
+    }
+
+    /// The daemon's own answers keep their meaning: `not_confirmed` is not confirmed, any other
+    /// `error` and a `send_failed` reply are not sent, for a send and for a retry alike.
+    #[test]
+    fn the_daemons_not_sent_and_not_confirmed_answers_keep_their_marks() {
+        let daemon = |code: &str| ClientError::Daemon {
+            code: code.to_owned(),
+            message: "m".to_owned(),
+        };
+        for retrying in [false, true] {
+            for (code, unconfirmed) in [
+                ("not_confirmed", true),
+                ("not_linked", false),
+                ("internal", false),
+            ] {
+                let (mut model, mut frame) = sent("hi");
+                if retrying {
+                    let ClientFrame::Send { client_id, .. } = &frame else {
+                        panic!("a send");
+                    };
+                    frame = ClientFrame::retry(client_id.clone());
+                }
+                let outcome = settle(&mut model, &frame, Err(daemon(code)), X);
+                assert!(matches!(outcome, Outcome::Done), "{code}: {outcome:?}");
+                assert_eq!(
+                    state(&model),
+                    (Some(MessageState::NotSent), false, unconfirmed),
+                    "{code} (retry: {retrying})"
+                );
+            }
+            let (mut model, frame) = sent("hi");
+            let ClientFrame::Send { client_id, .. } = &frame else {
+                panic!("a send");
+            };
+            let reply = DaemonFrame::SendFailed {
+                v: PROTOCOL_VERSION,
+                client_id: client_id.clone(),
+                message: "not accepted".to_owned(),
+            };
+            settle(&mut model, &frame, Ok(reply), X);
+            assert_eq!(state(&model), (Some(MessageState::NotSent), false, false));
+        }
     }
 
     #[test]

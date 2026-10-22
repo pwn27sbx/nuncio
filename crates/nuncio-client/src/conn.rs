@@ -44,8 +44,15 @@ pub enum ClientError {
     Json(#[from] serde_json::Error),
     #[error("frame of {bytes} bytes is over the {MAX_FRAME_BYTES} byte limit")]
     FrameTooLarge { bytes: usize },
+    /// A read hit its bound. Only reads are bounded, so a request that ends here was written
+    /// in full; a send or retry whose reply timed out is [`ClientError::SendUnanswered`] instead.
     #[error("the daemon did not answer within {0:?}")]
     Timeout(Duration),
+    /// A `send` or `retry` was written in full but its reply did not come within the bound: the
+    /// daemon may already have handed it to WhatsApp, so it is not confirmed, never not sent.
+    /// The connection is unusable, as after [`ClientError::Timeout`].
+    #[error("not confirmed: the daemon did not answer within {0:?}; it may have been delivered")]
+    SendUnanswered(Duration),
     #[error("the daemon closed the connection")]
     Closed,
     #[error("the daemon replied with error `{code}`: {message}")]
@@ -179,10 +186,19 @@ impl Connection {
 
     /// Send a frame and read the reply, turning an `error` frame into
     /// [`ClientError::Daemon`]. A reply whose op this build does not know comes back as
-    /// [`DaemonFrame::Unknown`]; the caller decides what that means for its request.
+    /// [`DaemonFrame::Unknown`]; the caller decides what that means for its request. A `send` or
+    /// `retry` written in full whose reply times out is [`ClientError::SendUnanswered`]; a
+    /// failure before it was written stays what it was (`Connect`, `Io`, ...).
     pub fn request(&mut self, frame: &ClientFrame) -> Result<DaemonFrame, ClientError> {
         self.send(frame)?;
-        match self.recv()? {
+        let reply = self.recv().map_err(|error| match (error, frame) {
+            (
+                ClientError::Timeout(waited),
+                ClientFrame::Send { .. } | ClientFrame::Retry { .. },
+            ) => ClientError::SendUnanswered(waited),
+            (error, _) => error,
+        })?;
+        match reply {
             DaemonFrame::Error { code, message, .. } => Err(ClientError::Daemon {
                 code: code.as_str().to_owned(),
                 message,

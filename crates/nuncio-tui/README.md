@@ -77,11 +77,11 @@ nuncio-tui [--image <png>]
   the pane's width; the composer grows up to five rows, then scrolls to keep the cursor in view.
   A send shows `sending` until the daemon
   answers, then `queued` (offline, waiting for the reconnect), nothing (sent), `not sent`
-  (it waits for a manual retry) or `not confirmed` (WhatsApp's acknowledgement timed out, so it
-  may have been delivered). The TUI keeps that mark in memory only: after a restart the daemon
-  lists such a send as `not sent`, since the wire has no not-confirmed message state. A
-  connection that dies silently still counts as linked for up to 3 minutes, until its keepalive
-  fails, so a send in that window shows `not confirmed` rather than `queued`.
+  (it waits for a manual retry) or `not confirmed` (WhatsApp's acknowledgement or the daemon's
+  answer timed out, so it may have been delivered). The TUI keeps that mark in memory only:
+  after a restart the daemon lists such a send as `not sent`, since the wire has no not-confirmed
+  message state. A connection that dies silently still counts as linked for up to 3 minutes,
+  until its keepalive fails, so a send in that window shows `not confirmed` rather than `queued`.
 - **Focus**: one pane has the keys at a time, the chat list or the conversation (the composer
   counts as the conversation); it is drawn with a thick border in the theme's accent colour, the
   other with a thin dim one. `Tab` switches between them.

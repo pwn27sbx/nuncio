@@ -160,7 +160,9 @@ impl Daemon {
     /// one it refuses with any other `error` (as `not_linked`) is shown as not sent; every `error`
     /// also becomes the footer notice. A broken connection (closed, timed out, malformed) is
     /// returned as the error after a send (or retry) it carried is marked not sent, and the driver
-    /// reconnects. While disconnected nothing is sent: a send (or retry) is shown as not sent, the
+    /// reconnects; a send (or retry) written in full whose reply timed out is marked not confirmed
+    /// instead (the daemon may already have handed it to WhatsApp), and the driver reconnects too.
+    /// While disconnected nothing is sent: a send (or retry) is shown as not sent, the
     /// footer says `not connected to nunciod`, and nothing retries it later. A `media_ready` the
     /// user asked for is opened, and a request the reply asks for (a `mark_read` after a chat is
     /// opened) is sent. A reply whose op this build does not know (a newer daemon) becomes the

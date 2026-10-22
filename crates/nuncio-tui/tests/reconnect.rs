@@ -10,7 +10,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use nuncio_client::{Chat, Palette, Session, Snapshot};
+use nuncio_client::{Chat, ClientFrame, Palette, Session, Snapshot};
 use nuncio_tui::{Action, App, Backoff, Daemon, Pane, Reconnect, Source};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -511,5 +511,115 @@ fn a_request_that_timed_out_reconnects_instead_of_leaving_the_tui_without_a_daem
         .map(|op| op["op"].as_str().unwrap_or_default())
         .collect();
     assert_eq!(ops, ["status", "chats", "messages"]);
+    let _ = std::fs::remove_file(&path);
+}
+
+/// F3: a send whose reply did not come within the read bound was written in full, so the daemon
+/// may already have handed it to WhatsApp. It is shown as not confirmed, never as not sent, the
+/// footer says it may have been delivered, the TUI still reconnects, and `R` retries it under the
+/// same client_id, so the daemon reuses its WhatsApp id.
+#[test]
+fn a_send_whose_reply_timed_out_is_not_confirmed_and_r_retries_it_under_the_same_client_id() {
+    let path = socket_path();
+    let _socket = Socket(path.clone());
+    let listener = UnixListener::bind(&path).expect("bind");
+    let server = thread::spawn(move || {
+        let mut first = Life::accept(&listener);
+        assert_eq!(first.serve()["op"], "messages");
+        // The send arrives whole and gets no answer within the TUI's read bound.
+        let mut line = String::new();
+        first.reader.read_line(&mut line).expect("the send");
+        let send: Value = serde_json::from_str(&line).expect("json");
+        let mut second = Life::accept(&listener);
+        let mut ops: Vec<Value> = (0..3).map(|_| second.serve()).collect();
+        line.clear();
+        second.reader.read_line(&mut line).expect("the retry");
+        let retry: Value = serde_json::from_str(&line).expect("json");
+        send_line(
+            &mut second.writer,
+            json!({"v":1,"op":"sent","client_id":retry["client_id"],"state":"sent",
+                "id":"3EB0D","timestamp":"2026-10-18T17:33:00Z"}),
+        );
+        ops.push(retry);
+        drop(first);
+        (send, ops)
+    });
+
+    let mut daemon = Daemon::connect_with_timeout(&path, "nuncio-tui/test", ms(150))
+        .expect("connect")
+        .with_backoff(Backoff::new(ms(20), ms(80)));
+    let mut app = app();
+    open_ada(&mut daemon, &mut app);
+    app.handle_key(key(KeyCode::Char('i')));
+    type_text(&mut app, "on my way");
+    let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Enter)) else {
+        panic!("Enter sends");
+    };
+    let ClientFrame::Send { client_id, .. } = &frame else {
+        panic!("a send: {frame:?}");
+    };
+    let client_id = client_id.clone();
+    assert!(
+        daemon.perform(&mut app, &frame).is_err(),
+        "the read timed out"
+    );
+    assert!(!daemon.is_connected(), "a timeout is still a loss");
+    let screen = render(&mut app, 160, 24);
+    assert!(screen.contains("on my way"), "{screen}");
+    assert!(screen.contains("· not confirmed"), "{screen}");
+    assert!(!screen.contains("not sent"), "{screen}");
+    let footer = last_line(&screen);
+    assert!(
+        footer.contains(
+            "not confirmed: the daemon did not answer within 150ms; it may have been delivered"
+        ),
+        "{footer}"
+    );
+
+    drain_until(&mut daemon, &mut app, "the reconnect", |s| {
+        last_line(s).contains("reconnected to nunciod")
+    });
+    let screen = render(&mut app, 160, 24);
+    assert!(screen.contains("· not confirmed"), "{screen}");
+
+    assert_eq!(app.pane(), Pane::Messages);
+    app.handle_key(key(KeyCode::Char('k')));
+    let retry = app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
+    assert_eq!(
+        retry,
+        Some(Action::Request(ClientFrame::retry(client_id.clone())))
+    );
+    let Some(Action::Request(retry)) = retry else {
+        unreachable!()
+    };
+    daemon
+        .perform(&mut app, &retry)
+        .expect("the retry is answered");
+    let screen = render(&mut app, 160, 24);
+    assert!(!screen.contains("not confirmed"), "{screen}");
+    assert!(!screen.contains("not sent"), "{screen}");
+
+    let (send, ops) = server.join().expect("the fake daemon ran its script");
+    assert_eq!(send["op"], "send");
+    assert_eq!(send["client_id"], client_id.as_str());
+    let ops: Vec<(&str, &str)> = ops
+        .iter()
+        .map(|op| {
+            (
+                op["op"].as_str().unwrap_or_default(),
+                op["client_id"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ops,
+        [
+            ("status", ""),
+            ("chats", ""),
+            ("messages", ""),
+            ("retry", client_id.as_str())
+        ],
+        "nothing is retried by itself, and the one retry reuses the send's client_id"
+    );
     let _ = std::fs::remove_file(&path);
 }

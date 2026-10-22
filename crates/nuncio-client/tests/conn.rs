@@ -291,6 +291,61 @@ fn a_wedged_daemon_makes_request_time_out() {
     let _ = server.join();
 }
 
+/// F3: a send (or retry) written in full whose reply did not come within the bound may already be
+/// with WhatsApp, so it is told apart from any other timeout; it still breaks the connection.
+#[test]
+fn a_wedged_daemon_leaves_a_written_send_or_retry_unanswered() {
+    for frame in [
+        ClientFrame::send("15551230001@s.whatsapp.net", "hi", "t-1"),
+        ClientFrame::retry("t-1"),
+    ] {
+        let (_dir, path, server) = silent_daemon();
+        let mut connection =
+            Connection::connect_with_timeout(&path, TEST_READ_TIMEOUT).expect("connects");
+        let err = connection.request(&frame).unwrap_err();
+        assert!(
+            matches!(err, ClientError::SendUnanswered(bound) if bound == TEST_READ_TIMEOUT),
+            "expected an unanswered send, got {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "not confirmed: the daemon did not answer within 100ms; it may have been delivered"
+        );
+        drop(connection);
+        let _ = server.join();
+    }
+}
+
+/// F3: a send that could not be written (the daemon had already closed the connection) never
+/// reached the daemon: it is an ordinary failure, never an unanswered send.
+#[test]
+fn a_send_that_could_not_be_written_is_not_an_unanswered_send() {
+    let dir = TempDir::new("closed");
+    let path = dir.0.join("core.sock");
+    let listener = UnixListener::bind(&path).expect("socket binds");
+    let (closed, gone) = std::sync::mpsc::channel();
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().expect("one client connects");
+        drop(stream);
+        closed.send(()).expect("signal");
+    });
+    let mut connection =
+        Connection::connect_with_timeout(&path, TEST_READ_TIMEOUT).expect("connects");
+    gone.recv().expect("the daemon closed");
+    let err = connection
+        .request(&ClientFrame::send(
+            "15551230001@s.whatsapp.net",
+            "hi",
+            "t-1",
+        ))
+        .unwrap_err();
+    assert!(
+        matches!(err, ClientError::Io(ref io) if io.kind() == std::io::ErrorKind::BrokenPipe),
+        "expected the write to fail, got {err:?}"
+    );
+    let _ = server.join();
+}
+
 #[test]
 fn a_short_timeout_does_not_break_a_normal_exchange() {
     let (_dir, path, server) = fake_daemon(lines(&[HELLO_OK, STATUS, STATUS]));

@@ -482,8 +482,9 @@ impl App {
         self.model.request_failed(frame, message);
     }
 
-    /// The daemon answered my send (or retry) `client_id` with `not_confirmed`: WhatsApp's
-    /// acknowledgement timed out, so it may have been delivered. It is shown as not confirmed, not
+    /// The daemon answered my send (or retry) `client_id` with `not_confirmed` (WhatsApp's
+    /// acknowledgement timed out), or its reply did not come within the read bound after it was
+    /// written in full: it may have been delivered. It is shown as not confirmed, not
     /// as not sent, and `R` still retries it: a retry reuses its WhatsApp id, so it can never
     /// become a second message.
     pub fn send_not_confirmed(&mut self, client_id: &str) {

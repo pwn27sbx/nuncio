@@ -434,6 +434,31 @@ fn a_late_reply_marks_its_own_send_and_is_no_loss_of_the_current_link() {
     assert!(c.model().connected());
 }
 
+/// A send the outbox could not even connect for, answered after its life ended (the event
+/// connection noticed the loss first): it never reached the daemon, so it is not sent, not "not
+/// confirmed", and the loss already shown is not shown again.
+#[test]
+fn a_late_reply_that_never_connected_marks_the_send_not_sent() {
+    let mut c = opened(Vec::new());
+    c.set_draft("hi");
+    let frame = sent(c.send().1);
+    c.incoming(Incoming::Lost(ClientError::Closed));
+    c.incoming(Incoming::Connected);
+    c.incoming(Incoming::LateReply {
+        request: frame,
+        result: Err(ClientError::Connect {
+            path: "/nonexistent/core.sock".into(),
+            source: std::io::Error::from(std::io::ErrorKind::NotFound),
+        }),
+    });
+    let shown = &c.model().loaded()[0];
+    assert_eq!(shown.state, Some(MessageState::NotSent));
+    assert!(!c.model().transcript().is_unconfirmed(shown));
+    assert!(!c.model().transcript().is_sending(shown));
+    assert!(c.model().connected(), "the new link stays");
+    assert_eq!(c.model().notice(), Some("reconnected to nunciod"));
+}
+
 // Notifications, the `open-chat` action and links (D3b).
 
 use nuncio_client::Config;

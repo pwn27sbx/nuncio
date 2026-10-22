@@ -201,10 +201,12 @@ fn a_request_on_a_broken_connection_is_answered_with_the_loss_and_not_sent_again
     drop(life);
     worker.send(ClientFrame::send("15551230001@s.whatsapp.net", "hi", "d-1"));
     let mut saw_reply = false;
-    // The event thread may notice first; either way the send comes back failed, exactly once.
+    // The event thread may notice first; either way the send comes back failed, exactly once. The
+    // send goes to the outbox, whose connect fails; when the event thread's loss ends the life
+    // before that failure comes back, it is the ended life's answer: a late reply.
     for _ in 0..2 {
         match next(&rx) {
-            Incoming::Reply { request, result } => {
+            Incoming::Reply { request, result } | Incoming::LateReply { request, result } => {
                 assert!(matches!(request, ClientFrame::Send { .. }));
                 assert!(result.as_ref().is_err_and(driver::is_loss), "{result:?}");
                 saw_reply = true;

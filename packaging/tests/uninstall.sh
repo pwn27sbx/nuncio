@@ -205,7 +205,8 @@ cp -p "$b" "$work/bindings.before"
 	source "$installer" || exit 99
 	# The second write of without_line fails, as on a full disk; every other printf works.
 	writes=0
-	# shellcheck disable=SC2329,SC2059 # called by without_line; it passes printf's own arguments on.
+	# shellcheck disable=SC2317,SC2329,SC2059 # called by without_line, so reachable (SC2317 is shellcheck
+	# 0.9's name for SC2329); it passes printf's own arguments on.
 	printf() {
 		if [[ ${FUNCNAME[1]} == without_line ]] && ((++writes > 1)); then return 1; fi
 		builtin printf "$@"

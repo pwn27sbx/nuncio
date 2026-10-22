@@ -128,11 +128,11 @@ func startDaemon(t *testing.T, runtimeDir, busAddress string) *exec.Cmd {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start nunciod: %v", err)
 	}
+	// One cleanup, so stderr is read only after Wait: until then os/exec's
+	// copying goroutine may still be writing to the buffer.
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-	})
-	t.Cleanup(func() {
 		if t.Failed() && stderr.Len() > 0 {
 			t.Logf("nunciod stderr: %s", stderr.String())
 		}
@@ -350,6 +350,13 @@ func TestDaemonReplacesStaleSocket(t *testing.T) {
 	before, err := os.Stat(socket)
 	if err != nil {
 		t.Fatalf("stat stale socket: %v", err)
+	}
+	// A second link keeps the stale inode allocated. Without it a file system
+	// that recycles freed inode numbers at once (ext4 does, APFS does not)
+	// hands the daemon's new socket the stale one's number, and SameFile
+	// would mistake the replacement for the stale file.
+	if err := os.Link(socket, filepath.Join(rt, "stale.sock")); err != nil {
+		t.Fatalf("link stale socket: %v", err)
 	}
 
 	startDaemon(t, rt, noBus(t))

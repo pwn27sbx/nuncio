@@ -1,6 +1,7 @@
 # ADR 0003: where the Signal state lives
 
-- Status: accepted (T17, Q5 option 1); planned until the home acceptance run
+- Status: accepted (T17, Q5 option 1); wired into `nunciod` and `nuncio link` and tested against a
+  fake keyring; with the real Secret Service planned until the home acceptance run
 - Date: 2026-10-21
 
 ## Context
@@ -88,11 +89,24 @@ The owner chose: "Q5/T17 option 1, a keyring-held data key with sealed columns".
 ### Failure modes
 
 11. **The keyring is locked or unavailable at start** (to confirm, L3 (3)): the daemon stays up and
-    reports it to the clients, never connects to WhatsApp and never writes to the store; it retries
-    the keyring on the session's capped backoff.
+    serves the socket, never connects to WhatsApp and never writes to the store (the keyring is
+    read before whatsmeow's schema upgrade, the migration's backup or anything else); it retries
+    the keyring on the session's capped backoff. Clients see the existing states, no new wire
+    field: `status` and `hello_ok` say `session: offline` (`linked: true`, no `stop_reason`, which
+    stays WhatsApp's own stops), and a request that needs the session (send, retry, react,
+    mark_read, download_media, logout) answers an `internal` error with a fixed text naming the
+    locked keyring. The daemon logs that same fixed line at each attempt. A database with no device
+    needs no key: the daemon stays `unlinked` and never asks the keyring. With a device stored, the
+    daemon serves the socket before it first asks the keyring, and makes that first attempt in the
+    background: on Linux the Secret Service may wait on an unlock prompt with no timeout, and
+    meanwhile `status` answers `offline` and a request answers a fixed text saying the device is
+    still opening. One attempt runs at a time, so a retry never opens a second prompt while one is
+    waiting, and stopping the daemon does not wait for it.
 12. **The data key is missing but sealed data exists** (the key check row fails, or the item is
-    gone): nuncio never creates a new key over sealed data. It says the device cannot be opened and
-    tells the user to run `nuncio purge --confirm` and link again.
+    gone): nuncio never creates a new key over sealed data. The device stays closed, the daemon
+    answers `offline` as in 11 and never retries on its own, and the error text, logged once and
+    answered to requests, is "the stored device cannot be read; run nuncio purge --confirm, then
+    nuncio link"; `nuncio link` prints it and links nothing.
 13. **A tampered or corrupted row:** GCM refuses it, and that one read fails with an error; there is
     no fallback to reading it as plain.
 
@@ -107,8 +121,10 @@ The owner chose: "Q5/T17 option 1, a keyring-held data key with sealed columns".
     `nuncio.db.pre-t17-<UTC time>.bak` (for example `nuncio.db.pre-t17-20261021T133045Z.bak`), or
     `…-1.bak` up to `…-99.bak` when that name is taken (a retry within the same second), created
     empty at `0600` first and never over an existing file, and checks the copy read-only
-    (integrity check, device row present). Only then does it ask the keyring for the data key
-    (created, or reused when an earlier failed run left it). One transaction seals the private
+    (integrity check, device row present). Only then does it take SQLite's write lock
+    (`BEGIN IMMEDIATE`), look for the plain device keys again under it, and ask the keyring for the
+    data key (reused when one is there, an earlier failed run's included; otherwise created, and a
+    key that appeared meanwhile is used, never replaced). One transaction seals the private
     columns in place, moves the pre-keys into `nuncio_pre_keys`, seals the device keys into
     `nuncio_device`, zeroes them in `whatsmeow_device`, writes the check row and sets the
     cleanup-pending mark (the one row of `nuncio_seal_cleanup`, no secret); it commits only if the
@@ -120,12 +136,27 @@ The owner chose: "Q5/T17 option 1, a keyring-held data key with sealed columns".
     still hold plain keys, and every later run that finds the mark retries the cleanup, even with
     nothing left to migrate, and reports `Cleaned` when it finishes. With nothing to migrate and
     no mark, a run writes nothing.
+    **Two migrations at once** (`nunciod` at start or on a retry, and `nuncio link`, on the same
+    plain database): the Secret Service has no compare-and-swap, so two processes that both find no
+    key could each write one, and the later write would replace the key the earlier one sealed
+    under. Creating the key only under the write lock rules that out: the second process waits for
+    the lock (up to 30 s) until the first has committed, then finds no plain device keys, writes no
+    key and starts its checks again, as if it had started after the first. Its backup, written
+    before it waited, stays on disk like any backup (15, 17). `nuncio link` also refuses before it
+    opens the store while `nunciod` answers on `core.sock`.
 15. **The backup is never deleted by the migration** (to confirm, L3 (2)). It holds the plain keys,
     and nuncio says so when it writes it, so the user can remove it once the sealed database works.
-16. **The wipe deletes the key and the backup.** `nuncio logout --confirm` and
+16. **Where the data key is created.** Only from `nuncio link`, and only when pairing saves a new
+    device (whatsmeow's `Device.Save`): the key is generated in memory when the link starts, then
+    on that first save written, read back, the check row written, the keyring read again and
+    compared (a key another process wrote meanwhile fails the save), and only then the device row
+    written. A link that never pairs leaves no key and no row. The daemon never creates a key,
+    except through the migration of a database that holds no sealed data yet (14).
+17. **The wipe deletes the key and the backup.** `nuncio logout --confirm` and
     `nuncio purge --confirm` delete the `store.data_key` item with the other keyring items under
     `nuncio` (the four `device.*` items of the older keyring-backed device store included), and
-    the migration's backup with `nuncio.db`, so a wipe leaves nothing behind.
+    every migration backup (`nuncio.db.pre-t17-*.bak`, numbered ones and a journal file left beside
+    one included; a symlink is removed as a link) with `nuncio.db`, so a wipe leaves nothing behind.
 
 ### Decisions to confirm with the owner
 

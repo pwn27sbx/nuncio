@@ -572,8 +572,9 @@ func TestHelpNamesTheSilentConnectionWindow(t *testing.T) {
 	}
 }
 
-// linkedDevice stores a whatsmeow device with an ID in the isolated data dir, as a finished
-// link would. Nothing here touches the network.
+// linkedDevice stores a whatsmeow device with an ID in the isolated data dir, sealed under a data
+// key in localKeyring (a fake: call fakeKeys first), as a finished link would. Nothing here
+// touches the network.
 func linkedDevice(t *testing.T) {
 	t.Helper()
 	path, err := wa.DBPath()
@@ -585,7 +586,7 @@ func linkedDevice(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = db.Close() }()
-	device, err := wa.OpenDevice(context.Background(), db)
+	device, _, err := wa.OpenDevice(context.Background(), db, path, localKeyring, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -613,6 +614,7 @@ func fakeConnect(t *testing.T) *int {
 
 func TestLinkRefusesASecondSessionWhileTheDaemonAnswers(t *testing.T) {
 	isolateData(t)
+	fakeKeys(t)
 	linkedDevice(t)
 	serveFakeDaemon(t, &fakeDaemon{session: ipc.SessionLinked})
 	calls := fakeConnect(t)
@@ -631,6 +633,7 @@ func TestLinkRefusesASecondSessionWhileTheDaemonAnswers(t *testing.T) {
 
 func TestLinkConnectsTheLinkedDeviceWhenNoDaemonAnswers(t *testing.T) {
 	isolateData(t)
+	fakeKeys(t)
 	linkedDevice(t)
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // no core.sock there
 	calls := fakeConnect(t)
@@ -835,6 +838,7 @@ func TestLogoutWithoutADaemonRefusesAndConnectsNothing(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // no core.sock there
 	linkedDevice(t)
 	before := listing(t, root)
+	items := keys.count()
 	calls := fakeConnect(t)
 
 	code, out, errOut := runCLI("logout", "--confirm")
@@ -852,8 +856,8 @@ func TestLogoutWithoutADaemonRefusesAndConnectsNothing(t *testing.T) {
 	if after := listing(t, root); !slices.Equal(before, after) {
 		t.Errorf("the data dirs changed:\n before %v\n after  %v", before, after)
 	}
-	if n := keys.count(); n != 4 {
-		t.Errorf("keyring holds %d items, want the 4 it had", n)
+	if n := keys.count(); n != items {
+		t.Errorf("keyring holds %d items, want the %d it had", n, items)
 	}
 }
 
@@ -983,6 +987,8 @@ func (qrLinker) Phone(context.Context, string) (string, error) {
 // never waits for a message and never sends one.
 func TestLinkExitsAfterReportingLinkedAndSendsNothing(t *testing.T) {
 	isolateData(t)
+	// A link needs the keyring for the data key, even one that never pairs.
+	fakeKeys(t)
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // no core.sock there
 	prepare := prepareLink
 	prepareLink = func(c wa.Consent, _ *whatsmeow.Client) (wa.Prepared, error) {

@@ -278,7 +278,8 @@ func TestSessionCloseDisconnectsAndClosesTheStore(t *testing.T) {
 
 func TestOpenSessionWithoutDatabaseIsUnlinkedAndCreatesNothing(t *testing.T) {
 	dataDir := filepath.Join(t.TempDir(), "nuncio")
-	s, err := OpenSession(context.Background(), filepath.Join(dataDir, "nuncio.db"))
+	kr := newTestKeyring()
+	s, err := OpenSession(context.Background(), filepath.Join(dataDir, "nuncio.db"), kr)
 	if err != nil {
 		t.Fatalf("OpenSession: %v", err)
 	}
@@ -291,6 +292,9 @@ func TestOpenSessionWithoutDatabaseIsUnlinkedAndCreatesNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(dataDir); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("stat %s = %v, want it not to exist: starting a session must not create the data dir", dataDir, err)
+	}
+	if n := kr.callCount(); n != 0 {
+		t.Errorf("the keyring was called %d times without a database, want never", n)
 	}
 }
 

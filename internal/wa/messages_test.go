@@ -244,7 +244,10 @@ func TestOpenSessionOverAnExistingDatabasePreparesTheMessageStore(t *testing.T) 
 		t.Fatalf("close: %v", err)
 	}
 
-	s, err := OpenSession(context.Background(), path)
+	// No device needs no key: a locked keyring changes nothing here.
+	kr := newTestKeyring()
+	kr.fail = true
+	s, err := OpenSession(context.Background(), path, kr)
 	if err != nil {
 		t.Fatalf("OpenSession: %v", err)
 	}

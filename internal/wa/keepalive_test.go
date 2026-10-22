@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -14,7 +13,6 @@ import (
 	waevents "go.mau.fi/whatsmeow/types/events"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
-	"github.com/pwn27sbx/nuncio/internal/store"
 )
 
 // keepAliveDead is the keepalive failure whatsmeow reports once the pings have failed for longer
@@ -187,13 +185,8 @@ func TestDeadKeepAliveIsLoggedOnce(t *testing.T) {
 // B1: the real whatsmeow client OpenSession builds sends normal delivery receipts (two grey
 // ticks) without being marked online, and keeps whatsmeow's own reconnect loop off.
 func TestOpenSessionForcesActiveDeliveryReceiptsWithoutPresence(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "nuncio.db")
-	db, err := store.Open(path)
-	if err != nil {
-		t.Fatalf("store.Open: %v", err)
-	}
-	_ = db.Close()
-	s, err := OpenSession(context.Background(), path)
+	path, kr, _ := linkedDatabase(t)
+	s, err := OpenSession(context.Background(), path, kr)
 	if err != nil {
 		t.Fatalf("OpenSession: %v", err)
 	}

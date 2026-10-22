@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/pwn27sbx/nuncio/internal/media"
@@ -14,7 +15,8 @@ import (
 
 // What nuncio keeps in its data directory ($XDG_DATA_HOME/nuncio).
 const (
-	// DBFile is the SQLite database: messages, chats and, today, whatsmeow's Signal state.
+	// DBFile is the SQLite database: messages, chats and whatsmeow's Signal state, its private
+	// columns sealed under the data key (ADR 0003).
 	DBFile = "nuncio.db"
 	// MediaDir is the media cache (internal/media).
 	MediaDir = "media"
@@ -25,6 +27,42 @@ const (
 // owned is every entry of the data dir that Wipe removes. Anything else in the directory is not
 // nuncio's and stays.
 var owned = []string{DBFile, DBFile + "-wal", DBFile + "-shm", MediaDir, ExportsDir}
+
+// backupPrefix starts the name of every backup the T17 migration writes next to the database
+// (MigrateToSealed: <db>.pre-t17-<UTC time>[-n].bak). The backups hold the device's keys in plain.
+const backupPrefix = DBFile + ".pre-t17-"
+
+// isMigrationBackup reports whether name is one of the migration's backups, or a journal file
+// SQLite left beside one.
+func isMigrationBackup(name string) bool {
+	if !strings.HasPrefix(name, backupPrefix) {
+		return false
+	}
+	for _, suffix := range []string{".bak", ".bak-wal", ".bak-shm", ".bak-journal"} {
+		if strings.HasSuffix(name, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// migrationBackups lists the migration's backups in dataDir by name; a missing dataDir has none.
+func migrationBackups(dataDir string) ([]string, error) {
+	entries, err := os.ReadDir(dataDir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		if isMigrationBackup(e.Name()) {
+			names = append(names, e.Name())
+		}
+	}
+	return names, nil
+}
 
 // The keyring items nuncio has ever written under KeyringService: the data key (ADR 0003) and
 // the four device items of the keyring-backed device store it replaces. No binary wrote the
@@ -47,8 +85,10 @@ var wipedKeyItems = []string{
 var removeDataDir = os.Remove
 
 // Wipe deletes everything nuncio keeps on this machine for the device, in this order: the
-// keyring items in kr (service KeyringService: the data key and the legacy device items), then the database with its WAL and SHM files, the media
-// cache and the exports in dataDir, and finally dataDir itself when nothing else is left in it.
+// keyring items in kr (service KeyringService: the data key and the legacy device items), then the
+// database with its WAL and SHM files, every backup the T17 migration wrote next to it
+// (<db>.pre-t17-*.bak, which hold the device's keys in plain), the media cache and the exports in
+// dataDir, and finally dataDir itself when nothing else is left in it.
 // An emptied dataDir that the packaged systemd unit's sandbox keeps (the rmdir fails with EBUSY
 // or EROFS) stays and is not an error; any other failure to remove it is, EPERM and EACCES
 // included, since they mean a real permission problem. A file of nuncio's that could not be
@@ -60,11 +100,8 @@ var removeDataDir = os.Remove
 // inside dataDir is removed as a link, and a dataDir that is itself a symlink is refused before
 // anything is deleted.
 //
-// Without the data key the sealed values left in any copy of nuncio.db cannot be opened. No binary
-// writes the data key yet (whatsmeow's sqlstore keeps the Signal state inside nuncio.db until the
-// sealed device store is wired), so today this step finds nothing; it runs anyway so a wipe never
-// leaves a key behind once it is. A failing keyring does not stop the files from being deleted:
-// the error is returned after them.
+// Without the data key the sealed values left in any copy of nuncio.db cannot be opened. A failing
+// keyring does not stop the files from being deleted: the error is returned after them.
 func Wipe(dataDir string, kr Keyring) error {
 	if fi, err := os.Lstat(dataDir); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
 		return fmt.Errorf("store: %s is a symlink; nothing was deleted", dataDir)
@@ -90,6 +127,17 @@ func Wipe(dataDir string, kr Keyring) error {
 	for _, name := range owned {
 		if err := os.RemoveAll(filepath.Join(dataDir, name)); err != nil {
 			errs = append(errs, fmt.Errorf("store: delete %s: %w", name, err))
+		}
+	}
+	// The backups, the same way: a symlink is removed as a link. Their names carry only the
+	// migration's time, so the error says which kind of file it was, not its name.
+	backups, err := migrationBackups(dataDir)
+	if err != nil {
+		errs = append(errs, fmt.Errorf("store: list the migration backups: %w", unwrapPath(err)))
+	}
+	for _, name := range backups {
+		if err := os.RemoveAll(filepath.Join(dataDir, name)); err != nil {
+			errs = append(errs, fmt.Errorf("store: delete a migration backup (%s*.bak): %w", backupPrefix, unwrapPath(err)))
 		}
 	}
 	if len(errs) == 0 {

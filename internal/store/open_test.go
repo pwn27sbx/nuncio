@@ -1,6 +1,8 @@
 package store
 
 import (
+	"context"
+	"database/sql/driver"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -86,5 +88,58 @@ func TestOpenKeepsPragmas(t *testing.T) {
 	}
 	if got := db.Stats().MaxOpenConnections; got != 1 {
 		t.Errorf("MaxOpenConnections = %d, want 1", got)
+	}
+}
+
+// A connection database/sql opens later (after a cancelled query made it drop the first one, as
+// L8 observed) gets the same pragmas: they are in the DSN, not run once on the first connection.
+func TestOpenGivesEveryNewConnectionItsPragmas(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "nuncio.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("Conn: %v", err)
+	}
+	// ErrBadConn makes database/sql discard this connection instead of returning it to the pool.
+	_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	_ = conn.Close()
+
+	var fk int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&fk); err != nil || fk != 1 {
+		t.Errorf("foreign_keys on a new connection = %d (%v), want 1", fk, err)
+	}
+	if got := db.Stats().OpenConnections; got != 1 {
+		t.Errorf("OpenConnections = %d, want 1 (a new one)", got)
+	}
+}
+
+// A path with characters that mean something in a URI still opens that file and no other.
+func TestOpenKeepsAPathWithURICharacters(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "a?b#c%d")
+	path := filepath.Join(dir, "nuncio.db")
+	openAndWrite(t, path)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if len(names) == 0 || names[0] != "nuncio.db" {
+		t.Errorf("files in the data dir = %v, want nuncio.db there", names)
+	}
+}
+
+// A relative path opens the file relative to the working directory, as before.
+func TestOpenKeepsARelativePath(t *testing.T) {
+	t.Chdir(t.TempDir())
+	openAndWrite(t, filepath.Join("data", "nuncio.db"))
+	if _, err := os.Stat(filepath.Join("data", "nuncio.db")); err != nil {
+		t.Errorf("stat data/nuncio.db: %v", err)
 	}
 }

@@ -14,8 +14,9 @@ nuncio runs as a linked WhatsApp device on one Linux machine, for one user. It a
 - **Your account from a ban** caused by the client: no automation, no retry loops, no presence.
 
 It does **not** protect against malware or anyone running as your user, against root, or against a
-stolen machine without disk encryption: today the Signal session state sits in an ordinary SQLite
-file (see below; sealing it under a keyring-held key is planned, T17). Using an unofficial client
+stolen machine without disk encryption: the messages sit in an ordinary SQLite file, and the
+Signal session state in it is sealed under a key that any process of yours can ask the unlocked
+keyring for (see below; the real Secret Service run is planned, T17). Using an unofficial client
 is against WhatsApp's Terms of Service; nuncio reduces the ban risk, it cannot remove it.
 
 ## What is stored where
@@ -23,7 +24,7 @@ is against WhatsApp's Terms of Service; nuncio reduces the ban risk, it cannot r
 | What | Where | Protection |
 | --- | --- | --- |
 | Messages, chats, reactions, the outbox, the search index | `$XDG_DATA_HOME/nuncio/nuncio.db` (default `~/.local/share/nuncio/`), with its `-wal` and `-shm` files | directory `0700`, files `0600` (an existing looser file is tightened when it is opened) |
-| **The WhatsApp device's Signal state** (identity and session keys, pre-keys, sender keys, app-state keys) | **inside the same `nuncio.db`**, in whatsmeow's own tables | `0600` only, **not encrypted** today. Planned (T17, in progress on `feat/m4-omarchy`, planned until the home acceptance run): the private columns sealed with AES-256-GCM under one data key held in the Secret Service (item `store.data_key`, service `nuncio`), and an existing plain database migrated after a backup ([ADR 0003](docs/adr/0003-where-the-signal-state-lives.md)). No binary writes keyring items yet |
+| **The WhatsApp device's Signal state** (identity and session keys, pre-keys, sender keys, app-state keys) | **inside the same `nuncio.db`**, in whatsmeow's own tables | `0600`, and the private columns sealed with AES-256-GCM under one data key held in the Secret Service (item `store.data_key`, service `nuncio`; T17, [ADR 0003](docs/adr/0003-where-the-signal-state-lives.md)). Tested against a fake keyring only; with the real Secret Service it is planned until the home acceptance run. An existing plain database is migrated at start after a backup, `nuncio.db.pre-t17-<UTC time>.bak`, which still holds the keys in plain until you delete it (the wipe deletes it). With the keyring locked `nunciod` serves offline and writes nothing; with the key gone the device cannot be read and is never resealed under a new key |
 | Media you open (photos, stickers, documents) | `$XDG_DATA_HOME/nuncio/media/` | directory `0700`, files `0600`; downloaded only on demand, never on their own, and checked against WhatsApp's SHA-256 |
 | `exports` | `$XDG_DATA_HOME/nuncio/exports/` | reserved for chat exports (no command writes it yet); deleted by the wipe |
 | The socket the apps talk to | `$XDG_RUNTIME_DIR/nuncio/core.sock` | directory `0700`, socket `0600` |
@@ -95,8 +96,9 @@ scores it (still to run on Linux).
 ## Wiping the device
 
 - `nuncio logout --confirm`: WhatsApp unlinks the device first (through the running daemon); then
-  the keyring items, `nuncio.db` with `-wal`/`-shm`, the media cache and the exports are deleted
-  and the daemon stops. If WhatsApp does not confirm, nothing is deleted.
+  the keyring items (the data key `store.data_key` included), `nuncio.db` with `-wal`/`-shm`, the
+  migration backups `nuncio.db.pre-t17-*.bak`, the media cache and the exports are deleted and the
+  daemon stops. If WhatsApp does not confirm, nothing is deleted.
 - `nuncio purge --confirm`: the same without contacting WhatsApp, for a device already removed
   under Linked devices on the phone.
 - Without `--confirm` both only list what they would delete. Under the systemd sandbox the emptied

@@ -456,3 +456,40 @@ func TestSealCheckRejectsAnUnknownVersion(t *testing.T) {
 		t.Fatalf("unknown version reported as %v", err)
 	}
 }
+
+// hidingKeyring answers its first Get as if the item were absent although it holds one: another
+// process wrote its key right after this caller looked.
+type hidingKeyring struct {
+	*countingKeyring
+	hidden bool
+}
+
+func (h *hidingKeyring) Get(service, user string) (string, error) {
+	if !h.hidden {
+		h.hidden = true
+		return "", ErrKeyNotFound
+	}
+	return h.countingKeyring.Get(service, user)
+}
+
+// L9 B1: a key that appears between LoadDataKey's first read and its write is never replaced;
+// LoadDataKey returns that key.
+func TestLoadDataKeyNeverReplacesAKeyThatAppearedMeanwhile(t *testing.T) {
+	kr := &hidingKeyring{countingKeyring: &countingKeyring{fakeKeyring: newFakeKeyring()}}
+	existing := testKey(5)
+	_ = kr.fakeKeyring.Set("nuncio", "store.data_key", base64.StdEncoding.EncodeToString(existing))
+
+	key, err := LoadDataKey(kr, true)
+	if err != nil {
+		t.Fatalf("LoadDataKey(create): %v", err)
+	}
+	if !bytes.Equal(key, existing) {
+		t.Error("LoadDataKey did not return the key that appeared meanwhile")
+	}
+	if kr.setCount() != 0 {
+		t.Errorf("keyring writes = %d, want 0", kr.setCount())
+	}
+	if got, _ := kr.fakeKeyring.Get("nuncio", "store.data_key"); got != base64.StdEncoding.EncodeToString(existing) {
+		t.Error("the key that appeared meanwhile was replaced")
+	}
+}

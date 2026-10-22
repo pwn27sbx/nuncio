@@ -5,7 +5,11 @@
 // never travel over D-Bus.
 //
 // The daemon, not `nuncio link`, owns the session: if the store holds a linked
-// device it connects; if not it stays unlinked and never starts a link. With a
+// device it connects; if not it stays unlinked and never starts a link. The
+// device's keys are sealed under a data key in the Secret Service (ADR 0003): a
+// database an older build left in plain is backed up and sealed at start, and
+// while the keyring is locked the daemon serves offline, connects nothing and
+// writes nothing, trying again on the session's backoff. With a
 // nuncio.db it stores incoming text and media messages and answers chats, messages and
 // unread counts from it; without one it answers the shared fixture chat list.
 // Attachments are downloaded only on a download_media request, into the private
@@ -90,8 +94,11 @@ func run() error {
 	}
 	// Opened only once the socket is ours, so a daemon that loses the race
 	// never touches the store. A missing nuncio.db means unlinked; nothing is
-	// created to find that out.
-	session, err := wa.OpenSession(context.Background(), dbPath)
+	// created to find that out. The device opens with the data key in the
+	// keyring (ADR 0003); while it cannot (a locked keyring), the daemon serves
+	// offline, opens nothing and tries again on the session's backoff.
+	keyring := store.SecretService{}
+	session, db, err := openSession(context.Background(), dbPath, keyring)
 	if err != nil {
 		return err
 	}
@@ -100,13 +107,13 @@ func run() error {
 	// connection changes) through this broker.
 	events := ipc.NewBroker()
 	session.SetEvents(events)
-	d, err := newDaemon(session, session.Store())
+	d, err := newDaemon(session, db)
 	if err != nil {
 		return err
 	}
-	// What a wipe (nuncio logout or purge) deletes: the device keys in the keyring, the data dir,
-	// and finally this socket.
-	d.dataDir, d.keyring, d.socket = filepath.Dir(dbPath), store.SecretService{}, socket
+	// What a wipe (nuncio logout or purge) deletes: the keyring items (the data key among them),
+	// the data dir, and finally this socket.
+	d.dataDir, d.keyring, d.socket = filepath.Dir(dbPath), keyring, socket
 
 	if bus != nil {
 		emit, err := exportDBus(bus, d)
@@ -129,7 +136,8 @@ func run() error {
 
 	// Connect only once this process is the one instance, so a second daemon
 	// never opens a competing session. A failed connect leaves it offline and
-	// retries after the backoff delay.
+	// retries after the backoff delay; a device that is not open yet is tried
+	// again from here on the same backoff.
 	if err := session.Start(); err != nil {
 		// The cause's type only: whatsmeow's text can carry the server or proxy address.
 		log.Printf("cannot connect the linked device (%s)", wa.ErrKind(err))

@@ -420,3 +420,45 @@ func TestWipeDeletesTheDataKeyAndTheLegacyItems(t *testing.T) {
 		t.Errorf("the wipe touched another service's item: %v", err)
 	}
 }
+
+// The wipe deletes every backup the T17 migration wrote next to the database, plain and numbered,
+// with any journal file SQLite left beside one, so no plain copy of the keys survives it; files
+// that only look alike stay.
+func TestWipeDeletesEveryMigrationBackup(t *testing.T) {
+	dir := populatedDataDir(t)
+	backups := []string{
+		DBFile + ".pre-t17-20261021T133045Z.bak",
+		DBFile + ".pre-t17-20261021T133045Z-1.bak",
+		DBFile + ".pre-t17-20261021T133045Z-99.bak",
+		DBFile + ".pre-t17-20261022T080000Z.bak-journal",
+	}
+	for _, name := range backups {
+		writeFile(t, filepath.Join(dir, name))
+	}
+	// A backup that is a symlink is removed as a link; its target stays.
+	target := filepath.Join(t.TempDir(), "outside.bak")
+	writeFile(t, target)
+	link := filepath.Join(dir, DBFile+".pre-t17-20261023T000000Z.bak")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	kept := []string{"other.db.pre-t17-20261021T133045Z.bak", DBFile + ".pre-t17-notes.txt", DBFile + ".bak"}
+	for _, name := range kept {
+		writeFile(t, filepath.Join(dir, name))
+	}
+
+	if err := Wipe(dir, newFakeKeyring()); err != nil {
+		t.Fatalf("Wipe: %v", err)
+	}
+	for _, name := range append(backups, filepath.Base(link)) {
+		assertGone(t, filepath.Join(dir, name))
+	}
+	if _, err := os.Stat(target); err != nil {
+		t.Errorf("the symlinked backup's target was deleted: %v", err)
+	}
+	for _, name := range kept {
+		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+			t.Errorf("%s was deleted: %v", name, err)
+		}
+	}
+}

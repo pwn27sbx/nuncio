@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -40,7 +41,15 @@ const backupTimeLayout = "20060102T150405Z"
 // backup tries after its plain name, so a retry within the same second gets its own file.
 const maxBackupNumber = 99
 
+// errMigratedMeanwhile reports that, once this call held SQLite's write lock, the device keys it
+// found in plain were sealed already: another process (nunciod and `nuncio link` can both start a
+// migration) committed its migration first.
+var errMigratedMeanwhile = errors.New("store: another process sealed the database meanwhile")
+
 var (
+	// migrateBusyTimeout is how long a migration waits for SQLite's write lock while another
+	// process holds it (its migration, or that process's keyring prompt inside it).
+	migrateBusyTimeout = 30 * time.Second
 	// migrateNow is the clock that names the backup. Tests replace it.
 	migrateNow = time.Now
 	// migrateFault, when set, is called at each stage of the migration; an error it returns
@@ -113,7 +122,9 @@ type plainDevice struct {
 // schema older than the tables it seals is ErrSchemaOutdated, before anything is written.
 //
 // In order: a backup with VACUUM INTO at <dbPath>.pre-t17-<UTC time>.bak, or <…>-<n>.bak when
-// that name is taken (0600, never over an existing file), verified read-only; the data key; one
+// that name is taken (0600, never over an existing file), verified read-only; SQLite's write lock
+// (BEGIN IMMEDIATE), under which the plain device keys are looked for again and the data key is
+// taken from the keyring or created there (LoadDataKey, which never replaces a key it finds); one
 // transaction that seals every private column, moves the pre-keys to nuncio_pre_keys, seals the
 // device keys into nuncio_device, zeroes whatsmeow_device's private columns and writes the seal
 // check row and the cleanup-pending mark, committed only when the keyring still holds the key it
@@ -125,6 +136,12 @@ type plainDevice struct {
 // MigrationResult and writes nothing. The backup is never deleted. Errors carry no key material,
 // ids or numbers.
 //
+// Two processes may migrate the same database at once (L9 B1). Every key creation happens under
+// the write lock, so a second process waits until the first one committed (up to
+// migrateBusyTimeout) and then finds nothing left to seal and writes no key: the keyring always
+// ends holding the key the committed data is sealed under. A call that finds the database sealed
+// meanwhile starts its checks again, as a call made after the other one would.
+//
 // Call it with no other user of db: it holds one connection for its whole run.
 func MigrateToSealed(ctx context.Context, db *sql.DB, dbPath string, kr Keyring) (MigrationResult, error) {
 	conn, err := db.Conn(ctx)
@@ -133,6 +150,30 @@ func MigrateToSealed(ctx context.Context, db *sql.DB, dbPath string, kr Keyring)
 	}
 	defer conn.Close()
 
+	res, err := migrateOnce(ctx, conn, dbPath, kr)
+	if errors.Is(err, errMigratedMeanwhile) {
+		res, err = migrateOnce(ctx, conn, dbPath, kr)
+	}
+	return res, err
+}
+
+// busyTimeoutOn makes conn wait up to migrateBusyTimeout for SQLite's write lock while another
+// process holds it, and returns the function that puts the previous timeout back.
+func busyTimeoutOn(ctx context.Context, conn *sql.Conn) (restore func(), err error) {
+	var prev int64
+	if err := conn.QueryRowContext(ctx, `PRAGMA busy_timeout`).Scan(&prev); err != nil {
+		return nil, fmt.Errorf("store: migration: read busy_timeout: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA busy_timeout=%d`, migrateBusyTimeout.Milliseconds())); err != nil {
+		return nil, fmt.Errorf("store: migration: set busy_timeout: %w", err)
+	}
+	return func() {
+		_, _ = conn.ExecContext(context.WithoutCancel(ctx), fmt.Sprintf(`PRAGMA busy_timeout=%d`, prev))
+	}, nil
+}
+
+// migrateOnce is one pass of MigrateToSealed on its held connection.
+func migrateOnce(ctx context.Context, conn *sql.Conn, dbPath string, kr Keyring) (MigrationResult, error) {
 	pending, err := cleanupPending(ctx, conn)
 	if err != nil {
 		return MigrationResult{}, err
@@ -180,21 +221,11 @@ func MigrateToSealed(ctx context.Context, db *sql.DB, dbPath string, kr Keyring)
 		return MigrationResult{}, err
 	}
 
-	key, err := LoadDataKey(kr, true)
-	if err != nil {
-		return MigrationResult{}, fmt.Errorf("store: migration: %w", err)
-	}
-	defer clear(key)
-	sealer, err := NewSealer(key)
-	if err != nil {
-		return MigrationResult{}, err
-	}
-
 	restore, err := secureDeleteOn(ctx, conn)
 	if err != nil {
 		return MigrationResult{}, err
 	}
-	rows, err := sealInPlace(ctx, conn, sealer, kr, key, devices)
+	rows, sealer, err := sealInPlace(ctx, conn, kr)
 	restore()
 	if err != nil {
 		return MigrationResult{}, err
@@ -448,79 +479,131 @@ func verifyBackup(ctx context.Context, path string, devices []plainDevice) error
 	return nil
 }
 
-// sealInPlace runs the one migration transaction and returns the rows per table.
-func sealInPlace(ctx context.Context, conn *sql.Conn, sealer *Sealer, kr Keyring, key []byte, devices []plainDevice) (map[string]int, error) {
-	tx, err := conn.BeginTx(ctx, nil)
+// sealInPlace runs the one migration transaction and returns the rows per table and the sealer
+// of the data key it sealed under. It takes SQLite's write lock first (BEGIN IMMEDIATE) and only
+// then looks for the plain device keys again and takes or creates the data key, so no other
+// migration can create a key or commit between its look and its commit. With no plain device
+// keys left it is errMigratedMeanwhile, and nothing was written, the keyring included.
+func sealInPlace(ctx context.Context, conn *sql.Conn, kr Keyring) (map[string]int, *Sealer, error) {
+	// Only the write lock waits for another process: the cleanup after the commit fails fast on
+	// a reader, as before, and is retried.
+	restoreBusy, err := busyTimeoutOn(ctx, conn)
 	if err != nil {
-		return nil, fmt.Errorf("store: migration: begin: %w", err)
+		return nil, nil, err
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer restoreBusy()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return nil, nil, fmt.Errorf("store: migration: take the write lock: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if _, err := conn.ExecContext(context.WithoutCancel(ctx), `ROLLBACK`); err != nil {
+			// A connection that may still be inside the transaction never goes back to the pool.
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}()
+	tx := conn // the statements below run inside the transaction BEGIN opened on conn
+
+	devices, err := plainDevices(ctx, tx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() {
+		for _, d := range devices {
+			clear(d.noise)
+			clear(d.identity)
+			clear(d.signedPreKey)
+			clear(d.advSecret)
+		}
+	}()
+	if len(devices) == 0 {
+		return nil, nil, errMigratedMeanwhile
+	}
+	if sealedMeta, err := hasSealCheck(ctx, tx); err != nil {
+		return nil, nil, err
+	} else if sealedMeta {
+		return nil, nil, ErrMigrationInconsistent
+	}
+	key, err := LoadDataKey(kr, true)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store: migration: %w", err)
+	}
+	defer clear(key)
+	sealer, err := NewSealer(key)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	for _, schema := range []string{deviceSchema, preKeySchema, sealMetaSchema, cleanupMarkSchema} {
 		if _, err := tx.ExecContext(ctx, schema); err != nil {
-			return nil, fmt.Errorf("store: migration: create the sealed tables: %w", err)
+			return nil, nil, fmt.Errorf("store: migration: create the sealed tables: %w", err)
 		}
 	}
 	// The cleanup-pending mark commits with the sealed values: no commit without it.
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO nuncio_seal_cleanup (id) VALUES (1)`); err != nil {
-		return nil, fmt.Errorf("store: migration: write the cleanup mark: %w", err)
+		return nil, nil, fmt.Errorf("store: migration: write the cleanup mark: %w", err)
 	}
 	rows := map[string]int{}
 	for _, c := range migratedColumns {
 		n, err := sealColumn(ctx, tx, sealer, c)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		rows[c.table] = n
 		if err := fault("sealed " + c.table); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 	n, err := movePreKeys(ctx, tx, sealer)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	rows["whatsmeow_pre_keys"] = n
 	if err := fault("moved whatsmeow_pre_keys"); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if err := sealDevices(ctx, tx, sealer, devices); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	rows["whatsmeow_device"] = len(devices)
 	if err := fault("sealed whatsmeow_device"); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// WriteSealCheck's row, written inside this transaction so the check and the sealed values
 	// commit together.
 	if _, err := tx.ExecContext(ctx, `INSERT INTO nuncio_seal_meta (id, version, "check") VALUES (1, ?, ?)`,
 		sealVersion, sealer.Seal(sealCheckAAD(), []byte(sealCheckPlaintext))); err != nil {
-		return nil, fmt.Errorf("store: migration: write the seal check row: %w", err)
+		return nil, nil, fmt.Errorf("store: migration: write the seal check row: %w", err)
 	}
 	if err := fault("check"); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	// L5 A1: another process may have replaced the key since LoadDataKey; commit only while the
-	// keyring still holds the key everything here is sealed under.
+	// L5 A1: a writer outside the migration (a link's first save) may have replaced the key since
+	// LoadDataKey; commit only while the keyring still holds the key everything here is sealed
+	// under.
 	back, err := readDataKey(kr)
 	if err != nil {
-		return nil, fmt.Errorf("store: migration: read the data key again: %w", err)
+		return nil, nil, fmt.Errorf("store: migration: read the data key again: %w", err)
 	}
 	same := bytes.Equal(back, key)
 	clear(back)
 	if !same {
-		return nil, fmt.Errorf("%w: %s changed during the migration (service %s)", ErrKeyringUnavailable, itemDataKey, KeyringService)
+		return nil, nil, fmt.Errorf("%w: %s changed during the migration (service %s)", ErrKeyringUnavailable, itemDataKey, KeyringService)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("store: migration: commit: %w", err)
+	if _, err := tx.ExecContext(ctx, `COMMIT`); err != nil {
+		return nil, nil, fmt.Errorf("store: migration: commit: %w", err)
 	}
-	return rows, nil
+	committed = true
+	return rows, sealer, nil
 }
 
 // sealColumn seals every value of one column in place, bound like sealedStore binds it. A NULL
 // stays NULL, as sealedStore stores a nil value.
-func sealColumn(ctx context.Context, tx *sql.Tx, sealer *Sealer, c migratedColumn) (int, error) {
+func sealColumn(ctx context.Context, tx *sql.Conn, sealer *Sealer, c migratedColumn) (int, error) {
 	cols := fmt.Sprintf("rowid, %q, %q", c.ourCol, c.column)
 	for _, p := range c.pk {
 		cols += fmt.Sprintf(", %q", p)
@@ -573,7 +656,7 @@ func sealColumn(ctx context.Context, tx *sql.Tx, sealer *Sealer, c migratedColum
 
 // movePreKeys moves every pre-key from whatsmeow_pre_keys into nuncio_pre_keys, sealed like
 // sealedStore seals a pre-key it generates.
-func movePreKeys(ctx context.Context, tx *sql.Tx, sealer *Sealer) (int, error) {
+func movePreKeys(ctx context.Context, tx *sql.Conn, sealer *Sealer) (int, error) {
 	type preKey struct {
 		jid      string
 		id       uint32
@@ -614,7 +697,7 @@ func movePreKeys(ctx context.Context, tx *sql.Tx, sealer *Sealer) (int, error) {
 
 // sealDevices seals each device's keys into nuncio_device, like PutDevice, and leaves the zeroed
 // stub row in whatsmeow_device.
-func sealDevices(ctx context.Context, tx *sql.Tx, sealer *Sealer, devices []plainDevice) error {
+func sealDevices(ctx context.Context, tx *sql.Conn, sealer *Sealer, devices []plainDevice) error {
 	for _, d := range devices {
 		if len(d.noise) != devicePrivSize || len(d.identity) != devicePrivSize || len(d.signedPreKey) != devicePrivSize || len(d.advSecret) == 0 {
 			return errors.New("store: migration: a whatsmeow_device row has keys of the wrong length")

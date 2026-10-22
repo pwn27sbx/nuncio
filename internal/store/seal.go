@@ -51,9 +51,14 @@ var (
 )
 
 // LoadDataKey returns the data key from the keyring. When the item is absent and create is
-// true it generates a new key, writes it and reads it back, and returns it only when the
-// keyring returns exactly what was written. When the item is absent and create is false it
-// returns ErrDataKeyMissing and writes nothing.
+// true it generates a new key and keeps it with StoreDataKey, so a key that appeared meanwhile is
+// never replaced: that key is returned instead. A new key is returned only when the keyring
+// returns exactly what was written. When the item is absent and create is false it returns
+// ErrDataKeyMissing and writes nothing.
+//
+// The keyring has no compare-and-swap: two callers that both find no key can both write one, the
+// later write winning. A caller that creates the key under a lock every other creator also holds
+// (the migration holds SQLite's write lock, MigrateToSealed) is never overtaken.
 //
 // Errors never carry the key or the stored item.
 func LoadDataKey(kr Keyring, create bool) ([]byte, error) {
@@ -71,20 +76,94 @@ func LoadDataKey(kr Keyring, create bool) ([]byte, error) {
 	}
 
 	key = randomBytes(dataKeySize)
+	switch err := StoreDataKey(kr, key); {
+	case err == nil:
+		return key, nil
+	case errors.Is(err, ErrDataKeyExists):
+		clear(key)
+		return readDataKey(kr)
+	default:
+		clear(key)
+		return nil, err
+	}
+}
+
+// writeDataKey writes key as the data key item and reads it back; it fails unless the keyring
+// returns exactly what was written.
+func writeDataKey(kr Keyring, key []byte) error {
 	if err := kr.Set(KeyringService, itemDataKey, base64.StdEncoding.EncodeToString(key)); err != nil {
-		return nil, fmt.Errorf("%w: write %s (service %s): %w", ErrKeyringUnavailable, itemDataKey, KeyringService, err)
+		return fmt.Errorf("%w: write %s (service %s): %w", ErrKeyringUnavailable, itemDataKey, KeyringService, err)
 	}
 	back, err := readDataKey(kr)
 	if errors.Is(err, ErrDataKeyMissing) || errors.Is(err, ErrDataKeyInvalid) {
-		return nil, fmt.Errorf("%w: %s did not read back after the write (service %s)", ErrKeyringUnavailable, itemDataKey, KeyringService)
+		return fmt.Errorf("%w: %s did not read back after the write (service %s)", ErrKeyringUnavailable, itemDataKey, KeyringService)
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
+	defer clear(back)
 	if !bytes.Equal(back, key) {
-		return nil, fmt.Errorf("%w: %s read back differs from what was written (service %s)", ErrKeyringUnavailable, itemDataKey, KeyringService)
+		return fmt.Errorf("%w: %s read back differs from what was written (service %s)", ErrKeyringUnavailable, itemDataKey, KeyringService)
 	}
-	return key, nil
+	return nil
+}
+
+// NewDataKey returns a fresh random data key. It is written nowhere: StoreDataKey keeps it.
+func NewDataKey() []byte { return randomBytes(dataKeySize) }
+
+// ErrDataKeyExists reports a keyring that already holds another data key. StoreDataKey never
+// replaces it: whatever is sealed under it would become unreadable.
+var ErrDataKeyExists = errors.New("store: the keyring already holds another data key")
+
+// StoreDataKey keeps key (from NewDataKey) as the data key when the keyring holds none yet,
+// and reads it back. A keyring that already holds key is left as it is; one that holds another
+// key fails with ErrDataKeyExists and is not written. `nuncio link` calls it on the first save of
+// a newly paired device, so a link that never pairs leaves no key behind.
+//
+// Errors never carry the key or the stored item.
+func StoreDataKey(kr Keyring, key []byte) error {
+	if kr == nil {
+		return fmt.Errorf("%w: no keyring", ErrKeyringUnavailable)
+	}
+	if len(key) != dataKeySize {
+		return fmt.Errorf("store: the data key is %d bytes, want %d", len(key), dataKeySize)
+	}
+	current, err := readDataKey(kr)
+	switch {
+	case err == nil:
+		defer clear(current)
+		if !bytes.Equal(current, key) {
+			return ErrDataKeyExists
+		}
+		return nil
+	case errors.Is(err, ErrDataKeyMissing):
+		return writeDataKey(kr, key)
+	default:
+		return err
+	}
+}
+
+// ForgetDataKey deletes the data key item, but only while it still holds key: it undoes a
+// StoreDataKey whose save then failed, and never deletes a key another process wrote meanwhile.
+func ForgetDataKey(kr Keyring, key []byte) error {
+	if kr == nil {
+		return fmt.Errorf("%w: no keyring", ErrKeyringUnavailable)
+	}
+	current, err := readDataKey(kr)
+	if errors.Is(err, ErrDataKeyMissing) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	defer clear(current)
+	if !bytes.Equal(current, key) {
+		return nil
+	}
+	if err := kr.Delete(KeyringService, itemDataKey); err != nil && !errors.Is(err, ErrKeyNotFound) {
+		return fmt.Errorf("%w: delete %s (service %s): %w", ErrKeyringUnavailable, itemDataKey, KeyringService, err)
+	}
+	return nil
 }
 
 // readDataKey reads and decodes the data key item.

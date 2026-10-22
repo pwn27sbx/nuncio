@@ -24,10 +24,10 @@ about.**
 - M4 (packaging and the Omarchy glue: everything below about Arch, systemd, the hotkey and the bar)
   is written but has **never been built or installed on Linux**. Acceptance on Arch/Omarchy is
   pending.
-- Not done yet: the Signal state still lives in plain in `nuncio.db`, not behind the keyring
-  (T17, see [SECURITY.md](SECURITY.md)). Sealing it under a keyring-held data key is in progress on
-  this branch and planned until the home acceptance run
-  ([ADR 0003](docs/adr/0003-where-the-signal-state-lives.md)).
+- The Signal state in `nuncio.db` is sealed under a data key held in the Secret Service (T17,
+  [ADR 0003](docs/adr/0003-where-the-signal-state-lives.md), see [SECURITY.md](SECURITY.md)): the
+  binaries are wired to it and tested against a fake keyring only. With the real Secret Service it
+  is planned until the home acceptance run.
 
 Linking an unofficial client is against WhatsApp's Terms of Service and accounts have been banned
 for it. Use a spare number, never the one that carries your two-factor authentication.
@@ -108,7 +108,7 @@ nuncio retry <client_id>      send again, once, a message that ended not sent (o
 nuncio focus <jid>            ask the running UI to open that chat
 nuncio link --qr              link by scanning a QR code (needs --consent)
 nuncio link --phone N         link with an 8-digit pairing code (needs --consent)
-nuncio logout --confirm       unlink this device from WhatsApp, delete all local data and keys, stop nunciod
+nuncio logout --confirm       unlink this device from WhatsApp, delete all local data, backups and keys, stop nunciod
 nuncio purge --confirm        the same without contacting WhatsApp, for a device already removed on the phone
 ```
 
@@ -138,19 +138,27 @@ A `<jid>` is a WhatsApp chat: `15551230001@s.whatsapp.net` (a person) or
   an error.
 - `link` exits as soon as the device is linked, and never sends a message. Run on a device that is
   already linked, it connects it once to check that WhatsApp still accepts it, reports it and
-  exits; it refuses to do even that while `nunciod` answers on `core.sock`: the daemon owns that
-  session.
+  exits. It refuses to run at all while `nunciod` answers on `core.sock`, before it opens the
+  database: the daemon owns that session. `link` needs the keyring (Secret Service) unlocked: it
+  creates the data key only when pairing saves the new device, reads it back before the device is
+  saved, and a link that never pairs leaves no key and no device behind. A `nuncio.db` an older
+  build left in plain is backed up (`nuncio.db.pre-t17-<UTC time>.bak`, which still holds the keys
+  in plain: delete it once nuncio works) and sealed first, by `link` or by `nunciod` at start.
+- With the keyring locked or absent, `nunciod` stays up and answers `offline`, never connects to
+  WhatsApp and writes nothing; it tries again on the session's backoff. When the data key is gone
+  but a sealed device is stored, nothing creates a new one: the device cannot be read, and the way
+  out is `nuncio purge --confirm`, then `nuncio link`.
 - `logout` and `purge` without `--confirm` only list what they would delete and exit 2. With it,
   the teardown runs in this order: (1) WhatsApp unlinks the device (`logout` only), (2) the
-  keyring items under the service `nuncio` are deleted, (3) `nuncio.db` with its `-wal` and
-  `-shm` files, the `media` cache and the `exports` in `$XDG_DATA_HOME/nuncio` are deleted (the
+  keyring items under the service `nuncio` are deleted (the data key `store.data_key` among them),
+  (3) `nuncio.db` with its `-wal` and `-shm` files, every migration backup
+  (`nuncio.db.pre-t17-*.bak`), the `media` cache and the `exports` in `$XDG_DATA_HOME/nuncio` are
+  deleted (the
   directory too, when nothing else is in it and the sandbox allows it), (4) `nunciod` removes its
   socket and exits. `logout` needs a running `nunciod`, because only the daemon's session may talk
   to WhatsApp for the device; when WhatsApp does not confirm, nothing is deleted. `purge` never
   contacts WhatsApp: it asks a running daemon to do the same, or deletes the local data itself when
-  no daemon runs. Today no binary writes keyring items yet (whatsmeow keeps the Signal state inside
-  `nuncio.db`), so step 2 finds nothing until T17 is wired; with T17 (planned) step 2 deletes the
-  data key `store.data_key` and step 3 also deletes the migration's backup of the plain database.
+  no daemon runs.
 
 One chat per contact: a contact's phone-number chat is merged into her hidden-id (`@lid`) chat
 when whatsmeow knows the pair ([ADR 0001](docs/adr/0001-one-chat-per-contact.md)).
@@ -217,7 +225,7 @@ cmd/nunciod/           Go daemon: owns the one linked-device session
 cmd/nuncio/            the CLI
 cmd/nuncio-demo/       a fake daemon for trying the apps
 internal/wa/           the whatsmeow integration: session, backoff, sends, receipts
-internal/store/        SQLite store, the wipe, the keyring-held data key (not wired yet, T17)
+internal/store/        SQLite store, the wipe, the keyring-held data key and the sealed device store
 internal/media/        on-demand media downloads and their cache
 internal/ipc/          NDJSON framing, wire types, socket and D-Bus names
 crates/nuncio-client/  shared Rust client: IPC, view models, config, links, theme and font

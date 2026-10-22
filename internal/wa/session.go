@@ -1,6 +1,7 @@
 package wa
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -541,27 +542,187 @@ func DBPath() (string, error) {
 	return filepath.Join(base, "nuncio", "nuncio.db"), nil
 }
 
-// OpenDevice prepares whatsmeow's device store inside db and returns its first device, which has
-// a nil ID when nothing is linked yet.
+// ErrDeviceUnreadable reports a stored device that cannot be opened: its data key is gone from the
+// keyring, the keyring holds another key, or its sealed row does not open (altered bytes). nuncio
+// never creates a key over sealed data and never reads a sealed value as plain (ADR 0003, 12-13).
+var ErrDeviceUnreadable = errors.New("the stored device cannot be read; run nuncio purge --confirm, then nuncio link")
+
+// ErrCleanupPending reports a migration that sealed the database but could not yet wipe the old
+// plain keys from its free pages (store.MigrationResult.CleanupPending). The device is not opened
+// until a later call finishes that cleanup.
+var ErrCleanupPending = errors.New("wa: the old plain keys are not wiped from the database's free pages yet")
+
+// OpenDevice opens the WhatsApp device kept in db (the database at dbPath) with its private
+// material sealed under the data key in kr (ADR 0003), in this order:
 //
-// whatsmeow's own sqlstore keeps the full Signal state (sessions, pre-keys, sender keys, app
-// state) a linked device needs, inside nuncio.db in the 0700 data directory, until the
-// keyring-backed device store replaces it.
-func OpenDevice(ctx context.Context, db *sql.DB) (*wastore.Device, error) {
-	container := sqlstore.NewWithDB(db, "sqlite3", nil)
-	if err := container.Upgrade(ctx); err != nil {
-		return nil, fmt.Errorf("wa: cannot prepare the device store: %w", err)
-	}
-	device, err := container.GetFirstDevice(ctx)
+//  1. Without a stored device, the daemon (forLink false) opens nothing: it returns a nil device
+//     and never asks the keyring, so it never creates a key.
+//  2. A keyring that cannot be read stops everything before anything is written:
+//     store.ErrKeyringUnavailable.
+//  3. whatsmeow's schema upgrade, then store.MigrateToSealed, which backs a plain database up and
+//     seals it in place; its result is returned. A migration whose free-page cleanup is still
+//     pending is ErrCleanupPending: the device is not opened.
+//  4. The data key, never created over sealed data: a stored device whose key is missing or
+//     invalid, or whose seal check row is missing or was sealed under another key, is
+//     ErrDeviceUnreadable.
+//  5. The sealed device store, and the stored device, or for a link (forLink true) without one a
+//     new unpaired device. Nothing of a new device is written until pairing saves it: only then
+//     does its first save create the data key (when the keyring has none), read it back, write
+//     the seal check row, read the keyring again and compare (so a key another process put there
+//     meanwhile is caught) and save the device. A link that never pairs leaves no key and no row.
+func OpenDevice(ctx context.Context, db *sql.DB, dbPath string, kr store.Keyring, forLink bool) (*wastore.Device, store.MigrationResult, error) {
+	var res store.MigrationResult
+	stored, err := HasStoredDevice(ctx, db)
 	if err != nil {
-		return nil, fmt.Errorf("wa: cannot read the device store: %w", err)
+		return nil, res, err
 	}
-	return device, nil
+	if !stored && !forLink {
+		return nil, res, nil
+	}
+	// A read only, so a locked keyring stops the start before the upgrade, the migration's
+	// backup or anything else writes.
+	if _, err := store.LoadDataKey(kr, false); errors.Is(err, store.ErrKeyringUnavailable) {
+		return nil, res, fmt.Errorf("wa: %w", err)
+	}
+	if err := sqlstore.NewWithDB(db, "sqlite3", nil).Upgrade(ctx); err != nil {
+		return nil, res, fmt.Errorf("wa: cannot prepare the device store: %w", err)
+	}
+	res, err = store.MigrateToSealed(ctx, db, dbPath, kr)
+	if err != nil {
+		if res.CleanupPending {
+			return nil, res, fmt.Errorf("%w: %w", ErrCleanupPending, err)
+		}
+		return nil, res, fmt.Errorf("wa: cannot seal the device store: %w", err)
+	}
+	if res.CleanupPending {
+		return nil, res, ErrCleanupPending
+	}
+
+	key, err := store.LoadDataKey(kr, false)
+	create := false
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrKeyringUnavailable):
+		return nil, res, fmt.Errorf("wa: %w", err)
+	case stored || !errors.Is(err, store.ErrDataKeyMissing):
+		return nil, res, fmt.Errorf("%w: %w", ErrDeviceUnreadable, err)
+	default:
+		// A link over a database with no device: a new key, kept only by the first save.
+		key, create = store.NewDataKey(), true
+	}
+	sealer, err := store.NewSealer(key)
+	if err != nil {
+		return nil, res, fmt.Errorf("%w: %w", ErrDeviceUnreadable, err)
+	}
+	switch err := store.VerifySealCheck(ctx, db, sealer); {
+	case err == nil:
+	case errors.Is(err, store.ErrSealCheckMissing) && !stored:
+		// Written by the first save.
+	case errors.Is(err, store.ErrSealCheckMissing), errors.Is(err, store.ErrWrongDataKey):
+		return nil, res, fmt.Errorf("%w: %w", ErrDeviceUnreadable, err)
+	default:
+		return nil, res, fmt.Errorf("wa: %w", err)
+	}
+	devices, err := store.NewDeviceStore(ctx, db, sealer)
+	if err != nil {
+		return nil, res, fmt.Errorf("wa: cannot prepare the device store: %w", err)
+	}
+	if stored {
+		device, err := devices.LoadDevice(ctx)
+		switch {
+		case err == nil:
+			return device, res, nil
+		case !errors.Is(err, store.ErrNoDevice):
+			return nil, res, fmt.Errorf("%w: %w", ErrDeviceUnreadable, err)
+		case !forLink:
+			return nil, res, nil
+		}
+	}
+	device := devices.NewDevice()
+	device.Container = &firstSave{devices: devices, db: db, kr: kr, sealer: sealer, key: key, create: create}
+	return device, res, nil
 }
 
-// OpenSession builds the daemon's session over the database at path. A missing database means
-// unlinked, and nothing is created: merely starting the daemon must leave no data dir behind.
-func OpenSession(ctx context.Context, path string) (*Session, error) {
+// HasStoredDevice reports whether db holds a whatsmeow_device row. It only reads, and never asks
+// the keyring: without a stored device OpenSessionOn never asks it either.
+func HasStoredDevice(ctx context.Context, db *sql.DB) (bool, error) {
+	var stored bool
+	err := db.QueryRowContext(ctx, `SELECT COUNT(*) > 0 FROM sqlite_master WHERE type = 'table' AND name = 'whatsmeow_device'`).Scan(&stored)
+	if err == nil && stored {
+		err = db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM whatsmeow_device)`).Scan(&stored)
+	}
+	if err != nil {
+		return false, fmt.Errorf("wa: cannot read the device store: %w", err)
+	}
+	return stored, nil
+}
+
+// firstSave is the container of a new device until pairing saves it (OpenDevice, step 5). Its
+// first PutDevice keeps the data key and the seal check row; from then on DeviceStore is the
+// device's container (PutDevice wires it).
+type firstSave struct {
+	devices *store.DeviceStore
+	db      *sql.DB
+	kr      store.Keyring
+	sealer  *store.Sealer
+	key     []byte
+	create  bool // the keyring holds no data key yet
+
+	mu    sync.Mutex
+	ready bool
+}
+
+var _ wastore.DeviceContainer = (*firstSave)(nil)
+
+func (f *firstSave) PutDevice(ctx context.Context, device *wastore.Device) error {
+	if device == nil || device.ID == nil {
+		// Nothing is kept for a device that is not paired yet.
+		return sqlstore.ErrDeviceIDMustBeSet
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.ready {
+		if err := f.keepKey(ctx); err != nil {
+			return err
+		}
+		f.ready = true
+	}
+	return f.devices.PutDevice(ctx, device)
+}
+
+func (f *firstSave) DeleteDevice(ctx context.Context, device *wastore.Device) error {
+	return f.devices.DeleteDevice(ctx, device)
+}
+
+// keepKey writes the data key (when it is new) and reads it back, writes the seal check row, and
+// reads the keyring again: the device is saved only under the key the keyring holds.
+func (f *firstSave) keepKey(ctx context.Context) error {
+	if f.create {
+		if err := store.StoreDataKey(f.kr, f.key); err != nil {
+			return fmt.Errorf("wa: cannot keep the data key in the keyring; nothing was saved: %w", err)
+		}
+	}
+	if err := store.WriteSealCheck(ctx, f.db, f.sealer); err != nil {
+		if f.create {
+			_ = store.ForgetDataKey(f.kr, f.key)
+		}
+		return fmt.Errorf("wa: cannot write the seal check; nothing was saved: %w", err)
+	}
+	back, err := store.LoadDataKey(f.kr, false)
+	if err != nil {
+		return fmt.Errorf("wa: cannot read the data key back; nothing was saved: %w", err)
+	}
+	defer clear(back)
+	if !bytes.Equal(back, f.key) {
+		return errors.New("wa: the keyring no longer holds the data key the device would be sealed under; nothing was saved")
+	}
+	return nil
+}
+
+// OpenSession builds the daemon's session over the database at path, its device sealed under the
+// data key in kr. A missing database means unlinked, and nothing is created: merely starting the
+// daemon must leave no data dir behind. On an error the database is closed again.
+func OpenSession(ctx context.Context, path string, kr store.Keyring) (*Session, error) {
 	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
 		return NewSession(nil, nil, nil), nil
 	} else if err != nil {
@@ -571,14 +732,29 @@ func OpenSession(ctx context.Context, path string) (*Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := store.EnsureSchema(db); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	device, err := OpenDevice(ctx, db)
+	s, err := OpenSessionOn(ctx, db, path, kr)
 	if err != nil {
 		_ = db.Close()
 		return nil, err
+	}
+	return s, nil
+}
+
+// OpenSessionOn is OpenSession over db, already opened at path, which it leaves open on an error
+// (store.ErrKeyringUnavailable, ErrCleanupPending, ErrDeviceUnreadable or another), so the caller
+// can serve what the store holds and try again. Without a stored device the session is unlinked
+// over db's message store, and the keyring is never asked. The returned session closes db.
+func OpenSessionOn(ctx context.Context, db *sql.DB, path string, kr store.Keyring) (*Session, error) {
+	device, res, err := OpenDevice(ctx, db, path, kr, false)
+	logMigration(res)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.EnsureSchema(db); err != nil {
+		return nil, err
+	}
+	if device == nil {
+		return NewSession(nil, db, db.Close), nil
 	}
 	client := whatsmeow.NewClient(device, nil)
 	// whatsmeow reconnects on its own by default, with no ceiling and no stop on bans; the
@@ -602,6 +778,20 @@ func OpenSession(ctx context.Context, path string) (*Session, error) {
 	// (which fetches, decrypts and checks the hashes), into $XDG_DATA_HOME/nuncio/media.
 	s.SetMedia(filepath.Join(filepath.Dir(path), store.MediaDir), client)
 	return s, nil
+}
+
+// logMigration logs what a migration did, in fixed words: the backup by its file name only (a
+// time, no user data), never its directory, which names the user's home.
+func logMigration(res store.MigrationResult) {
+	if res.Migrated {
+		log.Printf("sealed the WhatsApp keys in nuncio.db; the backup %s next to it still holds them in plain: delete it once nuncio works", filepath.Base(res.BackupPath))
+	}
+	if res.Cleaned {
+		log.Print("wiped the old plain keys from nuncio.db's free pages")
+	}
+	if res.CleanupPending {
+		log.Print("the old plain keys may still be in nuncio.db's free pages; the wipe is tried again before the device opens")
+	}
 }
 
 // whatsmeowClient adapts *whatsmeow.Client to Client, LIDMapper and Contacts.

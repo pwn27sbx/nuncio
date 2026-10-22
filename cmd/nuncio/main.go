@@ -28,7 +28,7 @@ const usage = `usage:
   nuncio focus <jid>            ask the running UI to open that chat
   nuncio link --qr              link by scanning a QR code (needs --consent)
   nuncio link --phone N         link with an 8-digit pairing code (needs --consent)
-  nuncio logout --confirm       unlink this device from WhatsApp, delete all local data and keys, stop nunciod
+  nuncio logout --confirm       unlink this device from WhatsApp, delete all local data, backups and keys, stop nunciod
   nuncio purge --confirm        the same without contacting WhatsApp, for a device already removed on the phone
   nuncio --help
 
@@ -42,7 +42,8 @@ ever retried on its own: unless it was sent, send prints the message's
 client_id, and nuncio retry <client_id> sends it again under the same WhatsApp message id, so it
 cannot arrive twice.
 Nothing links a device without --consent. link never sends a message: once linked it says so and
-exits; then start nunciod (systemctl --user start nunciod). logout and purge without --confirm only list what they
+exits; then start nunciod (systemctl --user start nunciod). link needs the keyring unlocked: the
+device's keys are sealed under a data key kept there, created only when pairing saves the device. logout and purge without --confirm only list what they
 would delete. logout needs a running nunciod (it unlinks through the daemon's session); purge works
 with or without one.`
 

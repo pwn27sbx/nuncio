@@ -16,8 +16,9 @@ import (
 	"github.com/pwn27sbx/nuncio/internal/wa"
 )
 
-// localKeyring is the keyring a purge without a running daemon empties; tests replace it so that
-// no test can touch the owner's real keyring.
+// localKeyring is the keyring the CLI uses itself: the data key `nuncio link` creates and reads,
+// and the items a purge without a running daemon empties. Tests replace it so that no test can
+// touch the owner's real keyring.
 var localKeyring store.Keyring = store.SecretService{}
 
 // answerTimeout bounds the handshake that decides whether a daemon is running.
@@ -64,8 +65,8 @@ func teardown(name string, unlink bool, args []string, stdout, stderr io.Writer)
 		} else {
 			fmt.Fprintln(stderr, "nuncio purge deletes everything nuncio keeps here, without contacting WhatsApp (for a device already removed from your phone's Linked devices):")
 		}
-		fmt.Fprintf(stderr, "  %s (with its -wal and -shm files)\n  %s\n  %s\n  the nuncio items in the keyring\nand stops nunciod. Run it again with --confirm to do it. Nothing was deleted.\n",
-			dbPath, filepath.Join(dataDir, store.MediaDir), filepath.Join(dataDir, store.ExportsDir))
+		fmt.Fprintf(stderr, "  %s (with its -wal and -shm files)\n  %s (the migration's backups, which hold the keys in plain)\n  %s\n  %s\n  the nuncio items in the keyring (the data key included)\nand stops nunciod. Run it again with --confirm to do it. Nothing was deleted.\n",
+			dbPath, dbPath+".pre-t17-*.bak", filepath.Join(dataDir, store.MediaDir), filepath.Join(dataDir, store.ExportsDir))
 		return 2
 	}
 

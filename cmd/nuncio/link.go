@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -51,6 +52,16 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 
 	ctx := context.Background()
 
+	// The daemon owns the session of a linked device, and at start it migrates a plain database
+	// an older build left, as this command does. Checked before the store is opened, so a link
+	// never migrates, creates a key or connects while the daemon may be doing the same: a second
+	// connection of the same device would replace the daemon's stream, and each would take it
+	// back from the other.
+	if daemonAnswers() {
+		fmt.Fprintln(stderr, "nuncio link: nunciod is running and owns this device's session; stop it first. Nothing was linked.")
+		return 1
+	}
+
 	path, err := wa.DBPath()
 	if err != nil {
 		fmt.Fprintln(stderr, "nuncio link:", err)
@@ -64,15 +75,22 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 	}
 	defer func() { _ = db.Close() }()
 
-	device, err := wa.OpenDevice(ctx, db)
-	if err != nil {
-		fmt.Fprintln(stderr, "nuncio link:", err)
-		return 1
+	// The device's keys are sealed under the data key in the keyring (ADR 0003). A plain database
+	// from an older build is backed up and sealed first. A new device's data key is created only
+	// when pairing saves it, so a link that never pairs leaves no key and no device behind.
+	device, migration, err := wa.OpenDevice(ctx, db, path, localKeyring, true)
+	if notice := migration.Notice(); notice != "" {
+		fmt.Fprintln(stdout, "nuncio:", notice)
 	}
-	// The daemon owns the session of a linked device. A second connection of the same device would
-	// replace the daemon's stream, and each would take it back from the other.
-	if device.ID != nil && daemonAnswers() {
-		fmt.Fprintln(stderr, "nuncio link: nunciod is running and owns this device's session; stop it first. Nothing was connected.")
+	switch {
+	case errors.Is(err, store.ErrKeyringUnavailable):
+		fmt.Fprintln(stderr, "nuncio link: the keyring (Secret Service) is locked or unavailable; unlock it and try again. Nothing was linked.")
+		return 1
+	case errors.Is(err, wa.ErrDeviceUnreadable):
+		fmt.Fprintf(stderr, "nuncio link: %v. Nothing was linked.\n", wa.ErrDeviceUnreadable)
+		return 1
+	case err != nil:
+		fmt.Fprintln(stderr, "nuncio link:", err)
 		return 1
 	}
 	client := whatsmeow.NewClient(device, nil)

@@ -58,6 +58,12 @@ func runMain(m *testing.M) int {
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	binDir = dir
+	stopWatchdog, err := startWatchdog()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "watchdog:", err)
+		return 1
+	}
+	defer stopWatchdog()
 	nunciodBin = filepath.Join(dir, "nunciod")
 	nuncioBin = filepath.Join(dir, "nuncio")
 
@@ -69,6 +75,26 @@ func runMain(m *testing.M) int {
 		}
 	}
 	return m.Run()
+}
+
+// watchdogGroup is the process group of a shell that lives exactly as long as this test binary:
+// it blocks reading a pipe only the binary holds open, and when that closes (the binary ends in
+// any way, a -timeout panic and a kill included, where no cleanup runs) it kills its group. A
+// daemon a test starts joins that group, so it cannot outlive the binary.
+var watchdogGroup int
+
+func startWatchdog() (stop func(), err error) {
+	cmd := exec.Command("/bin/sh", "-c", "read _; kill -KILL 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	w, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start: %w", err)
+	}
+	watchdogGroup = cmd.Process.Pid
+	return func() { _ = w.Close(); _ = cmd.Wait() }, nil
 }
 
 func repoRoot(t *testing.T) string {
@@ -122,6 +148,7 @@ func startDaemon(t *testing.T, runtimeDir, busAddress string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(nunciodBin)
 	cmd.Env = daemonEnv(runtimeDir, busAddress)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: watchdogGroup}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	cmd.Stdout = io.Discard
@@ -454,7 +481,17 @@ func startPrivateBus(t *testing.T, runtimeDir string) *privateBus {
 		t.Fatalf("write bus config: %v", err)
 	}
 
-	cmd := exec.Command(daemon, "--config-file="+configFile, "--nofork", "--print-address=1")
+	// The bus runs in a process group of its own, which every service it activates inherits, so
+	// the cleanup can end them all by the group without knowing their PIDs (macOS's dbus-daemon
+	// answers no GetConnectionUnixProcessID). A cleanup does not run when the test binary dies
+	// (a -timeout panic, a kill), so a shell keeps the bus's group tied to the binary's life: it
+	// blocks reading a pipe only the binary holds open, and when that closes it kills the group.
+	cmd := exec.Command("/bin/sh", "-c", `"$0" "$@" </dev/null & read _; kill -KILL 0`,
+		daemon, "--config-file="+configFile, "--nofork", "--print-address=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if _, err := cmd.StdinPipe(); err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
 	cmd.Env = []string{
 		// The activation file runs `env nunciod`, so the bus and everything
 		// it starts must find the freshly built daemon on PATH.
@@ -488,10 +525,7 @@ func startPrivateBus(t *testing.T, runtimeDir string) *privateBus {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start dbus-daemon: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
+	t.Cleanup(func() { stopProcessGroup(t, cmd) })
 
 	addrs := make(chan string, 1)
 	go func() {
@@ -514,20 +548,25 @@ func startPrivateBus(t *testing.T, runtimeDir string) *privateBus {
 	}
 }
 
-// killActivatedDaemon kills whatever owns the daemon name on this private bus,
-// so a test never leaks a daemon process behind the bus it started.
-func killActivatedDaemon(t *testing.T, conn *dbus.Conn) {
-	t.Cleanup(func() {
-		call := conn.Object("org.freedesktop.DBus", dbus.ObjectPath("/org/freedesktop/DBus")).
-			Call("org.freedesktop.DBus.GetConnectionUnixProcessID", 0, ipc.DaemonName)
-		var pid uint32
-		if call.Err != nil || call.Store(&pid) != nil || pid == 0 {
+// stopProcessGroup kills the process group cmd leads (cmd started with Setpgid) and waits until
+// no process of it is left: the bus and every daemon it activated.
+func stopProcessGroup(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	pgid := cmd.Process.Pid
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	_ = cmd.Wait()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		err := syscall.Kill(-pgid, 0)
+		if errors.Is(err, syscall.ESRCH) {
 			return
 		}
-		if p, err := os.FindProcess(int(pid)); err == nil {
-			_ = p.Kill()
+		if time.Now().After(deadline) {
+			t.Errorf("process group %d of the private bus is still alive 5s after SIGKILL (kill 0 = %v)", pgid, err)
+			return
 		}
-	})
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func busClient(t *testing.T, address string) *dbus.Conn {
@@ -550,7 +589,6 @@ func TestDBusActivationStartsDaemonInUnderOneSecond(t *testing.T) {
 	rt := shortTempDir(t)
 	bus := startPrivateBus(t, rt)
 	conn := busClient(t, bus.address)
-	killActivatedDaemon(t, conn)
 	socket := socketPath(rt)
 	if _, err := os.Stat(socket); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("something is already serving %s before the activation test: %v", socket, err)
@@ -687,7 +725,6 @@ func TestCLIPrintsStatusFromRunningDaemon(t *testing.T) {
 func TestCLIActivatesDaemonOverDBus(t *testing.T) {
 	rt := shortTempDir(t)
 	bus := startPrivateBus(t, rt)
-	killActivatedDaemon(t, busClient(t, bus.address))
 
 	env := []string{
 		// The activation file runs `env nunciod`, so the built daemon has to

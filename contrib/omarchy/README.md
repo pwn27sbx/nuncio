@@ -50,8 +50,21 @@ omarchy plugin enable pwn27sbx.nuncio-unread --section right
 
 Errors from the widget show up in `qs log -p "$OMARCHY_PATH/shell" --tail 100`.
 
-Uninstall: `omarchy plugin disable pwn27sbx.nuncio-unread`, remove the plugin folder and
-`~/.config/hypr/nuncio.lua`, and delete the `require("hypr.nuncio")` line.
+Uninstall: first `omarchy plugin disable pwn27sbx.nuncio-unread`. Then
+`bash packaging/install.sh --uninstall` removes, after the package, what the steps above
+installed, at those paths and only while it is what nuncio ships:
+
+- the plugin folder, when it holds only `manifest.json` and `BarWidget.qml` and both are
+  unchanged;
+- `~/.config/hypr/nuncio.lua`, when unchanged, and every line of `~/.config/hypr/bindings.lua`
+  that is exactly `require("hypr.nuncio")`. The rest of `bindings.lua` stays byte for byte;
+  the file as it was is kept next to it as `bindings.lua.nuncio-backup` (`.1`, `.2`, … when
+  that name is taken).
+
+It prints one line for each thing it removes or leaves. A file you changed, a file it does not
+ship in the plugin folder, or a symlink anywhere on those paths is left in place with a line
+saying so (a changed `nuncio.lua` keeps its `require` line too), and you remove it by hand as
+above: the plugin folder, `~/.config/hypr/nuncio.lua` and the `require("hypr.nuncio")` line.
 
 ## How the widget reads the count
 
@@ -95,7 +108,9 @@ Acceptance (plan, M4): "the bar widget shows and clears unread; the hotkey launc
    runs without an error (it confirms the `--match` option and that monitoring the user bus
    needs no extra rights).
 7. Click on the badge: same launch-or-focus as the hotkey.
-8. Uninstall as above: the widget leaves the bar and the key does nothing.
+8. Uninstall as above: the widget leaves the bar and the key does nothing; the plugin folder
+   and `~/.config/hypr/nuncio.lua` are gone, `bindings.lua` lost only the `require` line, and
+   `hyprctl reload` reports no error.
 
 ## Assumptions to confirm
 

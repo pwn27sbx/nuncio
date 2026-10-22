@@ -12,6 +12,7 @@
 #    install.sh carries --proto '=https' --proto-redir '=https'.
 # 6. The code agrees with the packaging: the desktop APP_ID, and the D-Bus names (bus, object,
 #    interface, UnreadCount, UnreadChanged) the bar widget uses.
+# 7. The tests under packaging/tests pass (install.sh --uninstall, against a temporary home).
 # Exits non-zero on the first failing group, after printing every failure in it.
 set -uo pipefail
 
@@ -211,14 +212,14 @@ done
 end_group "app icon"
 
 # --- 5. scripts parse ---
-for script in "$here"/*.sh; do
-	if bash -n "$script"; then pass "bash -n $(basename "$script")"; else fail "bash -n $(basename "$script")"; fi
+for script in "$here"/*.sh "$here"/tests/*.sh; do
+	if bash -n "$script"; then pass "bash -n ${script#"$here"/}"; else fail "bash -n ${script#"$here"/}"; fi
 done
 filled=$(sed -e 's/@PKGVER@/0.0.0/; s/@SHA256@/0/; s/@SOURCE_DATE_EPOCH@/0/' "$pkgbuild")
 if bash -n <<<"$filled"; then pass "bash -n PKGBUILD (placeholders filled)"; else fail "bash -n PKGBUILD"; fi
 if command -v shellcheck >/dev/null; then
-	for script in "$here"/*.sh; do
-		if shellcheck "$script"; then pass "shellcheck $(basename "$script")"; else fail "shellcheck $(basename "$script")"; fi
+	for script in "$here"/*.sh "$here"/tests/*.sh; do
+		if shellcheck "$script"; then pass "shellcheck ${script#"$here"/}"; else fail "shellcheck ${script#"$here"/}"; fi
 	done
 else
 	printf 'skip shellcheck (not installed)\n'
@@ -267,5 +268,16 @@ done
 # Reading the count must never start the daemon through D-Bus activation.
 has "$widget" '"--auto-start=no"' "bar widget: reads UnreadCount with --auto-start=no"
 end_group "code agreement"
+
+# --- 7. packaging tests ---
+for test in "$here"/tests/*.sh; do
+	if out=$(bash "$test" 2>&1); then
+		pass "${test#"$here"/}: $(grep -c '^ok' <<<"$out") checks"
+	else
+		grep '^FAIL' <<<"$out"
+		fail "${test#"$here"/}"
+	fi
+done
+end_group "packaging tests"
 
 printf 'check.sh: all packaging checks passed\n'

@@ -43,7 +43,9 @@ bash install.sh --version <version>
 The installer prints its plan and asks first, downloads `nuncio-<version>-1-x86_64.pkg.tar.zst`
 and `SHA256SUMS` from the GitHub release, **checks the package's SHA-256 and stops on a mismatch**,
 runs `sudo pacman -U` and enables the daemon's user unit (`--no-enable` skips that). It never pipes
-a download into a shell and does nothing outside Arch. `bash install.sh --uninstall` removes it.
+a download into a shell and does nothing outside Arch. `bash install.sh --uninstall` removes it,
+and with it the Omarchy bar widget and hotkey if you installed them and did not change them
+([contrib/omarchy/README.md](contrib/omarchy/README.md)).
 Details: [packaging/README.md](packaging/README.md).
 
 ### From source

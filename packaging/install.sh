@@ -13,8 +13,10 @@
 #   3. runs `sudo pacman -U` on that file (pacman asks again and shows the dependencies);
 #   4. unless --no-enable: `systemctl --user enable --now nunciod.service` for you.
 # --uninstall runs `systemctl --user disable --now nunciod.service`, then `sudo pacman -R
-# nuncio`, and lists the data it leaves (your messages, under ~/.local/share/nuncio): delete it
-# with `nuncio purge --confirm` before uninstalling, or by hand.
+# nuncio`, then removes the Omarchy bar widget and hotkey that contrib/omarchy/README.md copies
+# by hand, only where they are still what nuncio ships, and lists the data it leaves (your
+# messages, under ~/.local/share/nuncio): delete it with `nuncio purge --confirm` before
+# uninstalling, or by hand.
 #
 # Without a terminal to confirm on it refuses, unless --yes. It never runs a downloaded script:
 # the only thing it downloads is the package and its checksum list, which pacman installs. The
@@ -36,9 +38,208 @@ die() {
 }
 
 usage() {
-	sed -n '2,25p' "$0"
+	sed -n '2,27p' "$0"
 	exit "${1:-0}"
 }
+
+
+confirm() {
+	if ((yes)); then
+		return 0
+	fi
+	if [[ ! -r /dev/tty ]] || ! { : </dev/tty; } 2>/dev/null; then
+		die "no terminal to confirm on; run it again with --yes to proceed without asking. Nothing was done."
+	fi
+	local answer
+	printf '%s [y/N] ' "$1" >/dev/tty
+	read -r answer </dev/tty || answer=""
+	[[ $answer == y || $answer == Y || $answer == yes ]] || die "cancelled; nothing was done"
+}
+
+# --- the Omarchy glue (contrib/omarchy/README.md "Install" copies it by hand) ---
+# Removed only at the paths that README names, only while each file is still the one nuncio
+# ships (by SHA-256; packaging/tests/uninstall.sh checks these against contrib/omarchy), and
+# never through a symlink. Anything else is left in place with one line saying so.
+glue_line='require("hypr.nuncio")'
+
+shipped_sha256() { # shipped_sha256 NAME: the SHA-256 of contrib/omarchy's file NAME
+	case $1 in
+	manifest.json) printf '%s' 53211026bb57e51ea3387e1df09863546779881b0396493b25ddf38417d25c2f ;;
+	BarWidget.qml) printf '%s' f6f07ce83b38c0e1b3d992fe0370b444bd7bd16a5c4c739e0a55e63227b93c3a ;;
+	nuncio.lua) printf '%s' 32561451d038b8169e098d34c83613cc45f600eb08845de6fbbb53f324ba9b32 ;;
+	*) return 1 ;;
+	esac
+}
+
+is_shipped() { # is_shipped FILE NAME: FILE is a plain file (no symlink) with the bytes of NAME
+	local want got
+	[[ -f $1 && ! -L $1 ]] || return 1
+	want=$(shipped_sha256 "$2") || return 1
+	got=$(sha256sum <"$1") || return 1
+	[[ ${got%% *} == "$want" ]]
+}
+
+symlink_in() { # symlink_in REL...: prints the first $HOME/REL that is a symlink
+	local rel
+	for rel; do
+		if [[ -L $HOME/$rel ]]; then
+			printf '%s' "$HOME/$rel"
+			return 0
+		fi
+	done
+	return 1
+}
+
+remove_widget() {
+	local rel=.config/omarchy/plugins/pwn27sbx.nuncio-unread link entry ok=1
+	local dir=$HOME/$rel
+	if link=$(symlink_in .config .config/omarchy .config/omarchy/plugins "$rel"); then
+		say "Left in place: $link is a symlink; remove the bar widget by hand (contrib/omarchy/README.md)"
+		return 0
+	fi
+	[[ -d $dir ]] || return 0
+	local entries=()
+	shopt -s nullglob dotglob
+	entries=("$dir"/*)
+	shopt -u nullglob dotglob
+	for entry in ${entries[@]+"${entries[@]}"}; do
+		case ${entry##*/} in
+		manifest.json | BarWidget.qml)
+			if ! is_shipped "$entry" "${entry##*/}"; then
+				say "Left in place: $entry (changed since nuncio shipped it, or not a plain file)"
+				ok=0
+			fi
+			;;
+		*)
+			say "Left in place: $entry (not a file nuncio ships)"
+			ok=0
+			;;
+		esac
+	done
+	if ((!ok)); then
+		say "Left in place: $dir (the bar widget stays whole; remove it by hand)"
+		return 0
+	fi
+	for entry in ${entries[@]+"${entries[@]}"}; do
+		if ! rm -f -- "$entry"; then
+			say "Left in place: $dir (could not remove $entry)"
+			return 0
+		fi
+		say "Removed: $entry"
+	done
+	if rmdir -- "$dir"; then
+		say "Removed: $dir"
+	else
+		say "Left in place: $dir (could not remove the folder)"
+	fi
+}
+
+without_line() { # without_line FILE LINE: FILE's bytes minus every line that is exactly LINE
+	# Fails when any write fails, so a caller never takes a short file for the whole one.
+	local l rc=0
+	while IFS= read -r l; do
+		[[ $l == "$2" ]] || printf '%s\n' "$l" || rc=1
+	done <"$1"
+	# A last line without a newline: read fails but has filled l.
+	[[ -z $l || $l == "$2" ]] || printf '%s' "$l" || rc=1
+	return "$rc"
+}
+
+remove_hotkey() {
+	local hypr=$HOME/.config/hypr link lua bindings backup tmp i ours=0 has_line
+	lua=$hypr/nuncio.lua bindings=$hypr/bindings.lua
+	if link=$(symlink_in .config .config/hypr); then
+		say "Left in place: $link is a symlink; remove the hotkey by hand (contrib/omarchy/README.md)"
+		return 0
+	fi
+	[[ -d $hypr ]] || return 0
+	if [[ -e $lua || -L $lua ]]; then
+		if ! is_shipped "$lua" nuncio.lua; then
+			say "Left in place: $lua (changed since nuncio shipped it, or not a plain file), and the $glue_line line that loads it"
+			return 0
+		fi
+		ours=1
+	fi
+	if [[ -L $bindings ]]; then
+		say "Left in place: $bindings is a symlink; delete the $glue_line line by hand"
+		((ours)) && say "Left in place: $lua (bindings.lua may still load it)"
+		return 0
+	fi
+	has_line=0
+	if [[ -f $bindings ]]; then
+		# Bytes, not characters: in a UTF-8 locale BSD grep and tr choke on bytes that are not UTF-8.
+		if LC_ALL=C grep -qxF -- "$glue_line" "$bindings"; then
+			has_line=1
+		elif (($? > 1)); then
+			say "Left in place: $bindings (could not read it); delete the $glue_line line by hand if it is there"
+			((ours)) && say "Left in place: $lua (bindings.lua may still load it)"
+			return 0
+		fi
+	fi
+	if ((has_line)); then
+		# bash cannot hold a NUL byte, so a file with one would not come back byte for byte.
+		if (($(LC_ALL=C tr -d '\000' <"$bindings" | LC_ALL=C wc -c) != $(LC_ALL=C wc -c <"$bindings"))); then
+			say "Left in place: $bindings (it holds a NUL byte); delete the $glue_line line by hand"
+			((ours)) && say "Left in place: $lua (bindings.lua still loads it)"
+			return 0
+		fi
+		backup=$bindings.nuncio-backup
+		for ((i = 1; i < 100; i++)); do
+			[[ -e $backup || -L $backup ]] || break
+			backup=$bindings.nuncio-backup.$i
+		done
+		# Written next to it and renamed over it: bindings.lua is either the old file or the new one.
+		if [[ -e $backup || -L $backup ]] || ! cp -p -- "$bindings" "$backup" ||
+			! tmp=$(mktemp "$hypr/.bindings.lua.nuncio.XXXXXX"); then
+			say "Left in place: $bindings (could not make a backup); delete the $glue_line line by hand"
+			((ours)) && say "Left in place: $lua (bindings.lua still loads it)"
+			return 0
+		fi
+		if ! cp -p -- "$bindings" "$tmp" || ! without_line "$bindings" "$glue_line" >"$tmp" ||
+			! mv -f -- "$tmp" "$bindings"; then
+			rm -f -- "$tmp"
+			say "Left in place: $bindings (could not rewrite it; backup: $backup); delete the $glue_line line by hand"
+			((ours)) && say "Left in place: $lua (bindings.lua still loads it)"
+			return 0
+		fi
+		say "Removed: the line $glue_line from $bindings (backup: $backup)"
+	fi
+	if ((ours)); then
+		if rm -f -- "$lua"; then
+			say "Removed: $lua"
+		else
+			say "Left in place: $lua (could not remove it)"
+		fi
+	fi
+	return 0
+}
+
+remove_omarchy_glue() {
+	remove_widget
+	remove_hotkey
+}
+
+uninstall_nuncio() {
+	say "This will:"
+	say "  1. systemctl --user disable --now nunciod.service"
+	say "  2. sudo pacman -R $pkgname"
+	say "  3. remove the Omarchy bar widget and hotkey that contrib/omarchy/README.md installs, where"
+	say "     they are unchanged (disable the widget first: omarchy plugin disable pwn27sbx.nuncio-unread)"
+	say "Your data stays in ~/.local/share/nuncio (delete it with 'nuncio purge --confirm' first, or by hand)."
+	confirm "Uninstall nuncio?"
+	systemctl --user disable --now nunciod.service || say "(the service was not enabled or not running)"
+	sudo pacman -R "$pkgname"
+	remove_omarchy_glue
+	say "nuncio is uninstalled."
+	if [[ -e ${XDG_DATA_HOME:-$HOME/.local/share}/nuncio ]]; then
+		say "Left behind: ${XDG_DATA_HOME:-$HOME/.local/share}/nuncio"
+	fi
+}
+
+# Sourced (packaging/tests/uninstall.sh does, to test the functions above): stop here.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then
+	return 0
+fi
 
 version="" dir="" yes=0 enable=1 uninstall=0
 while (($#)); do
@@ -71,32 +272,9 @@ if ((EUID == 0)); then
 fi
 [[ $(uname -m) == "$arch" ]] || die "the package is built for $arch, this machine is $(uname -m); nothing was done"
 
-confirm() {
-	if ((yes)); then
-		return 0
-	fi
-	if [[ ! -r /dev/tty ]] || ! { : </dev/tty; } 2>/dev/null; then
-		die "no terminal to confirm on; run it again with --yes to proceed without asking. Nothing was done."
-	fi
-	local answer
-	printf '%s [y/N] ' "$1" >/dev/tty
-	read -r answer </dev/tty || answer=""
-	[[ $answer == y || $answer == Y || $answer == yes ]] || die "cancelled; nothing was done"
-}
-
 if ((uninstall)); then
 	[[ -z $version && -z $dir ]] || die "--uninstall takes no --version or --dir"
-	say "This will:"
-	say "  1. systemctl --user disable --now nunciod.service"
-	say "  2. sudo pacman -R $pkgname"
-	say "Your data stays in ~/.local/share/nuncio (delete it with 'nuncio purge --confirm' first, or by hand)."
-	confirm "Uninstall nuncio?"
-	systemctl --user disable --now nunciod.service || say "(the service was not enabled or not running)"
-	sudo pacman -R "$pkgname"
-	say "nuncio is uninstalled."
-	if [[ -e ${XDG_DATA_HOME:-$HOME/.local/share}/nuncio ]]; then
-		say "Left behind: ${XDG_DATA_HOME:-$HOME/.local/share}/nuncio"
-	fi
+	uninstall_nuncio
 	exit 0
 fi
 

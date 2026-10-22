@@ -73,6 +73,17 @@ keeps a dangling link. Your messages and keys are not package files: `nuncio pur
 (before uninstalling) or deleting `~/.local/share/nuncio` removes them. `MANIFEST` lists every
 package file; after `pacman -R` none of them may exist.
 
+After the package, `--uninstall` also removes the Omarchy bar widget and hotkey that
+`contrib/omarchy/README.md` installs (disable the widget first:
+`omarchy plugin disable pwn27sbx.nuncio-unread`), only while they are what nuncio ships: the
+plugin folder when it holds only its unchanged `manifest.json` and `BarWidget.qml`;
+`~/.config/hypr/nuncio.lua` when unchanged, and every line of `~/.config/hypr/bindings.lua` that is
+exactly `require("hypr.nuncio")`. The rest of `bindings.lua` stays byte for byte, and the file as
+it was is kept next to it as `bindings.lua.nuncio-backup` (`.1`, `.2`, … when that name is taken).
+A changed file, a file nuncio does not ship, or a symlink on those paths is left in place with a
+line saying so (a changed `nuncio.lua` keeps its `require` line too); remove those by hand as
+`contrib/omarchy/README.md` says.
+
 ## How a release would be made (not done; needs the owner's OK)
 
 1. Commit, tag `v<version>` (the version in `Cargo.toml`, which `cmd/nunciod` must repeat).
@@ -161,4 +172,7 @@ cache. `check.sh` checks that they parse as XML, have those viewBoxes, hold no `
    `xdg-open 'whatsapp://send?phone=…&text=hola'` opens the app with the draft; the launcher shows
    nuncio and nuncio (terminal); `gapplication launch io.github.pwn27sbx.nuncio.Desktop` works.
 8. Log out and in: the daemon and the app start, the app with no window; launching it shows it.
-9. `bash install.sh --uninstall`: no path from `MANIFEST` remains, no unit is left enabled.
+9. `bash install.sh --uninstall`: no path from `MANIFEST` remains, no unit is left enabled; with
+   the Omarchy widget and hotkey installed and unchanged, the plugin folder and
+   `~/.config/hypr/nuncio.lua` are gone and `bindings.lua` lost only the `require` line (its
+   backup next to it).

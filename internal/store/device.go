@@ -126,6 +126,18 @@ func NewDeviceStore(ctx context.Context, db *sql.DB, sealer *Sealer) (*DeviceSto
 
 func deviceAAD(jid string) []byte { return sealAAD("nuncio_device", "sealed", jid, jid) }
 
+// sealDeviceKeys seals the device record (noise | identity | signed pre-key | ADV secret) for
+// nuncio_device. PutDevice and the migration (migrate_t17.go) both seal through it.
+func sealDeviceKeys(sealer *Sealer, jid string, noise, identity, signedPreKey, advSecret []byte) []byte {
+	private := make([]byte, 0, 3*devicePrivSize+len(advSecret))
+	private = append(private, noise...)
+	private = append(private, identity...)
+	private = append(private, signedPreKey...)
+	private = append(private, advSecret...)
+	defer clear(private)
+	return sealer.Seal(deviceAAD(jid), private)
+}
+
 const putDeviceStubQuery = `
 	INSERT INTO whatsmeow_device (jid, lid, registration_id, noise_key, identity_key,
 	                              signed_pre_key, signed_pre_key_id, signed_pre_key_sig,
@@ -170,13 +182,8 @@ func (s *DeviceStore) PutDevice(ctx context.Context, device *wastore.Device) err
 		return errors.New("store: the device has no account signature")
 	}
 	jid := device.ID.String()
-	private := make([]byte, 0, 3*devicePrivSize+len(device.AdvSecretKey))
-	private = append(private, device.NoiseKey.Priv[:]...)
-	private = append(private, device.IdentityKey.Priv[:]...)
-	private = append(private, device.SignedPreKey.Priv[:]...)
-	private = append(private, device.AdvSecretKey...)
-	sealed := s.sealer.Seal(deviceAAD(jid), private)
-	clear(private)
+	sealed := sealDeviceKeys(s.sealer, jid, device.NoiseKey.Priv[:], device.IdentityKey.Priv[:],
+		device.SignedPreKey.Priv[:], device.AdvSecretKey)
 
 	err := s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
 		if _, err := s.db.Exec(ctx, putDeviceStubQuery,

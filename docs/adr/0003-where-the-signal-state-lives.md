@@ -98,10 +98,28 @@ The owner chose: "Q5/T17 option 1, a keyring-held data key with sealed columns".
 
 ### Migrating an existing plain database
 
-14. **Backup first.** Before touching a plain `nuncio.db`, the migration writes a copy with
-    `VACUUM INTO` next to it (`0600`). It then seals the private columns in place in one
-    transaction, and vacuums so no freed page keeps a plain key. It is idempotent (already sealed
-    values are left alone), and a failure at any step leaves the original database as it was.
+14. **Backup first.** The migration (`store.MigrateToSealed`) runs only on a plain `nuncio.db`:
+    a `whatsmeow_device` row with real private keys and no `nuncio_seal_meta` row. A check row
+    over plain device keys is an error, never resealed. A whatsmeow schema older than the tables
+    it seals (a table or column missing) is refused with `store.ErrSchemaOutdated` before the
+    backup and the key: the caller runs whatsmeow's schema upgrade first, never the migration.
+    Before touching the database it writes a copy with `VACUUM INTO` next to it,
+    `nuncio.db.pre-t17-<UTC time>.bak` (for example `nuncio.db.pre-t17-20261021T133045Z.bak`), or
+    `…-1.bak` up to `…-99.bak` when that name is taken (a retry within the same second), created
+    empty at `0600` first and never over an existing file, and checks the copy read-only
+    (integrity check, device row present). Only then does it ask the keyring for the data key
+    (created, or reused when an earlier failed run left it). One transaction seals the private
+    columns in place, moves the pre-keys into `nuncio_pre_keys`, seals the device keys into
+    `nuncio_device`, zeroes them in `whatsmeow_device`, writes the check row and sets the
+    cleanup-pending mark (the one row of `nuncio_seal_cleanup`, no secret); it commits only if the
+    keyring, read again, still holds the key it sealed under. Then, with `secure_delete` on, a
+    WAL checkpoint, `VACUUM` and a last checkpoint wipe the free pages where stock whatsmeow left
+    old plain keys, and only then is the mark cleared. A failure before the commit leaves the
+    database's content as it was. A failure after it (a reader blocking the checkpoint, a
+    cancelled context, a full disk) returns `Migrated` with `CleanupPending`: the free pages may
+    still hold plain keys, and every later run that finds the mark retries the cleanup, even with
+    nothing left to migrate, and reports `Cleaned` when it finishes. With nothing to migrate and
+    no mark, a run writes nothing.
 15. **The backup is never deleted by the migration** (to confirm, L3 (2)). It holds the plain keys,
     and nuncio says so when it writes it, so the user can remove it once the sealed database works.
 16. **The wipe deletes the key and the backup.** `nuncio logout --confirm` and

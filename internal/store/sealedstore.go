@@ -343,12 +343,14 @@ CREATE TABLE IF NOT EXISTS nuncio_pre_keys (
 	FOREIGN KEY (jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE
 )`
 
-func (s *sealedStore) preKeyAAD(id uint32) string { return strconv.FormatUint(uint64(id), 10) }
+// preKeyAAD is the primary-key part of a pre-key's AAD after our JID. The migration (migrate_t17.go)
+// seals with it too.
+func preKeyAAD(id uint32) string { return strconv.FormatUint(uint64(id), 10) }
 
 func (s *sealedStore) genOnePreKey(ctx context.Context, id uint32, markUploaded bool) (*keys.PreKey, error) {
 	key := keys.NewPreKey(id)
 	_, err := s.db.Exec(ctx, `INSERT INTO nuncio_pre_keys (jid, key_id, sealed, uploaded) VALUES ($1, $2, $3, $4)`,
-		s.ourJID, key.KeyID, s.seal(tPreKeys, "sealed", key.Priv[:], s.preKeyAAD(key.KeyID)), markUploaded)
+		s.ourJID, key.KeyID, s.seal(tPreKeys, "sealed", key.Priv[:], preKeyAAD(key.KeyID)), markUploaded)
 	return key, err
 }
 
@@ -361,7 +363,7 @@ func (s *sealedStore) getNextPreKeyID(ctx context.Context) (uint32, error) {
 }
 
 func (s *sealedStore) openPreKey(id uint32, sealed []byte) (*keys.PreKey, error) {
-	priv, err := s.open(tPreKeys, "sealed", sealed, s.preKeyAAD(id))
+	priv, err := s.open(tPreKeys, "sealed", sealed, preKeyAAD(id))
 	if err != nil {
 		return nil, err
 	}

@@ -311,7 +311,7 @@ fn fixed_graphics(choice: ProtocolChoice, why: &str) -> (Option<Graphics>, Strin
     let picker = if protocol == ProtocolType::Halfblocks {
         Picker::halfblocks()
     } else {
-        // ratatui-image 11 builds a picker from a cell size only through this deprecated call.
+        // ratatui-image 12, like 11, builds a picker from a cell size only through this deprecated call.
         #[allow(deprecated)]
         let mut picker = Picker::from_fontsize(cell_size());
         picker.set_protocol_type(protocol);
@@ -342,7 +342,7 @@ fn queried_graphics(
 ) -> (Option<Graphics>, String) {
     let started = Instant::now();
     let result = Picker::from_query_stdio_with_options(QueryStdioOptions {
-        timeout: QUERY_TIMEOUT,
+        timeout_ms: QUERY_TIMEOUT.as_millis() as i32,
         ..QueryStdioOptions::default()
     });
     let answered = result

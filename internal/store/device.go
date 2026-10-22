@@ -31,8 +31,10 @@ var (
 	ErrNoDevice = errors.New("store: no device stored")
 	// ErrKeyNotFound reports a keyring item that is not there.
 	ErrKeyNotFound = errors.New("store: key not found in the keyring")
-	// ErrDeviceNotSealed reports a device row whose private keys are not in nuncio_device: a
-	// database written by whatsmeow's own store that was not migrated yet.
+	// ErrDeviceNotSealed reports a device row whose private keys are not in nuncio_device, or whose
+	// companion meta nonce is still plain in the whatsmeow_device stub: a database written by
+	// whatsmeow's own store, or sealed before the nonce was (T17 D3), that MigrateToSealed did not
+	// migrate yet.
 	ErrDeviceNotSealed = errors.New("store: the stored device has no sealed keys")
 )
 
@@ -67,10 +69,10 @@ func (SecretService) Delete(service, user string) error {
 }
 
 // DeviceStore is whatsmeow's device container over nuncio.db with the private material sealed
-// under the data key. The device's private keys live sealed in nuncio_device; whatsmeow_device
-// keeps a stub row (the JID and the public fields, the private columns zeroed) so the foreign
-// keys of every Signal table, and their ON DELETE CASCADE, keep working. The Signal state goes
-// through sealedStore.
+// under the data key. The device's private keys and its companion meta nonce live sealed in
+// nuncio_device; whatsmeow_device keeps a stub row (the JID and the public fields, the private
+// columns zeroed, the nonce empty) so the foreign keys of every Signal table, and their ON DELETE
+// CASCADE, keep working. The Signal state goes through sealedStore.
 type DeviceStore struct {
 	db        *dbutil.Database
 	container *sqlstore.Container
@@ -79,14 +81,38 @@ type DeviceStore struct {
 
 var _ wastore.DeviceContainer = (*DeviceStore)(nil)
 
-// deviceSchema holds the sealed private keys of each device. A row goes with its
-// whatsmeow_device row.
+// deviceSchema holds the sealed private keys of each device and its sealed companion meta nonce
+// (NULL when WhatsApp sent none). A row goes with its whatsmeow_device row. A table created before
+// the nonce was sealed lacks that column; addDeviceNonceColumn adds it.
 const deviceSchema = `
 CREATE TABLE IF NOT EXISTS nuncio_device (
-	jid    TEXT PRIMARY KEY,
-	sealed BLOB NOT NULL,
+	jid                  TEXT PRIMARY KEY,
+	sealed               BLOB NOT NULL,
+	companion_meta_nonce BLOB,
 	FOREIGN KEY (jid) REFERENCES whatsmeow_device(jid) ON DELETE CASCADE
 )`
+
+// querier is what addDeviceNonceColumn needs of a *sql.DB or a *sql.Conn.
+type querier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// addDeviceNonceColumn adds nuncio_device.companion_meta_nonce to a table created before it
+// (T17 D3); with the column there it writes nothing.
+func addDeviceNonceColumn(ctx context.Context, q querier) error {
+	var n int
+	if err := q.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('nuncio_device') WHERE name = 'companion_meta_nonce'`).Scan(&n); err != nil {
+		return fmt.Errorf("store: read the schema of nuncio_device: %w", err)
+	}
+	if n > 0 {
+		return nil
+	}
+	if _, err := q.ExecContext(ctx, `ALTER TABLE nuncio_device ADD COLUMN companion_meta_nonce BLOB`); err != nil {
+		return fmt.Errorf("store: add the sealed companion meta nonce to nuncio_device: %w", err)
+	}
+	return nil
+}
 
 // The sealed device record: noise | identity | signed pre-key (32 bytes each) | ADV secret.
 const devicePrivSize = 32
@@ -121,10 +147,26 @@ func NewDeviceStore(ctx context.Context, db *sql.DB, sealer *Sealer) (*DeviceSto
 			return nil, fmt.Errorf("store: create the sealed tables: %w", err)
 		}
 	}
+	if err := addDeviceNonceColumn(ctx, db); err != nil {
+		return nil, err
+	}
 	return &DeviceStore{db: wrapped, container: container, sealer: sealer}, nil
 }
 
 func deviceAAD(jid string) []byte { return sealAAD("nuncio_device", "sealed", jid, jid) }
+
+func deviceNonceAAD(jid string) []byte {
+	return sealAAD("nuncio_device", "companion_meta_nonce", jid, jid)
+}
+
+// sealDeviceNonce seals the companion meta nonce (whatsmeow sends it as the Companion_User_Secret
+// header) for nuncio_device; an empty one is NULL. PutDevice and the migration seal through it.
+func sealDeviceNonce(sealer *Sealer, jid, nonce string) []byte {
+	if nonce == "" {
+		return nil
+	}
+	return sealer.Seal(deviceNonceAAD(jid), []byte(nonce))
+}
 
 // sealDeviceKeys seals the device record (noise | identity | signed pre-key | ADV secret) for
 // nuncio_device. PutDevice and the migration (migrate_t17.go) both seal through it.
@@ -154,11 +196,15 @@ const putDeviceStubQuery = `
 `
 
 // putDeviceSealedQuery keeps the first keys written, like whatsmeow's container, which never
-// updates the key columns of an existing device.
-const putDeviceSealedQuery = `INSERT INTO nuncio_device (jid, sealed) VALUES ($1, $2) ON CONFLICT (jid) DO NOTHING`
+// updates the key columns of an existing device, and replaces the companion meta nonce, which it
+// does update.
+const putDeviceSealedQuery = `
+	INSERT INTO nuncio_device (jid, sealed, companion_meta_nonce) VALUES ($1, $2, $3)
+	ON CONFLICT (jid) DO UPDATE SET companion_meta_nonce=excluded.companion_meta_nonce
+`
 
 // PutDevice implements whatsmeow's DeviceContainer; Device.Save calls it. It writes the stub row
-// and the sealed keys in one transaction, then wires the device's stores like whatsmeow's own
+// (its companion_meta_nonce always empty) and the sealed keys and nonce in one transaction, then wires the device's stores like whatsmeow's own
 // container does.
 func (s *DeviceStore) PutDevice(ctx context.Context, device *wastore.Device) error {
 	if device == nil {
@@ -184,6 +230,7 @@ func (s *DeviceStore) PutDevice(ctx context.Context, device *wastore.Device) err
 	jid := device.ID.String()
 	sealed := sealDeviceKeys(s.sealer, jid, device.NoiseKey.Priv[:], device.IdentityKey.Priv[:],
 		device.SignedPreKey.Priv[:], device.AdvSecretKey)
+	sealedNonce := sealDeviceNonce(s.sealer, jid, device.CompanionMetaNonce)
 
 	err := s.db.DoTxn(ctx, nil, func(ctx context.Context) error {
 		if _, err := s.db.Exec(ctx, putDeviceStubQuery,
@@ -191,11 +238,11 @@ func (s *DeviceStore) PutDevice(ctx context.Context, device *wastore.Device) err
 			zeroKey, device.SignedPreKey.KeyID, device.SignedPreKey.Signature[:],
 			zeroKey, device.Account.Details, device.Account.AccountSignature, device.Account.AccountSignatureKey, device.Account.DeviceSignature,
 			device.Platform, device.BusinessName, device.PushName, uuid.NullUUID{UUID: device.FacebookUUID, Valid: device.FacebookUUID != uuid.Nil},
-			device.LIDMigrationTimestamp, device.CompanionMetaNonce,
+			device.LIDMigrationTimestamp, "",
 		); err != nil {
 			return fmt.Errorf("store: save the device row: %w", err)
 		}
-		if _, err := s.db.Exec(ctx, putDeviceSealedQuery, jid, sealed); err != nil {
+		if _, err := s.db.Exec(ctx, putDeviceSealedQuery, jid, sealed, sealedNonce); err != nil {
 			return fmt.Errorf("store: save the sealed device keys: %w", err)
 		}
 		return nil
@@ -221,19 +268,21 @@ const loadDeviceQuery = `
 	SELECT d.jid, d.lid, d.registration_id, d.signed_pre_key_id, d.signed_pre_key_sig,
 	       d.adv_details, d.adv_account_sig, d.adv_account_sig_key, d.adv_device_sig,
 	       d.platform, d.business_name, d.push_name, d.facebook_uuid, d.lid_migration_ts, d.companion_meta_nonce,
-	       n.sealed
+	       n.sealed, n.companion_meta_nonce
 	FROM whatsmeow_device d LEFT JOIN nuncio_device n ON n.jid = d.jid
 	ORDER BY d.jid LIMIT 1
 `
 
-// LoadDevice reads the device back (the first by JID; nuncio links one), its keys opened from
-// nuncio_device, with its stores wired.
+// LoadDevice reads the device back (the first by JID; nuncio links one), its keys and companion
+// meta nonce opened from nuncio_device, with its stores wired.
 // It returns ErrNoDevice when nothing is stored yet and ErrDeviceNotSealed for a device whose
-// keys are not sealed.
+// keys or nonce are not sealed.
 func (s *DeviceStore) LoadDevice(ctx context.Context) (*wastore.Device, error) {
 	var (
 		jid, lid          sql.NullString
 		preKeySig, sealed []byte
+		plainNonce        string
+		sealedNonce       []byte
 		account           waAdv.ADVSignedDeviceIdentity
 		fbUUID            uuid.NullUUID
 		preKeyID          uint32
@@ -242,15 +291,15 @@ func (s *DeviceStore) LoadDevice(ctx context.Context) (*wastore.Device, error) {
 	err := s.db.QueryRow(ctx, loadDeviceQuery).Scan(
 		&jid, &lid, &device.RegistrationID, &preKeyID, &preKeySig,
 		&account.Details, &account.AccountSignature, &account.AccountSignatureKey, &account.DeviceSignature,
-		&device.Platform, &device.BusinessName, &device.PushName, &fbUUID, &device.LIDMigrationTimestamp, &device.CompanionMetaNonce,
-		&sealed)
+		&device.Platform, &device.BusinessName, &device.PushName, &fbUUID, &device.LIDMigrationTimestamp, &plainNonce,
+		&sealed, &sealedNonce)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNoDevice
 	}
 	if err != nil {
 		return nil, fmt.Errorf("store: read the device row: %w", err)
 	}
-	if sealed == nil {
+	if sealed == nil || plainNonce != "" {
 		return nil, ErrDeviceNotSealed
 	}
 	id, err := types.ParseJID(jid.String)
@@ -272,6 +321,13 @@ func (s *DeviceStore) LoadDevice(ctx context.Context) (*wastore.Device, error) {
 	defer clear(private)
 	if len(private) <= 3*devicePrivSize {
 		return nil, fmt.Errorf("store: the sealed device keys hold %d bytes, want more than %d", len(private), 3*devicePrivSize)
+	}
+	if sealedNonce != nil {
+		nonce, err := s.sealer.Open(deviceNonceAAD(id.String()), sealedNonce)
+		if err != nil {
+			return nil, sealedReadError("nuncio_device", err)
+		}
+		device.CompanionMetaNonce = string(nonce)
 	}
 
 	device.ID = &id

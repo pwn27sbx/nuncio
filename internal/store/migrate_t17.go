@@ -15,10 +15,10 @@ import (
 )
 
 // The T17 migration (ADR 0003, 14-15): a nuncio.db written by whatsmeow's stock store, with the
-// device's private keys, the pre-keys and the Signal state in plain, becomes the sealed layout
-// of DeviceStore and sealedStore. It backs the database up first, seals in place in one
-// transaction, and then vacuums so no freed page keeps a plain key; a durable mark makes a later
-// call finish that vacuum when it was interrupted.
+// device's private keys and companion meta nonce, the pre-keys and the Signal state in plain,
+// becomes the sealed layout of DeviceStore and sealedStore. It backs the database up first, seals
+// in place in one transaction, and then vacuums so no freed page keeps a plain key; a durable mark
+// makes a later call finish that vacuum when it was interrupted.
 
 var (
 	// ErrMigrationInconsistent reports a database with a seal check row whose device keys are
@@ -136,6 +136,12 @@ type plainDevice struct {
 // MigrationResult and writes nothing. The backup is never deleted. Errors carry no key material,
 // ids or numbers.
 //
+// The companion meta nonce (T17 D3) is sealed into nuncio_device with the device keys, and the
+// stub row keeps it empty. A database sealed before that, its nonce still plain in the stub row,
+// is upgraded by the same rules (migrateNonces): a backup, one transaction under the write lock,
+// the cleanup; under the key the seal check row proves, which is read and never created. Without
+// that key it writes nothing and the caller's seal check reports the database.
+//
 // Two processes may migrate the same database at once (L9 B1). Every key creation happens under
 // the write lock, so a second process waits until the first one committed (up to
 // migrateBusyTimeout) and then finds nothing left to seal and writes no key: the keyring always
@@ -195,14 +201,27 @@ func migrateOnce(ctx context.Context, conn *sql.Conn, dbPath string, kr Keyring)
 		return MigrationResult{}, err
 	}
 	switch {
-	case len(devices) == 0 && pending:
+	case len(devices) == 0:
+		nonces, err := plainNonces(ctx, conn)
+		if err != nil {
+			return MigrationResult{}, err
+		}
+		if len(nonces) > 0 {
+			// A database sealed before the companion meta nonce was (T17 D3).
+			res, err := migrateNonces(ctx, conn, dbPath, kr, nonces)
+			if err != nil || res.Migrated {
+				res.Cleaned = pending && res.Migrated && !res.CleanupPending
+				return res, err
+			}
+		}
+		if !pending {
+			return MigrationResult{}, nil
+		}
 		// An earlier run committed but did not finish wiping its free pages.
 		if err := cleanFreePages(ctx, conn); err != nil {
 			return MigrationResult{CleanupPending: true}, err
 		}
 		return MigrationResult{Cleaned: true}, nil
-	case len(devices) == 0:
-		return MigrationResult{}, nil
 	case sealedMeta:
 		return MigrationResult{}, ErrMigrationInconsistent
 	}
@@ -217,7 +236,7 @@ func migrateOnce(ctx context.Context, conn *sql.Conn, dbPath string, kr Keyring)
 	if err := fault("backup"); err != nil {
 		return MigrationResult{}, err
 	}
-	if err := verifyBackup(ctx, backup, devices); err != nil {
+	if err := verifyBackup(ctx, backup, holdsDevices(devices)); err != nil {
 		return MigrationResult{}, err
 	}
 
@@ -297,7 +316,7 @@ func cleanFreePages(ctx context.Context, conn *sql.Conn) error {
 // requiredSchema is every whatsmeow table and column the migration reads or writes.
 func requiredSchema() map[string][]string {
 	tables := map[string][]string{
-		"whatsmeow_device":   {"jid", "noise_key", "identity_key", "signed_pre_key", "adv_key"},
+		"whatsmeow_device":   {"jid", "noise_key", "identity_key", "signed_pre_key", "adv_key", "companion_meta_nonce"},
 		"whatsmeow_pre_keys": {"jid", "key_id", "key", "uploaded"},
 	}
 	for _, c := range migratedColumns {
@@ -450,8 +469,8 @@ func unwrapPath(err error) error {
 }
 
 // verifyBackup opens the backup read-only and checks that it is a sound database holding every
-// device row the migration is about to seal.
-func verifyBackup(ctx context.Context, path string, devices []plainDevice) error {
+// device row the migration is about to seal (holds).
+func verifyBackup(ctx context.Context, path string, holds func(ctx context.Context, backup *sql.DB) bool) error {
 	name := filepath.Base(path)
 	u := url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}
 	db, err := sql.Open(driverName, u.String())
@@ -467,16 +486,26 @@ func verifyBackup(ctx context.Context, path string, devices []plainDevice) error
 	if check != "ok" {
 		return fmt.Errorf("store: migration: the backup %s fails its integrity check", name)
 	}
-	for _, d := range devices {
-		var noise []byte
-		err := db.QueryRowContext(ctx, `SELECT noise_key FROM whatsmeow_device WHERE jid = ?`, d.jid).Scan(&noise)
-		if err != nil || !bytes.Equal(noise, d.noise) {
-			clear(noise)
-			return fmt.Errorf("store: migration: the backup %s does not hold the device", name)
-		}
-		clear(noise)
+	if !holds(ctx, db) {
+		return fmt.Errorf("store: migration: the backup %s does not hold the device", name)
 	}
 	return nil
+}
+
+// holdsDevices reports whether a backup holds each device's plain noise key.
+func holdsDevices(devices []plainDevice) func(context.Context, *sql.DB) bool {
+	return func(ctx context.Context, db *sql.DB) bool {
+		for _, d := range devices {
+			var noise []byte
+			err := db.QueryRowContext(ctx, `SELECT noise_key FROM whatsmeow_device WHERE jid = ?`, d.jid).Scan(&noise)
+			same := err == nil && bytes.Equal(noise, d.noise)
+			clear(noise)
+			if !same {
+				return false
+			}
+		}
+		return true
+	}
 }
 
 // sealInPlace runs the one migration transaction and returns the rows per table and the sealer
@@ -541,6 +570,9 @@ func sealInPlace(ctx context.Context, conn *sql.Conn, kr Keyring) (map[string]in
 		if _, err := tx.ExecContext(ctx, schema); err != nil {
 			return nil, nil, fmt.Errorf("store: migration: create the sealed tables: %w", err)
 		}
+	}
+	if err := addDeviceNonceColumn(ctx, tx); err != nil {
+		return nil, nil, fmt.Errorf("store: migration: %w", err)
 	}
 	// The cleanup-pending mark commits with the sealed values: no commit without it.
 	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO nuncio_seal_cleanup (id) VALUES (1)`); err != nil {
@@ -695,18 +727,24 @@ func movePreKeys(ctx context.Context, tx *sql.Conn, sealer *Sealer) (int, error)
 	return len(all), nil
 }
 
-// sealDevices seals each device's keys into nuncio_device, like PutDevice, and leaves the zeroed
-// stub row in whatsmeow_device.
+// sealDevices seals each device's keys and companion meta nonce into nuncio_device, like
+// PutDevice, and leaves the zeroed stub row, its nonce empty, in whatsmeow_device.
 func sealDevices(ctx context.Context, tx *sql.Conn, sealer *Sealer, devices []plainDevice) error {
 	for _, d := range devices {
 		if len(d.noise) != devicePrivSize || len(d.identity) != devicePrivSize || len(d.signedPreKey) != devicePrivSize || len(d.advSecret) == 0 {
 			return errors.New("store: migration: a whatsmeow_device row has keys of the wrong length")
 		}
+		var nonce string
+		if err := tx.QueryRowContext(ctx, `SELECT companion_meta_nonce FROM whatsmeow_device WHERE jid = ?`, d.jid).Scan(&nonce); err != nil {
+			return fmt.Errorf("store: migration: read the companion meta nonce: %w", err)
+		}
 		sealed := sealDeviceKeys(sealer, d.jid, d.noise, d.identity, d.signedPreKey, d.advSecret)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO nuncio_device (jid, sealed) VALUES (?, ?)`, d.jid, sealed); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO nuncio_device (jid, sealed, companion_meta_nonce) VALUES (?, ?, ?)`,
+			d.jid, sealed, sealDeviceNonce(sealer, d.jid, nonce)); err != nil {
 			return fmt.Errorf("store: migration: write nuncio_device: %w", err)
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE whatsmeow_device SET noise_key = ?, identity_key = ?, signed_pre_key = ?, adv_key = ? WHERE jid = ?`,
+		if _, err := tx.ExecContext(ctx, `UPDATE whatsmeow_device SET noise_key = ?, identity_key = ?, signed_pre_key = ?, adv_key = ?,
+			companion_meta_nonce = '' WHERE jid = ?`,
 			zeroKey, zeroKey, zeroKey, zeroKey, d.jid); err != nil {
 			return fmt.Errorf("store: migration: zero the whatsmeow_device keys: %w", err)
 		}
@@ -752,4 +790,220 @@ func verifySealCheckConn(ctx context.Context, conn *sql.Conn, s *Sealer) error {
 		return ErrWrongDataKey
 	}
 	return nil
+}
+
+// The companion meta nonce (T17 D3, owner answer "A"): whatsmeow keeps it in
+// whatsmeow_device.companion_meta_nonce and sends it to WhatsApp as the Companion_User_Secret
+// header. It is sealed into nuncio_device like the device keys: the migration of a plain database
+// moves it with them (sealDevices), and a database sealed before D3, its nonce still plain in the
+// stub row, gets it sealed by migrateNonces.
+
+// plainNonce is a stub row whose companion meta nonce is still plain.
+type plainNonce struct{ jid, nonce string }
+
+// plainNonces returns the whatsmeow_device rows with a non-empty companion_meta_nonce. A table or
+// column that is not there yet holds none.
+func plainNonces(ctx context.Context, conn *sql.Conn) ([]plainNonce, error) {
+	var n int
+	if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('whatsmeow_device') WHERE name = 'companion_meta_nonce'`).Scan(&n); err != nil {
+		return nil, fmt.Errorf("store: migration: read the schema of whatsmeow_device: %w", err)
+	}
+	if n == 0 {
+		return nil, nil
+	}
+	rows, err := conn.QueryContext(ctx, `SELECT jid, companion_meta_nonce FROM whatsmeow_device WHERE companion_meta_nonce != '' ORDER BY jid`)
+	if err != nil {
+		return nil, fmt.Errorf("store: migration: read whatsmeow_device: %w", err)
+	}
+	defer rows.Close()
+	var out []plainNonce
+	for rows.Next() {
+		var p plainNonce
+		if err := rows.Scan(&p.jid, &p.nonce); err != nil {
+			return nil, fmt.Errorf("store: migration: read whatsmeow_device: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: migration: read whatsmeow_device: %w", err)
+	}
+	return out, nil
+}
+
+// migrateNonces seals the plain companion meta nonces of a sealed database (its device keys in
+// nuncio_device, a seal check row), with the rules of the migration: only under the data key the
+// check row proves, read and never created; a backup first, verified; one transaction under the
+// write lock that seals each nonce into nuncio_device, empties it in the stub row and sets the
+// cleanup-pending mark, committed only while the keyring still holds that key; then the free-page
+// cleanup. Without that key (none, another one, no check row) it writes nothing and returns a zero
+// MigrationResult: the caller's seal check reports the database. A keyring that cannot be read is
+// ErrKeyringUnavailable, before the backup.
+func migrateNonces(ctx context.Context, conn *sql.Conn, dbPath string, kr Keyring, nonces []plainNonce) (MigrationResult, error) {
+	key, sealer, err := sealingKey(ctx, conn, kr)
+	if err != nil || sealer == nil {
+		return MigrationResult{}, err
+	}
+	defer clear(key)
+
+	backup, err := writeBackup(ctx, conn, dbPath+".pre-t17-"+migrateNow().UTC().Format(backupTimeLayout))
+	if err != nil {
+		return MigrationResult{}, err
+	}
+	if err := fault("backup"); err != nil {
+		return MigrationResult{}, err
+	}
+	if err := verifyBackup(ctx, backup, holdsNonces(nonces)); err != nil {
+		return MigrationResult{}, err
+	}
+
+	restore, err := secureDeleteOn(ctx, conn)
+	if err != nil {
+		return MigrationResult{}, err
+	}
+	n, err := sealNoncesInPlace(ctx, conn, kr, key, sealer)
+	restore()
+	if err != nil {
+		return MigrationResult{}, err
+	}
+	res := MigrationResult{Migrated: true, BackupPath: backup, Rows: map[string]int{"whatsmeow_device": n}, CleanupPending: true}
+	if err := cleanFreePages(ctx, conn); err != nil {
+		return res, err
+	}
+	res.CleanupPending = false
+	return res, nil
+}
+
+// sealingKey returns the data key in kr and its sealer when the database's seal check row was
+// sealed under it, and no sealer (nil error) when there is no check row, no key or another key.
+// It only reads.
+func sealingKey(ctx context.Context, conn *sql.Conn, kr Keyring) ([]byte, *Sealer, error) {
+	if ok, err := hasSealCheck(ctx, conn); err != nil || !ok {
+		return nil, nil, err
+	}
+	key, err := LoadDataKey(kr, false)
+	switch {
+	case errors.Is(err, ErrKeyringUnavailable):
+		return nil, nil, fmt.Errorf("store: migration: %w", err)
+	case err != nil:
+		return nil, nil, nil
+	}
+	sealer, err := NewSealer(key)
+	if err != nil {
+		clear(key)
+		return nil, nil, nil
+	}
+	switch err := verifySealCheckConn(ctx, conn, sealer); {
+	case errors.Is(err, ErrWrongDataKey):
+		clear(key)
+		return nil, nil, nil
+	case err != nil:
+		clear(key)
+		return nil, nil, fmt.Errorf("store: migration: %w", err)
+	}
+	return key, sealer, nil
+}
+
+// holdsNonces reports whether a backup holds each stub row's plain nonce.
+func holdsNonces(nonces []plainNonce) func(context.Context, *sql.DB) bool {
+	return func(ctx context.Context, db *sql.DB) bool {
+		for _, p := range nonces {
+			var nonce string
+			err := db.QueryRowContext(ctx, `SELECT companion_meta_nonce FROM whatsmeow_device WHERE jid = ?`, p.jid).Scan(&nonce)
+			if err != nil || nonce != p.nonce {
+				return false
+			}
+		}
+		return true
+	}
+}
+
+// sealNoncesInPlace is migrateNonces' one transaction. Under the write lock it reads the plain
+// nonces and the check row again: with no plain nonce left, or a device key plain again, it is
+// errMigratedMeanwhile and MigrateToSealed starts its checks again.
+func sealNoncesInPlace(ctx context.Context, conn *sql.Conn, kr Keyring, key []byte, sealer *Sealer) (int, error) {
+	restoreBusy, err := busyTimeoutOn(ctx, conn)
+	if err != nil {
+		return 0, err
+	}
+	defer restoreBusy()
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return 0, fmt.Errorf("store: migration: take the write lock: %w", err)
+	}
+	committed := false
+	defer func() {
+		if committed {
+			return
+		}
+		if _, err := conn.ExecContext(context.WithoutCancel(ctx), `ROLLBACK`); err != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+	}()
+	tx := conn
+
+	devices, err := plainDevices(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	for _, d := range devices {
+		clear(d.noise)
+		clear(d.identity)
+		clear(d.signedPreKey)
+		clear(d.advSecret)
+	}
+	nonces, err := plainNonces(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	if len(devices) > 0 || len(nonces) == 0 {
+		return 0, errMigratedMeanwhile
+	}
+	if err := verifySealCheckConn(ctx, tx, sealer); err != nil {
+		return 0, fmt.Errorf("store: migration: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, deviceSchema); err != nil {
+		return 0, fmt.Errorf("store: migration: create the sealed tables: %w", err)
+	}
+	if err := addDeviceNonceColumn(ctx, tx); err != nil {
+		return 0, fmt.Errorf("store: migration: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, cleanupMarkSchema); err != nil {
+		return 0, fmt.Errorf("store: migration: create the sealed tables: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO nuncio_seal_cleanup (id) VALUES (1)`); err != nil {
+		return 0, fmt.Errorf("store: migration: write the cleanup mark: %w", err)
+	}
+	for _, p := range nonces {
+		res, err := tx.ExecContext(ctx, `UPDATE nuncio_device SET companion_meta_nonce = ? WHERE jid = ?`,
+			sealDeviceNonce(sealer, p.jid, p.nonce), p.jid)
+		if err != nil {
+			return 0, fmt.Errorf("store: migration: seal the companion meta nonce: %w", err)
+		}
+		if n, err := res.RowsAffected(); err != nil || n != 1 {
+			return 0, ErrDeviceNotSealed
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE whatsmeow_device SET companion_meta_nonce = '' WHERE jid = ?`, p.jid); err != nil {
+			return 0, fmt.Errorf("store: migration: empty the plain companion meta nonce: %w", err)
+		}
+	}
+	if err := fault("sealed companion_meta_nonce"); err != nil {
+		return 0, err
+	}
+	if err := fault("check"); err != nil {
+		return 0, err
+	}
+	back, err := readDataKey(kr)
+	if err != nil {
+		return 0, fmt.Errorf("store: migration: read the data key again: %w", err)
+	}
+	same := bytes.Equal(back, key)
+	clear(back)
+	if !same {
+		return 0, fmt.Errorf("%w: %s changed during the migration (service %s)", ErrKeyringUnavailable, itemDataKey, KeyringService)
+	}
+	if _, err := tx.ExecContext(ctx, `COMMIT`); err != nil {
+		return 0, fmt.Errorf("store: migration: commit: %w", err)
+	}
+	committed = true
+	return len(nonces), nil
 }

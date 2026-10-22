@@ -142,7 +142,15 @@ func pairedDevice(t *testing.T, jid types.JID) *wastore.Device {
 		},
 		Platform: "nuncio-test",
 		PushName: "synthetic",
+		// WhatsApp's companion meta nonce, sent back as the Companion_User_Secret header.
+		CompanionMetaNonce: testNonce(t),
 	}
+}
+
+// testNonce is a random companion meta nonce shaped like WhatsApp's (URL-safe base64 text).
+func testNonce(t *testing.T) string {
+	t.Helper()
+	return base64.RawURLEncoding.EncodeToString(randBytes(t, 24))
 }
 
 var ourTestJID = types.JID{User: "15551230001", Server: types.DefaultUserServer, Device: 7}
@@ -154,6 +162,7 @@ func devicePrivate(d *wastore.Device) map[string][]byte {
 		"identity private key":       d.IdentityKey.Priv[:],
 		"signed pre-key private key": d.SignedPreKey.Priv[:],
 		"advertisement secret":       d.AdvSecretKey,
+		"companion meta nonce":       []byte(d.CompanionMetaNonce),
 	}
 }
 
@@ -426,4 +435,119 @@ func TestSecretServiceAgainstTheRealKeyring(t *testing.T) {
 	if _, err := kr.Get(service, "probe"); !errors.Is(err, ErrKeyNotFound) {
 		t.Fatalf("Get after Delete = %v, want ErrKeyNotFound", err)
 	}
+}
+
+// D3 (T17 L11): the companion meta nonce is sealed in nuncio_device, bound to its JID; the stub
+// row keeps it empty, a later Save that changes it reseals it, and LoadDevice returns it.
+func TestDeviceStoreSealsTheCompanionMetaNonce(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db := openStoreDB(t, dir)
+	sealer := testSealer(t)
+	s := newTestDeviceStore(t, db, sealer)
+	device := pairedDevice(t, ourTestJID)
+	first := device.CompanionMetaNonce
+	device.Container = s
+	must(t, device.Save(ctx))
+
+	assertNonceSealed := func(want string) {
+		t.Helper()
+		var stub string
+		var sealed []byte
+		must(t, db.QueryRow(`SELECT d.companion_meta_nonce, n.companion_meta_nonce FROM whatsmeow_device d
+			JOIN nuncio_device n ON n.jid = d.jid`).Scan(&stub, &sealed))
+		if stub != "" {
+			t.Errorf("whatsmeow_device.companion_meta_nonce is not empty")
+		}
+		plain, err := sealer.Open(sealAAD("nuncio_device", "companion_meta_nonce", ourTestJID.String(), ourTestJID.String()), sealed)
+		if err != nil || string(plain) != want {
+			t.Errorf("nuncio_device.companion_meta_nonce does not open to the nonce (%v)", err)
+		}
+		loaded, err := s.LoadDevice(ctx)
+		if err != nil {
+			t.Fatalf("LoadDevice: %v", err)
+		}
+		if loaded.CompanionMetaNonce != want {
+			t.Errorf("LoadDevice returned another companion meta nonce")
+		}
+	}
+	assertNonceSealed(first)
+
+	// whatsmeow's storeCompanionMetaNonce: a new nonce from a history sync, then Save.
+	device.CompanionMetaNonce = testNonce(t)
+	must(t, device.Save(ctx))
+	assertNonceSealed(device.CompanionMetaNonce)
+
+	secrets := map[string][]byte{"first nonce": []byte(first), "second nonce": []byte(device.CompanionMetaNonce)}
+	assertNoSecretBytes(t, dir, secrets)
+	must(t, db.Close())
+	assertNoSecretBytes(t, dir, secrets)
+}
+
+// A device without a companion meta nonce stores none and loads with an empty one.
+func TestDeviceStoreWithoutACompanionMetaNonce(t *testing.T) {
+	ctx := context.Background()
+	db := openStoreDB(t, t.TempDir())
+	s := newTestDeviceStore(t, db, testSealer(t))
+	device := pairedDevice(t, ourTestJID)
+	device.CompanionMetaNonce = ""
+	device.Container = s
+	must(t, device.Save(ctx))
+
+	var nulls int
+	must(t, db.QueryRow(`SELECT COUNT(*) FROM nuncio_device WHERE companion_meta_nonce IS NULL`).Scan(&nulls))
+	if nulls != 1 {
+		t.Errorf("nuncio_device.companion_meta_nonce is not NULL for a device without one")
+	}
+	loaded, err := s.LoadDevice(ctx)
+	if err != nil {
+		t.Fatalf("LoadDevice: %v", err)
+	}
+	assertSameDevice(t, loaded, device)
+}
+
+// A companion meta nonce left plain in the stub row means the database was not upgraded yet
+// (MigrateToSealed does it): the device is not loaded with it, nor without it.
+func TestDeviceStoreRefusesAPlainCompanionMetaNonce(t *testing.T) {
+	ctx := context.Background()
+	db := openStoreDB(t, t.TempDir())
+	s := newTestDeviceStore(t, db, testSealer(t))
+	device := pairedDevice(t, ourTestJID)
+	device.Container = s
+	must(t, device.Save(ctx))
+	_, err := db.Exec(`UPDATE whatsmeow_device SET companion_meta_nonce = ?`, testNonce(t))
+	must(t, err)
+
+	if _, err := s.LoadDevice(ctx); !errors.Is(err, ErrDeviceNotSealed) {
+		t.Fatalf("LoadDevice with a plain nonce in the stub = %v, want ErrDeviceNotSealed", err)
+	}
+}
+
+// D3: a nuncio_device created before the nonce was sealed gets its column when the device store
+// opens, so the next Save seals the nonce there.
+func TestNewDeviceStoreAddsTheNonceColumnToAnOlderTable(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db := openStoreDB(t, dir)
+	sealer := testSealer(t)
+	device := pairedDevice(t, ourTestJID)
+	nonce := device.CompanionMetaNonce
+	device.CompanionMetaNonce = ""
+	device.Container = newTestDeviceStore(t, db, sealer)
+	must(t, device.Save(ctx))
+	_, err := db.Exec(`ALTER TABLE nuncio_device DROP COLUMN companion_meta_nonce`)
+	must(t, err)
+
+	s := newTestDeviceStore(t, db, sealer)
+	loaded, err := s.LoadDevice(ctx)
+	if err != nil {
+		t.Fatalf("LoadDevice: %v", err)
+	}
+	loaded.CompanionMetaNonce = nonce
+	must(t, loaded.Save(ctx))
+	again, err := s.LoadDevice(ctx)
+	if err != nil || again.CompanionMetaNonce != nonce {
+		t.Fatalf("LoadDevice after the Save = %v; want the nonce back", err)
+	}
+	assertNoSecretBytes(t, dir, map[string][]byte{"nonce": []byte(nonce)})
 }

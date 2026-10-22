@@ -216,6 +216,7 @@ func logicalDump(t *testing.T, db *sql.DB, skip ...string) map[string][]string {
 // whatsmeow's plain layout, for comparing what must stay plain.
 var sealedColumns = []string{
 	"whatsmeow_device.noise_key", "whatsmeow_device.identity_key", "whatsmeow_device.signed_pre_key", "whatsmeow_device.adv_key",
+	"whatsmeow_device.companion_meta_nonce",
 	"whatsmeow_pre_keys", "nuncio_*",
 	"whatsmeow_sessions.session", "whatsmeow_sender_keys.sender_key", "whatsmeow_app_state_sync_keys.key_data",
 	"whatsmeow_message_secrets.key", "whatsmeow_privacy_tokens.token", "whatsmeow_nct_salt.salt",
@@ -319,6 +320,13 @@ func stockReadBack(t *testing.T, path string) (*wastore.Device, []observed) {
 // sealedReadBack loads the device from db through the sealed device store under the key in kr.
 func sealedReadBack(t *testing.T, db *sql.DB, kr Keyring) (*wastore.Device, []observed) {
 	t.Helper()
+	device := sealedLoad(t, db, kr)
+	return device, readBack(t, device)
+}
+
+// sealedLoad loads the device from db through the sealed device store under the key in kr.
+func sealedLoad(t *testing.T, db *sql.DB, kr Keyring) *wastore.Device {
+	t.Helper()
 	ctx := context.Background()
 	key, err := LoadDataKey(kr, false)
 	if err != nil {
@@ -333,7 +341,7 @@ func sealedReadBack(t *testing.T, db *sql.DB, kr Keyring) (*wastore.Device, []ob
 	if err != nil {
 		t.Fatalf("LoadDevice: %v", err)
 	}
-	return device, readBack(t, device)
+	return device
 }
 
 func copyFile(t *testing.T, from, to string) {
@@ -465,6 +473,11 @@ func TestMigrateBacksUpThenSealsEverything(t *testing.T) {
 		AND signed_pre_key = zeroblob(32) AND adv_key = zeroblob(32)`).Scan(&zeroed))
 	if zeroed != 1 {
 		t.Errorf("the whatsmeow_device row is not a zeroed stub")
+	}
+	var stubNonce string
+	must(t, f.db.QueryRow(`SELECT companion_meta_nonce FROM whatsmeow_device`).Scan(&stubNonce))
+	if stubNonce != "" {
+		t.Errorf("whatsmeow_device.companion_meta_nonce is not empty after the migration")
 	}
 
 	// Differential: the sealed store on the migrated file reads what the stock store reads on
@@ -904,6 +917,7 @@ func TestMigrateRefusesAnOlderWhatsmeowSchema(t *testing.T) {
 	for name, older := range map[string]string{
 		"a table missing":  `DROP TABLE whatsmeow_nct_salt`,
 		"a column missing": `ALTER TABLE whatsmeow_privacy_tokens RENAME COLUMN token TO old_token`,
+		"no nonce column":  `ALTER TABLE whatsmeow_device DROP COLUMN companion_meta_nonce`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			f := newPlainFixture(t)
@@ -925,5 +939,286 @@ func TestMigrateRefusesAnOlderWhatsmeowSchema(t *testing.T) {
 			}
 			assertDumpsEqual(t, logicalDump(t, f.db), before, "with an older schema")
 		})
+	}
+}
+
+// nonceFixture is a database sealed by the code before D3 (T17 L11): the device sealed in
+// nuncio_device and a seal check row, but the companion meta nonce still plain in the
+// whatsmeow_device stub row. legacy also drops nuncio_device's companion_meta_nonce column, as
+// that code created the table without it.
+type nonceFixture struct {
+	dir, path string
+	db        *sql.DB
+	kr        *fakeKeyring
+	device    *wastore.Device
+	nonce     string
+}
+
+func newNonceFixture(t *testing.T, legacy bool) *nonceFixture {
+	t.Helper()
+	ctx := context.Background()
+	dir := t.TempDir()
+	db := openStoreDB(t, dir)
+	key := randBytes(t, dataKeySize)
+	kr := newFakeKeyring()
+	must(t, kr.Set(KeyringService, itemDataKey, base64.StdEncoding.EncodeToString(key)))
+	sealer, err := NewSealer(key)
+	must(t, err)
+	device := pairedDevice(t, ourTestJID)
+	device.Container = newTestDeviceStore(t, db, sealer)
+	must(t, device.Save(ctx))
+	must(t, WriteSealCheck(ctx, db, sealer))
+	_, err = db.Exec(`UPDATE whatsmeow_device SET companion_meta_nonce = ?`, device.CompanionMetaNonce)
+	must(t, err)
+	_, err = db.Exec(`UPDATE nuncio_device SET companion_meta_nonce = NULL`)
+	must(t, err)
+	if legacy {
+		_, err = db.Exec(`ALTER TABLE nuncio_device DROP COLUMN companion_meta_nonce`)
+		must(t, err)
+	}
+	var busy, logPages, done int
+	must(t, db.QueryRow(`PRAGMA wal_checkpoint(TRUNCATE)`).Scan(&busy, &logPages, &done))
+	f := &nonceFixture{dir: dir, path: filepath.Join(dir, DBFile), db: db, kr: kr, device: device, nonce: device.CompanionMetaNonce}
+	if secretsFound(t, dir, f.secrets()) == 0 {
+		t.Fatal("control: the plain nonce is not in the database files, so the scan proves nothing")
+	}
+	return f
+}
+
+func (f *nonceFixture) secrets() map[string][]byte {
+	return map[string][]byte{"companion meta nonce": []byte(f.nonce)}
+}
+
+// D3: a database sealed before the nonce was gets it sealed on the next MigrateToSealed, after a
+// backup like any migration, in one transaction with the cleanup that wipes the free pages; the
+// device then loads with its nonce, and a second run does nothing.
+func TestMigrateSealsAPlainCompanionMetaNonceOfASealedDatabase(t *testing.T) {
+	for name, legacy := range map[string]bool{"table without the column": true, "table with the column": false} {
+		t.Run(name, func(t *testing.T) {
+			f := newNonceFixture(t, legacy)
+			now := time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)
+			fixClock(t, now)
+			skip := []string{"nuncio_device", "nuncio_seal_cleanup", "whatsmeow_device.companion_meta_nonce"}
+			before := logicalDump(t, f.db, skip...)
+
+			res, err := MigrateToSealed(context.Background(), f.db, f.path, f.kr)
+
+			if err != nil || !res.Migrated || res.CleanupPending {
+				t.Fatalf("MigrateToSealed = %+v, %v; want a finished migration", res, err)
+			}
+			if res.BackupPath != backupName(f.path, now) {
+				t.Errorf("BackupPath = %q, want %q", res.BackupPath, backupName(f.path, now))
+			}
+			if want := map[string]int{"whatsmeow_device": 1}; !reflect.DeepEqual(res.Rows, want) {
+				t.Errorf("Rows = %v, want %v", res.Rows, want)
+			}
+			assertMode(t, res.BackupPath, 0o600)
+			if data, err := os.ReadFile(res.BackupPath); err != nil || !bytes.Contains(data, []byte(f.nonce)) {
+				t.Errorf("control: the backup does not hold the database as it was (%v)", err)
+			}
+			assertNoSecretBytes(t, f.dir, f.secrets())
+			assertNoSecretBytes(t, f.dir, devicePrivate(f.device))
+			assertDumpsEqual(t, logicalDump(t, f.db, skip...), before, "everything but the nonce")
+			var stub string
+			must(t, f.db.QueryRow(`SELECT companion_meta_nonce FROM whatsmeow_device`).Scan(&stub))
+			if stub != "" {
+				t.Error("whatsmeow_device.companion_meta_nonce is not empty after the upgrade")
+			}
+			loaded := sealedLoad(t, f.db, f.kr)
+			assertSameDevice(t, loaded, f.device)
+			if f.kr.count() != 1 {
+				t.Error("the upgrade changed the keyring")
+			}
+
+			after := logicalDump(t, f.db)
+			dbBefore, err := os.ReadFile(f.path)
+			must(t, err)
+			var stages []string
+			injectFault(t, func(stage string) error { stages = append(stages, stage); return nil })
+			again := migrate(t, f.asPlain(), f.kr)
+			if again.Migrated || again.Cleaned || again.CleanupPending || len(stages) != 0 {
+				t.Errorf("second run = %+v, stages %v; want nothing to do", again, stages)
+			}
+			if dbAfter, err := os.ReadFile(f.path); err != nil || !bytes.Equal(dbAfter, dbBefore) {
+				t.Errorf("the second run changed %s (%v)", DBFile, err)
+			}
+			assertDumpsEqual(t, logicalDump(t, f.db), after, "the second run")
+			if got := backups(t, f.path); len(got) != 1 {
+				t.Errorf("backups = %v, want one", got)
+			}
+			must(t, f.db.Close())
+			assertNoSecretBytes(t, f.dir, f.secrets())
+		})
+	}
+}
+
+// asPlain lets the plainFixture helpers run on a nonce fixture.
+func (f *nonceFixture) asPlain() *plainFixture {
+	return &plainFixture{dir: f.dir, path: f.path, db: f.db, device: f.device}
+}
+
+// D3: a failure inside the nonce upgrade's transaction leaves the database's content as it was
+// (the legacy table keeps its old columns), keeps the backup and the key, and a retry succeeds.
+func TestMigrateCompanionMetaNonceFailureLeavesTheOriginal(t *testing.T) {
+	for _, stage := range []string{"sealed companion_meta_nonce", "check"} {
+		t.Run(stage, func(t *testing.T) {
+			f := newNonceFixture(t, true)
+			before := logicalDump(t, f.db)
+			key, err := f.kr.Get(KeyringService, itemDataKey)
+			must(t, err)
+			boom := errors.New("injected failure")
+			reached := false
+			injectFault(t, func(s string) error {
+				if s == stage {
+					reached = true
+					return boom
+				}
+				return nil
+			})
+
+			_, err = MigrateToSealed(context.Background(), f.db, f.path, f.kr)
+
+			if !reached || !errors.Is(err, boom) {
+				t.Fatalf("reached %v, err = %v; want the injected failure at %q", reached, err, stage)
+			}
+			assertNoSecretIn(t, err, []byte(f.nonce))
+			assertDumpsEqual(t, logicalDump(t, f.db), before, "after a failed upgrade")
+			if got := backups(t, f.path); len(got) != 1 {
+				t.Errorf("backups = %v, want the one of the failed run", got)
+			}
+
+			injectFault(t, nil)
+			res := migrate(t, f.asPlain(), f.kr)
+			if !res.Migrated || res.CleanupPending {
+				t.Fatalf("the retry = %+v, want a finished migration", res)
+			}
+			if again, _ := f.kr.Get(KeyringService, itemDataKey); again != key || f.kr.count() != 1 {
+				t.Error("the keyring changed")
+			}
+			loaded := sealedLoad(t, f.db, f.kr)
+			assertSameDevice(t, loaded, f.device)
+			assertNoSecretBytes(t, f.dir, f.secrets())
+		})
+	}
+}
+
+// D3: the nonce is sealed only under the key the seal check row proves. Without that key (none,
+// another one, no check row) the upgrade writes nothing, no backup and no key, and leaves the
+// verdict to the caller's seal check; a keyring that cannot be read is ErrKeyringUnavailable,
+// also before the backup.
+func TestMigrateCompanionMetaNonceNeedsTheSealingKey(t *testing.T) {
+	for name, tc := range map[string]struct {
+		prepare func(t *testing.T, f *nonceFixture)
+		wantErr error
+	}{
+		"no key": {prepare: func(t *testing.T, f *nonceFixture) {
+			must(t, f.kr.Delete(KeyringService, itemDataKey))
+		}},
+		"another key": {prepare: func(t *testing.T, f *nonceFixture) {
+			must(t, f.kr.Set(KeyringService, itemDataKey, base64.StdEncoding.EncodeToString(testKey(0x77))))
+		}},
+		"no check row": {prepare: func(t *testing.T, f *nonceFixture) {
+			_, err := f.db.Exec(`DELETE FROM nuncio_seal_meta`)
+			must(t, err)
+		}},
+		"keyring down": {prepare: func(t *testing.T, f *nonceFixture) {
+			f.kr.getErr = errors.New("synthetic: the secret service is not running")
+		}, wantErr: ErrKeyringUnavailable},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newNonceFixture(t, true)
+			tc.prepare(t, f)
+			before := logicalDump(t, f.db)
+			items := f.kr.count()
+
+			res, err := MigrateToSealed(context.Background(), f.db, f.path, f.kr)
+
+			if tc.wantErr == nil && err != nil || tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if res.Migrated {
+				t.Errorf("result = %+v, want nothing migrated", res)
+			}
+			if got := backups(t, f.path); len(got) != 0 {
+				t.Errorf("backups = %v, want none", got)
+			}
+			if f.kr.count() != items {
+				t.Error("the keyring changed")
+			}
+			assertDumpsEqual(t, logicalDump(t, f.db), before, "without the sealing key")
+		})
+	}
+}
+
+// D3: the nonce upgrade commits only while the keyring still holds the key it sealed under, like
+// the migration (L5 A1).
+func TestMigrateCompanionMetaNonceRollsBackWhenTheKeyChanges(t *testing.T) {
+	f := newNonceFixture(t, true)
+	before := logicalDump(t, f.db)
+	// Read 1 is sealingKey's LoadDataKey, read 2 the check before the commit.
+	kr := &swappingKeyring{fakeKeyring: f.kr, n: 2}
+
+	_, err := MigrateToSealed(context.Background(), f.db, f.path, kr)
+
+	if !errors.Is(err, ErrKeyringUnavailable) || kr.reads != 2 {
+		t.Fatalf("err = %v after %d reads, want ErrKeyringUnavailable after the check before the commit", err, kr.reads)
+	}
+	assertDumpsEqual(t, logicalDump(t, f.db), before, "after the key changed under the upgrade")
+}
+
+// D3: a backup that does not hold the plain nonce stops the upgrade before the write lock, and
+// the database stays as it was.
+func TestMigrateCompanionMetaNonceStopsOnABackupWithoutTheNonce(t *testing.T) {
+	f := newNonceFixture(t, true)
+	now := time.Date(2026, 10, 22, 9, 30, 0, 0, time.UTC)
+	fixClock(t, now)
+	before := logicalDump(t, f.db)
+	injectFault(t, func(stage string) error {
+		if stage != "backup" {
+			return nil
+		}
+		backup, err := sql.Open(driverName, backupName(f.path, now))
+		if err != nil {
+			return err
+		}
+		defer backup.Close()
+		_, err = backup.Exec(`UPDATE whatsmeow_device SET companion_meta_nonce = 'another'`)
+		return err
+	})
+
+	_, err := MigrateToSealed(context.Background(), f.db, f.path, f.kr)
+
+	if err == nil || !strings.Contains(err.Error(), "does not hold the device") {
+		t.Fatalf("err = %v, want the backup refused", err)
+	}
+	assertDumpsEqual(t, logicalDump(t, f.db), before, "after a backup without the nonce")
+}
+
+// D3: a cleanup interrupted after the nonce upgrade's commit stays pending, with no plain nonce
+// in the files, and the next run finishes it.
+func TestMigrateCompanionMetaNonceCleanupInterrupted(t *testing.T) {
+	f := newNonceFixture(t, true)
+	boom := errors.New("injected failure")
+	injectFault(t, func(stage string) error {
+		if stage == "checkpointed" {
+			return boom
+		}
+		return nil
+	})
+
+	res, err := MigrateToSealed(context.Background(), f.db, f.path, f.kr)
+
+	if !errors.Is(err, boom) || !res.Migrated || !res.CleanupPending {
+		t.Fatalf("interrupted: %+v, %v; want the failure, Migrated and the cleanup pending", res, err)
+	}
+	assertNoSecretBytes(t, f.dir, f.secrets())
+	injectFault(t, nil)
+	res = migrate(t, f.asPlain(), f.kr)
+	if res.Migrated || !res.Cleaned || res.CleanupPending {
+		t.Fatalf("the retry = %+v, want the cleanup done", res)
+	}
+	assertNoSecretBytes(t, f.dir, f.secrets())
+	if loaded := sealedLoad(t, f.db, f.kr); loaded.CompanionMetaNonce != f.nonce {
+		t.Error("the device lost its nonce")
 	}
 }

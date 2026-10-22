@@ -586,6 +586,15 @@ func TestSealedValuesAreBoundToTheirRow(t *testing.T) {
 				return err
 			},
 		},
+		{
+			name: "companion meta nonce to another account", table: "nuncio_device",
+			setup: func(t *testing.T, d *wastore.Device) {},
+			move:  `UPDATE nuncio_device SET companion_meta_nonce = (SELECT companion_meta_nonce FROM nuncio_device WHERE jid = '` + ourTestJID.String() + `') WHERE jid = '` + otherJID.String() + `'`,
+			read: func(d, _ *wastore.Device) error {
+				_, err := d.Container.(*DeviceStore).LoadDevice(ctx) // loads otherJID, the lowest JID
+				return err
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

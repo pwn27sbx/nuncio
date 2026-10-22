@@ -59,13 +59,19 @@ The owner chose: "Q5/T17 option 1, a keyring-held data key with sealed columns".
    - the PN-to-LID migration is overridden: each moved row is opened under its old address and
      sealed again under the new one;
    - the device's private keys are kept by nuncio's device store, sealed under the data key in
-     `nuncio_device` (`jid`, `sealed`; noise, identity and signed pre-key private keys and the ADV
-     secret in one value), not as one keyring item per key.
+     `nuncio_device` (`jid`, `sealed`, `companion_meta_nonce`; `sealed` holds the noise, identity
+     and signed pre-key private keys and the ADV secret in one value), not as one keyring item per
+     key;
+   - the companion meta nonce WhatsApp issues (whatsmeow sends it back as the
+     `Companion_User_Secret` header) is sealed on its own in `nuncio_device.companion_meta_nonce`,
+     same key and format, bound to (`nuncio_device`, `companion_meta_nonce`, our JID), `NULL` when
+     WhatsApp sent none; unlike the keys it is replaced on every save that changes it.
 7. **What is sealed and what stays plain** (S6):
 
    | Sealed | Plain |
    | --- | --- |
    | `whatsmeow_device` keys (`noise_key`, `identity_key`, `signed_pre_key`, `adv_key`; see 8) | JIDs, ids, timestamps, flags |
+   | `whatsmeow_device.companion_meta_nonce` (into `nuncio_device`; owner, T17 L11) | |
    | pre-keys | contacts' public identity keys |
    | `sessions.session` | signatures and public device fields |
    | `sender_keys.sender_key` | app-state version hashes and MACs |
@@ -75,8 +81,9 @@ The owner chose: "Q5/T17 option 1, a keyring-held data key with sealed columns".
    | `event_buffer.plaintext`, `retry_buffer.plaintext` | |
 
 8. **`whatsmeow_device` keeps a stub row.** Every Signal table has a foreign key to it, so the row
-   with our JID must exist; its key columns hold zeroed bytes of the checked length, and the real
-   keys are read from the sealed device record.
+   with our JID must exist; its key columns hold zeroed bytes of the checked length and its
+   `companion_meta_nonce` is empty, and the real keys and nonce are read from `nuncio_device`. A
+   stub row whose nonce is not empty is a database not migrated yet: the device is not loaded.
 9. **A key check row.** One row in `nuncio_seal_meta` holds a known value sealed under the data
    key. At start it tells apart "no data yet", "the right key" and "a different or missing key"
    before anything else is read or written.
@@ -127,7 +134,8 @@ The owner chose: "Q5/T17 option 1, a keyring-held data key with sealed columns".
     key that appeared meanwhile is used, never replaced). One transaction seals the private
     columns in place, moves the pre-keys into `nuncio_pre_keys`, seals the device keys into
     `nuncio_device`, zeroes them in `whatsmeow_device`, writes the check row and sets the
-    cleanup-pending mark (the one row of `nuncio_seal_cleanup`, no secret); it commits only if the
+    cleanup-pending mark (the one row of `nuncio_seal_cleanup`, no secret), the companion meta
+    nonce moving with the device keys; it commits only if the
     keyring, read again, still holds the key it sealed under. Then, with `secure_delete` on, a
     WAL checkpoint, `VACUUM` and a last checkpoint wipe the free pages where stock whatsmeow left
     old plain keys, and only then is the mark cleared. A failure before the commit leaves the
@@ -136,6 +144,16 @@ The owner chose: "Q5/T17 option 1, a keyring-held data key with sealed columns".
     still hold plain keys, and every later run that finds the mark retries the cleanup, even with
     nothing left to migrate, and reports `Cleaned` when it finishes. With nothing to migrate and
     no mark, a run writes nothing.
+    **A database sealed before the nonce was** (the device keys in `nuncio_device`, a check row,
+    the nonce still plain in the stub row; only test databases, since the first real migration
+    runs after this change and covers the nonce itself): the same call upgrades it by the same
+    rules. It takes the data key from the keyring only when the check row proves it, never
+    creates one, and without it writes nothing (the seal check then reports the database, 12); a
+    keyring that cannot be read stops it before the backup. Then a backup, verified to hold the
+    nonce; under the write lock one transaction that seals the nonce into `nuncio_device` (adding
+    the column to an older table), empties it in the stub row and sets the cleanup-pending mark,
+    committed only while the keyring still holds the key; then the same free-page cleanup. A
+    second run finds nothing to do.
     **Two migrations at once** (`nunciod` at start or on a retry, and `nuncio link`, on the same
     plain database): the Secret Service has no compare-and-swap, so two processes that both find no
     key could each write one, and the later write would replace the key the earlier one sealed

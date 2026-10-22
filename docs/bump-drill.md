@@ -110,6 +110,33 @@ machine and OS, so it says nothing about whether M1 made the build slower.
 No `sudo`, no installs. The pin stays in `go.mod` and `go.sum` for review
 afterwards (`git diff go.mod go.sum`).
 
+## A real bump: review the sealed store
+
+`internal/store/sealedstore.go` wraps whatsmeow's `*sqlstore.SQLStore` and seals every private
+column (ADR 0003). A method it does not override falls through to `SQLStore`, which writes in
+plain. So a bump that changes `SQLStore` is a reviewed change, not only a rebuild:
+
+```sh
+TMPDIR=/tmp go test ./internal/store/ -run TestSQLStoreMethodSetIsPinned
+```
+
+When it fails, it lists every method added, removed or changed. For each one, decide whether it
+reads or writes a sealed column (ADR 0003, point 7: sessions, pre-keys, sender keys, app-state key
+data, message secrets, privacy tokens, the NCT salt, the event and retry buffers, the device keys).
+If it does, override it in `sealedstore.go` with a test in `sealedstore_test.go`; then update
+`pinnedSQLStoreMethods` in the same commit. Also compare `sqlstore/upgrades/00-latest-schema.sql`
+before and after: a new table or column holding key material needs the same treatment.
+
+`*sqlstore.Container` methods reach the sealed store too, through `SQLStore`: the device ones
+(`PutDevice`, `GetDevice` and the rest) are shadowed to fail, and only `Close` and `Upgrade` stay
+promoted. `TestSealedStoreRefusesTheContainersDeviceMethods` calls each one, so a new `Container`
+method fails it until it is shadowed in `sealedstore.go` or added to `keptContainerMethods`.
+
+Both guards compare method names and signatures only, never the SQL inside them. So every bump
+also reviews the diff of `sqlstore/store.go` and `sqlstore/container.go`, even when the tests pass:
+a method that keeps its signature but changes its query (another column, a copy in SQL) can still
+move key bytes the sealed store does not see.
+
 ## Limits worth knowing
 
 - A default run pins the reference already in `go.mod`, so `go.mod` and

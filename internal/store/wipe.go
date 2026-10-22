@@ -26,12 +26,28 @@ const (
 // nuncio's and stays.
 var owned = []string{DBFile, DBFile + "-wal", DBFile + "-shm", MediaDir, ExportsDir}
 
+// The keyring items nuncio has ever written under KeyringService: the data key (ADR 0003) and
+// the four device items of the keyring-backed device store it replaces. No binary wrote the
+// legacy items, but a wipe deletes them too so nothing of an older build is left behind.
+const (
+	itemLegacyNoiseKey     = "device.noise_key"
+	itemLegacyIdentityKey  = "device.identity_key"
+	itemLegacySignedPreKey = "device.signed_pre_key"
+	itemLegacyAdvSecretKey = "device.adv_secret_key"
+)
+
+// wipedKeyItems is every keyring item Wipe deletes, in a fixed order.
+var wipedKeyItems = []string{
+	itemDataKey,
+	itemLegacyNoiseKey, itemLegacyIdentityKey, itemLegacySignedPreKey, itemLegacyAdvSecretKey,
+}
+
 // removeDataDir removes the emptied data dir itself. Tests replace it to reproduce what a
 // sandbox does to that last rmdir.
 var removeDataDir = os.Remove
 
-// Wipe deletes everything nuncio keeps on this machine for the device, in this order: the device
-// keys in kr (service KeyringService), then the database with its WAL and SHM files, the media
+// Wipe deletes everything nuncio keeps on this machine for the device, in this order: the
+// keyring items in kr (service KeyringService: the data key and the legacy device items), then the database with its WAL and SHM files, the media
 // cache and the exports in dataDir, and finally dataDir itself when nothing else is left in it.
 // An emptied dataDir that the packaged systemd unit's sandbox keeps (the rmdir fails with EBUSY
 // or EROFS) stays and is not an error; any other failure to remove it is, EPERM and EACCES
@@ -44,11 +60,11 @@ var removeDataDir = os.Remove
 // inside dataDir is removed as a link, and a dataDir that is itself a symlink is refused before
 // anything is deleted.
 //
-// The keyring items are the ones DeviceStore.DeleteDevice removes. No binary writes them yet
-// (whatsmeow's sqlstore keeps the Signal state inside nuncio.db until the keyring-backed device
-// store is wired), so today this step finds nothing; it runs anyway so a wipe never leaves keys
-// behind once it is. A failing keyring does not stop the files from being deleted: the error is
-// returned after them.
+// Without the data key the sealed values left in any copy of nuncio.db cannot be opened. No binary
+// writes the data key yet (whatsmeow's sqlstore keeps the Signal state inside nuncio.db until the
+// sealed device store is wired), so today this step finds nothing; it runs anyway so a wipe never
+// leaves a key behind once it is. A failing keyring does not stop the files from being deleted:
+// the error is returned after them.
 func Wipe(dataDir string, kr Keyring) error {
 	if fi, err := os.Lstat(dataDir); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
 		return fmt.Errorf("store: %s is a symlink; nothing was deleted", dataDir)
@@ -61,7 +77,7 @@ func Wipe(dataDir string, kr Keyring) error {
 	media.Close(filepath.Join(dataDir, MediaDir))
 
 	var errs []error
-	for _, name := range keyItems {
+	for _, name := range wipedKeyItems {
 		switch err := kr.Delete(KeyringService, name); {
 		case err == nil, errors.Is(err, ErrKeyNotFound):
 		default:

@@ -58,7 +58,7 @@ func writeFile(t *testing.T, path string) {
 func fullKeyring(t *testing.T) *fakeKeyring {
 	t.Helper()
 	kr := newFakeKeyring()
-	for _, name := range keyItems {
+	for _, name := range wipedKeyItems {
 		if err := kr.Set(KeyringService, name, "synthetic"); err != nil {
 			t.Fatal(err)
 		}
@@ -163,8 +163,8 @@ func TestWipeRefusesADataDirThatIsASymlink(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(real, DBFile)); err != nil {
 		t.Errorf("the database behind the link was touched: %v", err)
 	}
-	if n := kr.count(); n != len(keyItems) {
-		t.Errorf("keyring holds %d items after a refused Wipe, want %d", n, len(keyItems))
+	if n := kr.count(); n != len(wipedKeyItems) {
+		t.Errorf("keyring holds %d items after a refused Wipe, want %d", n, len(wipedKeyItems))
 	}
 }
 
@@ -392,5 +392,31 @@ func TestWipeReportsAKeptDataDirItCannotRead(t *testing.T) {
 	t.Cleanup(func() { removeDataDir = orig; _ = os.Chmod(dir, 0o700) })
 	if err := Wipe(dir, newFakeKeyring()); err == nil {
 		t.Fatal("Wipe = nil, want an error: the kept data dir could not be read")
+	}
+}
+
+// The wipe deletes the data key and the four items of the older keyring-backed device store, by
+// their literal names, and leaves another service's items alone.
+func TestWipeDeletesTheDataKeyAndTheLegacyItems(t *testing.T) {
+	kr := newFakeKeyring()
+	names := []string{"store.data_key", "device.noise_key", "device.identity_key", "device.signed_pre_key", "device.adv_secret_key"}
+	for _, name := range names {
+		if err := kr.Set("nuncio", name, "synthetic"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := kr.Set("another-app", "store.data_key", "synthetic"); err != nil {
+		t.Fatal(err)
+	}
+	if err := Wipe(populatedDataDir(t), kr); err != nil {
+		t.Fatalf("Wipe: %v", err)
+	}
+	for _, name := range names {
+		if _, err := kr.Get("nuncio", name); !errors.Is(err, ErrKeyNotFound) {
+			t.Errorf("keyring item %s survived the wipe (get: %v)", name, err)
+		}
+	}
+	if _, err := kr.Get("another-app", "store.data_key"); err != nil {
+		t.Errorf("the wipe touched another service's item: %v", err)
 	}
 }

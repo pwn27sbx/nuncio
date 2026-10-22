@@ -27,8 +27,9 @@ The owner chose: "Q5/T17 option 1, a keyring-held data key with sealed columns".
 ### The data key and the seal
 
 1. **One keyring item holds the data key**: `store.data_key` under the service `nuncio`, 32 random
-   bytes from `crypto/rand`. It is created once, then read back and compared before anything is
-   sealed under it, so a keyring that drops a write is caught before data depends on it.
+   bytes from `crypto/rand`, stored as their standard base64. It is created once, then read back
+   and compared before anything is sealed under it, so a keyring that drops a write is caught
+   before data depends on it.
 2. **AES-256-GCM from the Go standard library** (`crypto/aes`, `crypto/cipher`), no new dependency
    and no cgo. Every seal draws a fresh random 96-bit nonce; at the volume of one linked device
    (thousands of rows, not billions) random nonces stay far below GCM's collision bound.
@@ -51,11 +52,14 @@ The owner chose: "Q5/T17 option 1, a keyring-held data key with sealed columns".
    - pre-keys are generated and inserted inside `SQLStore` itself, so the driver would see only the
      final `INSERT` with no notion of which bytes are private.
 6. **What the wrapper takes over from `SQLStore`:**
-   - pre-keys live in nuncio's own table (`nuncio_pre_keys`), generated and sealed by the wrapper;
+   - pre-keys live in nuncio's own table (`nuncio_pre_keys`: `jid`, `key_id`, `sealed`,
+     `uploaded`, with a cascading foreign key to `whatsmeow_device`), generated and sealed by the
+     wrapper;
    - the PN-to-LID migration is overridden: each moved row is opened under its old address and
      sealed again under the new one;
-   - the device's private keys are kept by nuncio's device store, sealed under the data key, not as
-     one keyring item per key.
+   - the device's private keys are kept by nuncio's device store, sealed under the data key in
+     `nuncio_device` (`jid`, `sealed`; noise, identity and signed pre-key private keys and the ADV
+     secret in one value), not as one keyring item per key.
 7. **What is sealed and what stays plain** (S6):
 
    | Sealed | Plain |
@@ -72,12 +76,14 @@ The owner chose: "Q5/T17 option 1, a keyring-held data key with sealed columns".
 8. **`whatsmeow_device` keeps a stub row.** Every Signal table has a foreign key to it, so the row
    with our JID must exist; its key columns hold zeroed bytes of the checked length, and the real
    keys are read from the sealed device record.
-9. **A key check row.** One row in a nuncio table holds a known value sealed under the data key. At
-   start it tells apart "no data yet", "the right key" and "a different or missing key" before
-   anything else is read or written.
-10. **The whatsmeow upgrade guard.** A test pins the method sets of the whatsmeow store interfaces
-    the wrapper implements. A whatsmeow bump that adds or changes a method fails that test, so a new
-    method cannot fall through to `SQLStore` and write key bytes in plain.
+9. **A key check row.** One row in `nuncio_seal_meta` holds a known value sealed under the data
+   key. At start it tells apart "no data yet", "the right key" and "a different or missing key"
+   before anything else is read or written.
+10. **The whatsmeow upgrade guard.** A test (`TestSQLStoreMethodSetIsPinned`) pins the exported
+    method set of `*sqlstore.SQLStore`, names and signatures, which covers every whatsmeow store
+    interface the wrapper implements. A whatsmeow bump that adds or changes a method fails that
+    test, so a new method cannot fall through to `SQLStore` and write key bytes in plain
+    (`docs/bump-drill.md`).
 
 ### Failure modes
 
@@ -100,7 +106,8 @@ The owner chose: "Q5/T17 option 1, a keyring-held data key with sealed columns".
     and nuncio says so when it writes it, so the user can remove it once the sealed database works.
 16. **The wipe deletes the key and the backup.** `nuncio logout --confirm` and
     `nuncio purge --confirm` delete the `store.data_key` item with the other keyring items under
-    `nuncio`, and the migration's backup with `nuncio.db`, so a wipe leaves nothing behind.
+    `nuncio` (the four `device.*` items of the older keyring-backed device store included), and
+    the migration's backup with `nuncio.db`, so a wipe leaves nothing behind.
 
 ### Decisions to confirm with the owner
 

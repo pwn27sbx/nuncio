@@ -45,6 +45,7 @@ Go daemon and CLI (`go.mod`):
 | `github.com/google/uuid` | BSD-3-Clause |
 | `github.com/mdp/qrterminal/v3` | MIT |
 | `github.com/zalando/go-keyring` | MIT |
+| `go.mau.fi/util` | MPL-2.0 |
 | `google.golang.org/protobuf` | BSD-3-Clause |
 | `modernc.org/sqlite` | BSD-3-Clause (bundled SQLite is public domain; bundled sqlite-vec is MIT) |
 

@@ -1,0 +1,12 @@
+# Dependabot opens pull requests for new versions of the GitHub Actions the workflows use, pinned
+# by full commit SHA with a version comment (.github/workflows/ci.yml), keeping both up to date.
+# Cargo and Go modules are updated by hand: cargo-deny and govulncheck in CI flag the versions
+# that must move. The Arch container image digest in ci.yml is not covered; bump it by hand.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci

@@ -1,0 +1,63 @@
+# cargo-deny's checks of the Rust dependency graph (Cargo.lock), run by CI (.github/workflows/ci.yml,
+# job "cargo-deny") and locally with `cargo deny --locked check`. Written for cargo-deny 0.20.
+
+[graph]
+# The platforms nuncio is built on: Arch Linux (the package) and macOS (development). Crates that
+# only another platform pulls in (the windows-* family) are left out of every check.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+]
+
+[advisories]
+# Every vulnerability and unsound advisory fails the check (cargo-deny's fixed behaviour), and so
+# does any crate flagged unmaintained, direct or transitive, and any yanked version. A justified
+# exception goes in `ignore` with its reason.
+unmaintained = "all"
+unsound = "all"
+yanked = "deny"
+ignore = []
+
+[licenses]
+# nuncio is GPL-3.0-only, so every dependency licence must be one that can be combined into a
+# GPL-3.0 work. A crate offering a choice (`MIT OR Apache-2.0`) passes when one of its options is
+# here. CREDITS.md names the licences in use; this list adds only GPL-3.0-compatible ones.
+allow = [
+    "GPL-3.0-only",                 # nuncio's own crates
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "ISC",
+    "Zlib",
+    "MPL-2.0",                      # compatible with GPL-3.0 through its section 3.3
+    "BSL-1.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "CC0-1.0",
+    "Unlicense",
+    "WTFPL",
+]
+confidence-threshold = 0.93
+# The list names the compatible licences, not only the ones in Cargo.lock today.
+unused-allowed-license = "allow"
+
+[licenses.private]
+ignore = false
+
+[bans]
+# Two versions of one crate are reported, not refused: GTK, ratatui and their dependencies pull
+# in a few (syn, thiserror, toml, rustix, ...) that nuncio cannot unify on its own.
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+# Crates come from crates.io only: no other registry, no git dependency.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

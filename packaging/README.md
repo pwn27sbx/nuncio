@@ -39,6 +39,10 @@ systemctl --user enable --now nunciod.service
 With Rust from rustup's own installer (not a pacman package), add `--nodeps` to `makepkg`, as for
 Sealwax: makepkg's check of the build dependencies fails, pacman still checks the runtime ones.
 
+With rustup, the repository's `rust-toolchain.toml` (it is in the tarball) makes cargo use the
+Rust it pins, and rustup downloads it the first time. Arch's `rust` package has no rustup and
+ignores the file.
+
 What the build does: `prepare()` is the only step with network access (`go mod download` into
 `$srcdir/gomodcache`, `cargo fetch --locked` for the host). `build()` and `check()` run with
 `GOPROXY=off`, `GOTOOLCHAIN=local`, `CGO_ENABLED=0`, `-trimpath -mod=readonly -buildmode=pie`, and
@@ -91,7 +95,13 @@ line saying so (a changed `nuncio.lua` keeps its `require` line too); remove tho
 3. `sha256sum nuncio-<version>-1-x86_64.pkg.tar.zst > SHA256SUMS`.
 4. A GitHub release `v<version>` with the package and `SHA256SUMS` as assets.
 
-No CI builds it: delivery and CI are the owner's decision (Q14).
+CI builds the package but releases nothing: delivery is the owner's decision (Q14). The `arch` job
+of [.github/workflows/ci.yml](../.github/workflows/ci.yml) runs, in an `archlinux:base` container
+pinned by digest, `package-source.sh` on the checked-out commit, `makepkg --cleanbuild` (with
+`check()`) as a non-root user, `namcap` on the `PKGBUILD` and the package (an `E:` fails the job),
+`pacman -U`, a comparison of `pacman -Qlq nuncio` with `MANIFEST`,
+`systemd-analyze --user verify` on the installed unit and `check.sh` with `desktop-file-validate`
+and `systemd-analyze` present. It stores no package: what a release ships is still built by hand.
 
 ## Decisions
 

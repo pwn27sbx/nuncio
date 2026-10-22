@@ -1,0 +1,8 @@
+# The Rust toolchain rustup uses in this repository, locally and in CI (.github/workflows/ci.yml).
+# The oldest supported Rust is the workspace `rust-version` in Cargo.toml; CI's "Rust MSRV" job
+# checks the workspace with it. Plain cargo without rustup (Arch's `rust` package, which the
+# package build uses) ignores this file.
+[toolchain]
+channel = "1.99.1"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

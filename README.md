@@ -201,8 +201,13 @@ CGO_ENABLED=0 go build ./...            # the daemon stays pure Go
 packaging/check.sh                      # static checks of the packaging files
 ```
 
-CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the same checks on every push and
-pull request, plus `gofmt`, `go vet`, `go test -race`, `cargo fmt --check` and `cargo clippy -D warnings`.
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the same checks on every push to
+`main` and every pull request, plus `gofmt`, `go vet`, `go test -race`, `cargo fmt --check`,
+`cargo clippy -D warnings`, `govulncheck`, `cargo deny check` ([deny.toml](deny.toml): licences
+compatible with GPL-3.0, advisories, crates.io only), a `cargo check` with the oldest supported
+Rust (`rust-version` in `Cargo.toml`), and the Arch package build (`makepkg`, `namcap`,
+`systemd-analyze verify`; [packaging/README.md](packaging/README.md)). The Rust toolchain is pinned
+in [rust-toolchain.toml](rust-toolchain.toml); rustup installs it on first use.
 
 On a Mac, install GTK first: `brew install gtk4 libadwaita pkgconf`. The review rules for code and
 agents are in [AGENTS.md](AGENTS.md); the wire protocol both sides test against is

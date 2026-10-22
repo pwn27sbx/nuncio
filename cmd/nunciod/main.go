@@ -306,8 +306,8 @@ var errClosed = errors.New("the local data is being deleted; run nuncio purge --
 // sessionState is what the daemon reads from, and sends through, its WhatsApp session.
 type sessionState interface {
 	State() wa.State
-	// StopKind is why WhatsApp stopped the session, a fixed ipc.Stop* value, or "" (status's
-	// stop_reason).
+	// StopKind is why WhatsApp stopped the session, or why the stored device stays closed (the
+	// gate), a fixed ipc.Stop* value, or "" (status's stop_reason).
 	StopKind() string
 	// Send sends one text message through the outbox under the client's client_id; Retry sends a
 	// not-sent one again by its client_id.

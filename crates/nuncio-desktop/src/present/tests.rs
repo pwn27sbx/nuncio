@@ -444,3 +444,35 @@ fn the_headers_name_the_stop_reason() {
     m.set_connected(false);
     assert_eq!(connection(&m), "reconnecting…");
 }
+
+/// D4: a stored device nunciod keeps closed shows its fixed text in the headers, and a later
+/// frame without a stop_reason (the device opened) clears it.
+#[test]
+fn the_headers_name_a_closed_device_and_clear_it() {
+    use nuncio_client::wire::StopReason;
+    let mut m = model(vec![chat(ANA, "Ana")]);
+    m.apply(&DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: Session::Offline,
+        stop_reason: Some(StopReason::KeyringLocked),
+    });
+    assert_eq!(
+        sidebar_header(&m).subtitle,
+        "offline · keyring locked: unlock it to connect"
+    );
+    m.apply(&DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: Session::Offline,
+        stop_reason: Some(StopReason::DeviceUnreadable),
+    });
+    assert_eq!(
+        conversation_header(&m).subtitle,
+        "offline · the stored key does not open this device: see SECURITY.md"
+    );
+    m.apply(&DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: Session::Offline,
+        stop_reason: None,
+    });
+    assert_eq!(connection(&m), "offline");
+}

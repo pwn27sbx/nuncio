@@ -841,7 +841,8 @@ impl App {
                     " · {} · {}{} · {} unread",
                     self.model.status().daemon,
                     self.model.status().session.as_str(),
-                    // Why WhatsApp stopped the session, as fixed text (never WhatsApp's own).
+                    // Why WhatsApp stopped the session, or why nunciod keeps the device
+                    // closed, as fixed text (never WhatsApp's own).
                     self.model
                         .status()
                         .stop_reason

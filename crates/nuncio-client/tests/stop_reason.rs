@@ -16,13 +16,15 @@ fn fixture(name: &str) -> String {
         .to_owned()
 }
 
-const ALL: [(&str, StopReason); 6] = [
+const ALL: [(&str, StopReason); 8] = [
     ("logged_out", StopReason::LoggedOut),
     ("temporary_ban", StopReason::TemporaryBan),
     ("stream_replaced", StopReason::StreamReplaced),
     ("client_outdated", StopReason::ClientOutdated),
     ("connect_rejected", StopReason::ConnectRejected),
     ("other", StopReason::Other),
+    ("keyring_locked", StopReason::KeyringLocked),
+    ("device_unreadable", StopReason::DeviceUnreadable),
 ];
 
 #[test]
@@ -107,6 +109,8 @@ fn each_stop_reason_has_fixed_text_without_numbers() {
         "WhatsApp says this client is out of date",
         "WhatsApp rejected the connection",
         "WhatsApp stopped the session",
+        "keyring locked: unlock it to connect",
+        "the stored key does not open this device: see SECURITY.md",
     ];
     for ((_, reason), text) in ALL.into_iter().zip(want) {
         assert_eq!(reason.describe(), text);
@@ -173,4 +177,83 @@ fn the_model_follows_the_stop_reason_of_events_status_and_snapshot() {
         started.status().stop_reason,
         Some(StopReason::StreamReplaced)
     );
+}
+
+/// D4: the two fixtures of a stored device nunciod keeps closed parse to their values.
+#[test]
+fn the_closed_device_fixtures_parse_to_their_stop_reasons() {
+    let frame: DaemonFrame =
+        serde_json::from_str(&fixture("event_connection_keyring_locked.json")).expect("parses");
+    assert_eq!(
+        frame,
+        DaemonFrame::EventConnection {
+            v: PROTOCOL_VERSION,
+            session: Session::Offline,
+            stop_reason: Some(StopReason::KeyringLocked),
+        }
+    );
+    let frame: DaemonFrame =
+        serde_json::from_str(&fixture("status_device_unreadable_response.json")).expect("parses");
+    assert!(matches!(
+        frame,
+        DaemonFrame::Status {
+            linked: true,
+            session: Session::Offline,
+            stop_reason: Some(StopReason::DeviceUnreadable),
+            ..
+        }
+    ));
+}
+
+/// The `stop_reason` an older client (Q6, before D4) knows: the same serde shape as
+/// [`StopReason`] then, with its catch-all.
+#[derive(Debug, PartialEq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Q6StopReason {
+    LoggedOut,
+    TemporaryBan,
+    StreamReplaced,
+    ClientOutdated,
+    ConnectRejected,
+    #[serde(other)]
+    Other,
+}
+
+#[derive(serde::Deserialize)]
+struct Q6Frame {
+    stop_reason: Option<Q6StopReason>,
+}
+
+/// D4: an older client reads the new values as `other`, so it shows its generic stop text.
+#[test]
+fn an_older_client_reads_the_new_values_as_other() {
+    for name in [
+        "event_connection_keyring_locked.json",
+        "status_device_unreadable_response.json",
+    ] {
+        let frame: Q6Frame = serde_json::from_str(&fixture(name)).expect("an older client parses");
+        assert_eq!(frame.stop_reason, Some(Q6StopReason::Other), "{name}");
+    }
+    let frame: Q6Frame =
+        serde_json::from_str(&fixture("event_connection_stopped.json")).expect("parses");
+    assert_eq!(frame.stop_reason, Some(Q6StopReason::TemporaryBan));
+}
+
+/// D4: a frame without `stop_reason` after a closed device clears it, as after a Q6 stop.
+#[test]
+fn a_frame_without_a_stop_clears_a_closed_device_reason() {
+    let mut m = model();
+    m.apply(&DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: Session::Offline,
+        stop_reason: Some(StopReason::KeyringLocked),
+    });
+    assert_eq!(m.status().stop_reason, Some(StopReason::KeyringLocked));
+    m.apply(&DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: Session::Offline,
+        stop_reason: None,
+    });
+    assert_eq!(m.status().stop_reason, None);
+    assert_eq!(m.status().session, Session::Offline);
 }

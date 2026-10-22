@@ -399,7 +399,8 @@ fn picture_view(model: &Model, message: &Message) -> Option<PictureView> {
 }
 
 /// The connection as the headers say it: `reconnecting…` while the driver is, else the session,
-/// followed by why WhatsApp stopped it when it did (fixed text, never WhatsApp's own).
+/// followed by why WhatsApp stopped it, or why nunciod keeps the device closed, when it did (fixed
+/// text, never WhatsApp's own).
 pub fn connection(model: &Model) -> String {
     if !model.connected() {
         return "reconnecting…".to_owned();

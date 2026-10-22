@@ -69,3 +69,32 @@ fn the_header_without_a_stop_is_unchanged() {
         "nuncio · nunciod/0.1.0 · offline · 2 unread"
     );
 }
+
+/// D4: a stored device nunciod keeps closed shows its fixed text, and a later frame without a
+/// stop_reason (the device opened) clears it.
+#[test]
+fn the_header_names_a_closed_device_and_clears_it() {
+    let mut a = app(Session::Offline, Some(StopReason::KeyringLocked));
+    assert_eq!(
+        header(&mut a),
+        "nuncio · nunciod/0.1.0 · offline · keyring locked: unlock it to connect · 2 unread"
+    );
+    a.apply(&DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: Session::Offline,
+        stop_reason: Some(StopReason::DeviceUnreadable),
+    });
+    assert_eq!(
+        header(&mut a),
+        "nuncio · nunciod/0.1.0 · offline · the stored key does not open this device: see SECURITY.md · 2 unread"
+    );
+    a.apply(&DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: Session::Offline,
+        stop_reason: None,
+    });
+    assert_eq!(
+        header(&mut a),
+        "nuncio · nunciod/0.1.0 · offline · 2 unread"
+    );
+}

@@ -22,6 +22,14 @@ On a Mac, install GTK first: `brew install gtk4 libadwaita pkgconf`. The demo an
 each send, and has a photo, stickers and a document to open. Stop the demo and start it again to see
 the header say `reconnecting…` and the app resync on its own.
 
+After the session the headers' subtitle names why it is not connected when the daemon says so
+(`stop_reason`, `proto/wire.md`), in fixed text: a WhatsApp stop (`offline · WhatsApp temporarily
+banned this account`, …), `offline · keyring locked: unlock it to connect` while the keyring is
+locked, or `offline · the stored key does not open this device: see SECURITY.md` when the stored
+key does not open the device. It goes away once the daemon's next frame has no reason (the keyring
+was unlocked and the device opened). A reason this build does not know shows as
+`WhatsApp stopped the session`.
+
 `--theme-dir DIR` follows `DIR/colors.toml` instead of Omarchy's theme; `--probe` runs the theme
 switch check without a window. `GApplication`'s own `--gapplication-*` options are passed on to it
 (the app's D-Bus `.service` starts it with `nuncio-desktop --gapplication-service`); any other

@@ -57,7 +57,7 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `op` | Fields | Fixture |
 |---|---|---|
 | `hello_ok` | `v`, `op`, `daemon` (string), `session` (see below), `unread` (int) | `hello_ok_daemon.json` |
-| `status` | `v`, `op`, `daemon`, `linked` (bool), `session`, `unread` (int), `stop_reason` (string or absent, see "`stop_reason`"; added in Q6) | `status_response.json`, `status_stopped_response.json` |
+| `status` | `v`, `op`, `daemon`, `linked` (bool), `session`, `unread` (int), `stop_reason` (string or absent, see "`stop_reason`"; added in Q6) | `status_response.json`, `status_stopped_response.json`, `status_device_unreadable_response.json` |
 | `chats` | `v`, `op`, `chats` (array of Chat, at most `limit`; fewer when they do not all fit in one frame, see "Replies too long for one frame") | `chats_response.json` |
 | `error` | `v`, `op`, `code` (string), `message` (string) | `error_version_mismatch.json`, `error_not_linked.json` |
 | `messages` | `v`, `op`, `jid`, `messages` (array of Message, newest first, at most `limit`; fewer when they do not all fit in one frame, see "Replies too long for one frame"); answers `messages` and `search` | `messages_response.json`, `search_response.json`, `messages_group_response.json` |
@@ -87,7 +87,7 @@ because events were lost; to avoid it, a UI drains every queued event on each ti
 | `op` | Fields | Fixture |
 |---|---|---|
 | `event_message` | `v`, `op`, `jid`, `message` (Message); also published when a send of mine changes state (queued, sent, not sent): a client replaces the message with the same `id` | `event_message.json`, `event_message_not_sent.json`, `event_message_image.json`, `event_message_sticker.json`, `event_message_group.json` |
-| `event_connection` | `v`, `op`, `session`, `stop_reason` (string or absent, see "`stop_reason`"; added in Q6) | `event_connection.json`, `event_connection_stopped.json` |
+| `event_connection` | `v`, `op`, `session`, `stop_reason` (string or absent, see "`stop_reason`"; added in Q6) | `event_connection.json`, `event_connection_stopped.json`, `event_connection_keyring_locked.json` |
 | `event_unread` | `v`, `op`, `unread` (int, total), `jid`, `chat_unread` (int) | `event_unread.json` |
 | `event_focus` | `v`, `op`, `jid` | `event_focus.json` |
 | `event_chat` | `v`, `op`, `chat` (Chat): published when app-state sync from another device changes a chat's pin, archive or mute; `chat` is the chat as it now is, as `chats` would list it (its unread count and `last_message` included), so a client replaces the chat with the same `jid` or adds it (added in M2). Also published after every merge of a contact's phone-number chat into her LID chat, with `aliases` (T15, see "One chat per contact"): a client then drops or renames the entries named in `aliases`. Also published when a chat's `name` changes (see "Chat names") | `event_chat.json`, `event_chat_aliases.json`, `event_chat_phone.json` |
@@ -108,10 +108,11 @@ or `offline` as the stop says, never on a stale frame). A change undone before i
 
 ### `stop_reason`
 
-Why WhatsApp stopped the session for good, on `status` and `event_connection` (added in Q6). It is
-absent while the session runs, reconnects or is simply unlinked, so those frames are the same bytes
-as before it existed, and an older client that ignores unknown keys keeps working. Once set it stays
-set, with the first stop's value, until nunciod restarts: a stopped session never reconnects on its
+Why WhatsApp stopped the session for good, on `status` and `event_connection` (added in Q6), or why
+nunciod keeps the stored device closed (added in D4, see below). It is absent while the session
+runs, reconnects or is simply unlinked, so those frames are the same bytes as before it existed, and
+an older client that ignores unknown keys keeps working. A WhatsApp stop, once set, stays set, with
+the first stop's value, until nunciod restarts: a stopped session never reconnects on its
 own. A stop that leaves `session` as it was (a temporary ban while already `offline`) is still
 published, as an `event_connection` that differs from the one before by its `stop_reason` only.
 `hello_ok` does not carry it; a client reads it from `status`.
@@ -127,8 +128,18 @@ numbers, ids or names.
 | `client_outdated` | WhatsApp no longer accepts this client's version | `WhatsApp says this client is out of date` |
 | `connect_rejected` | WhatsApp refused the connection | `WhatsApp rejected the connection` |
 | `other` | any other stop; a client also reads a value it does not know as `other` | `WhatsApp stopped the session` |
+| `keyring_locked` | nunciod keeps the stored device closed because the keyring (Secret Service) is locked, absent or unavailable; it tries again on its backoff, so unlocking the keyring is enough (`session` is `offline`, `linked` true; added in D4) | `keyring locked: unlock it to connect` |
+| `device_unreadable` | nunciod keeps the stored device closed because the stored data key does not open it (the key is missing or another one, or a sealed row fails its check); unlocking does not fix it and nunciod does not try again (`session` is `offline`, `linked` true; added in D4) | `the stored key does not open this device: see SECURITY.md` |
 
 Example: `{"v":1,"op":"event_connection","session":"offline","stop_reason":"temporary_ban"}`.
+
+`keyring_locked` and `device_unreadable` (added in D4) are not WhatsApp stops: they say why
+nunciod has not opened the stored device yet. While nunciod is still opening it (its first
+attempt, which may wait on an unlock prompt) or waits on a pending migration cleanup, there is no
+`stop_reason`. nunciod publishes an `event_connection` (`offline`) each time the value changes
+(`keyring_locked` becomes `device_unreadable` when the keyring opens on a missing key), and when
+the device opens it publishes one without `stop_reason`, which clears it, before the session's own
+frames follow. A client older than D4 reads both values as `other`.
 
 ### Chat (M0 shape)
 

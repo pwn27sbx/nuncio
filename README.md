@@ -147,7 +147,9 @@ A `<jid>` is a WhatsApp chat: `15551230001@s.whatsapp.net` (a person) or
 - With the keyring locked or absent, `nunciod` stays up and answers `offline`, never connects to
   WhatsApp and writes nothing; it tries again on the session's backoff. When the data key is gone
   but a sealed device is stored, nothing creates a new one: the device cannot be read, and the way
-  out is `nuncio purge --confirm`, then `nuncio link`.
+  out is `nuncio purge --confirm`, then `nuncio link`. The apps show either state in their header
+  (`keyring locked: unlock it to connect`, or `the stored key does not open this device: see
+  SECURITY.md`); see [SECURITY.md](SECURITY.md#a-locked-keyring-or-an-unreadable-device).
 - `logout` and `purge` without `--confirm` only list what they would delete and exit 2. With it,
   the teardown runs in this order: (1) WhatsApp unlinks the device (`logout` only), (2) the
   keyring items under the service `nuncio` are deleted (the data key `store.data_key` among them),

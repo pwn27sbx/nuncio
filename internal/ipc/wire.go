@@ -369,8 +369,9 @@ type EventMessage struct {
 }
 
 // EventConnection is pushed to subscribers when the session state changes. StopReason is set
-// once WhatsApp stopped the session for good (one of the Stop* values) and omitted otherwise, so
-// a frame without a stop is the same bytes as before it existed.
+// once WhatsApp stopped the session for good, or while nunciod keeps the stored device closed
+// (StopKeyringLocked, StopDeviceUnreadable), one of the Stop* values, and omitted otherwise, so a
+// frame without a stop is the same bytes as before it existed.
 type EventConnection struct {
 	V          int    `json:"v"`
 	Op         string `json:"op"`
@@ -378,14 +379,21 @@ type EventConnection struct {
 	StopReason string `json:"stop_reason,omitempty"`
 }
 
-// The stop_reason values: why WhatsApp stopped the session, fixed words chosen here and never
-// WhatsApp's own text, codes or ban expiry.
+// The stop_reason values: why WhatsApp stopped the session, or why nunciod keeps the stored
+// device closed, fixed words chosen here and never WhatsApp's own text, codes or ban expiry, nor a
+// key, id or name.
 const (
 	StopLoggedOut       = "logged_out"
 	StopTemporaryBan    = "temporary_ban"
 	StopStreamReplaced  = "stream_replaced"
 	StopClientOutdated  = "client_outdated"
 	StopConnectRejected = "connect_rejected"
+	// StopKeyringLocked: the keyring (Secret Service) is locked, absent or unavailable; nunciod
+	// tries again on its backoff, so unlocking it is enough.
+	StopKeyringLocked = "keyring_locked"
+	// StopDeviceUnreadable: the data key is missing or another one, or a sealed row fails its
+	// check; unlocking does not fix it.
+	StopDeviceUnreadable = "device_unreadable"
 	// StopOther is any other stop.
 	StopOther = "other"
 )

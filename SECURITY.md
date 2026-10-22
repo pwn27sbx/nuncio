@@ -34,6 +34,22 @@ Never copy `~/.local/share/nuncio/` to another machine or into a bug report: it 
 keys as long as T17 is open. Once T17 ships, the migration's backup of the plain database (next to
 `nuncio.db`) still holds them until you delete it or run the wipe; messages stay plain either way.
 
+## A locked keyring or an unreadable device
+
+`nunciod` never opens the stored device without its data key, and the apps say why in their header:
+
+- `keyring locked: unlock it to connect` (`stop_reason` `keyring_locked`): the keyring (Secret
+  Service) is locked, absent or unavailable. `nunciod` stays up, answers `offline`, never connects
+  and writes nothing, and tries again on its backoff: unlock the keyring and it connects on its own.
+- `the stored key does not open this device: see SECURITY.md` (`stop_reason` `device_unreadable`):
+  the data key `store.data_key` is missing or is another one, or a sealed row fails its check.
+  Unlocking does not help and nothing creates a new key over sealed data. The way out is
+  `nuncio purge --confirm` (see "Wiping the device"), then `nuncio link`. Purge does not tell
+  WhatsApp, so also remove the old device under Linked devices on the phone. Purge also deletes
+  the `nuncio.db.pre-t17-*.bak` backups, which may be the last copy of the device's keys.
+
+Neither text, nor the log line behind it, carries a key, an id, a number or a name.
+
 ## What never leaves the machine or reaches a log
 
 - **Message text** is never written to a log. Notifications carry it only with

@@ -377,8 +377,8 @@ func TestDaemonWithTheKeyMissingOverSealedDataCreatesNoKey(t *testing.T) {
 	_ = g.Start()
 	timers.fire()
 	d, _ := newDaemon(s, db)
-	if got := d.Status(); got.Session != ipc.SessionOffline || !got.Linked || got.StopReason != "" {
-		t.Errorf("Status() = %+v, want offline, linked, no stop_reason", got)
+	if got := d.Status(); got.Session != ipc.SessionOffline || !got.Linked || got.StopReason != ipc.StopDeviceUnreadable {
+		t.Errorf("Status() = %+v, want offline, linked, stop_reason device_unreadable", got)
 	}
 	const want = "the stored device cannot be read; run nuncio purge --confirm, then nuncio link"
 	if _, err := d.Send("15551230002@s.whatsapp.net", "hello", "c-1"); err == nil || err.Error() != want {
@@ -447,7 +447,7 @@ func rawFrames(t *testing.T, sock string) (hello, status string) {
 }
 
 // A normally linked daemon answers the same hello and status frames as before, byte for byte, and
-// so does a gate once it has handed over to the opened session. A gate whose device is not open
+// so does a gate once it has handed over to the opened session. A gate still opening its device
 // answers the existing offline frames.
 func TestStatusAndHelloFramesAreUnchangedWhenLinkedNormally(t *testing.T) {
 	fake := &fakeWAClient{sendID: "3EB0BBB1"}
@@ -461,6 +461,7 @@ func TestStatusAndHelloFramesAreUnchangedWhenLinkedNormally(t *testing.T) {
 		linkedStatus  = `{"v":1,"op":"status","daemon":"nunciod/0.1.0","linked":true,"session":"linked","unread":0}`
 		offlineHello  = `{"v":1,"op":"hello_ok","daemon":"nunciod/0.1.0","session":"offline","unread":0}`
 		offlineStatus = `{"v":1,"op":"status","daemon":"nunciod/0.1.0","linked":true,"session":"offline","unread":0}`
+		lockedStatus  = `{"v":1,"op":"status","daemon":"nunciod/0.1.0","linked":true,"session":"offline","unread":0,"stop_reason":"keyring_locked"}`
 	)
 	for _, c := range []struct {
 		name          string
@@ -469,7 +470,9 @@ func TestStatusAndHelloFramesAreUnchangedWhenLinkedNormally(t *testing.T) {
 	}{
 		{"direct", live, linkedHello, linkedStatus},
 		{"gate handed over", &gate{live: live}, linkedHello, linkedStatus},
-		{"gate closed", &gate{reason: errKeyringLocked}, offlineHello, offlineStatus},
+		{"gate opening", &gate{reason: errOpening}, offlineHello, offlineStatus},
+		// D4: a locked keyring adds stop_reason to status only; hello_ok never carries it.
+		{"gate locked", &gate{reason: errKeyringLocked}, offlineHello, lockedStatus},
 	} {
 		d, err := newDaemon(c.session, nil)
 		if err != nil {

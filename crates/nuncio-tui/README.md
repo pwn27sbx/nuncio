@@ -14,6 +14,14 @@ messages, keeping the draft, the selected chat and message and the open pane. A 
 disconnected is shown as `not sent` and the footer says `not connected to nunciod`; nothing
 retries it by itself (`R` does, once reconnected).
 
+After the session the header names why it is not connected when the daemon says so
+(`stop_reason`, `proto/wire.md`), in fixed text: a WhatsApp stop (`offline · WhatsApp temporarily
+banned this account`, …), `offline · keyring locked: unlock it to connect` while the keyring is
+locked, or `offline · the stored key does not open this device: see SECURITY.md` when the stored
+key does not open the device. It goes away once the daemon's next frame has no reason (the keyring
+was unlocked and the device opened). A reason this build does not know shows as
+`WhatsApp stopped the session`.
+
 Pictures are drawn in the conversation (see [Pictures](#pictures)): from the thumbnail each image
 or sticker message carries, with the full picture only when you press `o`. Nothing is ever
 downloaded on its own.

@@ -86,12 +86,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_forty_six_documented_files() {
+fn fixture_directory_holds_the_forty_eight_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 46, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 48, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -305,6 +305,14 @@ fn constructed_m1_daemon_frames_match_their_fixtures() {
         },
     );
     assert_frame(
+        &dir.join("event_connection_keyring_locked.json"),
+        &DaemonFrame::EventConnection {
+            v: PROTOCOL_VERSION,
+            session: Session::Offline,
+            stop_reason: Some(StopReason::KeyringLocked),
+        },
+    );
+    assert_frame(
         &dir.join("event_unread.json"),
         &DaemonFrame::EventUnread {
             v: PROTOCOL_VERSION,
@@ -388,6 +396,17 @@ fn constructed_daemon_frames_match_their_fixtures() {
             session: Session::Unlinked,
             unread: 0,
             stop_reason: Some(StopReason::LoggedOut),
+        },
+    );
+    assert_frame(
+        &dir.join("status_device_unreadable_response.json"),
+        &DaemonFrame::Status {
+            v: PROTOCOL_VERSION,
+            daemon: "nunciod/0.1.0".to_owned(),
+            linked: true,
+            session: Session::Offline,
+            unread: 0,
+            stop_reason: Some(StopReason::DeviceUnreadable),
         },
     );
 
@@ -804,7 +823,7 @@ fn every_daemon_fixture_parses_to_its_own_variant_not_the_catch_all() {
             Err(_) => assert!(is_client, "{name}: a daemon fixture does not parse"),
         }
     }
-    assert_eq!(daemon_fixtures, 31, "every daemon fixture was checked");
+    assert_eq!(daemon_fixtures, 33, "every daemon fixture was checked");
 }
 
 /// ADR 0001: `event_chat` (and `chats`) name the phone-number chats merged into a chat in

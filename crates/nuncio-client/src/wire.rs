@@ -461,7 +461,8 @@ impl Session {
     }
 }
 
-/// Why WhatsApp stopped the session for good (`stop_reason` on `status` and `event_connection`).
+/// Why WhatsApp stopped the session for good, or why nunciod keeps the stored device closed
+/// (`stop_reason` on `status` and `event_connection`).
 ///
 /// The daemon sends fixed words, never WhatsApp's own text; a value this build does not know
 /// becomes [`StopReason::Other`]. [`StopReason::describe`] is what a client shows.
@@ -478,6 +479,12 @@ pub enum StopReason {
     ClientOutdated,
     /// WhatsApp refused the connection.
     ConnectRejected,
+    /// The keyring (Secret Service) is locked or absent: nunciod keeps the stored device closed
+    /// and tries again, so unlocking it is enough.
+    KeyringLocked,
+    /// The stored data key does not open the device (missing or another one): unlocking does not
+    /// fix it.
+    DeviceUnreadable,
     /// Any other stop, or one this build does not know yet.
     #[serde(other)]
     Other,
@@ -492,6 +499,8 @@ impl StopReason {
             Self::StreamReplaced => "stream_replaced",
             Self::ClientOutdated => "client_outdated",
             Self::ConnectRejected => "connect_rejected",
+            Self::KeyringLocked => "keyring_locked",
+            Self::DeviceUnreadable => "device_unreadable",
             Self::Other => "other",
         }
     }
@@ -505,6 +514,8 @@ impl StopReason {
             Self::ClientOutdated => "WhatsApp says this client is out of date",
             Self::ConnectRejected => "WhatsApp rejected the connection",
             Self::Other => "WhatsApp stopped the session",
+            Self::KeyringLocked => "keyring locked: unlock it to connect",
+            Self::DeviceUnreadable => "the stored key does not open this device: see SECURITY.md",
         }
     }
 }

@@ -78,8 +78,11 @@ func openSession(ctx context.Context, dbPath string, kr store.Keyring) (daemonSe
 func afterFunc(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
 
 // gate is the daemon's session while the stored device is not open. It reports offline (a device
-// is stored: linked, not connected) with no stop_reason, so status and event_connection keep their
-// existing values, and answers every request that needs the session with the fixed reason. Start
+// is stored: linked, not connected) and answers every request that needs the session with the
+// fixed reason. Status and event_connection carry stop_reason keyring_locked while the keyring is
+// locked or absent and device_unreadable once the device cannot be read; the gate publishes an
+// event_connection each time that stop_reason changes, and one without it when the device opens,
+// before the session publishes its own (as a Q6 stop clears). Start
 // makes the first attempt at once, in the background; when the reason can pass (a locked
 // keyring, a pending cleanup) it tries again on the session's capped backoff; once the device
 // opens, the gate hands everything to that session and starts it. A reason that cannot pass
@@ -105,7 +108,9 @@ type gate struct {
 	inflight bool        // an attempt is running; it closes what it opened when Close came meanwhile
 	cancel   func() bool // the pending attempt
 	events   *ipc.Broker
-	unread   func()
+	// published is the stop_reason of the last event_connection the gate published ("" for none).
+	published string
+	unread    func()
 }
 
 // fail records why the device is not open and logs it once, in fixed words: the error's type, never
@@ -127,6 +132,35 @@ func (g *gate) fail(err error) {
 	g.mu.Unlock()
 	if !retry {
 		g.logf("the WhatsApp device stays closed: %v", reason)
+	}
+	g.publishStop(gateStopKind(reason))
+}
+
+// gateStopKind is the stop_reason of a gate's reason: only a locked keyring and an unreadable
+// device have one.
+func gateStopKind(reason error) string {
+	switch reason {
+	case errKeyringLocked:
+		return ipc.StopKeyringLocked
+	case wa.ErrDeviceUnreadable:
+		return ipc.StopDeviceUnreadable
+	}
+	return ""
+}
+
+// publishStop publishes an offline event_connection with stop_reason kind when it differs from the
+// last one the gate published. Attempts run one at a time, so their frames never cross.
+func (g *gate) publishStop(kind string) {
+	g.mu.Lock()
+	if kind == g.published {
+		g.mu.Unlock()
+		return
+	}
+	g.published = kind
+	b := g.events
+	g.mu.Unlock()
+	if b != nil {
+		b.Publish(ipc.EventConnection{V: ipc.Version, Op: ipc.OpEventConnection, Session: string(wa.StateOffline), StopReason: kind})
 	}
 }
 
@@ -189,6 +223,7 @@ func (g *gate) attempt() {
 	g.live = s
 	g.mu.Unlock()
 	g.logf("opened the WhatsApp device")
+	g.publishStop("")
 	if err := g.start(s); err != nil {
 		// The cause's type only: whatsmeow's text can carry the server or proxy address.
 		g.logf("cannot connect the linked device (%s)", wa.ErrKind(err))
@@ -252,7 +287,7 @@ func (g *gate) StopKind() string {
 	if s := g.session(); s != nil {
 		return s.StopKind()
 	}
-	return ""
+	return gateStopKind(g.why())
 }
 
 func (g *gate) Send(jid, text, clientID string) (ipc.Sent, error) {

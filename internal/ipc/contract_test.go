@@ -130,6 +130,14 @@ func fixtureCases() []fixtureCase {
 			},
 		},
 		{
+			file: "status_device_unreadable_response.json",
+			into: func() any { return &StatusResponse{} },
+			build: func() any {
+				return StatusResponse{V: 1, Op: OpStatus, Daemon: "nunciod/0.1.0", Linked: true, Session: SessionOffline,
+					StopReason: StopDeviceUnreadable}
+			},
+		},
+		{
 			file:  "chats_response.json",
 			into:  func() any { return &ChatsResponse{} },
 			build: func() any { return ChatsResponse{V: 1, Op: OpChats, Chats: fixtureChatList()} },
@@ -311,6 +319,13 @@ func fixtureCases() []fixtureCase {
 			into: func() any { return &EventConnection{} },
 			build: func() any {
 				return EventConnection{V: 1, Op: OpEventConnection, Session: SessionOffline, StopReason: StopTemporaryBan}
+			},
+		},
+		{
+			file: "event_connection_keyring_locked.json",
+			into: func() any { return &EventConnection{} },
+			build: func() any {
+				return EventConnection{V: 1, Op: OpEventConnection, Session: SessionOffline, StopReason: StopKeyringLocked}
 			},
 		},
 		{

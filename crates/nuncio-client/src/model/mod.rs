@@ -55,7 +55,8 @@ pub struct Status {
     pub session: Session,
     /// Unread messages in all chats.
     pub unread: u32,
-    /// Why WhatsApp stopped the session, as the last `status` or `event_connection` said.
+    /// Why WhatsApp stopped the session, or why nunciod keeps the stored device closed, as the
+    /// last `status` or `event_connection` said.
     pub stop_reason: Option<StopReason>,
 }
 

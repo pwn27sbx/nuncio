@@ -1,0 +1,90 @@
+# The checks the project runs locally (README.md, "Development"; AGENTS.md, "Code"), on every push
+# and pull request. Read-only: no secrets, no release, no artifacts.
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go (gofmt, vet, pure-Go build, race tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # The D-Bus tests in cmd/nunciod start a private dbus-daemon of their own and skip without it.
+      - name: Install dbus-daemon
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends dbus-daemon
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            printf 'gofmt needed:\n%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: Build without cgo
+        run: CGO_ENABLED=0 go build ./...
+      - name: go test -race
+        run: go test -race -count=1 -timeout 900s ./...
+
+  rust:
+    name: Rust (fmt, clippy, tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # nuncio-desktop asks for GTK 4.12 and libadwaita 1.4 (crates/nuncio-desktop/Cargo.toml);
+      # Ubuntu 24.04 ships GTK 4.14 and libadwaita 1.5.
+      - name: Install GTK 4 and libadwaita
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libgtk-4-dev libadwaita-1-dev
+      - name: Install the stable toolchain
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy
+          rustup default stable
+          rustc --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Without a display the desktop smoke test prints "skipped" and passes, as it does locally.
+      - name: cargo test
+        run: cargo test --workspace --no-fail-fast
+
+  packaging:
+    name: Packaging (packaging/check.sh)
+    runs-on: ubuntu-24.04
+    # A plain container, without systemd: `systemd-analyze --user verify` needs /usr/bin/nunciod
+    # installed, so check.sh skips it here as it does on a machine without systemd.
+    container: ubuntu:24.04
+    timeout-minutes: 10
+    steps:
+      - name: Install the check tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 shellcheck desktop-file-utils
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: packaging/check.sh
+        run: bash packaging/check.sh

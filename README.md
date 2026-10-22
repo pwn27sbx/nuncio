@@ -201,6 +201,9 @@ CGO_ENABLED=0 go build ./...            # the daemon stays pure Go
 packaging/check.sh                      # static checks of the packaging files
 ```
 
+CI ([.github/workflows/ci.yml](.github/workflows/ci.yml)) runs the same checks on every push and
+pull request, plus `gofmt`, `go vet`, `go test -race`, `cargo fmt --check` and `cargo clippy -D warnings`.
+
 On a Mac, install GTK first: `brew install gtk4 libadwaita pkgconf`. The review rules for code and
 agents are in [AGENTS.md](AGENTS.md); the wire protocol both sides test against is
 [proto/wire.md](proto/wire.md), with shared fixtures in `proto/fixtures/`.

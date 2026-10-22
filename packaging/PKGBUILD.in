@@ -77,7 +77,9 @@ check() {
   cd "$srcdir/nuncio-$pkgver"
   _go_env
   export GOPROXY=off
-  # The tests open Unix sockets, whose path must stay under 108 bytes: $srcdir is too deep.
+  # The tests open Unix sockets, whose path must fit in 108 bytes with the NUL (dbus-daemon: 99).
+  # They put each in a short os.MkdirTemp dir, at most $TMPDIR + 30 bytes (/nw + 10 digits +
+  # /nuncio/core.sock): 54 under this 24-byte $TMPDIR. $srcdir is too deep for that.
   local tmp
   tmp=$(mktemp -d /tmp/nuncio-check.XXXXXX)
   TMPDIR=$tmp go test ./... || { rm -rf "$tmp"; return 1; }

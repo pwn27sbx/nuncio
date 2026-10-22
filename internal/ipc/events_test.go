@@ -17,7 +17,7 @@ import (
 // startEventServer serves h on a private unix socket with events fanned out by b.
 func startEventServer(t *testing.T, h Handler, b *Broker) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "core.sock")
+	sock := filepath.Join(shortTempDir(t), "core.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen %s: %v", sock, err)

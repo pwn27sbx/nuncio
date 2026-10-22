@@ -111,7 +111,7 @@ func dataHome(runtimeDir string) string {
 // D-Bus face.
 func noBus(t *testing.T) string {
 	t.Helper()
-	return "unix:path=" + filepath.Join(t.TempDir(), "no-such-bus")
+	return "unix:path=" + filepath.Join(shortTempDir(t), "no-such-bus")
 }
 
 func socketPath(runtimeDir string) string {
@@ -227,7 +227,7 @@ func assertFixtureChats(t *testing.T, chats []ipc.Chat) {
 }
 
 func TestDaemonServesProtocolOnSocket(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	startDaemon(t, rt, noBus(t))
 	socket := socketPath(rt)
 
@@ -260,7 +260,7 @@ func TestDaemonServesProtocolOnSocket(t *testing.T) {
 }
 
 func TestDaemonWithoutDatabaseIsUnlinkedAndCreatesNoDataDir(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	startDaemon(t, rt, noBus(t))
 	st, err := waitForDaemon(t, socketPath(rt)).Status()
 	if err != nil {
@@ -344,7 +344,7 @@ func TestStatusReportsTheSessionState(t *testing.T) {
 }
 
 func TestDaemonReplacesStaleSocket(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	socket := socketPath(rt)
 	makeStaleSocket(t, socket)
 	before, err := os.Stat(socket)
@@ -375,7 +375,7 @@ func TestDaemonReplacesStaleSocket(t *testing.T) {
 }
 
 func TestDaemonLeavesLiveSocketAlone(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	socket := socketPath(rt)
 	bus := noBus(t)
 
@@ -429,7 +429,7 @@ func startPrivateBus(t *testing.T, runtimeDir string) *privateBus {
 		t.Skip("dbus-daemon is not installed: skipping the D-Bus spike")
 	}
 	repo := repoRoot(t)
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	socket := filepath.Join(dir, "bus")
 	configFile := filepath.Join(dir, "bus.conf")
 	dataHome := filepath.Join(dir, "data-home")
@@ -547,7 +547,7 @@ func busClient(t *testing.T, address string) *dbus.Conn {
 }
 
 func TestDBusActivationStartsDaemonInUnderOneSecond(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	bus := startPrivateBus(t, rt)
 	conn := busClient(t, bus.address)
 	killActivatedDaemon(t, conn)
@@ -594,7 +594,7 @@ func TestDBusActivationStartsDaemonInUnderOneSecond(t *testing.T) {
 }
 
 func TestDaemonExitsWhenNameIsAlreadyOwned(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	bus := startPrivateBus(t, rt)
 	conn := busClient(t, bus.address)
 	reply, err := conn.RequestName(ipc.DaemonName, dbus.NameFlagDoNotQueue)
@@ -621,7 +621,7 @@ func TestDaemonExitsWhenNameIsAlreadyOwned(t *testing.T) {
 }
 
 func TestDBusSingleInstanceSecondDaemonExitsZero(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	bus := startPrivateBus(t, rt)
 	first := startDaemon(t, rt, bus.address)
 	socket := socketPath(rt)
@@ -670,7 +670,7 @@ func TestDBusSingleInstanceSecondDaemonExitsZero(t *testing.T) {
 const wantCLIOutput = "linked=false session=unlinked unread=0\n"
 
 func TestCLIPrintsStatusFromRunningDaemon(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	bus := noBus(t)
 	startDaemon(t, rt, bus)
 	waitForDaemon(t, socketPath(rt))
@@ -685,7 +685,7 @@ func TestCLIPrintsStatusFromRunningDaemon(t *testing.T) {
 }
 
 func TestCLIActivatesDaemonOverDBus(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	bus := startPrivateBus(t, rt)
 	killActivatedDaemon(t, busClient(t, bus.address))
 
@@ -843,7 +843,7 @@ func textMessage(chat types.JID, id string, fromMe bool, ts time.Time, text stri
 // serveSocket serves h, with events from b, on a private socket and returns its path.
 func serveSocket(t *testing.T, h ipc.Handler, b *ipc.Broker) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "core.sock")
+	sock := filepath.Join(shortTempDir(t), "core.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen %s: %v", sock, err)
@@ -1387,8 +1387,10 @@ type wipeRig struct {
 	served chan struct{}
 }
 
-// shortTempDir is a temp dir with a short path: a unix socket path must fit in 104 bytes on macOS,
-// and t.TempDir carries the long test name.
+// shortTempDir is a temp dir with a short path, removed at cleanup, for every dir a unix socket
+// lives in (the daemon's runtime dir, a private bus): a socket path must fit in sun_path (104 bytes
+// on macOS, 108 on Linux, both with the NUL; dbus-daemon allows 99), and t.TempDir carries up to 64
+// bytes of the test name plus 14 more, too long under a deep $TMPDIR such as makepkg's check() sets.
 func shortTempDir(t *testing.T) string {
 	t.Helper()
 	dir, err := os.MkdirTemp("", "nw")

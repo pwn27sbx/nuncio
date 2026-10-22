@@ -15,7 +15,7 @@ import (
 )
 
 func TestDBusUnreadCountFollowsTheStoreWithOneSignalOfEachKind(t *testing.T) {
-	bus := startPrivateBus(t, t.TempDir())
+	bus := startPrivateBus(t, shortTempDir(t))
 	daemonConn := busClient(t, bus.address)
 	listener := busClient(t, bus.address)
 
@@ -91,7 +91,7 @@ func TestDBusUnreadCountFollowsTheStoreWithOneSignalOfEachKind(t *testing.T) {
 }
 
 func TestDBusIntrospectionListsUnreadCountAndUnreadChanged(t *testing.T) {
-	bus := startPrivateBus(t, t.TempDir())
+	bus := startPrivateBus(t, shortTempDir(t))
 	daemonConn := busClient(t, bus.address)
 	listener := busClient(t, bus.address)
 	unreadDaemonWith(t, func(d *daemon) unreadEmitter {

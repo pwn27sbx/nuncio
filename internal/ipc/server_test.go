@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -156,10 +157,24 @@ func newFakeHandler(t *testing.T) *fakeHandler {
 	}
 }
 
+// shortTempDir is a temp dir with a short path, removed at cleanup, for the tests' unix sockets: a
+// socket path must fit in sun_path (104 bytes on macOS, 108 on Linux, both with the NUL), and
+// t.TempDir carries up to 64 bytes of the test name plus 14 more, too long under a deep $TMPDIR such
+// as the one makepkg's check() sets.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ni")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // startServer serves h on a private unix socket and returns its path.
 func startServer(t *testing.T, h Handler) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "core.sock")
+	sock := filepath.Join(shortTempDir(t), "core.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen %s: %v", sock, err)

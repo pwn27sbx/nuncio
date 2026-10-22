@@ -145,7 +145,7 @@ func unreadDaemon(t *testing.T) (*daemon, *fakeWAClient, *fakeEmitter) {
 // with that window and starts the session.
 func unreadDaemonWith(t *testing.T, newEmit func(*daemon) unreadEmitter, window time.Duration) (*daemon, *fakeWAClient) {
 	t.Helper()
-	root := t.TempDir()
+	root := shortTempDir(t)
 	dataDir := filepath.Join(root, "data", "nuncio")
 	db, err := store.Open(filepath.Join(dataDir, store.DBFile))
 	if err != nil {

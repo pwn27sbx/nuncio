@@ -98,6 +98,20 @@ func (d *fakeDaemon) sendCalls() []ipc.SendRequest {
 	return append([]ipc.SendRequest(nil), d.sends...)
 }
 
+// shortTempDir is a temp dir with a short path, removed at cleanup, for the runtime dir that holds
+// core.sock: a socket path must fit in sun_path (104 bytes on macOS, 108 on Linux, both with the
+// NUL), and t.TempDir carries up to 64 bytes of the test name plus 14 more, too long under a deep
+// $TMPDIR such as makepkg's check() sets.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "nc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // serveFakeDaemon serves d, with events from a new broker, at $XDG_RUNTIME_DIR/nuncio/core.sock,
 // where the CLI looks, and returns the socket path.
 func serveFakeDaemon(t *testing.T, d *fakeDaemon) string {
@@ -105,7 +119,7 @@ func serveFakeDaemon(t *testing.T, d *fakeDaemon) string {
 	if d.session == "" {
 		d.session = ipc.SessionUnlinked
 	}
-	runtime := t.TempDir()
+	runtime := shortTempDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", runtime)
 	sock := filepath.Join(runtime, "nuncio", "core.sock")
 	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
@@ -635,7 +649,7 @@ func TestLinkConnectsTheLinkedDeviceWhenNoDaemonAnswers(t *testing.T) {
 	isolateData(t)
 	fakeKeys(t)
 	linkedDevice(t)
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // no core.sock there
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t)) // no core.sock there
 	calls := fakeConnect(t)
 
 	code, _, _ := runCLI("link", "--qr", "--consent")
@@ -835,7 +849,7 @@ func TestLogoutAsksTheRunningDaemonToUnlinkAndWipe(t *testing.T) {
 func TestLogoutWithoutADaemonRefusesAndConnectsNothing(t *testing.T) {
 	root, _ := populatedData(t)
 	keys := fakeKeys(t)
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // no core.sock there
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t)) // no core.sock there
 	linkedDevice(t)
 	before := listing(t, root)
 	items := keys.count()
@@ -895,7 +909,7 @@ func TestPurgeAsksTheRunningDaemonWithoutTheNetwork(t *testing.T) {
 func TestPurgeWithoutADaemonLeavesNothingBehind(t *testing.T) {
 	_, dataDir := populatedData(t)
 	keys := fakeKeys(t)
-	runtime := t.TempDir()
+	runtime := shortTempDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", runtime)
 	// A socket left behind by a dead daemon.
 	sock := filepath.Join(runtime, "nuncio", "core.sock")
@@ -934,7 +948,7 @@ func TestPurgeWithoutADaemonLeavesNothingBehind(t *testing.T) {
 func TestPurgeRefusesWhileSomethingListensButDoesNotAnswer(t *testing.T) {
 	root, _ := populatedData(t)
 	keys := fakeKeys(t)
-	runtime := t.TempDir()
+	runtime := shortTempDir(t)
 	t.Setenv("XDG_RUNTIME_DIR", runtime)
 	sock := filepath.Join(runtime, "nuncio", "core.sock")
 	if err := os.MkdirAll(filepath.Dir(sock), 0o700); err != nil {
@@ -989,7 +1003,7 @@ func TestLinkExitsAfterReportingLinkedAndSendsNothing(t *testing.T) {
 	isolateData(t)
 	// A link needs the keyring for the data key, even one that never pairs.
 	fakeKeys(t)
-	t.Setenv("XDG_RUNTIME_DIR", t.TempDir()) // no core.sock there
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t)) // no core.sock there
 	prepare := prepareLink
 	prepareLink = func(c wa.Consent, _ *whatsmeow.Client) (wa.Prepared, error) {
 		return wa.Prepared{Linker: qrLinker{}, Consent: c}, nil

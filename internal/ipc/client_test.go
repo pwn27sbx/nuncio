@@ -64,7 +64,7 @@ func TestDialHandshakesAndCarriesRequests(t *testing.T) {
 }
 
 func TestDialReportsMissingSocket(t *testing.T) {
-	if _, err := Dial(filepath.Join(t.TempDir(), "nope.sock"), "nuncio/0.1.0"); err == nil {
+	if _, err := Dial(filepath.Join(shortTempDir(t), "nope.sock"), "nuncio/0.1.0"); err == nil {
 		t.Fatal("Dial on a missing socket: got nil error")
 	}
 }
@@ -72,7 +72,7 @@ func TestDialReportsMissingSocket(t *testing.T) {
 // TestDialReportsVersionMismatch covers a client talking to a daemon that
 // refuses the version: the handshake must fail loudly, not silently.
 func TestDialReportsVersionMismatch(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "core.sock")
+	sock := filepath.Join(shortTempDir(t), "core.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -96,7 +96,7 @@ func TestDialReportsVersionMismatch(t *testing.T) {
 // never answers anything again: a wedged daemon.
 func startSilentServer(t *testing.T, answerHello bool) string {
 	t.Helper()
-	sock := filepath.Join(t.TempDir(), "core.sock")
+	sock := filepath.Join(shortTempDir(t), "core.sock")
 	ln, err := net.Listen("unix", sock)
 	if err != nil {
 		t.Fatalf("listen: %v", err)

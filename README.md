@@ -24,8 +24,10 @@ about.**
 - M4 (packaging and the Omarchy glue: everything below about Arch, systemd, the hotkey and the bar)
   is written but has **never been built or installed on Linux**. Acceptance on Arch/Omarchy is
   pending.
-- Not done yet: the Signal state still lives in `nuncio.db`, not behind the keyring (T17, see
-  [SECURITY.md](SECURITY.md)).
+- Not done yet: the Signal state still lives in plain in `nuncio.db`, not behind the keyring
+  (T17, see [SECURITY.md](SECURITY.md)). Sealing it under a keyring-held data key is in progress on
+  this branch and planned until the home acceptance run
+  ([ADR 0003](docs/adr/0003-where-the-signal-state-lives.md)).
 
 Linking an unofficial client is against WhatsApp's Terms of Service and accounts have been banned
 for it. Use a spare number, never the one that carries your two-factor authentication.
@@ -147,7 +149,8 @@ A `<jid>` is a WhatsApp chat: `15551230001@s.whatsapp.net` (a person) or
   to WhatsApp for the device; when WhatsApp does not confirm, nothing is deleted. `purge` never
   contacts WhatsApp: it asks a running daemon to do the same, or deletes the local data itself when
   no daemon runs. Today no binary writes keyring items yet (whatsmeow keeps the Signal state inside
-  `nuncio.db`), so step 2 finds nothing until the keyring-backed device store is wired (T17).
+  `nuncio.db`), so step 2 finds nothing until T17 is wired; with T17 (planned) step 2 deletes the
+  data key `store.data_key` and step 3 also deletes the migration's backup of the plain database.
 
 One chat per contact: a contact's phone-number chat is merged into her hidden-id (`@lid`) chat
 when whatsmeow knows the pair ([ADR 0001](docs/adr/0001-one-chat-per-contact.md)).
@@ -214,7 +217,7 @@ cmd/nunciod/           Go daemon: owns the one linked-device session
 cmd/nuncio/            the CLI
 cmd/nuncio-demo/       a fake daemon for trying the apps
 internal/wa/           the whatsmeow integration: session, backoff, sends, receipts
-internal/store/        SQLite store, the wipe, the keyring-backed device keys (not wired yet, T17)
+internal/store/        SQLite store, the wipe, the keyring-held data key (not wired yet, T17)
 internal/media/        on-demand media downloads and their cache
 internal/ipc/          NDJSON framing, wire types, socket and D-Bus names
 crates/nuncio-client/  shared Rust client: IPC, view models, config, links, theme and font
@@ -235,7 +238,8 @@ odd/tasks/             the build plan of record
 - [docs/config.md](docs/config.md): the configuration file.
 - [docs/adr/](docs/adr/): design decisions
   ([0001 one chat per contact](docs/adr/0001-one-chat-per-contact.md),
-  [0002 chat names](docs/adr/0002-chat-names.md)).
+  [0002 chat names](docs/adr/0002-chat-names.md),
+  [0003 where the Signal state lives](docs/adr/0003-where-the-signal-state-lives.md)).
 - [CREDITS.md](CREDITS.md): the projects and dependencies nuncio is built on.
 
 ## Licence

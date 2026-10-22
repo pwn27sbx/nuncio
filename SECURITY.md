@@ -15,22 +15,23 @@ nuncio runs as a linked WhatsApp device on one Linux machine, for one user. It a
 
 It does **not** protect against malware or anyone running as your user, against root, or against a
 stolen machine without disk encryption: today the Signal session state sits in an ordinary SQLite
-file (see below). Using an unofficial client is against WhatsApp's Terms of Service; nuncio reduces
-the ban risk, it cannot remove it.
+file (see below; sealing it under a keyring-held key is planned, T17). Using an unofficial client
+is against WhatsApp's Terms of Service; nuncio reduces the ban risk, it cannot remove it.
 
 ## What is stored where
 
 | What | Where | Protection |
 | --- | --- | --- |
 | Messages, chats, reactions, the outbox, the search index | `$XDG_DATA_HOME/nuncio/nuncio.db` (default `~/.local/share/nuncio/`), with its `-wal` and `-shm` files | directory `0700`, files `0600` (an existing looser file is tightened when it is opened) |
-| **The WhatsApp device's Signal state** (identity and session keys, pre-keys, sender keys, app-state keys) | **inside the same `nuncio.db`**, in whatsmeow's own tables | `0600` only, **not encrypted**. Moving it behind the keyring (Secret Service) is planned (T17) and not done: the keyring-backed device store exists in `internal/store/device.go` but no binary writes keyring items yet |
+| **The WhatsApp device's Signal state** (identity and session keys, pre-keys, sender keys, app-state keys) | **inside the same `nuncio.db`**, in whatsmeow's own tables | `0600` only, **not encrypted** today. Planned (T17, in progress on `feat/m4-omarchy`, planned until the home acceptance run): the private columns sealed with AES-256-GCM under one data key held in the Secret Service (item `store.data_key`, service `nuncio`), and an existing plain database migrated after a backup ([ADR 0003](docs/adr/0003-where-the-signal-state-lives.md)). No binary writes keyring items yet |
 | Media you open (photos, stickers, documents) | `$XDG_DATA_HOME/nuncio/media/` | directory `0700`, files `0600`; downloaded only on demand, never on their own, and checked against WhatsApp's SHA-256 |
 | `exports` | `$XDG_DATA_HOME/nuncio/exports/` | reserved for chat exports (no command writes it yet); deleted by the wipe |
 | The socket the apps talk to | `$XDG_RUNTIME_DIR/nuncio/core.sock` | directory `0700`, socket `0600` |
 | Settings | `~/.config/nuncio/config.toml` | written by nuncio-desktop's settings with mode `0600`, its directory created `0700` ([docs/config.md](docs/config.md)) |
 
 Never copy `~/.local/share/nuncio/` to another machine or into a bug report: it holds the device's
-keys as long as T17 is open.
+keys as long as T17 is open. Once T17 ships, the migration's backup of the plain database (next to
+`nuncio.db`) still holds them until you delete it or run the wipe; messages stay plain either way.
 
 ## What never leaves the machine or reaches a log
 

@@ -654,27 +654,28 @@ fn the_frame_shown_is_the_one_whose_delay_the_elapsed_time_is_in_looping_forever
 }
 
 #[test]
-fn an_opened_animated_sticker_keeps_every_frame_shrunk_to_twice_its_box() {
+fn an_opened_animated_sticker_keeps_every_frame_shrunk_to_its_box() {
     let dir = temp_dir("animated");
     let file = dir.join("S1.webp");
     std::fs::write(&file, animated_sticker(512, 3, 5)).expect("write");
     let full = decode_picture(&sticker_request(file.clone(), Variant::Full, true)).expect("full");
     assert_eq!(
         (full.width, full.height, full.source),
-        (320, 320, (512, 512))
+        (160, 160, (512, 512)),
+        "an animation's frames are at its box, not twice it"
     );
+    assert_eq!(full.rgba.len(), 160 * 160 * 4, "its first frame too");
     assert_eq!(full.delays_ms, [100, 100, 100], "under 10 ms is 100 ms");
     assert_eq!(full.later.len(), 2);
-    assert!(full.later.iter().all(|frame| frame.len() == 320 * 320 * 4));
+    assert!(full.later.iter().all(|frame| frame.len() == 160 * 160 * 4));
     assert_ne!(full.later[0], full.rgba, "each frame its own");
-    assert_eq!(full.bytes(), 3 * 320 * 320 * 4, "every frame is counted");
-    // Its first frame is the picture a sticker that does not animate shows.
+    assert_eq!(full.bytes(), 3 * 160 * 160 * 4, "every frame is counted");
+    // A sticker that does not animate still shows its first frame at twice its box, as before.
     let still = decode_picture(&sticker_request(file, Variant::Full, false)).expect("still");
     assert_eq!(
         (still.width, still.height, still.source),
         (320, 320, (512, 512))
     );
-    assert!(still.rgba == full.rgba, "the first frame differs");
     assert!(still.delays_ms.is_empty() && still.later.is_empty());
     assert_eq!(still.bytes(), 320 * 320 * 4);
     let _ = std::fs::remove_dir_all(&dir);
@@ -682,13 +683,15 @@ fn an_opened_animated_sticker_keeps_every_frame_shrunk_to_twice_its_box() {
 
 #[test]
 fn an_animated_sticker_over_its_frame_cap_shows_its_first_frame_only() {
-    let frame = 320 * 320 * 4;
+    // Each frame is kept at the 160 px box: 100 KiB, over the 4 KiB floor, so 163 fit.
+    let frame = 160 * 160 * 4;
     let fit = ANIMATION_BYTES / frame;
     assert_eq!(ANIMATION_BYTES, 16 << 20);
+    assert_eq!(fit, 163);
     let dir = temp_dir("animation-cap");
     for (frames, animates) in [(fit, true), (fit + 1, false)] {
         let file = dir.join(format!("S{frames}.webp"));
-        std::fs::write(&file, animated_sticker(320, frames, 40)).expect("write");
+        std::fs::write(&file, animated_sticker(512, frames, 40)).expect("write");
         let full = decode_picture(&sticker_request(file, Variant::Full, true)).expect("full");
         assert_eq!(
             (
@@ -698,8 +701,11 @@ fn an_animated_sticker_over_its_frame_cap_shows_its_first_frame_only() {
             (animates, animates),
             "{frames} frames"
         );
-        assert_eq!((full.width, full.height), (320, 320));
-        if !animates {
+        if animates {
+            assert_eq!((full.width, full.height), (160, 160));
+        } else {
+            // Its first frame, as a still sticker shows it: twice its box.
+            assert_eq!((full.width, full.height), (320, 320));
             assert!(full.later.is_empty() && full.delays_ms.is_empty());
         }
     }

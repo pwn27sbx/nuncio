@@ -10,8 +10,8 @@
 //! Open in the message's menu), never by itself; every byte is untrusted, and a picture that does
 //! not decode or is too large keeps its label. A sticker's transparent pixels show the bubble
 //! behind it. An animated sticker plays only once its full picture was fetched: its frames are
-//! decoded within [`ANIMATION_BYTES`] and the one to show at a time is [`frame_at`]'s; its
-//! thumbnail, and a sticker whose frames cannot all be kept, give the first frame.
+//! decoded at its box within [`ANIMATION_BYTES`] and the one to show at a time is [`frame_at`]'s;
+//! its thumbnail, and a sticker whose frames cannot all be kept, give the first frame.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -39,9 +39,10 @@ pub const SCALE: u32 = 2;
 pub const CACHE_ENTRIES: usize = 256;
 /// About how many bytes the cache's pictures may take (four per pixel).
 pub const CACHE_BYTES: usize = 64 << 20;
-/// The most bytes an animated sticker's frames may keep (four per pixel, after shrinking to
-/// [`SCALE`] times its box, and at least [`FRAME_MIN_BYTES`] a frame); one whose frames need more
-/// shows its first frame only. A 512 px sticker in its 160 px box keeps 320x320 frames: 40 fit.
+/// The most bytes an animated sticker's frames may keep (four per pixel, after shrinking to its
+/// box, not [`SCALE`] times it, and at least [`FRAME_MIN_BYTES`] a frame); one whose frames need
+/// more shows its first frame only, at [`SCALE`] times its box as a still sticker. A 512 px
+/// sticker in its 160 px box keeps 160x160 frames (100 KiB each): 163 fit.
 pub const ANIMATION_BYTES: usize = 16 << 20;
 /// How many pictures are decoded at once, each on its own thread.
 pub const WORKERS: usize = 2;
@@ -217,19 +218,20 @@ pub fn requests<T: Clone>(model: &Model, bubble: &Bubble, cache: &Cache<T>) -> V
 
 /// Decode `request`'s untrusted bytes within its variant's bounds, and shrink the picture to at
 /// most [`SCALE`] times its box (keeping its shape) so a large photo costs no more than its box.
-/// An animated request gives every frame when they keep at most [`ANIMATION_BYTES`], else (as
-/// any other) its first frame.
+/// An animated request gives every frame, each shrunk to at most its box (once, not [`SCALE`]
+/// times: more frames fit), when they keep at most [`ANIMATION_BYTES`]; else (as any other) its
+/// first frame at [`SCALE`] times its box.
 pub fn decode_picture(request: &Request) -> Result<Pixels, String> {
     let bytes = match &request.origin {
         Origin::Base64(text) => thumb_bytes(text)?,
         Origin::File(path) => read_capped(path)?,
     };
     let bounds = request.key.variant.bounds();
-    let (box_w, box_h) = request.target;
-    let (max_w, max_h) = (box_w.max(1) * SCALE, box_h.max(1) * SCALE);
+    let (box_w, box_h) = (request.target.0.max(1), request.target.1.max(1));
+    let (max_w, max_h) = (box_w * SCALE, box_h * SCALE);
     let frames = request
         .animated
-        .then(|| decode_frames(&bytes, bounds, (max_w, max_h), ANIMATION_BYTES as u64))
+        .then(|| decode_frames(&bytes, bounds, (box_w, box_h), ANIMATION_BYTES as u64))
         .flatten();
     if let Some(animation) = frames {
         let (first, _) = &animation.frames[0];

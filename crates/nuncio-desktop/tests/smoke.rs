@@ -628,7 +628,7 @@ fn pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click() {
     );
 
     // The animated sticker's full picture, fetched by the click above, plays: every frame is
-    // kept, shrunk to twice its box. Its thumbnail did not.
+    // kept, shrunk to its box (not twice it, as a still picture). Its thumbnail did not.
     check(
         ui.picture(1).is_some_and(|p| p.frames == 1 && !p.animating),
         "an animated sticker's thumbnail stays still",
@@ -639,7 +639,7 @@ fn pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click() {
     check(
         wait_for(&ui, |ui| {
             ui.picture(1)
-                .is_some_and(|p| p.frames == 3 && p.animating && p.texture == Some((320, 320)))
+                .is_some_and(|p| p.frames == 3 && p.animating && p.texture == Some((160, 160)))
         }),
         "an opened animated sticker plays its frames",
     );
@@ -657,7 +657,7 @@ fn pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click() {
     check(
         wait_for(&ui, |ui| {
             ui.picture(1)
-                .is_some_and(|p| p.frames == 3 && p.texture == Some((320, 320)))
+                .is_some_and(|p| p.frames == 3 && p.texture == Some((160, 160)))
         }),
         "its frames are decoded again",
     );

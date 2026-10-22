@@ -141,9 +141,10 @@ nuncio-tui's rules (the decode rules are shared: `nuncio_client::pictures`):
 - **Stickers.** Transparent pixels show the bubble behind them. An animated sticker (its label says
   `▶`) shows its first frame, and plays once its full picture was fetched on request: looping
   forever, each frame for its own delay (one under 10 ms is shown for 100 ms). Its frames are shrunk
-  to twice its box as they are decoded and may keep at most 16 MiB, each frame counted as at least
-  4 KiB (they count in the cache's 64 MiB). A sticker over that cap shows its first frame only: a
-  512 px sticker keeps 320x320 frames, so one with more than 40 frames stays still. So does one
+  to its box (once, not twice as a still picture) as they are decoded and may keep at most 16 MiB,
+  each frame counted as at least 4 KiB (they count in the cache's 64 MiB). A sticker over that cap
+  shows its first frame only, as sharp as a still sticker: a 512 px sticker keeps 160x160 frames
+  (100 KiB each), so one with more than 163 frames stays still. So does one
   with more than 1000 frames, whose canvas is over 1024 px a side, or with a frame that does not
   decode. The thumbnail never plays. When the desktop turns animations off (GTK's
   `gtk-enable-animations` setting) a playing sticker stops at its first frame and none starts;

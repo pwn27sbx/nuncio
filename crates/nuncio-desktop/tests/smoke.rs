@@ -366,6 +366,55 @@ fn disc_png() -> Vec<u8> {
     bytes
 }
 
+/// A 512x512 animated WebP sticker of `frames` frames, each of its own colour, 80 ms each.
+fn animated_sticker(frames: usize) -> Vec<u8> {
+    use image::ImageEncoder;
+    fn u24(value: u32) -> [u8; 3] {
+        let [a, b, c, _] = value.to_le_bytes();
+        [a, b, c]
+    }
+    fn chunk(name: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = name.to_vec();
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    }
+    let side = 512;
+    let mut vp8x = vec![0x10 | 0x02, 0, 0, 0];
+    vp8x.extend_from_slice(&u24(side - 1));
+    vp8x.extend_from_slice(&u24(side - 1));
+    let mut body = b"WEBP".to_vec();
+    body.extend(chunk(b"VP8X", &vp8x));
+    body.extend(chunk(b"ANIM", &[0, 0, 0, 0, 0, 0]));
+    for n in 0..frames {
+        let colour = image::Rgba([(n * 60) as u8, 120, 255 - (n * 60) as u8, 255]);
+        let picture = image::RgbaImage::from_pixel(side, side, colour);
+        let mut still = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut still)
+            .write_image(
+                picture.as_raw(),
+                side,
+                side,
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("encode a webp");
+        let mut anmf = Vec::new();
+        for value in [0, 0, side - 1, side - 1, 80] {
+            anmf.extend_from_slice(&u24(value));
+        }
+        anmf.push(0x02);
+        anmf.extend_from_slice(&still[12..]);
+        body.extend(chunk(b"ANMF", &anmf));
+    }
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    bytes.extend(body);
+    bytes
+}
+
 fn wait_for(ui: &Ui, done: impl Fn(&Ui) -> bool) -> bool {
     let deadline = Instant::now() + Duration::from_secs(10);
     while !done(ui) && Instant::now() < deadline {
@@ -577,6 +626,46 @@ fn pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click() {
         wait_for(&ui, |ui| texture(ui, 2) == Some((64, 64))),
         "and the picture that failed is shown once it decodes",
     );
+
+    // The animated sticker's full picture, fetched by the click above, plays: every frame is
+    // kept, shrunk to twice its box. Its thumbnail did not.
+    check(
+        ui.picture(1).is_some_and(|p| p.frames == 1 && !p.animating),
+        "an animated sticker's thumbnail stays still",
+    );
+    let moving = dir.join("DEMOS1.webp");
+    std::fs::write(&moving, animated_sticker(3)).expect("write");
+    ready(&ui, "DEMOS1", &moving);
+    check(
+        wait_for(&ui, |ui| {
+            ui.picture(1)
+                .is_some_and(|p| p.frames == 3 && p.animating && p.texture == Some((320, 320)))
+        }),
+        "an opened animated sticker plays its frames",
+    );
+    check(
+        laid_out(&ui, 1) == Some((160, 160)),
+        "in the same box: nothing moves",
+    );
+    // With the desktop asking for no animations it shows its first frame, still.
+    let settings = gtk::Settings::default().expect("the default settings");
+    settings.set_gtk_enable_animations(false);
+    ui.evict_pictures();
+    ui.click_picture(1);
+    check(asked(&ui, "DEMOS1"), "asked again");
+    ready(&ui, "DEMOS1", &moving);
+    check(
+        wait_for(&ui, |ui| {
+            ui.picture(1)
+                .is_some_and(|p| p.frames == 3 && p.texture == Some((320, 320)))
+        }),
+        "its frames are decoded again",
+    );
+    check(
+        ui.picture(1).is_some_and(|p| !p.animating),
+        "but nothing plays when animations are off",
+    );
+    settings.set_gtk_enable_animations(true);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

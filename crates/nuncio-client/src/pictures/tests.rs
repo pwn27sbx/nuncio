@@ -277,9 +277,10 @@ fn webp(width: u32, height: u32) -> Vec<u8> {
     bytes
 }
 
-/// An animated WebP whose one frame, at the top left, is a `frame_w` x `frame_h` lossless picture
-/// on a `width` x `height` canvas, as a sticker is.
-fn animated_webp(width: u32, height: u32, frame_w: u32, frame_h: u32) -> Vec<u8> {
+/// An animated WebP on a `width` x `height` canvas: each frame is a lossless still WebP (its
+/// bytes, width and height) drawn at the top left over what was there (not blended with it, so
+/// its pixels come out as they went in), shown for its duration in milliseconds.
+fn animation(width: u32, height: u32, frames: &[(Vec<u8>, u32, u32, u32)]) -> Vec<u8> {
     fn u24(value: u32) -> [u8; 3] {
         let [a, b, c, _] = value.to_le_bytes();
         [a, b, c]
@@ -293,26 +294,66 @@ fn animated_webp(width: u32, height: u32, frame_w: u32, frame_h: u32) -> Vec<u8>
         }
         out
     }
-    // The still WebP is RIFF, size, WEBP, then its one VP8L chunk.
-    let frame = webp(frame_w, frame_h)[12..].to_vec();
     let mut vp8x = vec![0x10 | 0x02, 0, 0, 0];
     vp8x.extend_from_slice(&u24(width - 1));
     vp8x.extend_from_slice(&u24(height - 1));
-    let mut anmf = Vec::new();
-    for value in [0, 0, frame_w - 1, frame_h - 1, 100] {
-        anmf.extend_from_slice(&u24(value));
-    }
-    anmf.push(0);
-    anmf.extend_from_slice(&frame);
     let mut body = b"WEBP".to_vec();
     body.extend(chunk(b"VP8X", &vp8x));
     body.extend(chunk(b"ANIM", &[0, 0, 0, 0, 0, 0]));
-    body.extend(chunk(b"ANMF", &anmf));
+    for (still, frame_w, frame_h, duration) in frames {
+        let mut anmf = Vec::new();
+        for value in [0, 0, frame_w - 1, frame_h - 1, *duration] {
+            anmf.extend_from_slice(&u24(value));
+        }
+        anmf.push(0x02);
+        // The still WebP is RIFF, size, WEBP, then its one VP8L chunk.
+        anmf.extend_from_slice(&still[12..]);
+        body.extend(chunk(b"ANMF", &anmf));
+    }
     let mut bytes = b"RIFF".to_vec();
     bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
     bytes.extend(body);
     bytes
 }
+
+/// An animated WebP whose one frame, at the top left, is a `frame_w` x `frame_h` lossless picture
+/// on a `width` x `height` canvas, as a sticker is.
+fn animated_webp(width: u32, height: u32, frame_w: u32, frame_h: u32) -> Vec<u8> {
+    animation(
+        width,
+        height,
+        &[(webp(frame_w, frame_h), frame_w, frame_h, 100)],
+    )
+}
+
+/// An animated WebP of `width` x `height` whose frames fill the canvas, each of one colour, shown
+/// for its duration in milliseconds.
+fn coloured(width: u32, height: u32, frames: &[(Rgba<u8>, u32)]) -> Vec<u8> {
+    let frames: Vec<_> = frames
+        .iter()
+        .map(|&(colour, duration)| {
+            let picture = RgbaImage::from_pixel(width, height, colour);
+            let mut still = Vec::new();
+            image::codecs::webp::WebPEncoder::new_lossless(&mut still)
+                .write_image(
+                    picture.as_raw(),
+                    width,
+                    height,
+                    image::ExtendedColorType::Rgba8,
+                )
+                .expect("encode a webp");
+            (still, width, height, duration)
+        })
+        .collect();
+    animation(width, height, &frames)
+}
+
+const RED: Rgba<u8> = Rgba([220, 30, 30, 255]);
+const GREEN: Rgba<u8> = Rgba([30, 200, 60, 255]);
+const BLUE: Rgba<u8> = Rgba([40, 60, 230, 128]);
+
+/// Room for any frame: nothing is shrunk.
+const ANY_FIT: (u32, u32) = (MAX_SIDE, MAX_SIDE);
 
 const TOO_LARGE: &str = "the picture is larger than nuncio draws";
 
@@ -429,4 +470,161 @@ fn a_picture_within_the_cap_decodes_exactly_as_the_decoder_alone_does() {
         assert_eq!(ours.color(), plain.color(), "{name}");
         assert!(ours.as_bytes() == plain.as_bytes(), "{name}: pixels differ");
     }
+}
+
+#[test]
+fn an_animated_webp_gives_every_frame_in_order_with_its_delay() {
+    let bytes = coloured(64, 48, &[(RED, 80), (GREEN, 10), (BLUE, 250)]);
+    let frames = decode_frames(&bytes, FULL_BOUNDS, ANY_FIT, u64::MAX).expect("animated");
+    assert_eq!(frames.canvas, (64, 48));
+    let seen: Vec<_> = frames
+        .frames
+        .iter()
+        .map(|(image, delay)| (image.dimensions(), *image.get_pixel(10, 10), *delay))
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ((64, 48), RED, 80),
+            ((64, 48), GREEN, 10),
+            ((64, 48), BLUE, 250)
+        ]
+    );
+}
+
+#[test]
+fn a_frame_shown_for_under_10_ms_is_shown_for_100() {
+    let bytes = coloured(8, 8, &[(RED, 0), (GREEN, 9), (BLUE, 10)]);
+    let frames = decode_frames(&bytes, FULL_BOUNDS, ANY_FIT, u64::MAX).expect("animated");
+    let delays: Vec<_> = frames.frames.iter().map(|(_, delay)| *delay).collect();
+    assert_eq!(delays, [100, 100, 10]);
+}
+
+#[test]
+fn each_frame_is_shrunk_to_the_fit_at_once_keeping_its_shape() {
+    let bytes = coloured(512, 256, &[(RED, 100), (GREEN, 100)]);
+    let frames = decode_frames(&bytes, FULL_BOUNDS, (320, 320), u64::MAX).expect("animated");
+    assert_eq!(frames.canvas, (512, 256), "the size before shrinking");
+    for (image, _) in &frames.frames {
+        assert_eq!(image.dimensions(), (320, 160));
+    }
+}
+
+#[test]
+fn the_first_frame_is_the_picture_decode_gives() {
+    let bytes = animation(
+        96,
+        64,
+        &[(webp(96, 64), 96, 64, 100), (webp(40, 30), 40, 30, 100)],
+    );
+    let frames = decode_frames(&bytes, FULL_BOUNDS, ANY_FIT, u64::MAX).expect("animated");
+    let still = decode(&bytes, FULL_BOUNDS)
+        .expect("its first frame")
+        .into_rgba8();
+    assert!(frames.frames[0].0 == still, "the first frame differs");
+}
+
+#[test]
+fn frames_past_the_byte_cap_give_no_animation() {
+    let bytes = coloured(64, 64, &[(RED, 100), (GREEN, 100), (BLUE, 100)]);
+    let all = 3 * 64 * 64 * 4;
+    assert!(decode_frames(&bytes, FULL_BOUNDS, ANY_FIT, all).is_some());
+    assert!(decode_frames(&bytes, FULL_BOUNDS, ANY_FIT, all - 1).is_none());
+    // The cap counts the frames as kept, shrunk to the fit.
+    assert!(decode_frames(&bytes, FULL_BOUNDS, (48, 48), 3 * 48 * 48 * 4).is_some());
+}
+
+#[test]
+fn each_frame_is_charged_at_least_its_minimum_against_the_cap() {
+    assert_eq!(FRAME_MIN_BYTES, 4 << 10);
+    // 8x8 frames hold 256 bytes of pixels, but each costs a texture and its bookkeeping.
+    let bytes = coloured(8, 8, &[(RED, 100), (GREEN, 100), (BLUE, 100)]);
+    let charged = 3 * FRAME_MIN_BYTES;
+    assert!(decode_frames(&bytes, FULL_BOUNDS, ANY_FIT, charged).is_some());
+    assert!(decode_frames(&bytes, FULL_BOUNDS, ANY_FIT, charged - 1).is_none());
+}
+
+#[test]
+fn an_animation_of_more_than_max_frames_gives_no_frames_and_stops_decoding_there() {
+    assert_eq!(MAX_FRAMES, 1000);
+    let tiny = |frames: usize| coloured(1, 1, &vec![(RED, 100); frames]);
+    let at_most = decode_frames(&tiny(MAX_FRAMES), FULL_BOUNDS, ANY_FIT, u64::MAX)
+        .expect("as many frames as allowed");
+    assert_eq!(at_most.frames.len(), MAX_FRAMES);
+    let just_over = tiny(MAX_FRAMES + 1);
+    let (decoded, over_peak) =
+        peak::of(|| decode_frames(&just_over, FULL_BOUNDS, ANY_FIT, u64::MAX).is_none());
+    assert!(decoded, "one frame too many");
+    // Twenty times as many frames hold no more at once: the decode stopped past the limit.
+    let many = tiny(20 * MAX_FRAMES);
+    let (decoded, many_peak) =
+        peak::of(|| decode_frames(&many, FULL_BOUNDS, ANY_FIT, u64::MAX).is_none());
+    assert!(decoded, "far too many frames");
+    assert!(
+        many_peak <= over_peak + (64 << 10),
+        "held {many_peak} bytes, {over_peak} just over the limit"
+    );
+}
+
+#[test]
+fn a_frame_that_does_not_decode_gives_no_animation_but_the_first_frame_still_decodes() {
+    let mut bytes = coloured(16, 16, &[(RED, 100), (GREEN, 100), (BLUE, 100)]);
+    // The last of three: keeping the two before it would still be an animation.
+    let last = bytes
+        .windows(4)
+        .enumerate()
+        .filter(|(_, name)| name == b"VP8L")
+        .nth(2)
+        .map(|(at, _)| at)
+        .expect("a third frame");
+    // Its VP8L signature byte, after the chunk's name and size.
+    bytes[last + 8] = 0;
+    assert!(decode_frames(&bytes, FULL_BOUNDS, ANY_FIT, u64::MAX).is_none());
+    let still = decode(&bytes, FULL_BOUNDS)
+        .expect("the first frame")
+        .into_rgba8();
+    assert_eq!(*still.get_pixel(0, 0), RED);
+}
+
+#[test]
+fn only_an_animated_webp_of_at_most_1024_a_side_gives_frames() {
+    let two = [(RED, 100), (GREEN, 100)];
+    assert!(decode_frames(&coloured(1024, 8, &two), FULL_BOUNDS, ANY_FIT, u64::MAX).is_some());
+    assert!(decode_frames(&coloured(1025, 8, &two), FULL_BOUNDS, ANY_FIT, u64::MAX).is_none());
+    assert!(decode_frames(&coloured(8, 1025, &two), FULL_BOUNDS, ANY_FIT, u64::MAX).is_none());
+    for (name, bytes) in [
+        ("one frame", coloured(8, 8, &[(RED, 100)])),
+        ("still webp", webp(8, 8)),
+        ("png", png(8, 8, 255)),
+        ("jpeg", jpeg(8, 8)),
+        ("garbage", b"not a picture".to_vec()),
+    ] {
+        assert!(
+            decode_frames(&bytes, FULL_BOUNDS, ANY_FIT, u64::MAX).is_none(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn an_animation_header_over_its_bounds_at_12_bytes_a_pixel_gives_no_frames() {
+    let bytes = coloured(64, 64, &[(RED, 100), (GREEN, 100)]);
+    let at = |alloc| Bounds {
+        side: MAX_SIDE,
+        alloc,
+    };
+    assert!(decode_frames(&bytes, at(64 * 64 * 12), ANY_FIT, u64::MAX).is_some());
+    assert!(decode_frames(&bytes, at(64 * 64 * 12 - 1), ANY_FIT, u64::MAX).is_none());
+    assert!(
+        decode_frames(
+            &bytes,
+            Bounds {
+                side: 63,
+                ..FULL_BOUNDS
+            },
+            ANY_FIT,
+            u64::MAX
+        )
+        .is_none()
+    );
 }

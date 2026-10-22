@@ -115,7 +115,7 @@ struct Inner {
     /// The draft is being set from code, not typed.
     setting_draft: Cell<bool>,
     /// The decoded pictures, as textures ([`crate::pictures`]).
-    pictures: RefCell<Cache<gdk::Texture>>,
+    pictures: RefCell<Cache<Drawn>>,
     /// The threads that decode pictures; what they decode comes back on the main loop.
     decoder: Decoder,
     /// The picture widgets drawn now, by chat and message id, to put a texture in once decoded.
@@ -132,6 +132,83 @@ struct Slot {
     sticker: bool,
     /// Its box came from the size the message states; else from the picture once decoded.
     sized: bool,
+    /// How many frames the picture in it has (one when it does not animate).
+    frames: Cell<usize>,
+    /// The tick that plays its animation, stopped before another picture goes in (and gone once
+    /// it stopped itself).
+    ticking: Rc<RefCell<Option<gtk::TickCallbackId>>>,
+}
+
+impl Slot {
+    fn new(picture: &gtk::Picture, sticker: bool, sized: bool) -> Self {
+        Self {
+            picture: picture.downgrade(),
+            sticker,
+            sized,
+            frames: Cell::new(0),
+            ticking: Rc::default(),
+        }
+    }
+
+    /// Put `drawn` in its picture: its first frame, and an animation plays it from there unless
+    /// the desktop asks for no animations (`gtk-enable-animations`). The setting is read when a
+    /// sticker is drawn: turned off, a playing sticker stops at its first frame; turned on, a
+    /// sticker plays the next time it is drawn (its row rebuilt), not before.
+    fn show(&self, picture: &gtk::Picture, drawn: &Drawn) {
+        if let Some(tick) = self.ticking.take() {
+            tick.remove();
+        }
+        picture.set_paintable(Some(&drawn.first));
+        self.frames
+            .set(drawn.animation.as_ref().map_or(1, |a| a.textures.len()));
+        let Some(animation) = &drawn.animation else {
+            return;
+        };
+        if !picture.settings().is_gtk_enable_animations() {
+            return;
+        }
+        let animation = Rc::clone(animation);
+        let started = Cell::new(None::<i64>);
+        let shown = Cell::new(0_usize);
+        let ticking = Rc::downgrade(&self.ticking);
+        let tick = picture.add_tick_callback(move |picture, clock| {
+            if !picture.settings().is_gtk_enable_animations() {
+                picture.set_paintable(animation.textures.first());
+                // Breaking removes this tick: its id goes with it.
+                if let Some(ticking) = ticking.upgrade() {
+                    ticking.borrow_mut().take();
+                }
+                return glib::ControlFlow::Break;
+            }
+            // Microseconds, from the frame clock: the frame painted next.
+            let now = clock.frame_time();
+            let start = started.get().unwrap_or(now);
+            started.set(Some(start));
+            let elapsed = u64::try_from(now.saturating_sub(start) / 1000).unwrap_or(0);
+            let index = pictures::frame_at(&animation.delays_ms, elapsed);
+            if index != shown.get()
+                && let Some(texture) = animation.textures.get(index)
+            {
+                shown.set(index);
+                picture.set_paintable(Some(texture));
+            }
+            glib::ControlFlow::Continue
+        });
+        self.ticking.replace(Some(tick));
+    }
+}
+
+/// A decoded picture as the window draws it: its first frame, and an animated sticker's frames.
+#[derive(Clone)]
+struct Drawn {
+    first: gdk::Texture,
+    animation: Option<Rc<Animation>>,
+}
+
+/// An animation's frames, one texture each built once, and how long each shows.
+struct Animation {
+    textures: Vec<gdk::Texture>,
+    delays_ms: Vec<u32>,
 }
 
 impl Ui {
@@ -1376,17 +1453,17 @@ impl Ui {
     /// cannot be shown says why; a thumbnail just keeps its label.
     fn picture_decoded(&self, done: Decoded) {
         let Decoded { key, outcome } = done;
-        let outcome = outcome.map(|pixels| (pixels.rgba.len(), pixels.source, texture(pixels)));
-        let outcome = outcome.map(|(bytes, source, texture)| (texture, bytes, source));
+        let outcome = outcome.map(|pixels| (pixels.bytes(), pixels.source, drawn(pixels)));
+        let outcome = outcome.map(|(bytes, source, drawn)| (drawn, bytes, source));
         let shown = match &outcome {
-            Ok((texture, _, source)) => Ok((texture.clone(), *source)),
+            Ok((drawn, _, source)) => Ok((drawn.clone(), *source)),
             Err(error) => Err(error.clone()),
         };
         if !self.0.pictures.borrow_mut().finish(key.clone(), outcome) {
             return;
         }
         match shown {
-            Ok((texture, source)) => {
+            Ok((drawn, source)) => {
                 let mut live = self.0.live.borrow_mut();
                 let Some(slots) = live.get_mut(&(key.chat.clone(), key.id.clone())) else {
                     return;
@@ -1409,7 +1486,7 @@ impl Ui {
                                 .settle_box(&key, source, slot.sticker);
                         reserve(&picture, fixed);
                     }
-                    picture.set_paintable(Some(&texture));
+                    slot.show(&picture, &drawn);
                 }
             }
             Err(error) if key.variant == Variant::Full => {
@@ -1434,11 +1511,18 @@ impl Ui {
             .unwrap_or_else(|| picture.clone().upcast());
         let (_, width, _, _) = outer.measure(gtk::Orientation::Horizontal, -1);
         let (_, height, _, _) = outer.measure(gtk::Orientation::Vertical, width);
+        let live = self.0.live.borrow();
+        let slot = live
+            .values()
+            .flatten()
+            .find(|slot| slot.picture.upgrade().as_ref() == Some(&picture));
         Some(PictureState {
             reserved: picture.size_request(),
             laid_out: (width, height),
             texture: paintable.map(|p| (p.intrinsic_width(), p.intrinsic_height())),
             alt: picture.alternative_text().map(|t| t.to_string()),
+            frames: slot.map_or(0, |slot| slot.frames.get()),
+            animating: slot.is_some_and(|slot| slot.ticking.borrow().is_some()),
         })
     }
 
@@ -2221,22 +2305,38 @@ pub struct PictureState {
     /// The size of the texture drawn in it, once one is.
     pub texture: Option<(i32, i32)>,
     pub alt: Option<String>,
+    /// How many frames the picture in it has: none before one is drawn, one when it is still.
+    pub frames: usize,
+    /// An animation plays in it.
+    pub animating: bool,
 }
 
-/// A decoded picture as a texture: RGBA, not premultiplied, so a sticker's transparent pixels show
-/// the bubble behind it.
-fn texture(pixels: pictures::Pixels) -> gdk::Texture {
+/// A decoded picture as textures, one per frame built once: RGBA, not premultiplied, so a
+/// sticker's transparent pixels show the bubble behind it.
+fn drawn(pixels: pictures::Pixels) -> Drawn {
     let width = i32::try_from(pixels.width).unwrap_or(1);
     let height = i32::try_from(pixels.height).unwrap_or(1);
     let stride = pixels.width as usize * 4;
-    gdk::MemoryTexture::new(
-        width,
-        height,
-        gdk::MemoryFormat::R8g8b8a8,
-        &glib::Bytes::from_owned(pixels.rgba),
-        stride,
-    )
-    .upcast()
+    let texture = |rgba: Vec<u8>| -> gdk::Texture {
+        gdk::MemoryTexture::new(
+            width,
+            height,
+            gdk::MemoryFormat::R8g8b8a8,
+            &glib::Bytes::from_owned(rgba),
+            stride,
+        )
+        .upcast()
+    };
+    let first = texture(pixels.rgba);
+    let animation = (!pixels.later.is_empty()).then(|| {
+        let mut textures = vec![first.clone()];
+        textures.extend(pixels.later.into_iter().map(texture));
+        Rc::new(Animation {
+            textures,
+            delays_ms: pixels.delays_ms,
+        })
+    });
+    Drawn { first, animation }
 }
 
 /// Give `picture` a box of exactly `width` x `height`: at least that (its size request) and at
@@ -2295,7 +2395,9 @@ fn picture_widget(ui: &Weak<Inner>, index: usize, view: &PictureView) -> gtk::Wi
         if let Some(size) = known {
             reserve(&picture, size);
         }
-        if let Some((texture, variant)) = cache.best(&view.chat, &view.id) {
+        let slot = Slot::new(&picture, view.sticker, view.size.is_some());
+        if let Some((drawn, variant)) = cache.best(&view.chat, &view.id) {
+            let texture = &drawn.first;
             if view.size.is_none() && known.is_none() {
                 let source = match variant {
                     Variant::Full => cache.full_pixels(&view.chat, &view.id),
@@ -2308,7 +2410,7 @@ fn picture_widget(ui: &Weak<Inner>, index: usize, view: &PictureView) -> gtk::Wi
                 let key = pictures::Key::new(&view.chat, &view.id, variant);
                 reserve(&picture, cache.settle_box(&key, source, view.sticker));
             }
-            picture.set_paintable(Some(&texture));
+            slot.show(&picture, &drawn);
         }
         drop(cache);
         inner
@@ -2316,11 +2418,7 @@ fn picture_widget(ui: &Weak<Inner>, index: usize, view: &PictureView) -> gtk::Wi
             .borrow_mut()
             .entry((view.chat.clone(), view.id.clone()))
             .or_default()
-            .push(Slot {
-                picture: picture.downgrade(),
-                sticker: view.sticker,
-                sized: view.size.is_some(),
-            });
+            .push(slot);
     }
     let click = gtk::GestureClick::new();
     click.set_button(gdk::BUTTON_PRIMARY);

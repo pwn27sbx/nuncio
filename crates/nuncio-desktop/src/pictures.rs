@@ -8,8 +8,10 @@
 //! from the `width` and `height` the message states, so nothing moves when it (or later the full
 //! picture) arrives; the full file is fetched only when the user asks (a click, Enter, `o`, or
 //! Open in the message's menu), never by itself; every byte is untrusted, and a picture that does
-//! not decode or is too large keeps its label. A sticker gives its first frame, its transparent
-//! pixels showing the bubble behind it.
+//! not decode or is too large keeps its label. A sticker's transparent pixels show the bubble
+//! behind it. An animated sticker plays only once its full picture was fetched: its frames are
+//! decoded within [`ANIMATION_BYTES`] and the one to show at a time is [`frame_at`]'s; its
+//! thumbnail, and a sticker whose frames cannot all be kept, give the first frame.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -19,7 +21,9 @@ use std::thread;
 
 use image::imageops::FilterType;
 use nuncio_client::Model;
-use nuncio_client::pictures::{decode, fit_box, read_capped, thumb_bytes};
+use nuncio_client::pictures::{
+    FRAME_MIN_BYTES, decode, decode_frames, fit_box, read_capped, thumb_bytes,
+};
 
 pub use nuncio_client::pictures::Variant;
 
@@ -35,6 +39,10 @@ pub const SCALE: u32 = 2;
 pub const CACHE_ENTRIES: usize = 256;
 /// About how many bytes the cache's pictures may take (four per pixel).
 pub const CACHE_BYTES: usize = 64 << 20;
+/// The most bytes an animated sticker's frames may keep (four per pixel, after shrinking to
+/// [`SCALE`] times its box, and at least [`FRAME_MIN_BYTES`] a frame); one whose frames need more
+/// shows its first frame only. A 512 px sticker in its 160 px box keeps 320x320 frames: 40 fit.
+pub const ANIMATION_BYTES: usize = 16 << 20;
 /// How many pictures are decoded at once, each on its own thread.
 pub const WORKERS: usize = 2;
 
@@ -100,9 +108,12 @@ pub struct Request {
     pub key: Key,
     pub origin: Origin,
     pub target: (u32, u32),
+    /// Decode its frames: the full picture of an animated sticker.
+    pub animated: bool,
 }
 
-/// A decoded picture: `width` x `height` RGBA pixels, four bytes each, not premultiplied.
+/// A decoded picture: `width` x `height` RGBA pixels, four bytes each, not premultiplied. An
+/// animation has more frames of that size after `rgba`, its first.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Pixels {
     pub width: u32,
@@ -110,6 +121,26 @@ pub struct Pixels {
     /// The size it had before it was shrunk to its box.
     pub source: (u32, u32),
     pub rgba: Vec<u8>,
+    /// How long each frame shows, in milliseconds: one per frame, `rgba` first; empty for a
+    /// picture that does not animate.
+    pub delays_ms: Vec<u32>,
+    /// The frames after the first.
+    pub later: Vec<Vec<u8>>,
+}
+
+impl Pixels {
+    /// The bytes all its frames take: a still picture its pixels, an animation each frame's
+    /// pixels but at least [`FRAME_MIN_BYTES`] (its texture), as [`decode_frames`] charged them.
+    pub fn bytes(&self) -> usize {
+        if self.later.is_empty() {
+            return self.rgba.len();
+        }
+        let least = FRAME_MIN_BYTES as usize;
+        std::iter::once(&self.rgba)
+            .chain(&self.later)
+            .map(|frame| frame.len().max(least))
+            .sum()
+    }
 }
 
 impl std::fmt::Debug for Pixels {
@@ -158,6 +189,7 @@ pub fn requests<T: Clone>(model: &Model, bubble: &Bubble, cache: &Cache<T>) -> V
             key: full.clone(),
             origin: Origin::File(path.clone()),
             target,
+            animated: picture.animated,
         });
     }
     let thumb = Key::new(&picture.chat, &picture.id, Variant::Thumb);
@@ -176,6 +208,7 @@ pub fn requests<T: Clone>(model: &Model, bubble: &Bubble, cache: &Cache<T>) -> V
                 key: thumb,
                 origin: Origin::Base64(text),
                 target,
+                animated: false,
             },
         );
     }
@@ -184,15 +217,39 @@ pub fn requests<T: Clone>(model: &Model, bubble: &Bubble, cache: &Cache<T>) -> V
 
 /// Decode `request`'s untrusted bytes within its variant's bounds, and shrink the picture to at
 /// most [`SCALE`] times its box (keeping its shape) so a large photo costs no more than its box.
+/// An animated request gives every frame when they keep at most [`ANIMATION_BYTES`], else (as
+/// any other) its first frame.
 pub fn decode_picture(request: &Request) -> Result<Pixels, String> {
     let bytes = match &request.origin {
         Origin::Base64(text) => thumb_bytes(text)?,
         Origin::File(path) => read_capped(path)?,
     };
-    let picture = decode(&bytes, request.key.variant.bounds())?;
-    let source = (picture.width(), picture.height());
+    let bounds = request.key.variant.bounds();
     let (box_w, box_h) = request.target;
     let (max_w, max_h) = (box_w.max(1) * SCALE, box_h.max(1) * SCALE);
+    let frames = request
+        .animated
+        .then(|| decode_frames(&bytes, bounds, (max_w, max_h), ANIMATION_BYTES as u64))
+        .flatten();
+    if let Some(animation) = frames {
+        let (first, _) = &animation.frames[0];
+        let (width, height) = first.dimensions();
+        let delays_ms = animation.frames.iter().map(|(_, delay)| *delay).collect();
+        let mut frames = animation
+            .frames
+            .into_iter()
+            .map(|(image, _)| image.into_raw());
+        return Ok(Pixels {
+            width,
+            height,
+            source: animation.canvas,
+            rgba: frames.next().unwrap_or_default(),
+            delays_ms,
+            later: frames.collect(),
+        });
+    }
+    let picture = decode(&bytes, bounds)?;
+    let source = (picture.width(), picture.height());
     let picture = if picture.width() > max_w || picture.height() > max_h {
         picture.resize(max_w, max_h, FilterType::Triangle)
     } else {
@@ -204,7 +261,27 @@ pub fn decode_picture(request: &Request) -> Result<Pixels, String> {
         height: rgba.height(),
         source,
         rgba: rgba.into_raw(),
+        delays_ms: Vec::new(),
+        later: Vec::new(),
     })
+}
+
+/// The frame of an animation to show `elapsed_ms` after it started, each frame shown for its
+/// delay in `delays_ms`, looping forever; the first when there are no frames or no time.
+pub fn frame_at(delays_ms: &[u32], elapsed_ms: u64) -> usize {
+    let total: u64 = delays_ms.iter().map(|&delay| u64::from(delay)).sum();
+    if total == 0 {
+        return 0;
+    }
+    let mut left = elapsed_ms % total;
+    for (index, &delay) in delays_ms.iter().enumerate() {
+        let delay = u64::from(delay);
+        if left < delay {
+            return index;
+        }
+        left -= delay;
+    }
+    0
 }
 
 /// The [`WORKERS`] decoding threads. Dropping it ends them once they finish what they decode.

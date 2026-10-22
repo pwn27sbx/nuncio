@@ -103,7 +103,8 @@ pub struct PictureView {
     pub chat: String,
     pub id: String,
     pub sticker: bool,
-    /// An animated sticker: its first frame is drawn, and the label says `▶`.
+    /// An animated sticker: the label says `▶`; its thumbnail is drawn still, and its full picture
+    /// plays once fetched ([`crate::pictures::decode_picture`]).
     pub animated: bool,
     /// The box the bubble reserves before anything is decoded ([`crate::pictures::picture_box`]),
     /// from the size the message states; `None` when it states none.

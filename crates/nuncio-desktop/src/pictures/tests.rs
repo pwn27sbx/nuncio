@@ -228,6 +228,7 @@ fn a_thumbnail_is_asked_for_at_once_and_nothing_is_ever_downloaded_by_itself() {
             key: Key::new(ANA, "P1", Variant::Thumb),
             origin: Origin::Base64(base64(&jpeg(48, 32))),
             target: (300, 200),
+            animated: false,
         }]
     );
     // Events, a resync and the window being seen fetch nothing.
@@ -279,6 +280,7 @@ fn the_full_picture_is_fetched_only_when_asked_and_shown_in_the_bubble() {
             key: Key::new(ANA, "P1", Variant::Full),
             origin: Origin::File(PathBuf::from(path)),
             target: (300, 200),
+            animated: false,
         }]
     );
     // Open externally keeps today's behaviour: the file is opened outside the app.
@@ -385,6 +387,7 @@ fn a_thumbnail_decodes_to_its_own_size_and_a_large_picture_shrinks_to_twice_its_
         key: Key::new(ANA, "P1", variant),
         origin,
         target: (300, 200),
+        animated: false,
     };
     let thumb = decode_picture(&request(
         Variant::Thumb,
@@ -413,6 +416,7 @@ fn a_sticker_keeps_its_transparency_and_bad_bytes_are_an_error() {
         key: Key::new(ANA, "S1", Variant::Thumb),
         origin: Origin::Base64(base64(&png(64, 64))),
         target: (160, 160),
+        animated: false,
     })
     .expect("a png sticker thumbnail");
     assert_eq!(sticker.rgba[3], 0, "a transparent corner stays transparent");
@@ -427,6 +431,7 @@ fn a_sticker_keeps_its_transparency_and_bad_bytes_are_an_error() {
             key: Key::new(ANA, "S1", Variant::Thumb),
             origin,
             target: (160, 160),
+            animated: false,
         };
         assert!(decode_picture(&request).is_err(), "{request:?}");
     }
@@ -438,6 +443,7 @@ fn a_sticker_keeps_its_transparency_and_bad_bytes_are_an_error() {
             key: Key::new(ANA, "S1", Variant::Thumb),
             origin: Origin::Base64(base64(&big)),
             target: (160, 160),
+            animated: false,
         }),
         Err("the picture is larger than nuncio draws".to_owned())
     );
@@ -464,6 +470,7 @@ fn at_most_two_pictures_are_decoded_at_once_and_every_one_is_answered() {
             key: Key::new(ANA, id, Variant::Thumb),
             origin: Origin::Base64(base64(&jpeg(8, 8))),
             target: (8, 8),
+            animated: false,
         });
     }
     let first = rx.recv_timeout(WAIT).expect("one");
@@ -563,4 +570,225 @@ fn opening_a_picture_asks_for_its_retry_and_other_media_do_not() {
     c.open_media(1);
     c.open_externally(0);
     assert!(c.take_picture_retries().is_empty());
+}
+
+/// An animated WebP sticker of `side` x `side` whose `frames` fill the canvas, each of its own
+/// colour and shown for `delay_ms`, as WhatsApp's animated stickers are.
+fn animated_sticker(side: u32, frames: usize, delay_ms: u32) -> Vec<u8> {
+    fn u24(value: u32) -> [u8; 3] {
+        let [a, b, c, _] = value.to_le_bytes();
+        [a, b, c]
+    }
+    fn chunk(name: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = name.to_vec();
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    }
+    let mut vp8x = vec![0x10 | 0x02, 0, 0, 0];
+    vp8x.extend_from_slice(&u24(side - 1));
+    vp8x.extend_from_slice(&u24(side - 1));
+    let mut body = b"WEBP".to_vec();
+    body.extend(chunk(b"VP8X", &vp8x));
+    body.extend(chunk(b"ANIM", &[0, 0, 0, 0, 0, 0]));
+    for n in 0..frames {
+        let colour = Rgba([(n * 40) as u8, 255 - (n * 30) as u8, 90, 255]);
+        let picture = RgbaImage::from_pixel(side, side, colour);
+        let mut still = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut still)
+            .write_image(
+                picture.as_raw(),
+                side,
+                side,
+                image::ExtendedColorType::Rgba8,
+            )
+            .expect("encode a webp");
+        let mut anmf = Vec::new();
+        for value in [0, 0, side - 1, side - 1, delay_ms] {
+            anmf.extend_from_slice(&u24(value));
+        }
+        // Drawn over the canvas, not blended.
+        anmf.push(0x02);
+        anmf.extend_from_slice(&still[12..]);
+        body.extend(chunk(b"ANMF", &anmf));
+    }
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    bytes.extend(body);
+    bytes
+}
+
+fn sticker_request(file: PathBuf, variant: Variant, animated: bool) -> Request {
+    Request {
+        key: Key::new(ANA, "S1", variant),
+        origin: Origin::File(file),
+        target: (160, 160),
+        animated,
+    }
+}
+
+#[test]
+fn the_frame_shown_is_the_one_whose_delay_the_elapsed_time_is_in_looping_forever() {
+    let delays = [100, 50, 200];
+    for (elapsed, index) in [
+        (0, 0),
+        (99, 0),
+        (100, 1),
+        (149, 1),
+        (150, 2),
+        (349, 2),
+        // Past the last frame it starts again, as often as it plays.
+        (350, 0),
+        (449, 0),
+        (450, 1),
+        (350 * 1000 + 120, 1),
+        (u64::MAX, frame_at(&delays, u64::MAX % 350)),
+    ] {
+        assert_eq!(frame_at(&delays, elapsed), index, "{elapsed} ms");
+    }
+    assert_eq!(frame_at(&[], 500), 0, "no frames: the first");
+    assert_eq!(frame_at(&[0, 0], 500), 0, "no time: the first");
+}
+
+#[test]
+fn an_opened_animated_sticker_keeps_every_frame_shrunk_to_twice_its_box() {
+    let dir = temp_dir("animated");
+    let file = dir.join("S1.webp");
+    std::fs::write(&file, animated_sticker(512, 3, 5)).expect("write");
+    let full = decode_picture(&sticker_request(file.clone(), Variant::Full, true)).expect("full");
+    assert_eq!(
+        (full.width, full.height, full.source),
+        (320, 320, (512, 512))
+    );
+    assert_eq!(full.delays_ms, [100, 100, 100], "under 10 ms is 100 ms");
+    assert_eq!(full.later.len(), 2);
+    assert!(full.later.iter().all(|frame| frame.len() == 320 * 320 * 4));
+    assert_ne!(full.later[0], full.rgba, "each frame its own");
+    assert_eq!(full.bytes(), 3 * 320 * 320 * 4, "every frame is counted");
+    // Its first frame is the picture a sticker that does not animate shows.
+    let still = decode_picture(&sticker_request(file, Variant::Full, false)).expect("still");
+    assert_eq!(
+        (still.width, still.height, still.source),
+        (320, 320, (512, 512))
+    );
+    assert!(still.rgba == full.rgba, "the first frame differs");
+    assert!(still.delays_ms.is_empty() && still.later.is_empty());
+    assert_eq!(still.bytes(), 320 * 320 * 4);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_animated_sticker_over_its_frame_cap_shows_its_first_frame_only() {
+    let frame = 320 * 320 * 4;
+    let fit = ANIMATION_BYTES / frame;
+    assert_eq!(ANIMATION_BYTES, 16 << 20);
+    let dir = temp_dir("animation-cap");
+    for (frames, animates) in [(fit, true), (fit + 1, false)] {
+        let file = dir.join(format!("S{frames}.webp"));
+        std::fs::write(&file, animated_sticker(320, frames, 40)).expect("write");
+        let full = decode_picture(&sticker_request(file, Variant::Full, true)).expect("full");
+        assert_eq!(
+            (
+                full.later.len() + 1 == frames,
+                full.delays_ms.len() == frames
+            ),
+            (animates, animates),
+            "{frames} frames"
+        );
+        assert_eq!((full.width, full.height), (320, 320));
+        if !animates {
+            assert!(full.later.is_empty() && full.delays_ms.is_empty());
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn only_the_full_picture_of_an_animated_sticker_is_asked_to_animate() {
+    let mut animated = message("S1", "sticker", "");
+    animated.animated = true;
+    animated.thumb = Some(base64(&png(64, 64)));
+    let mut still = animated.clone();
+    still.id = "S2".to_owned();
+    still.animated = false;
+    let (mut c, _) = opened(vec![photo("P1"), still, animated]);
+    let cache = Cache::<u8>::default();
+    // Newest first on the wire: S1, S2, P1.
+    let asked = |c: &Controller| {
+        bubbles(c.model(), 0)
+            .iter()
+            .flat_map(|bubble| requests(c.model(), bubble, &cache))
+            .map(|request| (request.key.id, request.key.variant, request.animated))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        asked(&c),
+        [
+            ("S1".to_owned(), Variant::Thumb, false),
+            ("S2".to_owned(), Variant::Thumb, false),
+            ("P1".to_owned(), Variant::Thumb, false),
+        ],
+        "a thumbnail stays still"
+    );
+    for (index, id) in [(0, "S1"), (1, "S2"), (2, "P1")] {
+        c.open_media(index);
+        c.incoming(ready(id, &format!("/tmp/nuncio-media/{id}.webp")));
+    }
+    let full: Vec<_> = asked(&c)
+        .into_iter()
+        .filter(|(_, variant, _)| *variant == Variant::Full)
+        .collect();
+    assert_eq!(
+        full,
+        [
+            ("S1".to_owned(), Variant::Full, true),
+            ("S2".to_owned(), Variant::Full, false),
+            ("P1".to_owned(), Variant::Full, false),
+        ]
+    );
+}
+
+#[test]
+fn an_animated_thumbnail_or_a_photo_decodes_as_before() {
+    let dir = temp_dir("still");
+    let file = dir.join("S1.webp");
+    std::fs::write(&file, animated_sticker(64, 3, 100)).expect("write");
+    let thumb = decode_picture(&sticker_request(file, Variant::Thumb, false)).expect("thumb");
+    assert!(thumb.later.is_empty() && thumb.delays_ms.is_empty());
+    let photo = dir.join("P1.jpg");
+    std::fs::write(&photo, jpeg(480, 320)).expect("write");
+    let full = decode_picture(&Request {
+        key: Key::new(ANA, "P1", Variant::Full),
+        origin: Origin::File(photo),
+        target: (300, 200),
+        animated: false,
+    })
+    .expect("photo");
+    assert_eq!((full.width, full.height), (480, 320));
+    assert!(full.later.is_empty() && full.delays_ms.is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_animated_sticker_costs_at_least_a_minimum_per_frame_and_a_still_its_pixels() {
+    let dir = temp_dir("frame-cost");
+    let file = dir.join("S1.webp");
+    std::fs::write(&file, animated_sticker(8, 3, 100)).expect("write");
+    let full = decode_picture(&sticker_request(file.clone(), Variant::Full, true)).expect("full");
+    assert_eq!(full.later.len(), 2);
+    assert_eq!(
+        full.bytes(),
+        3 * nuncio_client::pictures::FRAME_MIN_BYTES as usize,
+        "each 256-byte frame costs its texture"
+    );
+    let still = decode_picture(&sticker_request(file, Variant::Full, false)).expect("still");
+    assert_eq!(
+        still.bytes(),
+        8 * 8 * 4,
+        "a still picture costs its pixels, as before"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }

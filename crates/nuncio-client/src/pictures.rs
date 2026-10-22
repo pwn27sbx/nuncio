@@ -6,14 +6,17 @@
 //! picture is the file a `download_media` wrote, fetched only when the user asks. Every byte
 //! decoded here is untrusted: only JPEG, PNG and WebP are decoded (an animated WebP gives its first
 //! frame), the size the header declares is checked before anything is decoded, and each variant
-//! has its own bounds, so a tiny thumbnail declaring a huge picture costs nothing. Nothing here
-//! panics on bad input: it says why in an `Err`.
+//! has its own bounds, so a tiny thumbnail declaring a huge picture costs nothing. An animated
+//! WebP's frames are decoded only on request ([`decode_frames`]), within the same bounds and a cap
+//! on what its frames keep. Nothing here panics on bad input: it says why in an `Err`.
 
 use std::io::{Cursor, Read};
 use std::path::Path;
 
 use base64::Engine;
-use image::{DynamicImage, ImageFormat, ImageReader, Limits};
+use image::codecs::webp::WebPDecoder;
+use image::imageops::FilterType;
+use image::{AnimationDecoder, DynamicImage, ImageFormat, ImageReader, Limits, RgbaImage};
 
 /// A full picture file larger than this is not decoded (WhatsApp sends far smaller ones).
 pub const MAX_FILE: u64 = 64 << 20;
@@ -39,6 +42,22 @@ pub const FULL_BOUNDS: Bounds = Bounds {
     side: MAX_SIDE,
     alloc: 96 << 20,
 };
+
+/// The largest side an animation's canvas may have for its frames to be decoded (a sticker's is
+/// 512); a larger one gives its first frame only.
+pub const ANIMATION_SIDE: u32 = 1024;
+/// A frame delay under this many milliseconds is taken as [`DEFAULT_DELAY_MS`], as browsers do.
+pub const MIN_DELAY_MS: u32 = 10;
+/// The delay a frame gets when it states one under [`MIN_DELAY_MS`].
+pub const DEFAULT_DELAY_MS: u32 = 100;
+
+/// The most frames an animation may have for them to be decoded; one with more gives its first
+/// frame only. A thousand is ten seconds at the shortest delay a frame is held to
+/// ([`MIN_DELAY_MS`]); WhatsApp's animated stickers have a few hundred at most.
+pub const MAX_FRAMES: usize = 1000;
+/// What a kept frame costs at least, whatever its pixels: its texture and bookkeeping. Each frame
+/// is charged this much when it holds fewer bytes, so a cap on bytes also bounds many tiny frames.
+pub const FRAME_MIN_BYTES: u64 = 4 << 10;
 
 /// Which picture of a message: the embedded thumbnail or the full file fetched on request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -117,16 +136,14 @@ fn peak_bytes_per_pixel(format: Option<ImageFormat>) -> u64 {
     }
 }
 
-/// Decode untrusted bytes: only JPEG, PNG and WebP (an animated WebP gives its first frame), within
-/// `bounds`. The size the header declares is checked first, so a small file declaring a huge
-/// picture is refused without decoding anything; the pixel buffers a decode holds at once then
-/// stay within `bounds.alloc` (the decoder's own working state adds well under 1 MiB).
-pub fn decode(bytes: &[u8], bounds: Bounds) -> Result<DynamicImage, String> {
-    let too_large = || "the picture is larger than nuncio draws".to_owned();
+/// The format and size the header of untrusted bytes declares, refused when the picture would be
+/// larger than `bounds` admit at the decode's peak ([`peak_bytes_per_pixel`]).
+fn checked_header(bytes: &[u8], bounds: Bounds) -> Result<(Option<ImageFormat>, u32, u32), String> {
     let header = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|_| "the picture could not be read".to_owned())?;
-    let per_pixel = peak_bytes_per_pixel(header.format());
+    let format = header.format();
+    let per_pixel = peak_bytes_per_pixel(format);
     let (width, height) = header
         .into_dimensions()
         .map_err(|error| format!("the picture could not be read: {error}"))?;
@@ -134,8 +151,17 @@ pub fn decode(bytes: &[u8], bounds: Bounds) -> Result<DynamicImage, String> {
         || height > bounds.side
         || u64::from(width) * u64::from(height) * per_pixel > bounds.alloc
     {
-        return Err(too_large());
+        return Err("the picture is larger than nuncio draws".to_owned());
     }
+    Ok((format, width, height))
+}
+
+/// Decode untrusted bytes: only JPEG, PNG and WebP (an animated WebP gives its first frame), within
+/// `bounds`. The size the header declares is checked first, so a small file declaring a huge
+/// picture is refused without decoding anything; the pixel buffers a decode holds at once then
+/// stay within `bounds.alloc` (the decoder's own working state adds well under 1 MiB).
+pub fn decode(bytes: &[u8], bounds: Bounds) -> Result<DynamicImage, String> {
+    checked_header(bytes, bounds)?;
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|_| "the picture could not be read".to_owned())?;
@@ -153,6 +179,70 @@ pub fn decode(bytes: &[u8], bounds: Bounds) -> Result<DynamicImage, String> {
     reader
         .decode()
         .map_err(|error| format!("the picture could not be decoded: {error}"))
+}
+
+/// The frames of an animation, each shrunk to fit and shown for its delay.
+pub struct Frames {
+    /// The canvas size, before shrinking.
+    pub canvas: (u32, u32),
+    /// Each frame's RGBA pixels and how long it shows, in milliseconds (at least
+    /// [`MIN_DELAY_MS`]).
+    pub frames: Vec<(RgbaImage, u32)>,
+}
+
+/// The frames of an animated WebP of untrusted bytes, or `None` for anything else, in which case
+/// [`decode`] gives what to draw: a picture that is not an animated WebP of at least two frames,
+/// whose canvas is over [`ANIMATION_SIDE`] a side, whose header is over `bounds` (checked as
+/// [`decode`] checks it, before any frame is decoded), with a frame that does not decode, with
+/// more than [`MAX_FRAMES`] frames, or whose frames would keep more than `cap_bytes`. Each frame
+/// (a canvas, at most [`ANIMATION_SIDE`] a side) is shrunk at once to at most `fit` keeping its
+/// shape, and only what is kept counts, at least [`FRAME_MIN_BYTES`] a frame; decoding stops as
+/// soon as a limit is passed.
+pub fn decode_frames(
+    bytes: &[u8],
+    bounds: Bounds,
+    fit: (u32, u32),
+    cap_bytes: u64,
+) -> Option<Frames> {
+    let (format, width, height) = checked_header(bytes, bounds).ok()?;
+    if format != Some(ImageFormat::WebP) || width > ANIMATION_SIDE || height > ANIMATION_SIDE {
+        return None;
+    }
+    let decoder = WebPDecoder::new(Cursor::new(bytes)).ok()?;
+    if !decoder.has_animation() {
+        return None;
+    }
+    let (max_w, max_h) = (fit.0.max(1), fit.1.max(1));
+    let mut frames = Vec::new();
+    let mut kept = 0_u64;
+    for frame in decoder.into_frames() {
+        let frame = frame.ok()?;
+        if frames.len() == MAX_FRAMES {
+            return None;
+        }
+        let (numer, denom) = frame.delay().numer_denom_ms();
+        let delay = numer / denom.max(1);
+        let delay = if delay < MIN_DELAY_MS {
+            DEFAULT_DELAY_MS
+        } else {
+            delay
+        };
+        let mut image = frame.into_buffer();
+        if image.width() > max_w || image.height() > max_h {
+            image = DynamicImage::ImageRgba8(image)
+                .resize(max_w, max_h, FilterType::Triangle)
+                .into_rgba8();
+        }
+        kept += (image.as_raw().len() as u64).max(FRAME_MIN_BYTES);
+        if kept > cap_bytes {
+            return None;
+        }
+        frames.push((image, delay));
+    }
+    (frames.len() > 1).then_some(Frames {
+        canvas: (width, height),
+        frames,
+    })
 }
 
 #[cfg(test)]

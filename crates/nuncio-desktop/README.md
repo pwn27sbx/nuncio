@@ -138,8 +138,17 @@ nuncio-tui's rules (the decode rules are shared: `nuncio_client::pictures`):
   checked before anything is decoded (a thumbnail may be at most 1024 px a side, a full picture
   16384, and a downloaded file at most 64 MiB). A picture that is corrupt, too large or another format
   is not drawn: the label stays, and for a full picture a toast says why.
-- **Stickers.** The first frame (an animated sticker's label says `▶`); transparent pixels show the
-  bubble behind them.
+- **Stickers.** Transparent pixels show the bubble behind them. An animated sticker (its label says
+  `▶`) shows its first frame, and plays once its full picture was fetched on request: looping
+  forever, each frame for its own delay (one under 10 ms is shown for 100 ms). Its frames are shrunk
+  to twice its box as they are decoded and may keep at most 16 MiB, each frame counted as at least
+  4 KiB (they count in the cache's 64 MiB). A sticker over that cap shows its first frame only: a
+  512 px sticker keeps 320x320 frames, so one with more than 40 frames stays still. So does one
+  with more than 1000 frames, whose canvas is over 1024 px a side, or with a frame that does not
+  decode. The thumbnail never plays. When the desktop turns animations off (GTK's
+  `gtk-enable-animations` setting) a playing sticker stops at its first frame and none starts;
+  turned back on, a sticker plays the next time its bubble is drawn. nuncio-tui keeps drawing the
+  first frame.
 - **Screen readers.** A picture bubble reads as what it is, then its caption: `Ana, 10:05: Photo,
   the beach`, `Ana, 10:05: Sticker`; the picture itself says the same (`Photo, the beach`).
 
@@ -149,7 +158,8 @@ gradient, its thumbnail a 48x32 JPEG of it), and three stickers (a yellow disc, 
 one, and a blue one with no thumbnail, which shows only its label and an empty box until you click
 it; each sticker's file is a 128x128 WebP of its own disc). Each thumbnail shows at once, blurry, in a box that does not move;
 click the photo (or select it and press Enter or `o`) and the sharp gradient replaces it; click a
-sticker and its own disc replaces the thumbnail. Shift+O opens the file with the desktop's opener.
+sticker and its own disc replaces the thumbnail (the demo's sticker files are still pictures, so the
+animated one does not play). Shift+O opens the file with the desktop's opener.
 
 ## Layout
 
@@ -243,4 +253,5 @@ no `GApplication` is attached, so notifications are only recorded, and the `open
 activated from a plain action group. The palette is opened through its F1 shortcut's action and the
 settings window is built (not shown) over a temporary `config.toml`, never yours. A photo and a
 sticker bubble are checked to reserve their box before decoding, to get a texture of the
-thumbnail's size, and to take the full picture only after a click.
+thumbnail's size, and to take the full picture only after a click; an animated sticker's full
+picture to keep all its frames and play them, and to stay still with animations turned off.

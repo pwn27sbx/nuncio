@@ -186,9 +186,10 @@ Nothing moves when the picture arrives in it.
   partly in view.
 - **Untrusted bytes.** Only JPEG, PNG and WebP are decoded. The size a picture's header declares
   is checked before decoding: a thumbnail may declare at most 1024 pixels a side and 16 MiB of
-  pixels, a full picture 16384 a side and 160 MiB (a 64 MiB file at most). Anything else keeps
-  the box with its `[image]` or `[sticker]` label (a full picture says why in the footer). A
-  decoded picture is shrunk to its box before it is encoded.
+  pixels, a full picture 16384 a side and 96 MiB of decode, a WebP a third of that because it
+  may be animated (a 64 MiB file at most). Anything else keeps the box with its `[image]` or
+  `[sticker]` label (a full picture says why in the footer). A decoded picture is shrunk to its
+  box before it is encoded.
 - A picture whose message states no size gets no box and no thumbnail; `o` draws the full picture
   in a box sized from the file.
 - Encoded pictures are cached (48 of them, about 96 MiB) and encoded on two worker threads, so

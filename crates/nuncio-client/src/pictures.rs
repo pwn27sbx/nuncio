@@ -33,10 +33,11 @@ pub const THUMB_BOUNDS: Bounds = Bounds {
     side: 1024,
     alloc: 16 << 20,
 };
-/// A full picture: a 4096x4096 RGBA photo is 64 MiB.
+/// A full picture: a 4096x4096 RGBA photo is 64 MiB. Every pixel buffer a decode holds at once
+/// fits in 96 MiB, so a WebP, which may be animated, gets a third of the pixels (see [`decode`]).
 pub const FULL_BOUNDS: Bounds = Bounds {
     side: MAX_SIDE,
-    alloc: 160 << 20,
+    alloc: 96 << 20,
 };
 
 /// Which picture of a message: the embedded thumbnail or the full file fetched on request.
@@ -106,19 +107,32 @@ pub fn read_capped(path: &Path) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+/// The bytes a pixel may cost at a decode's peak. A JPEG or PNG holds little beyond its output, an
+/// RGBA pixel at most (a wider output is refused by `max_alloc`). A WebP may be animated, and its
+/// first frame then needs the output, the canvas and the frame at once: three RGBA pixels.
+fn peak_bytes_per_pixel(format: Option<ImageFormat>) -> u64 {
+    match format {
+        Some(ImageFormat::WebP) => 12,
+        _ => 4,
+    }
+}
+
 /// Decode untrusted bytes: only JPEG, PNG and WebP (an animated WebP gives its first frame), within
 /// `bounds`. The size the header declares is checked first, so a small file declaring a huge
-/// picture is refused without decoding anything.
+/// picture is refused without decoding anything; the pixel buffers a decode holds at once then
+/// stay within `bounds.alloc` (the decoder's own working state adds well under 1 MiB).
 pub fn decode(bytes: &[u8], bounds: Bounds) -> Result<DynamicImage, String> {
     let too_large = || "the picture is larger than nuncio draws".to_owned();
-    let (width, height) = ImageReader::new(Cursor::new(bytes))
+    let header = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
-        .map_err(|_| "the picture could not be read".to_owned())?
+        .map_err(|_| "the picture could not be read".to_owned())?;
+    let per_pixel = peak_bytes_per_pixel(header.format());
+    let (width, height) = header
         .into_dimensions()
         .map_err(|error| format!("the picture could not be read: {error}"))?;
     if width > bounds.side
         || height > bounds.side
-        || u64::from(width) * u64::from(height) * 4 > bounds.alloc
+        || u64::from(width) * u64::from(height) * per_pixel > bounds.alloc
     {
         return Err(too_large());
     }

@@ -187,5 +187,246 @@ fn a_downloaded_file_over_the_cap_is_refused_and_a_missing_one_says_why() {
 fn each_variant_has_its_own_bounds() {
     assert_eq!(Variant::Thumb.bounds(), THUMB_BOUNDS);
     assert_eq!(Variant::Full.bounds(), FULL_BOUNDS);
+    assert_eq!(
+        FULL_BOUNDS.alloc,
+        96 << 20,
+        "a full picture may cost 96 MiB"
+    );
     const { assert!(THUMB_BOUNDS.side < FULL_BOUNDS.side && THUMB_BOUNDS.alloc < FULL_BOUNDS.alloc) };
+}
+
+/// Counts what this thread allocates, so a test can measure a decode's real peak.
+mod peak {
+    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::cell::Cell;
+
+    struct Tracking;
+
+    thread_local! {
+        static NOW: Cell<isize> = const { Cell::new(0) };
+        static PEAK: Cell<isize> = const { Cell::new(0) };
+    }
+
+    fn add(bytes: isize) {
+        let _ = NOW.try_with(|now| {
+            now.set(now.get() + bytes);
+            let _ = PEAK.try_with(|peak| peak.set(peak.get().max(now.get())));
+        });
+    }
+
+    // SAFETY: every call forwards to the system allocator unchanged; only a counter is updated.
+    unsafe impl GlobalAlloc for Tracking {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: forwarded as is.
+            let pointer = unsafe { System.alloc(layout) };
+            if !pointer.is_null() {
+                add(layout.size() as isize);
+            }
+            pointer
+        }
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: forwarded as is.
+            let pointer = unsafe { System.alloc_zeroed(layout) };
+            if !pointer.is_null() {
+                add(layout.size() as isize);
+            }
+            pointer
+        }
+        unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+            // SAFETY: forwarded as is.
+            unsafe { System.dealloc(pointer, layout) };
+            add(-(layout.size() as isize));
+        }
+        unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+            // SAFETY: forwarded as is.
+            let moved = unsafe { System.realloc(pointer, layout, size) };
+            if !moved.is_null() {
+                add(size as isize - layout.size() as isize);
+            }
+            moved
+        }
+    }
+
+    #[global_allocator]
+    static TRACKING: Tracking = Tracking;
+
+    /// The most `run` had allocated at once on this thread, beyond what was allocated before it.
+    pub fn of<T>(run: impl FnOnce() -> T) -> (T, u64) {
+        let start = NOW.with(Cell::get);
+        PEAK.with(|peak| peak.set(start));
+        let value = run();
+        let peak = PEAK.with(Cell::get) - start;
+        (value, peak.max(0) as u64)
+    }
+}
+
+/// A lossless WebP of `width` x `height` pixels with alpha.
+fn webp(width: u32, height: u32) -> Vec<u8> {
+    let picture = RgbaImage::from_fn(width, height, |x, y| {
+        Rgba([(x * 3) as u8, (y * 5) as u8, ((x ^ y) * 7) as u8, 200])
+    });
+    let mut bytes = Vec::new();
+    image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
+        .write_image(
+            picture.as_raw(),
+            width,
+            height,
+            image::ExtendedColorType::Rgba8,
+        )
+        .expect("encode a webp");
+    bytes
+}
+
+/// An animated WebP whose one frame, at the top left, is a `frame_w` x `frame_h` lossless picture
+/// on a `width` x `height` canvas, as a sticker is.
+fn animated_webp(width: u32, height: u32, frame_w: u32, frame_h: u32) -> Vec<u8> {
+    fn u24(value: u32) -> [u8; 3] {
+        let [a, b, c, _] = value.to_le_bytes();
+        [a, b, c]
+    }
+    fn chunk(name: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = name.to_vec();
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    }
+    // The still WebP is RIFF, size, WEBP, then its one VP8L chunk.
+    let frame = webp(frame_w, frame_h)[12..].to_vec();
+    let mut vp8x = vec![0x10 | 0x02, 0, 0, 0];
+    vp8x.extend_from_slice(&u24(width - 1));
+    vp8x.extend_from_slice(&u24(height - 1));
+    let mut anmf = Vec::new();
+    for value in [0, 0, frame_w - 1, frame_h - 1, 100] {
+        anmf.extend_from_slice(&u24(value));
+    }
+    anmf.push(0);
+    anmf.extend_from_slice(&frame);
+    let mut body = b"WEBP".to_vec();
+    body.extend(chunk(b"VP8X", &vp8x));
+    body.extend(chunk(b"ANIM", &[0, 0, 0, 0, 0, 0]));
+    body.extend(chunk(b"ANMF", &anmf));
+    let mut bytes = b"RIFF".to_vec();
+    bytes.extend_from_slice(&(body.len() as u32).to_le_bytes());
+    bytes.extend(body);
+    bytes
+}
+
+const TOO_LARGE: &str = "the picture is larger than nuncio draws";
+
+/// What a decoder holds beyond its pixel buffers (measured under 300 KiB).
+const WORKING_STATE: u64 = 1 << 20;
+
+#[test]
+fn a_full_picture_header_over_96_mib_is_refused_and_one_at_96_mib_passes() {
+    // 4096x6144 RGBA is exactly 96 MiB; one more row is over, and 5600x5600 (119 MiB) was
+    // admitted under the old 160 MiB cap.
+    assert_ne!(
+        decode(&png_declaring(4096, 6144), FULL_BOUNDS).map(|_| ()),
+        Err(TOO_LARGE.to_owned()),
+        "at the cap the header passes (its data then fails)"
+    );
+    for (width, height) in [(4096, 6145), (5600, 5600)] {
+        assert_eq!(
+            decode(&png_declaring(width, height), FULL_BOUNDS).map(|_| ()),
+            Err(TOO_LARGE.to_owned()),
+            "{width}x{height}"
+        );
+    }
+}
+
+#[test]
+fn an_animated_webp_counts_its_canvas_and_frame_against_the_cap() {
+    // A tiny frame on a canvas of 2048x4096 pixels: three RGBA buffers of it are exactly 96 MiB.
+    let at_cap = decode(&animated_webp(2048, 4096, 16, 16), FULL_BOUNDS).expect("at the cap");
+    assert_eq!((at_cap.width(), at_cap.height()), (2048, 4096));
+    // One more row is over, though its output alone (32 MiB) is far under.
+    assert_eq!(
+        decode(&animated_webp(2048, 4097, 16, 16), FULL_BOUNDS).map(|_| ()),
+        Err(TOO_LARGE.to_owned())
+    );
+}
+
+#[test]
+fn a_decode_never_holds_more_than_its_bounds_admit() {
+    let rgb_webp = {
+        let picture = image::RgbImage::from_fn(512, 512, |x, y| {
+            image::Rgb([(x * 3) as u8, (y * 5) as u8, ((x ^ y) * 7) as u8])
+        });
+        let mut bytes = Vec::new();
+        image::codecs::webp::WebPEncoder::new_lossless(&mut bytes)
+            .write_image(picture.as_raw(), 512, 512, image::ExtendedColorType::Rgb8)
+            .expect("encode a webp");
+        bytes
+    };
+    let deep_png = {
+        let picture = image::ImageBuffer::<Rgba<u16>, Vec<u16>>::from_pixel(
+            512,
+            512,
+            Rgba([1000, 2000, 3000, 65535]),
+        );
+        let mut bytes = Vec::new();
+        DynamicImage::ImageRgba16(picture)
+            .write_to(&mut Cursor::new(&mut bytes), ImageFormat::Png)
+            .expect("encode a 16-bit png");
+        bytes
+    };
+    let pixels = 512 * 512;
+    // The smallest allocation each one is admitted with: four bytes a pixel, eight for a 16-bit
+    // PNG's output, twelve for a WebP (it may be animated).
+    for (name, bytes, admitted) in [
+        ("png", png(512, 512, 255), pixels * 4),
+        ("jpeg", jpeg(512, 512), pixels * 4),
+        ("16-bit png", deep_png, pixels * 8),
+        ("webp", webp(512, 512), pixels * 12),
+        ("rgb webp", rgb_webp, pixels * 12),
+        (
+            "animated webp",
+            animated_webp(512, 512, 512, 512),
+            pixels * 12,
+        ),
+        (
+            "animated webp, small frame",
+            animated_webp(512, 512, 8, 8),
+            pixels * 12,
+        ),
+    ] {
+        let bounds = Bounds {
+            side: MAX_SIDE,
+            alloc: admitted,
+        };
+        let (decoded, peak) = peak::of(|| decode(&bytes, bounds));
+        assert!(decoded.is_ok(), "{name}: {:?}", decoded.map(|_| ()));
+        assert!(
+            peak <= admitted + WORKING_STATE,
+            "{name}: held {peak} bytes, admitted {admitted}"
+        );
+        let tighter = Bounds {
+            side: MAX_SIDE,
+            alloc: admitted - 1,
+        };
+        assert!(decode(&bytes, tighter).is_err(), "{name} under its bounds");
+    }
+}
+
+#[test]
+fn a_picture_within_the_cap_decodes_exactly_as_the_decoder_alone_does() {
+    for (name, bytes) in [
+        ("png", png(640, 480, 128)),
+        ("jpeg", jpeg(1024, 768)),
+        ("webp", webp(512, 512)),
+        ("animated webp", animated_webp(512, 512, 300, 200)),
+    ] {
+        let ours = decode(&bytes, FULL_BOUNDS).expect(name);
+        let plain = image::load_from_memory(&bytes).expect(name);
+        assert_eq!(
+            (ours.width(), ours.height()),
+            (plain.width(), plain.height()),
+            "{name}"
+        );
+        assert_eq!(ours.color(), plain.color(), "{name}");
+        assert!(ours.as_bytes() == plain.as_bytes(), "{name}: pixels differ");
+    }
 }

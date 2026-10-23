@@ -77,6 +77,20 @@ fn main() {
         ui.drawn() == (0, 0),
         "nothing is drawn before the daemon answers",
     );
+    ui.render();
+    let (list, transcript) = ui.empty_states();
+    check(
+        list.as_ref().is_some_and(|(title, _)| title == "No chats"),
+        "an empty list says so",
+    );
+    check(
+        transcript
+            == Some((
+                "No messages yet".to_owned(),
+                "Pick a chat to read it here".to_owned(),
+            )),
+        "an empty transcript says why",
+    );
 
     ui.incoming(Incoming::Connected);
     let asked = ui.take_undelivered();
@@ -112,6 +126,28 @@ fn main() {
         "an opened unread chat is marked read once shown",
     );
     check(ui.drawn() == (2, 2), "two bubbles");
+    check(
+        ui.empty_states() == (None, None),
+        "no empty state once there are rows",
+    );
+    let theirs = ui.message_parts(0).expect("a first bubble");
+    let mine = ui.message_parts(1).expect("a second bubble");
+    check(
+        theirs
+            .day
+            .as_deref()
+            .is_some_and(|day| day.contains("20 OCT"))
+            && mine.day.is_none(),
+        "one day label, above the day's first bubble",
+    );
+    check(
+        theirs.author.as_deref() == Some("Ana") && mine.author.is_none(),
+        "an author line above their group only",
+    );
+    check(
+        theirs.meta.as_deref() == Some("10:00") && mine.meta.as_deref() == Some("10:00 · sent"),
+        "each group's meta line under its last bubble",
+    );
     check(
         ui.conversation_title() == "Ana",
         "the header names the chat",

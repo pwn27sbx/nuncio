@@ -26,7 +26,19 @@ pub struct ChatRow {
     pub archived: bool,
     /// The last message's first line (`[image]` for a picture with no caption).
     pub preview: String,
+    /// The last message's local `HH:MM`, as the row's label says it.
     pub time: String,
+    /// The time as the row shows it (plan §6.2): `HH:MM` today, `Yesterday`, else the date.
+    pub when: String,
+    /// The count chip: the unread count, only when it is more than one (plan §5); one unread
+    /// message is told by the marker and the name's tone alone.
+    pub chip: Option<String>,
+    /// A group chat: a glyph before the name.
+    pub group: bool,
+    /// Who wrote the last message of a group that is not muted, before the preview.
+    pub author: Option<String>,
+    /// How my last message stands, as a glyph before the preview; `None` when it is not mine.
+    pub ticks: Option<&'static str>,
     /// What a screen reader says for the row.
     pub label: String,
 }
@@ -92,9 +104,49 @@ pub struct Bubble {
     pub can_open: bool,
     /// The picture an image or sticker message draws inside the bubble.
     pub picture: Option<PictureView>,
+    /// A document message's file, drawn as a row in the bubble.
+    pub document: Option<DocumentView>,
+    /// Who wrote the quoted message, when it is loaded.
+    pub quote_author: Option<String>,
+    /// The day label drawn above the first bubble of each day (plan §6.3).
+    pub day: Option<String>,
+    /// The bubble starts an author group: its author line is drawn (theirs), with the wider gap.
+    pub starts_group: bool,
+    /// The meta line (time and state) is drawn under it: it ends its group, or its send is not
+    /// sent yet or failed, which never waits for a later bubble to be said.
+    pub shows_meta: bool,
     /// What a screen reader says for the bubble.
     pub label: String,
 }
+
+/// A document message's file, as its row in the bubble shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocumentView {
+    /// The file's name, or `Document` when the message names none.
+    pub name: String,
+    /// Its size, as `12 KB`.
+    pub size: String,
+}
+
+/// One reaction chip under a bubble: an emoji and how many sent it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReactionChip {
+    pub emoji: String,
+    pub count: usize,
+    /// One of them is mine.
+    pub mine: bool,
+}
+
+/// What an empty pane says (plan §6.3): a title line and one line of hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EmptyState {
+    pub title: &'static str,
+    pub hint: &'static str,
+}
+
+/// A local calendar day, as days since 1970-01-01.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Day(i64);
 
 /// The picture inside an image or sticker bubble: the thumbnail the message embeds at once, the
 /// full file only once the user asked for it ([`Model::download_selected`]).
@@ -180,13 +232,45 @@ pub fn local_hhmm(message: &Message, offset_minutes: i32) -> String {
     format!("{:02}:{:02}", local / 60, local % 60)
 }
 
-fn chat_row(chat: &Chat, offset_minutes: i32) -> ChatRow {
+/// A group chat's JID ends in `@g.us`.
+fn is_group(jid: &str) -> bool {
+    jid.ends_with("@g.us")
+}
+
+/// The glyph for how my send `message` stands in the list (plan §6.2); `None` when not mine.
+fn ticks(message: &Message) -> Option<&'static str> {
+    message.from_me.then_some(match message.state {
+        Some(MessageState::Queued) => "◷",
+        Some(MessageState::NotSent) => "✗",
+        Some(MessageState::Unknown) | None => "✓",
+    })
+}
+
+fn chat_row(chat: &Chat, offset_minutes: i32, today: Option<Day>) -> ChatRow {
     let title = chat_title(chat);
     let unread = (chat.unread > 0).then(|| chat.unread.to_string());
     let (preview, time) = match &chat.last_message {
         Some(message) => (one_line(message), local_hhmm(message, offset_minutes)),
         None => ("(no messages)".to_owned(), String::new()),
     };
+    let group = is_group(&chat.jid);
+    // In a group that is not muted, who wrote the last message, when the daemon says it.
+    let author = chat
+        .last_message
+        .as_ref()
+        .filter(|_| group && !chat.muted)
+        .and_then(
+            |message| match (message.from_me, message.sender.as_deref()) {
+                (true, _) => Some("You".to_owned()),
+                (false, Some(sender)) if !sender.is_empty() => Some(sender.to_owned()),
+                (false, _) => None,
+            },
+        );
+    let day = chat
+        .last_message
+        .as_ref()
+        .and_then(|message| local_seconds(message, offset_minutes))
+        .map(day_at);
     let mut label = title.clone();
     if let Some(unread) = &unread {
         label.push_str(&format!(", {unread} unread"));
@@ -200,9 +284,12 @@ fn chat_row(chat: &Chat, offset_minutes: i32) -> ChatRow {
             label.push_str(&format!(", {word}"));
         }
     }
-    match &chat.last_message {
-        Some(_) => label.push_str(&format!(". Last message at {time}: {preview}")),
-        None => label.push_str(". No messages"),
+    match (&chat.last_message, &author) {
+        (Some(_), Some(author)) => {
+            label.push_str(&format!(". Last message at {time}: {author}: {preview}"));
+        }
+        (Some(_), None) => label.push_str(&format!(". Last message at {time}: {preview}")),
+        (None, _) => label.push_str(". No messages"),
     }
     ChatRow {
         jid: chat.jid.clone(),
@@ -212,18 +299,23 @@ fn chat_row(chat: &Chat, offset_minutes: i32) -> ChatRow {
         muted: chat.muted,
         archived: chat.archived,
         preview,
+        when: row_when(&time, day, today),
         time,
+        chip: (chat.unread > 1).then(|| chat.unread.to_string()),
+        group,
+        author,
+        ticks: chat.last_message.as_ref().and_then(ticks),
         label,
     }
 }
 
 /// The chat list's rows, in the model's order (archived chats last).
-pub fn chat_rows(model: &Model, offset_minutes: i32) -> Vec<ChatRow> {
+pub fn chat_rows(model: &Model, offset_minutes: i32, today: Option<Day>) -> Vec<ChatRow> {
     model
         .chat_list()
         .chats()
         .iter()
-        .map(|chat| chat_row(chat, offset_minutes))
+        .map(|chat| chat_row(chat, offset_minutes, today))
         .collect()
 }
 
@@ -247,33 +339,40 @@ fn mark(model: &Model, message: &Message) -> Option<SendMark> {
     })
 }
 
-/// The selected chat's loaded conversation as bubbles, oldest first. A bubble's sender (and its
-/// accessible label) is `You`, the group member the daemon names in `sender`, or the chat's title.
-pub fn bubbles(model: &Model, offset_minutes: i32) -> Vec<Bubble> {
+/// Who wrote `message`, as a bubble names her: `You`, the group member the daemon names in
+/// `sender`, or `theirs` (the chat's title).
+fn author(message: &Message, theirs: &str) -> String {
+    match (message.from_me, message.sender.as_deref()) {
+        (true, _) => "You".to_owned(),
+        (false, Some(sender)) if !sender.is_empty() => sender.to_owned(),
+        (false, _) => theirs.to_owned(),
+    }
+}
+
+/// The selected chat's loaded conversation as bubbles, oldest first, grouped by author and day
+/// (plan §6.3); `today` words the day labels (`Today`, `Yesterday`).
+pub fn bubbles(model: &Model, offset_minutes: i32, today: Option<Day>) -> Vec<Bubble> {
     let messages = model.loaded();
     let theirs = model
         .selected_chat()
         .map_or_else(|| "them".to_owned(), chat_title);
     let cursor = model.transcript().cursor();
+    let authors: Vec<String> = messages.iter().map(|m| author(m, &theirs)).collect();
+    let places = grouping(messages, &authors, offset_minutes, today);
     messages
         .iter()
+        .zip(places)
         .enumerate()
-        .map(|(index, message)| {
+        .map(|(index, (message, (day, starts_group, ends_group)))| {
             let mark = mark(model, message);
-            // In a group, the member the daemon names in `sender`; else the chat, as before.
-            let sender = match (message.from_me, message.sender.as_deref()) {
-                (true, _) => "You".to_owned(),
-                (false, Some(sender)) if !sender.is_empty() => sender.to_owned(),
-                (false, _) => theirs.clone(),
-            };
+            let sender = authors[index].clone();
             let time = local_hhmm(message, offset_minutes);
-            let quote = message
-                .reply_to
-                .as_deref()
-                .map(|id| match quoted(messages, id) {
-                    Some(original) => one_line(original),
-                    None => "(a message not loaded)".to_owned(),
-                });
+            let original = message.reply_to.as_deref().map(|id| quoted(messages, id));
+            let quote = original.map(|original| match original {
+                Some(original) => one_line(original),
+                None => "(a message not loaded)".to_owned(),
+            });
+            let quote_author = original.flatten().map(|original| author(original, &theirs));
             let media = media_label(message).map(|label| {
                 let transcript = model.transcript();
                 if transcript.is_downloading(&message.id) || transcript.is_showing(&message.id) {
@@ -343,8 +442,255 @@ pub fn bubbles(model: &Model, offset_minutes: i32) -> Vec<Bubble> {
                     && mark != Some(SendMark::Sending),
                 can_open: message.kind != "text" && !message.id.is_empty(),
                 picture: picture_view(model, message),
+                document: document_view(message),
+                quote_author,
+                day,
+                starts_group,
+                // A send not sent yet, or failed, says so under its own bubble.
+                shows_meta: ends_group || mark.is_some_and(|mark| mark != SendMark::Sent),
                 label,
             }
+        })
+        .collect()
+}
+
+/// Consecutive bubbles of one author at most this far apart share a group (plan §6.3).
+pub const GROUP_GAP_SECONDS: i64 = 5 * 60;
+
+const MONTHS: [&str; 12] = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+];
+const WEEKDAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+
+impl Day {
+    /// The day `year`-`month`-`day` (Howard Hinnant's `days_from_civil`).
+    pub fn from_civil(year: i32, month: u32, day: u32) -> Self {
+        let year = i64::from(year) - i64::from(month <= 2);
+        let era = year.div_euclid(400);
+        let year_of_era = year - era * 400;
+        let month = i64::from(month);
+        let day_of_year =
+            (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + i64::from(day) - 1;
+        let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+        Self(era * 146_097 + day_of_era - 719_468)
+    }
+
+    /// Its year, month (1–12) and day of the month (`civil_from_days`).
+    fn civil(self) -> (i64, usize, i64) {
+        let z = self.0 + 719_468;
+        let era = z.div_euclid(146_097);
+        let day_of_era = z - era * 146_097;
+        let year_of_era =
+            (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+        let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+        let mp = (5 * day_of_year + 2) / 153;
+        let day = day_of_year - (153 * mp + 2) / 5 + 1;
+        let month = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = year_of_era + era * 400 + i64::from(month <= 2);
+        (year, usize::try_from(month).unwrap_or(1), day)
+    }
+
+    /// `Tue 20 Oct`, with the year when `year` is set.
+    fn date(self, year: bool) -> String {
+        let (y, month, day) = self.civil();
+        let weekday = WEEKDAYS[usize::try_from(self.0.rem_euclid(7)).unwrap_or_default()];
+        let month = MONTHS[month - 1];
+        if year {
+            format!("{weekday} {day} {month} {y}")
+        } else {
+            format!("{weekday} {day} {month}")
+        }
+    }
+}
+
+/// The message's local time as seconds since 1970-01-01 at `offset_minutes` from UTC; `None`
+/// when its timestamp is not RFC 3339.
+fn local_seconds(message: &Message, offset_minutes: i32) -> Option<i64> {
+    let (date, time) = message.timestamp.split_once('T')?;
+    let mut date = date.splitn(3, '-').map(str::parse::<i64>);
+    let (Some(Ok(year)), Some(Ok(month)), Some(Ok(day))) = (date.next(), date.next(), date.next())
+    else {
+        return None;
+    };
+    let field = |range: std::ops::Range<usize>| time.get(range)?.parse::<i64>().ok();
+    let (hours, minutes) = (field(0..2)?, field(3..5)?);
+    let seconds = field(6..8).unwrap_or(0);
+    let day = Day::from_civil(
+        i32::try_from(year).ok()?,
+        u32::try_from(month).ok().filter(|m| (1..=12).contains(m))?,
+        u32::try_from(day).ok().filter(|d| (1..=31).contains(d))?,
+    );
+    Some(day.0 * 86_400 + hours * 3600 + minutes * 60 + seconds + i64::from(offset_minutes) * 60)
+}
+
+fn day_at(seconds: i64) -> Day {
+    Day(seconds.div_euclid(86_400))
+}
+
+/// A day as its label says it (plan §6.3): `Today`, `Yesterday`, `Tue 20 Oct` within this year,
+/// else with its year (and always with it when today is not known).
+pub fn day_label(day: Day, today: Option<Day>) -> String {
+    match today {
+        Some(today) if day == today => "Today".to_owned(),
+        Some(today) if day.0 + 1 == today.0 => "Yesterday".to_owned(),
+        Some(today) => day.date(today.civil().0 != day.civil().0),
+        None => day.date(true),
+    }
+}
+
+/// The time a chat row shows (plan §6.2): its `time` today (or when the day is not known),
+/// `Yesterday`, else `20 Oct`.
+fn row_when(time: &str, day: Option<Day>, today: Option<Day>) -> String {
+    match (day, today) {
+        (Some(day), Some(today)) if day.0 + 1 == today.0 => "Yesterday".to_owned(),
+        (Some(day), Some(today)) if day != today => {
+            let (_, month, date) = day.civil();
+            format!("{date} {}", MONTHS[month - 1])
+        }
+        _ => time.to_owned(),
+    }
+}
+
+/// The meta line under a bubble (plan §6.3): its time, and the state of a send of mine.
+pub fn meta_line(bubble: &Bubble) -> String {
+    match bubble.mark {
+        Some(mark) => format!("{} · {}", bubble.time, mark.as_str()),
+        None => bubble.time.clone(),
+    }
+}
+
+/// The reaction chips under a bubble: one per emoji, in the order first seen, with its count.
+pub fn reaction_chips(reactions: &[ReactionView]) -> Vec<ReactionChip> {
+    let mut chips: Vec<ReactionChip> = Vec::new();
+    for reaction in reactions {
+        match chips.iter_mut().find(|chip| chip.emoji == reaction.emoji) {
+            Some(chip) => {
+                chip.count += 1;
+                chip.mine |= reaction.mine;
+            }
+            None => chips.push(ReactionChip {
+                emoji: reaction.emoji.clone(),
+                count: 1,
+                mine: reaction.mine,
+            }),
+        }
+    }
+    chips
+}
+
+/// What the transcript says when it has no bubble: why. `None` while the open chat's messages
+/// are on their way, and when there are bubbles.
+pub fn transcript_empty(model: &Model) -> Option<EmptyState> {
+    let jid = model.selected_jid();
+    let loaded = jid.and_then(|jid| model.transcript().conversation(jid));
+    let hint = match loaded {
+        Some(messages) if !messages.is_empty() => return None,
+        Some(_) => "This chat has no messages",
+        None if jid.is_some() && model.transcript().opening() == jid => return None,
+        None => "Pick a chat to read it here",
+    };
+    Some(EmptyState {
+        title: "No messages yet",
+        hint,
+    })
+}
+
+/// What the chat list says when `filter` keeps no chat.
+pub fn list_empty(filter: Filter) -> EmptyState {
+    match filter {
+        Filter::All => EmptyState {
+            title: "No chats",
+            hint: "Chats appear here as the phone syncs them",
+        },
+        Filter::Unread => EmptyState {
+            title: "No unread chats",
+            hint: "Every chat is read",
+        },
+        Filter::Archived => EmptyState {
+            title: "No archived chats",
+            hint: "Chats archived on the phone are listed here",
+        },
+    }
+}
+
+/// A file size as a document row shows it: `900 B`, `12 KB`, `1.2 MB`.
+fn file_size(bytes: u64) -> String {
+    const UNITS: [&str; 3] = ["KB", "MB", "GB"];
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    // Display only: a size in tenths is exact enough as a float.
+    #[allow(clippy::cast_precision_loss)]
+    let mut size = bytes as f64 / 1024.0;
+    let mut unit = 0;
+    while size >= 1024.0 && unit + 1 < UNITS.len() {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if size < 10.0 {
+        format!("{size:.1} {}", UNITS[unit])
+    } else {
+        format!("{size:.0} {}", UNITS[unit])
+    }
+}
+
+/// A document message's row; `None` for any other kind.
+fn document_view(message: &Message) -> Option<DocumentView> {
+    if message.kind != "document" {
+        return None;
+    }
+    let media = message.media.as_ref();
+    let name = media
+        .map(|media| media.file_name.clone())
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| "Document".to_owned());
+    Some(DocumentView {
+        name,
+        size: media.map_or_else(String::new, |media| file_size(media.size)),
+    })
+}
+
+/// Where each bubble stands in its day and author group (plan §6.3), from the messages' local
+/// times: `(day label, starts a group, ends a group)`.
+fn grouping(
+    messages: &[Message],
+    authors: &[String],
+    offset_minutes: i32,
+    today: Option<Day>,
+) -> Vec<(Option<String>, bool, bool)> {
+    let times: Vec<Option<i64>> = messages
+        .iter()
+        .map(|message| local_seconds(message, offset_minutes))
+        .collect();
+    let starts: Vec<bool> = (0..messages.len())
+        .map(|i| {
+            let Some(before) = i.checked_sub(1) else {
+                return true;
+            };
+            let same_author =
+                messages[i].from_me == messages[before].from_me && authors[i] == authors[before];
+            let close = match (times[before], times[i]) {
+                (Some(before), Some(now)) => {
+                    day_at(before) == day_at(now)
+                        && (0..=GROUP_GAP_SECONDS).contains(&(now - before))
+                }
+                _ => false,
+            };
+            !(same_author && close)
+        })
+        .collect();
+    let mut last_day = None;
+    (0..messages.len())
+        .map(|i| {
+            let day = times[i].map(day_at);
+            let label = (day.is_some() && day != last_day)
+                .then(|| day.map(|day| day_label(day, today)))
+                .flatten();
+            if day.is_some() {
+                last_day = day;
+            }
+            let ends = starts.get(i + 1).copied().unwrap_or(true);
+            (label, starts[i], ends)
         })
         .collect()
 }

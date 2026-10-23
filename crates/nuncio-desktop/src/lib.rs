@@ -111,50 +111,15 @@ pub fn css_for(palette: &Palette, look: &Look) -> String {
            color: {foreground};\n\
          }}\n\
          .{ROOT_CLASS} .nuncio-accent {{ color: {accent}; }}\n\
-         .{ROOT_CLASS} .nuncio-unread {{\n  \
-           background-color: {accent};\n  \
-           color: {background};\n  \
-           border-radius: {radius}px;\n  \
-           padding: 0 6px;\n\
-         }}\n\
          .{ROOT_CLASS} .nuncio-muted {{ color: {bright_foreground}; }}\n\
          .{ROOT_CLASS} .nuncio-error {{ color: {red}; }}\n\
          .{ROOT_CLASS} .nuncio-bold {{ font-weight: bold; }}\n\
-         .{ROOT_CLASS} .nuncio-transcript {{ background-color: {background}; }}\n\
-         .{ROOT_CLASS} .nuncio-bubble {{\n  \
-           padding: 6px 10px;\n  \
-           border-radius: {radius}px;\n\
-         }}\n\
-         .{ROOT_CLASS} .nuncio-bubble.nuncio-mine {{\n  \
-           background-color: {accent};\n  \
-           color: {background};\n\
-         }}\n\
-         .{ROOT_CLASS} .nuncio-bubble.nuncio-theirs {{\n  \
-           background-color: alpha({foreground}, 0.08);\n\
-         }}\n\
-         .{ROOT_CLASS} .nuncio-bubble.nuncio-failed {{\n  \
-           background-color: alpha({red}, 0.15);\n  \
-           color: {foreground};\n  \
-           border: 1px solid {red};\n\
-         }}\n\
-         .{ROOT_CLASS} .nuncio-sender {{ color: {accent}; font-weight: bold; }}\n\
-         .{ROOT_CLASS} .nuncio-quote {{\n  \
-           border-left: 2px solid currentColor;\n  \
-           padding-left: 6px;\n  \
-           opacity: 0.8;\n\
-         }}\n\
-         .{ROOT_CLASS} .nuncio-media {{ font-style: italic; }}\n\
-         .{ROOT_CLASS} .nuncio-reaction-mine {{ font-weight: bold; }}\n\
-         .{ROOT_CLASS} row.nuncio-message:focus-visible .nuncio-bubble {{\n  \
-           outline: 2px solid {accent};\n  \
-           outline-offset: 1px;\n\
-         }}\n",
+         .{ROOT_CLASS} .nuncio-transcript {{ background-color: {background}; }}\n",
         background = palette.background.to_hex(),
         foreground = palette.foreground.to_hex(),
         accent = palette.accent.to_hex(),
         bright_foreground = bright_foreground.to_hex(),
         red = palette.red.to_hex(),
-        radius = radius,
     );
     css.push_str(&style::layout_css(palette, radius));
     css.push_str(&look_css(look));

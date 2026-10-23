@@ -33,7 +33,7 @@ against `main`, each merged on its own with the six CI checks green. Runner: `ca
 |---|---|---|---|---|---|
 | R0 | P0 tokens: palette roles, contrast tests | S1, S4, S5 | delegated (session backstop) | done, Risk: none | PR #4, merged `e0c137a` |
 | R1 | P1 window chrome and layout | S1, S2, S5 | delegated (session backstop) | done, Risk: item 6 (visual, checked on Omarchy) | PR, see L11 |
-| R2 | P2 chat list and transcript | S1, S5 | delegated (session backstop) | pending | |
+| R2 | P2 chat list and transcript | S1, S5 | delegated (session backstop) | done, Risk: item 6 (visual, checked on Omarchy) | PR, see L12 |
 | R3 | P3 composer | S1, S3, S5 | delegated (session backstop) | pending | |
 | R4 | P4 palette, search, settings, dialogs | S1, S5 | delegated (session backstop) | pending | |
 | R5 | P5 TUI parity | S1, S5 | delegated (session backstop) | pending | |
@@ -54,6 +54,14 @@ writer with a clean context writes each phase; an independent verifier checks ea
   never changes.
 - **F3.** If anything still looks rounded on Omarchy after R1, check `~/.config/gtk-4.0/gtk.css` and
   `hyprchroma.css` first: a user `gtk.css` overrides the app's CSS.
+- **F4.** Photo box: the plan says 240×180, `PHOTO_BOX` stays 300 (`pictures.rs`), since changing it
+  changes decode targets; judge both sizes on screen.
+- **F5.** A row is rebuilt when its group meta line moves (a new message from the same author within
+  5 min), which restarts an animated sticker in that row; check whether it is noticeable.
+- **F6.** The failed bubble lost its red fill (plan §6.3: text, `warning` meta line and Retry carry
+  it); check it still reads as failed.
+- **F7.** Not built (S5, no model data): system rows, read ticks, group member count. The
+  transcript's left-aligned 72-character measure moves to R6.
 
 ## Log
 
@@ -95,3 +103,7 @@ writer with a clean context writes each phase; an independent verifier checks ea
   reran `present` tests and the smoke test. Open for the owner's eyes: the header lost the
   "linked · N unread" total (rail counts are chats); switches are square too. Owner rule from now:
   no visible windows or screenshots on the Mac.
+- **L12** (2026-10-23, R2): chat rows per §6.2 and the transcript per §6.3, one `ListBoxRow` per
+  message (day label and author line inside it, so the row index stays the message index),
+  grouping by author within 300 s inclusive. Verifier: S1 and S5 pass, no blockers; advisories
+  logged as F4–F7. Parent reran the `present` tests.

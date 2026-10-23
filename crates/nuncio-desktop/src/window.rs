@@ -111,7 +111,11 @@ struct Inner {
     /// The filter the open conversation was opened from in the list, if it was.
     opened_from: Cell<Option<Filter>>,
     chats: gtk::ListBox,
+    /// What the chat list says when the filter keeps no chat.
+    chats_empty: Empty,
     transcript: gtk::ListBox,
+    /// What the transcript says when it has no message.
+    transcript_empty: Empty,
     transcript_scroll: gtk::ScrolledWindow,
     /// Keep the conversation scrolled to the newest message as it grows.
     stick: Cell<bool>,
@@ -402,6 +406,9 @@ impl Ui {
             .build();
         chats.add_css_class("navigation-sidebar");
         chats.update_property(&[Property::Label("Chats")]);
+        chats.add_css_class("nuncio-chats");
+        let chats_empty = Empty::new("system-users-symbolic");
+        chats.set_placeholder(Some(&chats_empty.root));
         let chats_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
@@ -474,6 +481,8 @@ impl Ui {
             .build();
         transcript.add_css_class("nuncio-transcript");
         transcript.update_property(&[Property::Label("Messages")]);
+        let transcript_empty = Empty::new("mail-unread-symbolic");
+        transcript.set_placeholder(Some(&transcript_empty.root));
         let transcript_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
@@ -598,7 +607,9 @@ impl Ui {
             filter: Cell::new(Filter::All),
             opened_from: Cell::new(None),
             chats,
+            chats_empty,
             transcript,
+            transcript_empty,
             transcript_scroll,
             stick: Cell::new(true),
             search_bar,
@@ -776,6 +787,35 @@ impl Ui {
     /// How many chat rows and message bubbles are drawn (tests).
     pub fn drawn(&self) -> (usize, usize) {
         (count_rows(&self.0.chats), count_rows(&self.0.transcript))
+    }
+
+    /// What is drawn around message `index`'s bubble: its day label, author line and meta line
+    /// (tests).
+    pub fn message_parts(&self, index: usize) -> Option<MessageParts> {
+        let row = self.0.transcript.row_at_index(i32::try_from(index).ok()?)?;
+        let first = |class: &str| {
+            let mut found = Vec::new();
+            texts_with_class(row.upcast_ref(), class, &mut found);
+            found.into_iter().next()
+        };
+        Some(MessageParts {
+            day: first("nuncio-day"),
+            author: first("nuncio-author-line"),
+            meta: first("nuncio-meta-line"),
+        })
+    }
+
+    /// What the chat list and the transcript say while empty, when they do (tests).
+    pub fn empty_states(&self) -> (Option<EmptyTexts>, Option<EmptyTexts>) {
+        let shows = |list: &gtk::ListBox, empty: &Empty| {
+            (list.row_at_index(0).is_none())
+                .then(|| empty.texts())
+                .flatten()
+        };
+        (
+            shows(&self.0.chats, &self.0.chats_empty),
+            shows(&self.0.transcript, &self.0.transcript_empty),
+        )
     }
 
     /// The conversation header's title (tests).
@@ -1992,6 +2032,7 @@ impl Ui {
         let inner = &self.0;
         let mut controller = inner.controller.borrow_mut();
         let offset = inner.offset_minutes;
+        let today = local_today();
         let model = controller.model();
 
         let status = present::rail_status(model);
@@ -2016,7 +2057,7 @@ impl Ui {
                 filter.name()
             ))]);
         }
-        let rows = present::chat_rows(model, offset);
+        let rows = present::chat_rows(model, offset, today);
         let listed = present::listed(model, inner.filter.get(), inner.opened_from.get());
         sync_rows(
             &inner.chats,
@@ -2034,6 +2075,12 @@ impl Ui {
             .chat_list()
             .highlighted()
             .and_then(|chat| listed.iter().position(|&shown| shown == chat));
+        inner
+            .chats_empty
+            .show(Some(present::list_empty(inner.filter.get())));
+        inner
+            .transcript_empty
+            .show(present::transcript_empty(model));
         let lost = highlighted.is_some() && inner.chats.selected_row().is_none();
         if inner.highlighted.replace(highlighted) != highlighted || lost {
             match highlighted
@@ -2049,7 +2096,7 @@ impl Ui {
         sync_rows(
             &inner.transcript,
             &mut inner.shown_bubbles.borrow_mut(),
-            present::bubbles(model, offset),
+            present::bubbles(model, offset, today),
             |bubble| {
                 inner.built.borrow_mut().push(bubble.clone());
                 bubble_row(&weak, bubble)
@@ -2480,50 +2527,146 @@ fn label(text: &str, class: &str) -> gtk::Label {
     label
 }
 
+/// One row of the chat list (plan §6.2): the unread marker, a square avatar, the name and time,
+/// then the preview. Unread is told three ways, never by colour alone: the marker, the name's
+/// tone and, past one message, the count chip.
 fn chat_row(chat: &ChatRow) -> gtk::ListBoxRow {
-    let avatar = adw::Avatar::new(36, Some(&chat.title), true);
-    let title = label(&chat.title, "heading");
+    let marker = gtk::Box::builder()
+        .width_request(6)
+        .height_request(6)
+        .valign(gtk::Align::Center)
+        .margin_start(8)
+        .build();
+    if chat.unread.is_some() {
+        marker.add_css_class("nuncio-unread-mark");
+    }
+    let avatar = adw::Avatar::new(32, Some(&chat.title), true);
+    avatar.set_margin_start(2);
+
+    let top = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    if chat.group {
+        let glyph = gtk::Image::from_icon_name("system-users-symbolic");
+        glyph.set_pixel_size(12);
+        glyph.add_css_class("nuncio-faint");
+        glyph.set_tooltip_text(Some("Group"));
+        top.append(&glyph);
+    }
+    let title = label(&chat.title, "nuncio-name");
+    if chat.unread.is_some() {
+        title.add_css_class("nuncio-name-unread");
+    }
     title.set_hexpand(true);
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    let time = label(&chat.time, "caption");
-    time.add_css_class("nuncio-muted");
-    let top = gtk::Box::new(gtk::Orientation::Horizontal, 6);
     top.append(&title);
-    top.append(&time);
-
-    let preview = label(&chat.preview, "nuncio-muted");
-    preview.set_hexpand(true);
-    preview.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-    bottom.append(&preview);
-    // The same marks the terminal client shows; never colour alone.
+    // The same marks the terminal client shows, quiet: the accent is for what is alive.
     let marks: String = [(chat.pinned, '★'), (chat.muted, '⊘'), (chat.archived, '▤')]
         .iter()
         .filter_map(|&(on, mark)| on.then_some(mark))
         .collect();
     if !marks.is_empty() {
-        bottom.append(&label(&marks, "nuncio-accent"));
+        top.append(&label(&marks, "nuncio-faint"));
     }
-    if let Some(unread) = &chat.unread {
-        title.add_css_class("nuncio-bold");
-        bottom.append(&label(unread, "nuncio-unread"));
+    let time = label(&chat.when, "nuncio-meta");
+    time.add_css_class("nuncio-faint");
+    top.append(&time);
+
+    let bottom = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    if let Some(ticks) = chat.ticks {
+        bottom.append(&label(ticks, "nuncio-ticks"));
+    }
+    if let Some(author) = &chat.author {
+        bottom.append(&label(&format!("{author}:"), "nuncio-preview-author"));
+    }
+    let preview = label(&chat.preview, "nuncio-preview");
+    preview.set_hexpand(true);
+    preview.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    bottom.append(&preview);
+    if let Some(count) = &chat.chip {
+        let chip = label(count, "nuncio-chip");
+        chip.set_xalign(0.5);
+        chip.set_valign(gtk::Align::Center);
+        bottom.append(&chip);
     }
 
-    let text = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    let text = gtk::Box::new(gtk::Orientation::Vertical, 6);
     text.set_hexpand(true);
+    text.set_valign(gtk::Align::Center);
+    text.set_margin_start(12);
+    text.set_margin_end(16);
     text.append(&top);
     text.append(&bottom);
-    let content = gtk::Box::new(gtk::Orientation::Horizontal, 10);
-    content.set_margin_top(6);
-    content.set_margin_bottom(6);
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    content.append(&marker);
     content.append(&avatar);
     content.append(&text);
     let row = gtk::ListBoxRow::builder()
         .accessible_role(gtk::AccessibleRole::ListItem)
         .child(&content)
         .build();
+    row.add_css_class("nuncio-chat-row");
     row.update_property(&[Property::Label(&chat.label)]);
     row
+}
+
+/// What an empty list or transcript shows (plan §6.3): a glyph, a title line and a hint line.
+struct Empty {
+    root: gtk::Box,
+    title: gtk::Label,
+    hint: gtk::Label,
+}
+
+impl Empty {
+    fn new(icon: &str) -> Self {
+        let glyph = gtk::Image::from_icon_name(icon);
+        glyph.set_pixel_size(32);
+        glyph.add_css_class("nuncio-faint");
+        let title = label("", "nuncio-title");
+        title.set_xalign(0.5);
+        let hint = label("", "nuncio-meta");
+        hint.set_xalign(0.5);
+        hint.set_wrap(true);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        root.set_valign(gtk::Align::Center);
+        root.set_halign(gtk::Align::Center);
+        root.set_vexpand(true);
+        root.set_margin_top(48);
+        root.set_margin_bottom(48);
+        root.add_css_class("nuncio-empty");
+        root.append(&glyph);
+        root.append(&title);
+        root.append(&hint);
+        Self { root, title, hint }
+    }
+
+    /// Say `state`, or nothing (`None`: there is nothing true to say yet).
+    fn show(&self, state: Option<present::EmptyState>) {
+        self.root.set_visible(state.is_some());
+        let state = state.unwrap_or(present::EmptyState {
+            title: "",
+            hint: "",
+        });
+        self.title.set_text(state.title);
+        self.hint.set_text(state.hint);
+        self.root
+            .update_property(&[Property::Label(&format!("{}. {}", state.title, state.hint))]);
+    }
+
+    /// The title and hint while shown (tests).
+    fn texts(&self) -> Option<EmptyTexts> {
+        self.root
+            .get_visible()
+            .then(|| (self.title.text().to_string(), self.hint.text().to_string()))
+    }
+}
+
+/// Today in local time, for the day labels and the rows' times.
+fn local_today() -> Option<present::Day> {
+    let now = glib::DateTime::now_local().ok()?;
+    Some(present::Day::from_civil(
+        now.year(),
+        u32::try_from(now.month()).ok()?,
+        u32::try_from(now.day_of_month()).ok()?,
+    ))
 }
 
 fn result_row(line: &str) -> gtk::ListBoxRow {
@@ -2539,61 +2682,93 @@ fn result_row(line: &str) -> gtk::ListBoxRow {
     row
 }
 
-/// One message as a bubble: mine on the right in the accent, theirs on the left. The row is what
-/// takes the focus and what a screen reader reads, by its label.
+/// One message as a square bubble (plan §6.3, decision 1): mine on the right on the active tone,
+/// theirs on the left on the chrome with a 1 px border. The day label goes above the first bubble
+/// of a day, the author line above the first of an author group (theirs), and the meta line (time
+/// and state) under the group's last. The row is what takes the focus and what a screen reader
+/// reads, by its label: one row per message, so a row's index is its message's.
 fn bubble_row(ui: &Weak<Inner>, bubble: &Bubble) -> gtk::ListBoxRow {
-    let column = gtk::Box::new(gtk::Orientation::Vertical, 2);
-    column.add_css_class("nuncio-bubble");
-    column.add_css_class(if bubble.mine {
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    if !bubble.mine && bubble.starts_group {
+        column.append(&label(&bubble.sender, "nuncio-author-line"));
+    }
+    let body = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    body.add_css_class("nuncio-bubble");
+    body.add_css_class(if bubble.mine {
         "nuncio-mine"
     } else {
         "nuncio-theirs"
     });
-    if bubble.mark.is_some_and(present::SendMark::is_failure) {
-        column.add_css_class("nuncio-failed");
-    }
-    if !bubble.mine {
-        column.append(&label(&bubble.sender, "nuncio-sender"));
+    if bubble
+        .picture
+        .as_ref()
+        .is_some_and(|picture| picture.sticker)
+    {
+        body.add_css_class("nuncio-sticker");
     }
     if let Some(quote) = &bubble.quote {
-        let quote = label(&format!("↪ {quote}"), "nuncio-quote");
-        quote.set_ellipsize(gtk::pango::EllipsizeMode::End);
-        column.append(&quote);
+        let lines = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        lines.add_css_class("nuncio-quote");
+        if let Some(author) = &bubble.quote_author {
+            lines.append(&label(author, "nuncio-quote-author"));
+        }
+        let text = label(quote, "nuncio-quote-text");
+        text.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        lines.append(&text);
+        body.append(&lines);
     }
-    if let Some(media) = &bubble.media {
-        column.append(&label(media, "nuncio-media"));
+    let downloading = bubble
+        .media
+        .as_deref()
+        .is_some_and(|media| media.ends_with("downloading…"));
+    match (&bubble.document, &bubble.media) {
+        (Some(document), _) => {
+            body.append(&document_row(document));
+            if downloading {
+                body.append(&label("downloading…", "nuncio-meta"));
+            }
+        }
+        (None, Some(media)) => body.append(&label(media, "nuncio-media")),
+        (None, None) => {}
     }
     if let Some(picture) = &bubble.picture {
-        column.append(&picture_widget(ui, bubble.index, picture));
+        body.append(&picture_widget(ui, bubble.index, picture));
     }
     if !bubble.text.is_empty() {
-        let text = label(&bubble.text, "nuncio-text");
+        // A media message's text is its caption, in the meta size.
+        let class = if bubble.media.is_some() {
+            "nuncio-caption"
+        } else {
+            "nuncio-text"
+        };
+        let text = label(&bubble.text, class);
         text.set_wrap(true);
         text.set_wrap_mode(gtk::pango::WrapMode::WordChar);
-        text.set_max_width_chars(56);
-        column.append(&text);
+        text.set_max_width_chars(68);
+        body.append(&text);
     }
-    if !bubble.reactions.is_empty() {
+    column.append(&body);
+    let chips = present::reaction_chips(&bubble.reactions);
+    if !chips.is_empty() {
         let reactions = gtk::Box::new(gtk::Orientation::Horizontal, 4);
-        for reaction in &bubble.reactions {
-            let shown = label(&reaction.emoji, "nuncio-reaction");
-            if reaction.mine {
-                shown.add_css_class("nuncio-reaction-mine");
-            }
-            reactions.append(&shown);
+        reactions.set_halign(if bubble.mine {
+            gtk::Align::End
+        } else {
+            gtk::Align::Start
+        });
+        for chip in &chips {
+            reactions.append(&reaction_chip(chip));
         }
         column.append(&reactions);
     }
-    let footer = match bubble.mark {
-        Some(mark) => format!("{} · {}", bubble.time, mark.as_str()),
-        None => bubble.time.clone(),
-    };
-    let footer = label(&footer, "caption");
-    footer.set_halign(gtk::Align::End);
-    if bubble.mark.is_some_and(present::SendMark::is_failure) {
-        footer.add_css_class("nuncio-error");
+    if bubble.shows_meta {
+        let meta = label(&present::meta_line(bubble), "nuncio-meta-line");
+        meta.set_halign(gtk::Align::End);
+        if bubble.mark.is_some_and(present::SendMark::is_failure) {
+            meta.add_css_class("nuncio-warning");
+        }
+        column.append(&meta);
     }
-    column.append(&footer);
     if bubble.can_retry {
         let retry = gtk::Button::builder()
             .label("Retry")
@@ -2621,14 +2796,21 @@ fn bubble_row(ui: &Weak<Inner>, bubble: &Bubble) -> gtk::ListBoxRow {
     });
     column.set_hexpand(true);
     lane.append(&column);
-    lane.set_margin_start(12);
-    lane.set_margin_end(12);
-    lane.set_margin_top(3);
-    lane.set_margin_bottom(3);
+    lane.set_margin_start(16);
+    lane.set_margin_end(16);
+    // 2 px between the bubbles of a group, 12 px between groups.
+    lane.set_margin_top(if bubble.starts_group { 12 } else { 2 });
+    let stack = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    if let Some(day) = &bubble.day {
+        let day = label(&day.to_uppercase(), "nuncio-day");
+        day.set_margin_start(16);
+        stack.append(&day);
+    }
+    stack.append(&lane);
     let row = gtk::ListBoxRow::builder()
         .accessible_role(gtk::AccessibleRole::ListItem)
         .activatable(true)
-        .child(&lane)
+        .child(&stack)
         .build();
     row.add_css_class("nuncio-message");
     row.update_property(&[Property::Label(&bubble.label)]);
@@ -2650,6 +2832,63 @@ fn bubble_row(ui: &Weak<Inner>, bubble: &Bubble) -> gtk::ListBoxRow {
     });
     row.add_controller(click);
     row
+}
+
+/// A document's 32 px row: a file glyph, its name and its size.
+fn document_row(document: &present::DocumentView) -> gtk::Box {
+    let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    row.add_css_class("nuncio-document");
+    let glyph = gtk::Image::from_icon_name("text-x-generic-symbolic");
+    glyph.set_pixel_size(16);
+    row.append(&glyph);
+    let name = label(&document.name, "nuncio-text");
+    name.set_ellipsize(gtk::pango::EllipsizeMode::Middle);
+    name.set_hexpand(true);
+    row.append(&name);
+    if !document.size.is_empty() {
+        row.append(&label(&document.size, "nuncio-meta"));
+    }
+    row
+}
+
+/// A flat reaction chip: the emoji and how many sent it.
+fn reaction_chip(chip: &present::ReactionChip) -> gtk::Box {
+    let shown = gtk::Box::new(gtk::Orientation::Horizontal, 4);
+    shown.add_css_class("nuncio-reaction");
+    if chip.mine {
+        shown.add_css_class("nuncio-reaction-mine");
+    }
+    shown.append(&label(&chip.emoji, "nuncio-reaction-emoji"));
+    shown.append(&label(&chip.count.to_string(), "nuncio-meta"));
+    shown
+}
+
+/// The texts of the labels with CSS class `class` inside `widget`, in order.
+fn texts_with_class(widget: &gtk::Widget, class: &str, found: &mut Vec<String>) {
+    if let Some(label) = widget.downcast_ref::<gtk::Label>()
+        && label.has_css_class(class)
+    {
+        found.push(label.text().to_string());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        texts_with_class(&current, class, found);
+        child = current.next_sibling();
+    }
+}
+
+/// An empty state's title and hint, as drawn ([`Ui::empty_states`], tests).
+pub type EmptyTexts = (String, String);
+
+/// What is drawn around message `index`'s bubble ([`Ui::message_parts`], tests).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageParts {
+    /// The day label above it.
+    pub day: Option<String>,
+    /// The author line above it.
+    pub author: Option<String>,
+    /// The meta line under it.
+    pub meta: Option<String>,
 }
 
 /// What a bubble's picture widget shows ([`Ui::picture`], tests).
@@ -2790,7 +3029,15 @@ fn picture_widget(ui: &Weak<Inner>, index: usize, view: &PictureView) -> gtk::Wi
         }
     });
     picture.add_controller(click);
-    wide.upcast()
+    if view.sticker {
+        return wide.upcast();
+    }
+    // A photo's 1 px frame goes around its box, so the box keeps its reserved size.
+    let frame = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    frame.set_halign(gtk::Align::Start);
+    frame.add_css_class("nuncio-frame");
+    frame.append(&wide);
+    frame.upcast()
 }
 
 /// The first picture widget inside `widget`.

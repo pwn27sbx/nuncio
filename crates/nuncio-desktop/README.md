@@ -196,12 +196,22 @@ surfaces in the live Omarchy palette's roles, toasts for notices.
   name, with the search button.
 - **Corners:** every element's corners are Hyprland's `decoration:rounding` (see
   [Font and corners](#font-and-corners)), and square without Hyprland.
-- **Chat list:** title, unread count, `★` pinned, `⊘` muted, `▤` archived (archived chats last), the
-  last message and its time.
-- **Conversation:** my messages on the right in the accent colour, theirs on the left with the
-  sender; time and send state under each; the quoted message (`↪`), reactions, and `[image]`,
-  `[sticker]`, `[document]` labels; photos and stickers are drawn in their bubble (see
-  [Pictures](#pictures)).
+- **Chat list:** 72 px rows: a square avatar, the name and the time (`21:52` today, `Yesterday`,
+  else the date), then the last message, after a `✓` (sent), `◷` (queued) or `✗` (not sent) when it
+  is mine, and after its author in a group that is not muted; a group has a people glyph before its
+  name, and `★` pinned, `⊘` muted, `▤` archived follow it (archived chats last). Unread is a small
+  accent square, the name in the full text tone and, from two messages, a count chip. The selected
+  row is one tone up with a 2 px accent bar. An empty filter says so (`No unread chats`…).
+- **Conversation:** square bubbles, mine on the right one tone up, theirs on the left on the chrome
+  with a 1 px border, at most 68 characters wide. Consecutive messages of one author at most five
+  minutes apart form a group: their author line above the first (theirs), the time and send state
+  (`not sent` in the warning colour) once under the last; a send not sent yet or failed says its
+  state under its own bubble. A day label (`TODAY`, `YESTERDAY`, `TUE 20 OCT`) goes above each
+  day's first message. A reply shows the quoted author and line behind a 2 px accent bar; reactions
+  are chips under the bubble, one per emoji with its count; a document is a row with its file name
+  and size; photos (in a 1 px frame) and stickers (bare) are drawn in their bubble (see
+  [Pictures](#pictures)). With no messages it says why: `This chat has no messages`, or `Pick a
+  chat to read it here`.
 - **Composer:** several lines; a "Replying to" bar with a cancel button; a banner when the open chat
   was merged away, which blocks the send until you choose the chat again.
 

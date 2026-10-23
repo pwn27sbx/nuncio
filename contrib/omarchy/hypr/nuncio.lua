@@ -24,7 +24,10 @@ local nuncio_class = "^io\\.github\\.pwn27sbx\\.nuncio\\.Desktop$"
 
 -- SUPER + SHIFT + ALT + G is Omarchy's WhatsApp web app binding; nuncio replaces it.
 -- Pick another key if you want to keep the web app.
-o.rebind("SUPER + SHIFT + ALT + G", "WhatsApp (nuncio)", {
+-- Omarchy 4.0.6 has `o.bind` but no `o.rebind` (helpers.lua), so the key is unbound first when
+-- the Lua binding API offers `hl.unbind` (guarded, so an older API does not break the config).
+pcall(function() hl.unbind("SUPER + SHIFT + ALT + G") end)
+o.bind("SUPER + SHIFT + ALT + G", "WhatsApp (nuncio)", {
   launch = "nuncio-desktop",
   focus = nuncio_class,
 })

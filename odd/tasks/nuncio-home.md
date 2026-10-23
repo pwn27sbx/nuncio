@@ -77,3 +77,11 @@ Runner: `cargo test --workspace --no-fail-fast`, `go test -race ./...`.
   `/usr/share/omarchy/shell/{Commons,Ui}` declare `module qs.*`; a scratch dir with `qs ->
   /usr/share/omarchy/shell` resolves them. Quickshell caches the failed compile, so the live check
   needed `omarchy-restart-shell`; after it, no widget error appears in `qs log`.
+- **L10.** T5.7 first run on Linux: copying `contrib/omarchy/hypr/nuncio.lua` made Hyprland show
+  `require("hypr.nuncio"): …/nuncio.lua:27: attempt to call a nil value (field 'rebind')`. Omarchy
+  4.0.6's helper table (`/usr/share/omarchy/default/hypr/helpers.lua`) has `o.bind` and no
+  `o.rebind`, so the hotkey never loaded and the old WhatsApp web-app bind stayed. Fixed by using
+  `o.bind` with the same `{launch, focus}` table (`command_from` expands it to
+  `omarchy-launch-or-focus '<class>' 'uwsm-app -- nuncio-desktop'`), preceded by a guarded
+  `hl.unbind` so the key is not bound twice. After the reload: `hyprctl configerrors` empty and
+  exactly one bind on SUPER+SHIFT+ALT+G, described "WhatsApp (nuncio)".

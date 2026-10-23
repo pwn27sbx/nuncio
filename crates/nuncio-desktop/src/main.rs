@@ -230,7 +230,8 @@ const FONT_ON_SWITCH: Duration = Duration::from_secs(2);
 
 /// The desktop's look at start: Omarchy's font (only where Omarchy is installed) and Hyprland's
 /// rounding (only under Hyprland). Each query is bounded to ~200 ms; a failure is logged once and
-/// leaves libadwaita's own, except a slow fontconfig, which is asked again in the background.
+/// leaves libadwaita's font or square corners, except a slow fontconfig, which is asked again in
+/// the background.
 struct StartLook {
     follows_font: bool,
     font_family: Option<String>,

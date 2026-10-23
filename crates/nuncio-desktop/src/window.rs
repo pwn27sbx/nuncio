@@ -1,5 +1,6 @@
-//! The window: an `AdwNavigationSplitView` with the chat list in the sidebar and the open
-//! conversation (transcript, search, composer) as the content, laid out after Sealwax
+//! The window: three panes side by side (design plan §5) — the rail (the one filled button, the
+//! filters, the connection), the chat list, and the open conversation (transcript, search,
+//! composer) — with a draggable `gtk::Paned` at each seam, laid out after Sealwax
 //! (`PixDevsApps/sealwax`, MIT: its DESIGN.md and window module were read for the design; no code
 //! was copied): flat theme surfaces, one pane at a time on a narrow tiled window, no title bar
 //! controls on a tiling desktop, toasts rather than dialogs, and every action reachable from the
@@ -11,13 +12,15 @@
 //!
 //! Keyboard (Tab moves between the chat list, the conversation and the composer):
 //!
-//! - chat list: Up/Down move, Enter opens the chat (and only opening marks it read);
+//! - chat list: Up/Down move, Enter opens the chat (and only opening marks it read); the rail's
+//!   All / Unread / Archived choose which chats it lists;
 //! - conversation: Up/Down move between messages; `r` replies, `e` reacts, Shift+R retries a send
 //!   that was not sent, `o` opens a media file (a picture's full file is shown in its bubble),
 //!   Shift+O opens it with the desktop's opener, Enter shows a picture in full (on any other
 //!   message it opens the menu), Menu or Shift+F10 opens the message's menu, Escape goes to the
-//!   composer;
-//! - composer: Enter sends, Shift+Enter starts a new line, Escape cancels the reply;
+//!   composer (on a window narrow enough for one pane, back to the list);
+//! - composer: Enter sends, Shift+Enter starts a new line, Escape cancels the reply, else goes to
+//!   the last message;
 //! - Ctrl+F searches the open chat; Escape closes the search; Ctrl+Q quits (the app's
 //!   `app.quit`, also in the menu);
 //! - F1 or Ctrl+K opens the command palette ([`crate::palette`]): type to filter, Up/Down choose,
@@ -40,14 +43,12 @@ use crate::lifecycle::{Close, Lifecycle};
 use crate::palette::{self, Step};
 use crate::pictures::{self, Cache, Decoded, Decoder, Variant};
 use crate::preferences::{Change, IMAGE_PROTOCOLS, Preferences, TITLE_BARS, Takes};
-use crate::present::{self, Bubble, ChatRow, PictureView};
+use crate::present::{self, Bubble, ChatRow, Filter, PictureView};
+use crate::style::{self, LIST_WIDTH, Layout, RAIL_COMPACT_WIDTH, RAIL_WIDTH};
 use crate::worker::{Backlog, EVENT_BACKLOG, Incoming, Settings, Worker};
 use crate::{ROOT_CLASS, WINDOW_CLASS};
 use nuncio_client::TitleBar;
 use nuncio_client::config::App;
-
-/// Below this width the window shows one pane at a time, with back navigation.
-const NARROW: &str = "max-width: 600sp";
 
 /// The window and the state behind it. Cheap to clone. The window itself keeps the state alive
 /// until it is closed, so a caller may drop every `Ui` once the window is shown.
@@ -78,19 +79,37 @@ struct Inner {
     quitting: Cell<bool>,
     offset_minutes: i32,
     window: adw::ApplicationWindow,
-    sidebar_header: adw::HeaderBar,
+    list_header: adw::HeaderBar,
     content_header: adw::HeaderBar,
+    /// The window controls are wanted (`[app] title_bar`).
+    title_bar: Cell<bool>,
     /// The window's own shortcuts (Ctrl+F, F1, Ctrl+K, Ctrl+,).
     shortcuts: gtk::ShortcutController,
     /// The command palette while it is open.
     palette: RefCell<Option<Rc<PaletteView>>>,
     /// The configuration file the settings edit (`None`: there is none).
     config_path: RefCell<Option<PathBuf>>,
-    split: adw::NavigationSplitView,
     toasts: adw::ToastOverlay,
-    sidebar_title: adw::WindowTitle,
-    content_title: adw::WindowTitle,
-    content_page: adw::NavigationPage,
+    /// The seam between the rail and the rest.
+    panes: gtk::Paned,
+    /// The seam between the chat list and the conversation.
+    lists: gtk::Paned,
+    rail: Rail,
+    list_view: adw::ToolbarView,
+    content_view: adw::ToolbarView,
+    /// Back to the chat list, when one pane is shown at a time.
+    back: gtk::Button,
+    content_title: gtk::Label,
+    /// Why WhatsApp stopped the session, under the conversation's header.
+    strip: gtk::Label,
+    /// How the panes are laid out at the window's width now.
+    layout: Cell<Layout>,
+    /// The conversation is the pane shown when there is room for one pane only.
+    show_content: Cell<bool>,
+    /// Which chats the list shows.
+    filter: Cell<Filter>,
+    /// The filter the open conversation was opened from in the list, if it was.
+    opened_from: Cell<Option<Filter>>,
     chats: gtk::ListBox,
     transcript: gtk::ListBox,
     transcript_scroll: gtk::ScrolledWindow,
@@ -106,9 +125,11 @@ struct Inner {
     reply_label: gtk::Label,
     composer: gtk::TextView,
     /// What is drawn now, to change only what changed.
-    shown_chats: RefCell<Vec<ChatRow>>,
+    /// The chat rows drawn, each with its position in the model's chat list.
+    shown_chats: RefCell<Vec<(usize, ChatRow)>>,
     shown_bubbles: RefCell<Vec<Bubble>>,
     shown_results: RefCell<Vec<String>>,
+    /// The highlighted chat's row at the last render.
     highlighted: Cell<Option<usize>>,
     /// The model's search was open at the last render.
     searching: Cell<bool>,
@@ -124,6 +145,128 @@ struct Inner {
     built: RefCell<Vec<Bubble>>,
     /// The last toast shown (tests).
     last_toast: RefCell<Option<String>>,
+}
+
+/// The rail's widgets that change: the filters with their counts, the connection line, and what
+/// the icon strip hides or shows.
+struct Rail {
+    root: gtk::Box,
+    filters: Vec<(Filter, gtk::ToggleButton, gtk::Label)>,
+    linked_mark: gtk::Box,
+    connection: gtk::Box,
+    connection_word: gtk::Label,
+    /// Shown with the labels; hidden on the icon strip.
+    texts: Vec<gtk::Widget>,
+    /// Shown on the icon strip only.
+    icons: Vec<gtk::Image>,
+}
+
+impl Rail {
+    /// The rail (plan §5): the one filled button, the three flat filters with their counts right
+    /// aligned, and the connection line at the bottom.
+    fn new() -> Self {
+        let mut texts: Vec<gtk::Widget> = Vec::new();
+        let mut icons = Vec::new();
+        // An icon (the strip's) and a label (the full rail's), one shown at a time.
+        let mut content = |icon: &str, text: &str, texts: &mut Vec<gtk::Widget>| {
+            let image = gtk::Image::from_icon_name(icon);
+            image.set_visible(false);
+            let label = gtk::Label::builder()
+                .label(text)
+                .xalign(0.0)
+                .hexpand(true)
+                .build();
+            let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+            row.append(&image);
+            row.append(&label);
+            icons.push(image);
+            texts.push(label.upcast());
+            row
+        };
+
+        // The palette is what the one filled button opens: there is no "new message" command
+        // to give it (the plan's label waits for that feature).
+        let primary = gtk::Button::builder()
+            .child(&content("system-search-symbolic", "Commands", &mut texts))
+            .tooltip_text("Command palette (F1, Ctrl+K)")
+            .action_name("win.command-palette")
+            .build();
+        primary.add_css_class("nuncio-primary");
+        primary.update_property(&[Property::Label("Command palette")]);
+
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
+        root.add_css_class("nuncio-chrome");
+        root.add_css_class("nuncio-rail");
+        root.append(&primary);
+        let filter_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        filter_box.set_margin_top(12);
+        let mut filters = Vec::new();
+        let mut group: Option<gtk::ToggleButton> = None;
+        for filter in Filter::EACH {
+            let icon = match filter {
+                Filter::All => "view-list-symbolic",
+                Filter::Unread => "mail-unread-symbolic",
+                Filter::Archived => "folder-symbolic",
+            };
+            let row = content(icon, filter.name(), &mut texts);
+            let count = gtk::Label::new(None);
+            count.add_css_class("nuncio-meta");
+            row.append(&count);
+            texts.push(count.clone().upcast());
+            let button = gtk::ToggleButton::builder()
+                .child(&row)
+                .tooltip_text(filter.name())
+                .active(filter == Filter::All)
+                .build();
+            button.add_css_class("nuncio-filter");
+            button.set_group(group.as_ref());
+            group.get_or_insert_with(|| button.clone());
+            filter_box.append(&button);
+            filters.push((filter, button, count));
+        }
+        root.append(&filter_box);
+
+        let linked_mark = gtk::Box::builder()
+            .valign(gtk::Align::Center)
+            .halign(gtk::Align::Center)
+            .build();
+        linked_mark.add_css_class("nuncio-linked-mark");
+        let connection_word = gtk::Label::builder().xalign(0.0).build();
+        connection_word.add_css_class("nuncio-meta");
+        texts.push(connection_word.clone().upcast());
+        let connection = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .vexpand(true)
+            .valign(gtk::Align::End)
+            .margin_start(8)
+            .margin_bottom(4)
+            .accessible_role(gtk::AccessibleRole::Status)
+            .build();
+        connection.append(&linked_mark);
+        connection.append(&connection_word);
+        root.append(&connection);
+
+        Self {
+            root,
+            filters,
+            linked_mark,
+            connection,
+            connection_word,
+            texts,
+            icons,
+        }
+    }
+
+    /// The labels, or the 48 px icon strip.
+    fn set_compact(&self, compact: bool) {
+        for text in &self.texts {
+            text.set_visible(!compact);
+        }
+        for icon in &self.icons {
+            icon.set_visible(compact);
+        }
+    }
 }
 
 /// A picture widget drawn now.
@@ -224,6 +367,9 @@ impl Ui {
             .title("nuncio")
             .default_width(960)
             .default_height(640)
+            // The smallest single pane: below it the window would clip its content.
+            .width_request(360)
+            .height_request(320)
             .build();
         if let Some(app) = app {
             window.set_application(Some(app));
@@ -233,10 +379,10 @@ impl Ui {
             window.add_css_class("nuncio-no-title-bar");
         }
 
-        // Sidebar: the chat list.
-        let sidebar_title = adw::WindowTitle::new("nuncio", "");
-        let sidebar_header = header_bar(title_bar);
-        sidebar_header.set_title_widget(Some(&sidebar_title));
+        let rail = Rail::new();
+
+        // The chat list, with its header.
+        let list_header = header_bar(&pane_title("Chats"));
         // The app menu: Quit really quits, also in background mode (Ctrl+Q).
         let menu = gio::Menu::new();
         menu.append(Some("Command palette"), Some("win.command-palette"));
@@ -248,7 +394,7 @@ impl Ui {
             .menu_model(&menu)
             .build();
         menu_button.update_property(&[Property::Label("Menu")]);
-        sidebar_header.pack_end(&menu_button);
+        list_header.pack_end(&menu_button);
         let chats = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
             .activate_on_single_click(true)
@@ -261,19 +407,29 @@ impl Ui {
             .vexpand(true)
             .child(&chats)
             .build();
-        let sidebar_view = adw::ToolbarView::new();
-        sidebar_view.add_top_bar(&sidebar_header);
-        sidebar_view.set_content(Some(&chats_scroll));
-        let sidebar_page = adw::NavigationPage::builder()
-            .title("Chats")
-            .tag("chats")
-            .child(&sidebar_view)
-            .build();
+        let list_view = adw::ToolbarView::new();
+        list_view.add_css_class("nuncio-chrome");
+        list_view.add_top_bar(&list_header);
+        list_view.set_content(Some(&chats_scroll));
 
-        // Content: the conversation.
-        let content_title = adw::WindowTitle::new("No chat", "");
-        let content_header = header_bar(title_bar);
-        content_header.set_title_widget(Some(&content_title));
+        // The conversation: its header holds only the chat's name (the connection is the rail's).
+        let content_title = pane_title("No chat");
+        content_title.set_ellipsize(gtk::pango::EllipsizeMode::End);
+        let content_header = header_bar(&content_title);
+        let back = gtk::Button::builder()
+            .icon_name("go-previous-symbolic")
+            .tooltip_text("Back to the chats (Escape)")
+            .visible(false)
+            .build();
+        back.update_property(&[Property::Label("Back to the chats")]);
+        content_header.pack_start(&back);
+        // A stop reason: one line under the header, in the warning colour, while it holds.
+        let strip = gtk::Label::builder()
+            .xalign(0.0)
+            .ellipsize(gtk::pango::EllipsizeMode::End)
+            .visible(false)
+            .build();
+        strip.add_css_class("nuncio-strip");
         let search_button = gtk::ToggleButton::builder()
             .icon_name("edit-find-symbolic")
             .tooltip_text("Search in this chat (Ctrl+F)")
@@ -384,29 +540,21 @@ impl Ui {
         content.append(&results_scroll);
         content.append(&transcript_scroll);
         let content_view = adw::ToolbarView::new();
+        content_view.add_css_class("nuncio-content");
         content_view.add_top_bar(&content_header);
+        content_view.add_top_bar(&strip);
         content_view.add_top_bar(&search_bar);
         content_view.set_content(Some(&content));
         content_view.add_bottom_bar(&bottom);
-        let content_page = adw::NavigationPage::builder()
-            .title("Conversation")
-            .tag("conversation")
-            .child(&content_view)
-            .build();
 
-        let split = adw::NavigationSplitView::builder()
-            .sidebar(&sidebar_page)
-            .content(&content_page)
-            .build();
-        split.add_css_class(ROOT_CLASS);
+        // A draggable seam between each two panes, drawn as a 1 px line; the panes fill the
+        // window, with no outer margin.
+        let lists = seam(&list_view, &content_view, LIST_WIDTH);
+        let panes = seam(&rail.root, &lists, RAIL_WIDTH);
         let toasts = adw::ToastOverlay::new();
-        toasts.set_child(Some(&split));
+        toasts.add_css_class(ROOT_CLASS);
+        toasts.set_child(Some(&panes));
         window.set_content(Some(&toasts));
-        if let Ok(condition) = adw::BreakpointCondition::parse(NARROW) {
-            let narrow = adw::Breakpoint::new(condition);
-            narrow.add_setter(&split, "collapsed", Some(&true.to_value()));
-            window.add_breakpoint(narrow);
-        }
 
         let shortcuts = gtk::ShortcutController::new();
         shortcuts.set_scope(gtk::ShortcutScope::Global);
@@ -430,16 +578,25 @@ impl Ui {
             quitting: Cell::new(false),
             offset_minutes,
             window,
-            sidebar_header,
+            list_header,
             content_header,
+            title_bar: Cell::new(title_bar),
             shortcuts,
             palette: RefCell::new(None),
             config_path: RefCell::new(None),
-            split,
             toasts,
-            sidebar_title,
+            panes,
+            lists,
+            rail,
+            list_view,
+            content_view,
+            back,
             content_title,
-            content_page,
+            strip,
+            layout: Cell::new(Layout::ThreePanes),
+            show_content: Cell::new(false),
+            filter: Cell::new(Filter::All),
+            opened_from: Cell::new(None),
             chats,
             transcript,
             transcript_scroll,
@@ -466,6 +623,8 @@ impl Ui {
             last_toast: RefCell::new(None),
         }));
         ui.connect(&send_button, &cancel_reply);
+        ui.add_breakpoints();
+        ui.apply_layout(Layout::ThreePanes);
         let weak = ui.weak();
         glib::spawn_future_local(async move {
             while let Ok(done) = decoded.recv().await {
@@ -563,8 +722,9 @@ impl Ui {
     }
 
     fn show_conversation(&self, commands: Vec<Command>) {
+        self.0.opened_from.set(None);
         if self.0.controller.borrow().model().is_open() {
-            self.0.split.set_show_content(true);
+            self.set_show_content(true);
         }
         self.run(commands);
         self.0.composer.grab_focus();
@@ -620,7 +780,138 @@ impl Ui {
 
     /// The conversation header's title (tests).
     pub fn conversation_title(&self) -> String {
-        self.0.content_title.title().to_string()
+        self.0.content_title.text().to_string()
+    }
+
+    /// The strip under the conversation header, while it is shown (tests).
+    pub fn stop_strip(&self) -> Option<String> {
+        self.0
+            .strip
+            .get_visible()
+            .then(|| self.0.strip.text().to_string())
+    }
+
+    /// The position of the selected row in the chat list, as drawn (tests).
+    pub fn selected_chat_row(&self) -> Option<usize> {
+        let row = self.0.chats.selected_row()?;
+        usize::try_from(row.index()).ok()
+    }
+
+    /// The count the rail shows next to `filter` (tests).
+    pub fn filter_count(&self, filter: Filter) -> String {
+        self.0
+            .rail
+            .filters
+            .iter()
+            .find(|(f, ..)| *f == filter)
+            .map(|(_, _, count)| count.text().to_string())
+            .unwrap_or_default()
+    }
+
+    /// The rail's connection word (tests).
+    pub fn connection_word(&self) -> String {
+        self.0.rail.connection_word.text().to_string()
+    }
+
+    /// List the chats `filter` keeps, as clicking it in the rail does.
+    pub fn set_filter(&self, filter: Filter) {
+        if let Some((_, button, _)) = self.0.rail.filters.iter().find(|(f, ..)| *f == filter) {
+            // Its `toggled` handler renders.
+            button.set_active(true);
+        }
+    }
+
+    /// Lay the panes out as at a window this wide ([`style::layout_for`]), as the window's
+    /// breakpoints do when it is resized.
+    pub fn apply_layout(&self, layout: Layout) {
+        let inner = &self.0;
+        inner.layout.set(layout);
+        let single = layout == Layout::SinglePane;
+        inner.rail.root.set_visible(!single);
+        inner.rail.set_compact(layout == Layout::CompactRail);
+        inner.panes.set_position(if layout == Layout::CompactRail {
+            RAIL_COMPACT_WIDTH
+        } else {
+            RAIL_WIDTH
+        });
+        inner.lists.set_position(LIST_WIDTH);
+        inner.back.set_visible(single);
+        self.show_panes();
+    }
+
+    /// The panes laid out now (tests).
+    pub fn layout(&self) -> Layout {
+        self.0.layout.get()
+    }
+
+    /// Which of the rail, the chat list and the conversation are shown (tests).
+    pub fn panes_shown(&self) -> (bool, bool, bool) {
+        let inner = &self.0;
+        (
+            inner.rail.root.get_visible(),
+            inner.list_view.get_visible(),
+            inner.content_view.get_visible(),
+        )
+    }
+
+    /// The window's breakpoints ([`style::breakpoints`]): each narrower layout applies while its
+    /// condition holds; none applied is three panes.
+    fn add_breakpoints(&self) {
+        for (condition, layout) in style::breakpoints() {
+            let Ok(condition) = adw::BreakpointCondition::parse(&condition) else {
+                continue;
+            };
+            let breakpoint = adw::Breakpoint::new(condition);
+            let apply = self.with(move |ui, (): ()| ui.apply_layout(layout));
+            breakpoint.connect_apply(move |_| apply(()));
+            // Unapplied first or after the next one applies: only the layout it set is undone.
+            let unapply = self.with(move |ui, (): ()| {
+                if ui.0.layout.get() == layout {
+                    ui.apply_layout(Layout::ThreePanes);
+                }
+            });
+            breakpoint.connect_unapply(move |_| unapply(()));
+            self.0.window.add_breakpoint(breakpoint);
+        }
+    }
+
+    /// Show the conversation (true) or the chat list when there is room for one pane only.
+    fn set_show_content(&self, shown: bool) {
+        self.0.show_content.set(shown);
+        self.show_panes();
+    }
+
+    /// Which panes are visible, and which header carries the window controls: with one pane the
+    /// shown one holds them all; otherwise the list's header the start ones, the conversation's
+    /// the end ones.
+    fn show_panes(&self) {
+        let inner = &self.0;
+        let single = inner.layout.get() == Layout::SinglePane;
+        let content = inner.show_content.get();
+        inner.list_view.set_visible(!single || !content);
+        inner.content_view.set_visible(!single || content);
+        let shown = inner.title_bar.get();
+        inner.list_header.set_show_start_title_buttons(shown);
+        inner
+            .list_header
+            .set_show_end_title_buttons(shown && single);
+        inner
+            .content_header
+            .set_show_start_title_buttons(shown && single);
+        inner.content_header.set_show_end_title_buttons(shown);
+    }
+
+    /// Back from the conversation to the chat list, when one pane is shown at a time (Escape, or
+    /// the header's back button); true when it went back.
+    fn go_back(&self) -> bool {
+        if self.0.layout.get() != Layout::SinglePane || !self.0.show_content.get() {
+            return false;
+        }
+        self.set_show_content(false);
+        self.0.controller.borrow_mut().back_to_list();
+        self.render();
+        self.0.chats.grab_focus();
+        true
     }
 
     /// The accessible role of the chat row and the bubble at these positions (tests).
@@ -639,7 +930,8 @@ impl Ui {
     /// Open the chat at list position `index`, as a click or Enter on its row does.
     pub fn open_chat(&self, index: usize) {
         let commands = self.0.controller.borrow_mut().open_chat(index);
-        self.0.split.set_show_content(true);
+        self.0.opened_from.set(Some(self.0.filter.get()));
+        self.set_show_content(true);
         self.run(commands);
         self.0.composer.grab_focus();
     }
@@ -682,12 +974,10 @@ impl Ui {
         }
     }
 
-    /// Show or hide the window controls in both header bars.
+    /// Show or hide the window controls in the header bars.
     pub fn set_title_bar(&self, shown: bool) {
-        for header in [&self.0.sidebar_header, &self.0.content_header] {
-            header.set_show_start_title_buttons(shown);
-            header.set_show_end_title_buttons(shown);
-        }
+        self.0.title_bar.set(shown);
+        self.show_panes();
         if shown {
             self.0.window.remove_css_class("nuncio-no-title-bar");
         } else {
@@ -697,7 +987,7 @@ impl Ui {
 
     /// Whether the header bars show the window controls (tests).
     pub fn title_bar_shown(&self) -> bool {
-        self.0.sidebar_header.shows_end_title_buttons()
+        self.0.content_header.shows_end_title_buttons()
     }
 
     /// Activate the window shortcut with this trigger (`"F1"`, `"<Control>k"`), as pressing it
@@ -1197,19 +1487,31 @@ impl Ui {
     fn connect(&self, send_button: &gtk::Button, cancel_reply: &gtk::Button) {
         let inner = &self.0;
 
+        // A row's position in the list is not the chat's in the model while a filter is on.
         inner.chats.connect_row_activated({
-            let f = self.with(|ui, index: usize| ui.open_chat(index));
+            let f = self.with(|ui, row: usize| {
+                let chat = ui.0.shown_chats.borrow().get(row).map(|(chat, _)| *chat);
+                if let Some(chat) = chat {
+                    ui.open_chat(chat);
+                }
+            });
             move |_, row| f(usize::try_from(row.index()).unwrap_or(usize::MAX))
         });
-        inner.split.connect_show_content_notify({
-            let f = self.with(|ui, shown: bool| {
-                if !shown && ui.0.split.is_collapsed() {
-                    ui.0.controller.borrow_mut().back_to_list();
+        inner.back.connect_clicked({
+            let f = self.with(|ui, (): ()| {
+                ui.go_back();
+            });
+            move |_| f(())
+        });
+        for (filter, button, _) in &inner.rail.filters {
+            let filter = *filter;
+            let f = self.with(move |ui, active: bool| {
+                if active && ui.0.filter.replace(filter) != filter {
                     ui.render();
                 }
             });
-            move |split| f(split.shows_content())
-        });
+            button.connect_toggled(move |button| f(button.is_active()));
+        }
 
         // Only a window the user can see marks new messages read.
         let seen = self.with(|ui, (): ()| {
@@ -1393,6 +1695,8 @@ impl Ui {
                 self.render();
             } else if let Some(row) = last_row(&self.0.transcript) {
                 row.grab_focus();
+            } else {
+                self.go_back();
             }
         } else {
             self.send();
@@ -1412,7 +1716,9 @@ impl Ui {
 
     fn message_key(&self, key: gdk::Key, state: gdk::ModifierType) {
         if key == gdk::Key::Escape {
-            self.0.composer.grab_focus();
+            if !self.go_back() {
+                self.0.composer.grab_focus();
+            }
             return;
         }
         let Some((index, row)) = self.focused_message() else {
@@ -1688,23 +1994,48 @@ impl Ui {
         let offset = inner.offset_minutes;
         let model = controller.model();
 
-        let sidebar = present::sidebar_header(model);
-        inner.sidebar_title.set_title(&sidebar.title);
-        inner.sidebar_title.set_subtitle(&sidebar.subtitle);
-        let header = present::conversation_header(model);
-        inner.content_title.set_title(&header.title);
-        inner.content_title.set_subtitle(&header.subtitle);
-        inner.content_page.set_title(&header.title);
+        let status = present::rail_status(model);
+        inner.rail.connection_word.set_text(&status.word);
+        inner.rail.linked_mark.set_visible(status.linked);
+        inner.rail.connection.set_tooltip_text(Some(&status.word));
+        inner
+            .rail
+            .connection
+            .update_property(&[Property::Label(&format!("Connection: {}", status.word))]);
+        let title = present::conversation_title(model);
+        inner.content_title.set_text(&title);
+        let strip = present::stop_strip(model);
+        inner.strip.set_text(strip.as_deref().unwrap_or_default());
+        inner.strip.set_visible(strip.is_some());
 
+        for (filter, button, count) in &inner.rail.filters {
+            let listed = present::count(model, *filter);
+            count.set_text(&listed.to_string());
+            button.update_property(&[Property::Label(&format!(
+                "{}, {listed} chats",
+                filter.name()
+            ))]);
+        }
+        let rows = present::chat_rows(model, offset);
+        let listed = present::listed(model, inner.filter.get(), inner.opened_from.get());
         sync_rows(
             &inner.chats,
             &mut inner.shown_chats.borrow_mut(),
-            present::chat_rows(model, offset),
-            chat_row,
+            listed
+                .iter()
+                .filter_map(|&chat| Some((chat, rows.get(chat)?.clone())))
+                .collect(),
+            |(_, chat)| chat_row(chat),
         );
-        let highlighted = model.chat_list().highlighted();
-        if highlighted != inner.highlighted.get() {
-            inner.highlighted.set(highlighted);
+        // The row to select: the highlighted chat's place in the list as filtered, when it moved,
+        // or when its row was rebuilt in place and lost the selection. A row the keys moved the
+        // selection to is left selected.
+        let highlighted = model
+            .chat_list()
+            .highlighted()
+            .and_then(|chat| listed.iter().position(|&shown| shown == chat));
+        let lost = highlighted.is_some() && inner.chats.selected_row().is_none();
+        if inner.highlighted.replace(highlighted) != highlighted || lost {
             match highlighted
                 .and_then(|i| i32::try_from(i).ok())
                 .and_then(|i| inner.chats.row_at_index(i))
@@ -2007,13 +2338,39 @@ fn palette_row(entry: &palette::Entry) -> gtk::ListBoxRow {
     row
 }
 
-/// A header bar; without the title bar it shows no window controls.
-fn header_bar(title_bar: bool) -> adw::HeaderBar {
+/// A pane's 44 px header (plan §6.1): `title` at its start, no centred title; which window
+/// controls it shows is [`Ui::show_panes`]'s.
+fn header_bar(title: &gtk::Label) -> adw::HeaderBar {
     let header = adw::HeaderBar::new();
     header.add_css_class("nuncio-headerbar");
-    header.set_show_start_title_buttons(title_bar);
-    header.set_show_end_title_buttons(title_bar);
+    header.add_css_class("nuncio-header");
+    header.set_title_widget(Some(&gtk::Box::new(gtk::Orientation::Horizontal, 0)));
+    header.pack_start(title);
     header
+}
+
+/// A pane header's title, 16 px from the pane's edge.
+fn pane_title(text: &str) -> gtk::Label {
+    let title = gtk::Label::builder().label(text).xalign(0.0).build();
+    title.add_css_class("nuncio-title");
+    title.set_margin_start(12);
+    title
+}
+
+/// Two panes side by side with a draggable seam, the first `width` pixels wide at first: a
+/// resized window gives or takes from the second, and neither is squeezed under its minimum.
+fn seam(start: &impl IsA<gtk::Widget>, end: &impl IsA<gtk::Widget>, width: i32) -> gtk::Paned {
+    let paned = gtk::Paned::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .start_child(start)
+        .end_child(end)
+        .resize_start_child(false)
+        .shrink_start_child(false)
+        .shrink_end_child(false)
+        .position(width)
+        .build();
+    paned.set_wide_handle(false);
+    paned
 }
 
 fn is_enter(key: gdk::Key) -> bool {

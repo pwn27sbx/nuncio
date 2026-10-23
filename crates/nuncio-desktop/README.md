@@ -20,14 +20,16 @@ XDG_RUNTIME_DIR=/tmp/nuncio-demo cargo run -p nuncio-desktop
 On a Mac, install GTK first: `brew install gtk4 libadwaita pkgconf`. The demo answers sends at once
 (a text starting with `fail` ends not sent, so Retry can be tried), sends an invented reply after
 each send, and has a photo, stickers and a document to open. Stop the demo and start it again to see
-the header say `reconnecting…` and the app resync on its own.
+the rail's connection line say `reconnecting…` and the app resync on its own.
 
-After the session the headers' subtitle names why it is not connected when the daemon says so
-(`stop_reason`, `proto/wire.md`), in fixed text: a WhatsApp stop (`offline · WhatsApp temporarily
-banned this account`, …), `offline · keyring locked: unlock it to connect` while the keyring is
-locked, or `offline · the stored key does not open this device: see SECURITY.md` when the stored
-key does not open the device. It goes away once the daemon's next frame has no reason (the keyring
-was unlocked and the device opened). A reason this build does not know shows as
+The connection is said once, at the bottom of the rail: `linked` (with a small accent square),
+`offline`, `unlinked`, or `reconnecting…` while the daemon connection is lost. When the daemon says
+why it is not connected (`stop_reason`, `proto/wire.md`), a one-line strip under the conversation
+header says it in fixed text, in the theme's warning colour: a WhatsApp stop (`WhatsApp temporarily
+banned this account`, …), `keyring locked: unlock it to connect` while the keyring is locked, or
+`the stored key does not open this device: see SECURITY.md` when the stored key does not open the
+device. It goes away once the daemon's next frame has no reason (the keyring was unlocked and the
+device opened), and while the daemon connection is lost. A reason this build does not know shows as
 `WhatsApp stopped the session`.
 
 `--theme-dir DIR` follows `DIR/colors.toml` instead of Omarchy's theme; `--probe` runs the theme
@@ -61,7 +63,7 @@ group message, who wrote it first (`Ana: Running late`; the title stays the grou
 ## Background mode
 
 With `[app] background = true` (the default), closing the window only hides it: the app keeps
-running, connected to `nunciod`, and keeps notifying. Quit (Ctrl+Q, or Quit in the sidebar
+running, connected to `nunciod`, and keeps notifying. Quit (Ctrl+Q, or Quit in the chat list
 header's menu) really quits. Launching `nuncio-desktop` again, clicking a notification or opening a link brings the
 window back. With `background = false`, closing the window quits.
 
@@ -91,7 +93,8 @@ link on the command line.
 
 ## Command palette
 
-F1 or Ctrl+K (or Command palette in the sidebar header's menu) opens a search box over the window
+F1 or Ctrl+K (or the rail's `Commands` button, or Command palette in the chat list header's menu)
+opens a search box over the window
 listing what can be done now, each with its key:
 
 - `Chat: <name>` for every chat (named as the list names it): opens it, as a click does;
@@ -175,10 +178,24 @@ animated one does not play). Shift+O opens the file with the desktop's opener.
 
 ## Layout
 
-After [Sealwax](https://github.com/PixDevsApps/sealwax) (MIT; its design was copied, no code): the
-chat list in the sidebar and the conversation as the content of an `AdwNavigationSplitView`, one
-pane at a time below 600 px, flat surfaces in the live Omarchy palette, toasts for notices.
+After [Sealwax](https://github.com/PixDevsApps/sealwax) (MIT; its design was copied, no code), as
+the design plan (`docs/design/redesign-plan.md` §5) sets it: three panes that fill the window, with
+no outer margin, separated by 1 px lines that can be dragged (a `gtk::Paned` at each seam), flat
+surfaces in the live Omarchy palette's roles, toasts for notices.
 
+- **Rail (200 px):** the one filled button (`Commands`, the command palette), then the filters
+  **All**, **Unread** (chats with unread messages) and **Archived**, each with how many chats it
+  lists, then the connection line at the bottom. A chat opened from the list stays in the filter
+  it was opened from while that filter is shown, so reading an unread chat does not pull its row
+  away; no other filter lists it for that, and the counts never include it.
+- **Widths:** from 1100 px wide, three panes (rail 200 px, chat list 360 px, the conversation the
+  rest); from 760 px the rail is a 48 px strip of icons with tooltips; below 760 px one pane at a
+  time: the list, or the open conversation, with a back button and Escape (from a message, or from
+  the composer when there is nothing else for Escape to do) going back to the list.
+- **Headers (44 px):** the pane's title at its start; the conversation's header holds only the chat's
+  name, with the search button.
+- **Corners:** every element's corners are Hyprland's `decoration:rounding` (see
+  [Font and corners](#font-and-corners)), and square without Hyprland.
 - **Chat list:** title, unread count, `★` pinned, `⊘` muted, `▤` archived (archived chats last), the
   last message and its time.
 - **Conversation:** my messages on the right in the accent colour, theirs on the left with the
@@ -209,10 +226,11 @@ The app follows the rest of an Omarchy desktop, as it follows the palette:
   gives no usable answer, libadwaita's font stays.
 - **Corners.** Under Hyprland (`HYPRLAND_INSTANCE_SIGNATURE` set) the app asks
   `hyprctl -j getoption decoration:rounding` once at start, with a 200 ms limit, and gives its
-  windows that corner radius (Omarchy's default is 0: square corners, like its other windows). Not
-  on Hyprland, or with no `hyprctl`, a slow one or output that is not a rounding, libadwaita's
-  corners stay and one line says why. A change of the rounding is seen on the next start. Bubbles
-  keep their own radius.
+  windows and every element in them (buttons, entries, bubbles, badges, popovers) that corner
+  radius (Omarchy's default is 0: square corners, like its other windows). Not on Hyprland, or with
+  no `hyprctl`, a slow one or output that is not a rounding, the window and every element in it are
+  square (the design's default), and one line says why. A change of the rounding is
+  seen on the next start.
 - **Title bar.** On Hyprland the window controls are hidden ([Layout](#layout)).
 
 The windows carry the `nuncio-window` class and their content `nuncio-root`, for your own CSS.
@@ -233,10 +251,10 @@ Tab moves between the chat list, the conversation and the composer.
 | conversation | Shift+O | open the media file (a picture too) with the desktop's opener |
 | conversation | Enter | on a photo or sticker, show it in full; on any other message, its menu |
 | conversation | Menu, Shift+F10, right click | the message's menu |
-| conversation | Escape | go to the composer |
+| conversation | Escape | go to the composer (with one pane shown, back to the chat list) |
 | composer | Enter | send |
 | composer | Shift+Enter | new line |
-| composer | Escape | cancel the reply (else go to the conversation) |
+| composer | Escape | cancel the reply (else go to the conversation; with one pane shown and no message, back to the chat list) |
 | anywhere | Ctrl+F | search the open chat (Enter searches, Escape closes) |
 | anywhere | F1, Ctrl+K | the command palette (type to filter, Up/Down, Enter runs, Escape closes) |
 | anywhere | Ctrl+, | the settings |
@@ -260,7 +278,8 @@ sticker says `Photo` or `Sticker` instead of `[image]` / `[sticker]`).
 ## Tests
 
 `cargo test -p nuncio-desktop`: the command line, the Omarchy font and Hyprland rounding in the
-generated CSS, `hyprctl`'s answer (through a fake runner: never the real one), the view data, the controller (notifications, links), the
+generated CSS, the panes' CSS from the palette roles, the layout chosen at each width, the rail's
+filters and connection line, `hyprctl`'s answer (through a fake runner: never the real one), the view data, the controller (notifications, links), the
 lifecycle (background, start hidden), the palette's commands and matching, the settings' rules, the
 pictures (boxes, what is decoded when, the cache, two decoding threads) and the worker (against a
 fake daemon) are plain unit tests; `tests/smoke.rs` builds the real window on GTK's main thread (its own `main`,

@@ -285,27 +285,100 @@ fn a_media_file_being_fetched_to_open_says_downloading() {
 }
 
 #[test]
-fn the_headers_say_reconnecting_while_the_connection_is_lost() {
+fn the_rail_says_the_connection_in_one_word() {
     let mut m = model(vec![chat(ANA, "Ana")]);
     assert_eq!(
-        conversation_header(&m),
-        Header {
-            title: "Ana".to_owned(),
-            subtitle: "linked".to_owned()
+        rail_status(&m),
+        RailStatus {
+            word: "linked".to_owned(),
+            linked: true
         }
     );
     m.set_connected(false);
-    assert_eq!(conversation_header(&m).subtitle, "reconnecting…");
-    assert_eq!(sidebar_header(&m).subtitle, "reconnecting…");
-    m.set_connected(true);
-    m.apply(&DaemonFrame::EventUnread {
-        v: PROTOCOL_VERSION,
-        unread: 4,
-        jid: ANA.to_owned(),
-        chat_unread: 4,
-    });
-    assert_eq!(sidebar_header(&m).subtitle, "linked · 4 unread");
-    assert_eq!(conversation_header(&model(Vec::new())).title, "No chat");
+    assert_eq!(
+        rail_status(&m),
+        RailStatus {
+            word: "reconnecting…".to_owned(),
+            linked: false
+        }
+    );
+}
+
+#[test]
+fn the_transcript_header_is_only_the_chat_name() {
+    let mut m = model(vec![chat(ANA, "Ana")]);
+    assert_eq!(conversation_title(&m), "Ana");
+    m.set_connected(false);
+    assert_eq!(
+        conversation_title(&m),
+        "Ana",
+        "the connection is the rail's"
+    );
+    assert_eq!(conversation_title(&model(Vec::new())), "No chat");
+}
+
+#[test]
+fn the_filters_list_all_unread_or_archived_chats() {
+    let mut ana = chat(ANA, "Ana");
+    ana.unread = 2;
+    let mut cara = chat("15551230003@s.whatsapp.net", "Cara");
+    cara.archived = true;
+    cara.unread = 1;
+    let m = model(vec![cara, ana, chat(BEN, "Ben")]);
+    let names = |filter| -> Vec<String> {
+        listed(&m, filter, None)
+            .into_iter()
+            .map(|i| chat_title(&m.chat_list().chats()[i]))
+            .collect()
+    };
+    assert_eq!(names(Filter::All), ["Ana", "Ben", "Cara"], "archived last");
+    assert_eq!(names(Filter::Unread), ["Ana", "Cara"]);
+    assert_eq!(names(Filter::Archived), ["Cara"]);
+    let filters: Vec<&str> = Filter::EACH.iter().map(|f| f.name()).collect();
+    assert_eq!(filters, ["All", "Unread", "Archived"]);
+}
+
+/// Ana, Ben (read now, opened from Unread) and Cara (archived), with Ben's conversation open.
+fn ben_open() -> Model {
+    let mut cara = chat("15551230003@s.whatsapp.net", "Cara");
+    cara.archived = true;
+    let mut m = model(vec![chat(ANA, "Ana"), chat(BEN, "Ben"), cara]);
+    m.select_chat(1);
+    m.open_selected().expect("opens");
+    assert_eq!(m.selected_jid(), Some(BEN));
+    m
+}
+
+#[test]
+fn the_open_chat_stays_only_in_the_filter_it_was_opened_from() {
+    let m = ben_open();
+    assert_eq!(
+        listed(&m, Filter::Unread, Some(Filter::Unread)),
+        [1],
+        "read now, but opened from Unread: its row stays"
+    );
+    assert_eq!(
+        listed(&m, Filter::Archived, Some(Filter::Unread)),
+        [2],
+        "Archived lists only the archived chat"
+    );
+    assert!(
+        listed(&m, Filter::Unread, None).is_empty(),
+        "opened elsewhere"
+    );
+    assert!(
+        listed(&m, Filter::Unread, Some(Filter::Archived)).is_empty(),
+        "opened from another filter"
+    );
+    assert_eq!(listed(&m, Filter::All, Some(Filter::Unread)), [0, 1, 2]);
+}
+
+#[test]
+fn the_counts_never_include_the_open_chat() {
+    let m = ben_open();
+    assert_eq!(count(&m, Filter::All), 3);
+    assert_eq!(count(&m, Filter::Unread), 0, "nothing is unread");
+    assert_eq!(count(&m, Filter::Archived), 1);
 }
 
 #[test]
@@ -419,45 +492,45 @@ fn a_group_bubble_and_its_label_name_the_sender_and_fall_back_to_the_group() {
     assert_eq!(shown[1].label, "Climbing, 10:05: an old one");
 }
 
-/// Q6: the headers say why WhatsApp stopped the session, in fixed text mapped from
-/// `stop_reason`; without one they are as before.
+/// Q6: the strip under the transcript header says why WhatsApp stopped the session, in fixed
+/// text mapped from `stop_reason`; the rail keeps the short word; without one there is no strip.
 #[test]
-fn the_headers_name_the_stop_reason() {
+fn the_strip_names_the_stop_reason() {
     use nuncio_client::wire::StopReason;
     let mut m = model(vec![chat(ANA, "Ana")]);
-    assert_eq!(connection(&m), "linked");
+    assert_eq!(stop_strip(&m), None);
     m.apply(&DaemonFrame::EventConnection {
         v: PROTOCOL_VERSION,
         session: Session::Offline,
         stop_reason: None,
     });
-    assert_eq!(connection(&m), "offline");
+    assert_eq!(stop_strip(&m), None);
+    assert_eq!(rail_status(&m).word, "offline");
+    assert!(!rail_status(&m).linked);
     m.apply(&DaemonFrame::EventConnection {
         v: PROTOCOL_VERSION,
         session: Session::Offline,
         stop_reason: Some(StopReason::StreamReplaced),
     });
     assert_eq!(
-        connection(&m),
-        "offline · another connection of this device took over"
+        stop_strip(&m).as_deref(),
+        Some("another connection of this device took over")
     );
     assert_eq!(
-        sidebar_header(&m).subtitle,
-        "offline · another connection of this device took over"
-    );
-    assert_eq!(
-        conversation_header(&m).subtitle,
-        "offline · another connection of this device took over"
+        rail_status(&m).word,
+        "offline",
+        "the rail keeps the short word"
     );
     // Lost daemon connection wins: the stop is the daemon's news, reconnecting is ours.
     m.set_connected(false);
-    assert_eq!(connection(&m), "reconnecting…");
+    assert_eq!(stop_strip(&m), None);
+    assert_eq!(rail_status(&m).word, "reconnecting…");
 }
 
-/// D4: a stored device nunciod keeps closed shows its fixed text in the headers, and a later
-/// frame without a stop_reason (the device opened) clears it.
+/// D4: a stored device nunciod keeps closed shows its fixed text in the strip, and a later frame
+/// without a stop_reason (the device opened) clears it.
 #[test]
-fn the_headers_name_a_closed_device_and_clear_it() {
+fn the_strip_names_a_closed_device_and_clears() {
     use nuncio_client::wire::StopReason;
     let mut m = model(vec![chat(ANA, "Ana")]);
     m.apply(&DaemonFrame::EventConnection {
@@ -466,8 +539,8 @@ fn the_headers_name_a_closed_device_and_clear_it() {
         stop_reason: Some(StopReason::KeyringLocked),
     });
     assert_eq!(
-        sidebar_header(&m).subtitle,
-        "offline · keyring locked: unlock it to connect"
+        stop_strip(&m).as_deref(),
+        Some("keyring locked: unlock it to connect")
     );
     m.apply(&DaemonFrame::EventConnection {
         v: PROTOCOL_VERSION,
@@ -475,13 +548,13 @@ fn the_headers_name_a_closed_device_and_clear_it() {
         stop_reason: Some(StopReason::DeviceUnreadable),
     });
     assert_eq!(
-        conversation_header(&m).subtitle,
-        "offline · the stored key does not open this device: see SECURITY.md"
+        stop_strip(&m).as_deref(),
+        Some("the stored key does not open this device: see SECURITY.md")
     );
     m.apply(&DaemonFrame::EventConnection {
         v: PROTOCOL_VERSION,
         session: Session::Offline,
         stop_reason: None,
     });
-    assert_eq!(connection(&m), "offline");
+    assert_eq!(stop_strip(&m), None);
 }

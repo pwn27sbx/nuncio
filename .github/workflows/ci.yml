@@ -1,0 +1,243 @@
+# The checks the project runs locally (README.md, "Development"; AGENTS.md, "Code"), plus the
+# Arch Linux package build, the Rust MSRV build and the dependency audits. Read-only: no
+# secrets, no release, no artifacts.
+name: CI
+
+on:
+  push:
+    # feat/m4-omarchy: until this workflow is on main, the only way to see its results on that
+    # branch (workflow_dispatch only works for workflows on the default branch). Drop it once the
+    # branch has a pull request.
+    branches: [main, feat/m4-omarchy]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go (gofmt, vet, pure-Go build, race tests, govulncheck)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The oldest Go the project supports: the `go` line of go.mod.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # The D-Bus tests in cmd/nunciod start a private dbus-daemon of their own and skip without it.
+      - name: Install dbus-daemon
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends dbus-daemon
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            printf 'gofmt needed:\n%s\n' "$unformatted"
+            exit 1
+          fi
+      - name: go vet
+        run: go vet ./...
+      - name: Build without cgo
+        run: CGO_ENABLED=0 go build ./...
+      - name: go test -race
+        run: go test -race -count=1 -timeout 900s ./...
+      # govulncheck reports the vulnerabilities the code actually reaches, in the modules and in
+      # the standard library of the Go that runs it. It runs on the current stable Go, the one a
+      # package is built with (Arch ships the latest), not on go.mod's minimum, whose old standard
+      # library would fail on fixes every newer Go already has.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache: false
+      - name: govulncheck
+        run: |
+          go version
+          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  rust:
+    name: Rust (fmt, clippy, tests)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # nuncio-desktop asks for GTK 4.12 and libadwaita 1.4 (crates/nuncio-desktop/Cargo.toml);
+      # Ubuntu 24.04 ships GTK 4.14 and libadwaita 1.5.
+      - name: Install GTK 4 and libadwaita
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libgtk-4-dev libadwaita-1-dev
+      # The toolchain rust-toolchain.toml pins (rustup >= 1.28 installs it with no argument).
+      - name: Install the pinned toolchain
+        run: |
+          rustup toolchain install
+          rustc --version
+          cargo --version
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      # Without a display the desktop smoke test prints "skipped" and passes, as it does locally.
+      - name: cargo test
+        run: cargo test --workspace --no-fail-fast
+
+  msrv:
+    name: Rust MSRV (cargo check with the workspace rust-version)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install GTK 4 and libadwaita
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libgtk-4-dev libadwaita-1-dev
+      # The version comes from Cargo.toml's [workspace.package], which every crate inherits, so
+      # it is written once. RUSTUP_TOOLCHAIN overrides rust-toolchain.toml for the later steps.
+      - name: Install the MSRV toolchain
+        run: |
+          msrv=$(sed -n '/^\[workspace.package\]/,/^\[/s/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          if [ -z "$msrv" ]; then
+            echo "no rust-version in Cargo.toml's [workspace.package]" >&2
+            exit 1
+          fi
+          rustup toolchain install "$msrv" --profile minimal
+          echo "RUSTUP_TOOLCHAIN=$msrv" >>"$GITHUB_ENV"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: msrv
+      - name: cargo check
+        run: |
+          rustc --version
+          cargo check --locked --workspace --all-targets
+
+  cargo-deny:
+    name: cargo-deny (licences, advisories, bans, sources)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      CARGO_TERM_COLOR: always
+      # The release binary and the SHA-256 that release publishes next to it
+      # (cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz.sha256).
+      CARGO_DENY_VERSION: 0.20.2
+      CARGO_DENY_SHA256: 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # cargo-deny reads the graph through `cargo metadata`.
+      - name: Install the pinned toolchain
+        run: rustup toolchain install
+      - name: Install cargo-deny
+        run: |
+          name=cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl
+          dir=$RUNNER_TEMP/cargo-deny
+          mkdir -p "$dir"
+          curl -fsSL --proto '=https' --proto-redir '=https' -o "$dir/$name.tar.gz" \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/$name.tar.gz"
+          echo "$CARGO_DENY_SHA256  $dir/$name.tar.gz" | sha256sum -c -
+          tar -xzf "$dir/$name.tar.gz" -C "$dir" --strip-components=1
+          "$dir/cargo-deny" --version
+          echo "$dir" >>"$GITHUB_PATH"
+      # deny.toml at the repository root holds the policy.
+      - name: cargo deny check
+        run: cargo-deny --locked check
+
+  arch:
+    name: Arch Linux package (makepkg, namcap, systemd-analyze, check.sh)
+    runs-on: ubuntu-24.04
+    # archlinux:base of 2026-10-18 (the `latest` tag on 2026-10-22), by its image index digest.
+    container: archlinux:base-20261018.0.612668@sha256:52dfbd5afb23a220d5ee92dafcb4c788d96c026ed04179890c23adef4c897fa0
+    timeout-minutes: 60
+    steps:
+      - name: Install the build and check tools
+        run: |
+          # The image strips docs and licences with NoExtract; an ordinary system keeps them, and
+          # the package installs both. Pacman's download sandbox can be refused by the container's
+          # own seccomp profile; this container is thrown away after the job.
+          sed -i -e '/^NoExtract/d' -e 's/^#\?DisableSandbox$/DisableSandbox/' /etc/pacman.conf
+          grep -q '^DisableSandbox$' /etc/pacman.conf || sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+          # The keyring first, so packages signed by keys newer than the image still verify.
+          pacman -Sy --noconfirm archlinux-keyring
+          # base-devel and namcap, the PKGBUILD's depends and makedepends (rust provides cargo,
+          # base-devel provides pkgconf), and check.sh's python and desktop-file-utils.
+          pacman -Su --noconfirm --needed base-devel git namcap \
+            gtk4 libadwaita glib2 gcc-libs glibc go rust pkgconf \
+            python desktop-file-utils
+      # After git is installed, so the checkout is a git repository: package-source.sh runs
+      # `git archive HEAD`.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # makepkg refuses to run as root. The builder gets its own copy of the checkout, so git
+      # sees a repository owned by the user running it.
+      - name: Create the build user
+        run: |
+          useradd --create-home builder
+          cp -a "$GITHUB_WORKSPACE" /home/builder/nuncio
+          chown -R builder:builder /home/builder/nuncio
+      - name: package-source.sh and makepkg (build, check, package)
+        run: |
+          runuser -l builder -c 'set -euo pipefail
+            cd ~/nuncio
+            packaging/package-source.sh ~/pkg
+            cd ~/pkg
+            makepkg --cleanbuild --force --noconfirm'
+      # namcap prints errors (E:) and warnings (W:); an error fails the job.
+      - name: namcap on the PKGBUILD and the package
+        run: |
+          cd /home/builder/pkg
+          out=$(namcap PKGBUILD nuncio-*.pkg.tar.zst)
+          printf '%s\n' "$out"
+          if grep -q ' E: ' <<<"$out"; then
+            echo "namcap reported errors" >&2
+            exit 1
+          fi
+        shell: bash
+      - name: Install the package
+        run: pacman -U --noconfirm /home/builder/pkg/nuncio-*.pkg.tar.zst
+      # packaging/MANIFEST lists every file the package installs; pacman's list of the installed
+      # package must be exactly that (directories left out).
+      - name: Installed files match packaging/MANIFEST
+        shell: bash
+        run: |
+          diff <(grep -vE '^[[:space:]]*(#|$)' packaging/MANIFEST | sort) \
+            <(pacman -Qlq nuncio | grep -v '/$' | sort)
+      # The installed unit, as the user that would enable it (systemd-analyze --user needs a
+      # runtime directory), then every packaging check with desktop-file-validate and
+      # systemd-analyze present.
+      - name: systemd-analyze verify and packaging/check.sh
+        run: |
+          runuser -l builder -c 'set -euo pipefail
+            export XDG_RUNTIME_DIR=$(mktemp -d)
+            systemd-analyze --user verify /usr/lib/systemd/user/nunciod.service
+            bash ~/nuncio/packaging/check.sh'
+
+  packaging:
+    # Kept beside the Arch job for ShellCheck: on Arch it pulls in the whole GHC runtime.
+    name: Packaging (packaging/check.sh with ShellCheck)
+    runs-on: ubuntu-24.04
+    # A plain container, without systemd: `systemd-analyze --user verify` needs /usr/bin/nunciod
+    # installed, so check.sh skips it here; the Arch job runs it on the installed package.
+    container: ubuntu:24.04
+    timeout-minutes: 10
+    steps:
+      - name: Install the check tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 shellcheck desktop-file-utils
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: packaging/check.sh
+        run: bash packaging/check.sh

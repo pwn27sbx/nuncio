@@ -1,0 +1,21 @@
+# Every path the nuncio package installs (package() in PKGBUILD.in), one per line.
+# `pacman -Ql nuncio` on an installed system must list exactly these files (plus their
+# directories), and after `pacman -R nuncio` none of them may exist. packaging/check.sh checks
+# that package() installs each of them and nothing else.
+/usr/bin/nunciod
+/usr/bin/nuncio
+/usr/bin/nuncio-tui
+/usr/bin/nuncio-desktop
+/usr/lib/systemd/user/nunciod.service
+/usr/share/dbus-1/services/io.github.pwn27sbx.nuncio.service
+/usr/share/dbus-1/services/io.github.pwn27sbx.nuncio.Desktop.service
+/usr/share/applications/io.github.pwn27sbx.nuncio.Desktop.desktop
+/usr/share/applications/nuncio-tui.desktop
+/etc/xdg/autostart/io.github.pwn27sbx.nuncio.Desktop.desktop
+/usr/share/icons/hicolor/scalable/apps/io.github.pwn27sbx.nuncio.Desktop.svg
+/usr/share/icons/hicolor/symbolic/apps/io.github.pwn27sbx.nuncio.Desktop-symbolic.svg
+/usr/share/licenses/nuncio/CREDITS.md
+/usr/share/doc/nuncio/README.md
+/usr/share/doc/nuncio/config.md
+/usr/share/doc/nuncio/nuncio-desktop.md
+/usr/share/doc/nuncio/PACKAGING.md

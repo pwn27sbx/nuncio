@@ -10,4 +10,22 @@ rust-version.workspace = true
 nuncio-client = { path = "../nuncio-client" }
 glib = "0.22"
 gtk = { package = "gtk4", version = "0.11", features = ["v4_12"] }
-adw = { package = "libadwaita", version = "0.9" }
+# 1.4: the navigation split view, the toolbar view and breakpoints.
+adw = { package = "libadwaita", version = "0.9", features = ["v1_4"] }
+# Already in Cargo.lock (through glib): the worker's answers into the GLib main loop.
+futures-channel = "0.3"
+# Already in Cargo.lock: shrinking a decoded picture to its box (decoding is nuncio_client::pictures).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# Already in Cargo.lock (through nuncio-client): `hyprctl -j` output.
+serde_json = "1.0"
+# Already in Cargo.lock (through nuncio-client): the error types, as nuncio-client writes them.
+thiserror = "2.0"
+
+[dev-dependencies]
+# Already in Cargo.lock: test thumbnails, as the wire carries them.
+base64 = "0.22"
+
+# GTK must run on the main thread, which libtest's harness does not give a test.
+[[test]]
+name = "smoke"
+harness = false

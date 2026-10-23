@@ -3,6 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,13 +17,23 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/godbus/dbus/v5"
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waSyncAction"
+	"go.mau.fi/whatsmeow/types"
+	waevents "go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
 
 	"github.com/pwn27sbx/nuncio/internal/ipc"
+	"github.com/pwn27sbx/nuncio/internal/store"
+	"github.com/pwn27sbx/nuncio/internal/wa"
 )
 
 var (
@@ -45,6 +58,12 @@ func runMain(m *testing.M) int {
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 	binDir = dir
+	stopWatchdog, err := startWatchdog()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "watchdog:", err)
+		return 1
+	}
+	defer stopWatchdog()
 	nunciodBin = filepath.Join(dir, "nunciod")
 	nuncioBin = filepath.Join(dir, "nuncio")
 
@@ -56,6 +75,26 @@ func runMain(m *testing.M) int {
 		}
 	}
 	return m.Run()
+}
+
+// watchdogGroup is the process group of a shell that lives exactly as long as this test binary:
+// it blocks reading a pipe only the binary holds open, and when that closes (the binary ends in
+// any way, a -timeout panic and a kill included, where no cleanup runs) it kills its group. A
+// daemon a test starts joins that group, so it cannot outlive the binary.
+var watchdogGroup int
+
+func startWatchdog() (stop func(), err error) {
+	cmd := exec.Command("/bin/sh", "-c", "read _; kill -KILL 0")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	w, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, fmt.Errorf("stdin pipe: %w", err)
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start: %w", err)
+	}
+	watchdogGroup = cmd.Process.Pid
+	return func() { _ = w.Close(); _ = cmd.Wait() }, nil
 }
 
 func repoRoot(t *testing.T) string {
@@ -77,20 +116,28 @@ func repoRoot(t *testing.T) string {
 }
 
 // daemonEnv is deliberately minimal: a test daemon must never see the user's
-// real session bus or runtime directory.
+// real session bus, runtime directory or data directory (where a linked device
+// would make it connect to WhatsApp).
 func daemonEnv(runtimeDir, busAddress string) []string {
 	return []string{
 		"PATH=" + os.Getenv("PATH"),
+		"XDG_DATA_HOME=" + dataHome(runtimeDir),
 		"XDG_RUNTIME_DIR=" + runtimeDir,
 		"DBUS_SESSION_BUS_ADDRESS=" + busAddress,
 	}
+}
+
+// dataHome is the empty XDG_DATA_HOME a test daemon gets: it holds no
+// nuncio.db, so the daemon is unlinked and connects to nothing.
+func dataHome(runtimeDir string) string {
+	return filepath.Join(runtimeDir, "data")
 }
 
 // noBus is an address nothing listens on, so the daemon runs without the
 // D-Bus face.
 func noBus(t *testing.T) string {
 	t.Helper()
-	return "unix:path=" + filepath.Join(t.TempDir(), "no-such-bus")
+	return "unix:path=" + filepath.Join(shortTempDir(t), "no-such-bus")
 }
 
 func socketPath(runtimeDir string) string {
@@ -101,17 +148,18 @@ func startDaemon(t *testing.T, runtimeDir, busAddress string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command(nunciodBin)
 	cmd.Env = daemonEnv(runtimeDir, busAddress)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: watchdogGroup}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	cmd.Stdout = io.Discard
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start nunciod: %v", err)
 	}
+	// One cleanup, so stderr is read only after Wait: until then os/exec's
+	// copying goroutine may still be writing to the buffer.
 	t.Cleanup(func() {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-	})
-	t.Cleanup(func() {
 		if t.Failed() && stderr.Len() > 0 {
 			t.Logf("nunciod stderr: %s", stderr.String())
 		}
@@ -200,13 +248,13 @@ func assertFixtureChats(t *testing.T, chats []ipc.Chat) {
 		t.Errorf("second chat last message = %+v, want a message from me", chats[1].LastMessage)
 	}
 	third := chats[2]
-	if third.JID != "120363000000000000@g.us" || !third.Archived || third.Unread != 17 || third.LastMessage != nil {
-		t.Errorf("group chat = %+v, want an archived group with 17 unread and no last message", third)
+	if third.JID != "120363000000000000@g.us" || !third.Archived || !third.Muted || third.Unread != 17 || third.LastMessage != nil {
+		t.Errorf("group chat = %+v, want an archived, muted group with 17 unread and no last message", third)
 	}
 }
 
 func TestDaemonServesProtocolOnSocket(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	startDaemon(t, rt, noBus(t))
 	socket := socketPath(rt)
 
@@ -238,13 +286,104 @@ func TestDaemonServesProtocolOnSocket(t *testing.T) {
 	}
 }
 
+func TestDaemonWithoutDatabaseIsUnlinkedAndCreatesNoDataDir(t *testing.T) {
+	rt := shortTempDir(t)
+	startDaemon(t, rt, noBus(t))
+	st, err := waitForDaemon(t, socketPath(rt)).Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.Linked || st.Session != ipc.SessionUnlinked {
+		t.Errorf("Status() = %+v, want unlinked", st)
+	}
+	dir := filepath.Join(dataHome(rt), "nuncio")
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat %s = %v, want it not to exist: starting the daemon must not create the data dir", dir, err)
+	}
+}
+
+type fixedSession wa.State
+
+func (s fixedSession) State() wa.State { return wa.State(s) }
+
+func (s fixedSession) StopKind() string { return "" }
+
+func (s fixedSession) Send(string, string, string) (ipc.Sent, error) {
+	return ipc.Sent{}, errors.New("a fixed session cannot send")
+}
+
+func (s fixedSession) SendReply(string, string, string, string) (ipc.Sent, error) {
+	return ipc.Sent{}, errors.New("a fixed session cannot send")
+}
+
+func (s fixedSession) React(string, string, string) error {
+	if wa.State(s) == wa.StateUnlinked {
+		return ipc.ErrNotLinked
+	}
+	return errors.New("a fixed session cannot react")
+}
+
+// MarkRead answers not linked while unlinked and a total of 7 otherwise.
+func (s fixedSession) MarkRead(string) (int, error) {
+	if wa.State(s) == wa.StateUnlinked {
+		return 0, ipc.ErrNotLinked
+	}
+	return 7, nil
+}
+
+func (s fixedSession) Retry(string) (ipc.Sent, error) {
+	return ipc.Sent{}, errors.New("a fixed session cannot retry")
+}
+
+func (s fixedSession) Logout(context.Context) error {
+	return errors.New("a fixed session cannot log out")
+}
+func (s fixedSession) Close() {}
+
+func (s fixedSession) DownloadMedia(string, string) (string, string, error) {
+	if wa.State(s) == wa.StateUnlinked {
+		return "", "", ipc.ErrNotLinked
+	}
+	return "", "", errors.New("a fixed session has no media")
+}
+
+func TestStatusReportsTheSessionState(t *testing.T) {
+	for _, tc := range []struct {
+		state  wa.State
+		linked bool
+	}{
+		{wa.StateUnlinked, false},
+		{wa.StateLinked, true},
+		{wa.StateOffline, true},
+	} {
+		d, err := newDaemon(fixedSession(tc.state), nil)
+		if err != nil {
+			t.Fatalf("newDaemon: %v", err)
+		}
+		want := ipc.Status{Daemon: daemonVersion, Linked: tc.linked, Session: string(tc.state)}
+		if got := d.Status(); got != want {
+			t.Errorf("Status() with a %s session = %+v, want %+v", tc.state, got, want)
+		}
+		if got := d.Hello("test/0.1.0"); got != want {
+			t.Errorf("Hello() with a %s session = %+v, want %+v", tc.state, got, want)
+		}
+	}
+}
+
 func TestDaemonReplacesStaleSocket(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	socket := socketPath(rt)
 	makeStaleSocket(t, socket)
 	before, err := os.Stat(socket)
 	if err != nil {
 		t.Fatalf("stat stale socket: %v", err)
+	}
+	// A second link keeps the stale inode allocated. Without it a file system
+	// that recycles freed inode numbers at once (ext4 does, APFS does not)
+	// hands the daemon's new socket the stale one's number, and SameFile
+	// would mistake the replacement for the stale file.
+	if err := os.Link(socket, filepath.Join(rt, "stale.sock")); err != nil {
+		t.Fatalf("link stale socket: %v", err)
 	}
 
 	startDaemon(t, rt, noBus(t))
@@ -263,7 +402,7 @@ func TestDaemonReplacesStaleSocket(t *testing.T) {
 }
 
 func TestDaemonLeavesLiveSocketAlone(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	socket := socketPath(rt)
 	bus := noBus(t)
 
@@ -317,7 +456,7 @@ func startPrivateBus(t *testing.T, runtimeDir string) *privateBus {
 		t.Skip("dbus-daemon is not installed: skipping the D-Bus spike")
 	}
 	repo := repoRoot(t)
-	dir := t.TempDir()
+	dir := shortTempDir(t)
 	socket := filepath.Join(dir, "bus")
 	configFile := filepath.Join(dir, "bus.conf")
 	dataHome := filepath.Join(dir, "data-home")
@@ -342,7 +481,17 @@ func startPrivateBus(t *testing.T, runtimeDir string) *privateBus {
 		t.Fatalf("write bus config: %v", err)
 	}
 
-	cmd := exec.Command(daemon, "--config-file="+configFile, "--nofork", "--print-address=1")
+	// The bus runs in a process group of its own, which every service it activates inherits, so
+	// the cleanup can end them all by the group without knowing their PIDs (macOS's dbus-daemon
+	// answers no GetConnectionUnixProcessID). A cleanup does not run when the test binary dies
+	// (a -timeout panic, a kill), so a shell keeps the bus's group tied to the binary's life: it
+	// blocks reading a pipe only the binary holds open, and when that closes it kills the group.
+	cmd := exec.Command("/bin/sh", "-c", `"$0" "$@" </dev/null & read _; kill -KILL 0`,
+		daemon, "--config-file="+configFile, "--nofork", "--print-address=1")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if _, err := cmd.StdinPipe(); err != nil {
+		t.Fatalf("stdin pipe: %v", err)
+	}
 	cmd.Env = []string{
 		// The activation file runs `env nunciod`, so the bus and everything
 		// it starts must find the freshly built daemon on PATH.
@@ -376,10 +525,7 @@ func startPrivateBus(t *testing.T, runtimeDir string) *privateBus {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start dbus-daemon: %v", err)
 	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-	})
+	t.Cleanup(func() { stopProcessGroup(t, cmd) })
 
 	addrs := make(chan string, 1)
 	go func() {
@@ -402,20 +548,27 @@ func startPrivateBus(t *testing.T, runtimeDir string) *privateBus {
 	}
 }
 
-// killActivatedDaemon kills whatever owns the daemon name on this private bus,
-// so a test never leaks a daemon process behind the bus it started.
-func killActivatedDaemon(t *testing.T, conn *dbus.Conn) {
-	t.Cleanup(func() {
-		call := conn.Object("org.freedesktop.DBus", dbus.ObjectPath("/org/freedesktop/DBus")).
-			Call("org.freedesktop.DBus.GetConnectionUnixProcessID", 0, ipc.DaemonName)
-		var pid uint32
-		if call.Err != nil || call.Store(&pid) != nil || pid == 0 {
+// stopProcessGroup kills the process group cmd leads (cmd started with Setpgid), reaps cmd, and
+// waits until no process of the group is still running: the bus and every daemon it activated.
+// The others are not this test's children, so whoever adopts them reaps them; a container's PID 1
+// may never do that, and a zombie left there counts as gone (kill(-pgid, 0) would still succeed).
+func stopProcessGroup(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
+	pgid := cmd.Process.Pid
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+	_ = cmd.Wait()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		members := runningGroupMembers(t, pgid)
+		if len(members) == 0 {
 			return
 		}
-		if p, err := os.FindProcess(int(pid)); err == nil {
-			_ = p.Kill()
+		if time.Now().After(deadline) {
+			t.Errorf("processes %v of the private bus's group %d still run 5s after SIGKILL", members, pgid)
+			return
 		}
-	})
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func busClient(t *testing.T, address string) *dbus.Conn {
@@ -435,10 +588,9 @@ func busClient(t *testing.T, address string) *dbus.Conn {
 }
 
 func TestDBusActivationStartsDaemonInUnderOneSecond(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	bus := startPrivateBus(t, rt)
 	conn := busClient(t, bus.address)
-	killActivatedDaemon(t, conn)
 	socket := socketPath(rt)
 	if _, err := os.Stat(socket); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("something is already serving %s before the activation test: %v", socket, err)
@@ -482,7 +634,7 @@ func TestDBusActivationStartsDaemonInUnderOneSecond(t *testing.T) {
 }
 
 func TestDaemonExitsWhenNameIsAlreadyOwned(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	bus := startPrivateBus(t, rt)
 	conn := busClient(t, bus.address)
 	reply, err := conn.RequestName(ipc.DaemonName, dbus.NameFlagDoNotQueue)
@@ -509,7 +661,7 @@ func TestDaemonExitsWhenNameIsAlreadyOwned(t *testing.T) {
 }
 
 func TestDBusSingleInstanceSecondDaemonExitsZero(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	bus := startPrivateBus(t, rt)
 	first := startDaemon(t, rt, bus.address)
 	socket := socketPath(rt)
@@ -558,7 +710,7 @@ func TestDBusSingleInstanceSecondDaemonExitsZero(t *testing.T) {
 const wantCLIOutput = "linked=false session=unlinked unread=0\n"
 
 func TestCLIPrintsStatusFromRunningDaemon(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	bus := noBus(t)
 	startDaemon(t, rt, bus)
 	waitForDaemon(t, socketPath(rt))
@@ -573,9 +725,8 @@ func TestCLIPrintsStatusFromRunningDaemon(t *testing.T) {
 }
 
 func TestCLIActivatesDaemonOverDBus(t *testing.T) {
-	rt := t.TempDir()
+	rt := shortTempDir(t)
 	bus := startPrivateBus(t, rt)
-	killActivatedDaemon(t, busClient(t, bus.address))
 
 	env := []string{
 		// The activation file runs `env nunciod`, so the built daemon has to
@@ -637,5 +788,1146 @@ func TestEmbeddedChatListMatchesContractFixture(t *testing.T) {
 	if !reflect.DeepEqual(embedded, resp.Chats) {
 		t.Fatalf("embedded chat list drifted from proto/fixtures/chats_response.json:\n embedded: %+v\n fixture:  %+v",
 			embedded, resp.Chats)
+	}
+}
+
+// fakeWAClient is a linked whatsmeow stand-in that never opens a socket; emit feeds it events.
+// SendMessage answers sendTime, or an error while fail is set, and counts the sends; NewMessageID
+// answers sendID.
+type fakeWAClient struct {
+	handlers []func(any)
+	sendID   string
+	sendTime time.Time
+	sends    atomic.Int64
+	fail     atomic.Bool
+	// timeout makes SendMessage answer whatsmeow's ack timeout, dropped the DisconnectedError real
+	// whatsmeow answers a send pending when the socket drops; onSend, when set, runs inside the
+	// first SendMessage call only, as what happens to the connection while it waits for the ack.
+	timeout atomic.Bool
+	dropped atomic.Bool
+	onSend  func()
+	// logouts counts Logout calls; onLogout, when set, runs inside each one; Logout answers
+	// logoutErr.
+	logouts   atomic.Int64
+	onLogout  func()
+	logoutErr error
+	// receipts counts MarkRead calls.
+	receipts atomic.Int64
+}
+
+func (f *fakeWAClient) Logout(context.Context) error {
+	f.logouts.Add(1)
+	if f.onLogout != nil {
+		f.onLogout()
+	}
+	return f.logoutErr
+}
+
+func (f *fakeWAClient) BuildReaction(_, _, _, emoji string) (*waE2E.Message, error) {
+	return &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{Text: &emoji}}, nil
+}
+
+func (f *fakeWAClient) OwnJID() string { return "15551230009@s.whatsapp.net" }
+
+func (f *fakeWAClient) OwnLID() string { return "" }
+
+func (f *fakeWAClient) SendMessage(context.Context, string, *waE2E.Message, string) (time.Time, error) {
+	if f.sends.Add(1) == 1 && f.onSend != nil {
+		f.onSend()
+	}
+	if f.timeout.Load() {
+		return time.Time{}, whatsmeow.ErrMessageTimedOut
+	}
+	if f.dropped.Load() {
+		return time.Time{}, &whatsmeow.DisconnectedError{Action: "message send"}
+	}
+	if f.fail.Load() {
+		return time.Time{}, errors.New("websocket closed")
+	}
+	return f.sendTime, nil
+}
+
+func (f *fakeWAClient) NewMessageID() string { return f.sendID }
+
+// MarkRead counts read receipts in receipts; ReadReceiptsPrivacy answers "all".
+func (f *fakeWAClient) MarkRead(context.Context, string, string, []string, time.Time, string) error {
+	f.receipts.Add(1)
+	return nil
+}
+
+func (f *fakeWAClient) ReadReceiptsPrivacy(context.Context) (string, error) { return "all", nil }
+
+func (f *fakeWAClient) HasDevice() bool             { return true }
+func (f *fakeWAClient) Connect() error              { f.emit(&waevents.Connected{}); return nil }
+func (f *fakeWAClient) Disconnect()                 {}
+func (f *fakeWAClient) AddEventHandler(h func(any)) { f.handlers = append(f.handlers, h) }
+
+func (f *fakeWAClient) emit(e any) {
+	for _, h := range f.handlers {
+		h(e)
+	}
+}
+
+func textMessage(chat types.JID, id string, fromMe bool, ts time.Time, text string) *waevents.Message {
+	return &waevents.Message{
+		Info: types.MessageInfo{
+			MessageSource: types.MessageSource{Chat: chat, Sender: chat, IsFromMe: fromMe},
+			ID:            id,
+			Timestamp:     ts,
+		},
+		Message: &waE2E.Message{Conversation: proto.String(text)},
+	}
+}
+
+// serveSocket serves h, with events from b, on a private socket and returns its path.
+func serveSocket(t *testing.T, h ipc.Handler, b *ipc.Broker) string {
+	t.Helper()
+	sock := filepath.Join(shortTempDir(t), "core.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatalf("listen %s: %v", sock, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = serve(ctx, ln, h, b); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	return sock
+}
+
+// serveInProcess serves h on a private socket and returns a connected client.
+func serveInProcess(t *testing.T, h ipc.Handler) *ipc.Client {
+	t.Helper()
+	sock := serveSocket(t, h, nil)
+	c, err := ipc.Dial(sock, "test/0.1.0")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func openTestStore(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := store.Open(filepath.Join(t.TempDir(), "nuncio.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := store.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	return db
+}
+
+func TestDaemonServesChatsMessagesAndUnreadFromTheStore(t *testing.T) {
+	db := openTestStore(t)
+	fake := &fakeWAClient{}
+	session := wa.NewSession(fake, db, nil)
+	if err := session.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	group := types.NewJID("120363000000000000", types.GroupServer)
+	t0 := time.Date(2026, 10, 18, 17, 50, 0, 0, time.UTC)
+	fake.emit(textMessage(group, "G1", false, t0, "group hello"))
+	fake.emit(textMessage(ada, "A1", false, t0.Add(time.Minute), "first"))
+	fake.emit(textMessage(ada, "A2", false, t0.Add(2*time.Minute), "second"))
+	fake.emit(textMessage(ada, "A3", true, t0.Add(3*time.Minute), "mine"))
+
+	d, err := newDaemon(session, db)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	c := serveInProcess(t, d)
+
+	st, err := c.Status()
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if st.Unread != 3 || st.Session != ipc.SessionLinked {
+		t.Errorf("Status() = %+v, want linked with 3 unread", st)
+	}
+
+	chats, err := c.Chats(40)
+	if err != nil {
+		t.Fatalf("Chats: %v", err)
+	}
+	wantChats := []ipc.Chat{
+		{JID: ada.String(), Unread: 2, Phone: "…0001", LastMessage: &ipc.Message{
+			ID: "A3", Kind: ipc.KindText, Text: "mine", FromMe: true, Timestamp: "2026-10-18T17:53:00Z"}},
+		{JID: group.String(), Unread: 1, LastMessage: &ipc.Message{
+			ID: "G1", Kind: ipc.KindText, Text: "group hello", Timestamp: "2026-10-18T17:50:00Z"}},
+	}
+	if !reflect.DeepEqual(chats.Chats, wantChats) {
+		t.Errorf("Chats() = %s, want %s", jsonOf(t, chats.Chats), jsonOf(t, wantChats))
+	}
+
+	msgs, err := c.Messages(ada.String(), 2)
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	wantMsgs := ipc.MessagesResponse{V: 1, Op: ipc.OpMessages, JID: ada.String(), Messages: []ipc.Message{
+		{ID: "A3", Kind: ipc.KindText, Text: "mine", FromMe: true, Timestamp: "2026-10-18T17:53:00Z"},
+		{ID: "A2", Kind: ipc.KindText, Text: "second", Timestamp: "2026-10-18T17:52:00Z"},
+	}}
+	if !reflect.DeepEqual(msgs, wantMsgs) {
+		t.Errorf("Messages() = %+v, want %+v", msgs, wantMsgs)
+	}
+
+	// Marking a chat read clears its unread, and the totals follow.
+	if err := session.MarkChatRead(ada.String()); err != nil {
+		t.Fatalf("MarkChatRead: %v", err)
+	}
+	if st, err := c.Status(); err != nil || st.Unread != 1 {
+		t.Errorf("Status() after marking ada read = %+v, %v; want 1 unread", st, err)
+	}
+	chats, err = c.Chats(40)
+	if err != nil {
+		t.Fatalf("Chats: %v", err)
+	}
+	if chats.Chats[0].Unread != 0 || chats.Chats[1].Unread != 1 {
+		t.Errorf("unread after marking ada read = %d and %d, want 0 and 1", chats.Chats[0].Unread, chats.Chats[1].Unread)
+	}
+}
+
+// App-state changes from the phone (pin, archive, mute) show in the next chats reply; a mute
+// that has already ended does not.
+func TestDaemonChatsReplyCarriesTheAppStateFlags(t *testing.T) {
+	db := openTestStore(t)
+	fake := &fakeWAClient{}
+	session := wa.NewSession(fake, db, nil)
+	if err := session.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	grace := types.NewJID("15551230002", types.DefaultUserServer)
+	group := types.NewJID("120363000000000000", types.GroupServer)
+	t0 := time.Date(2026, 10, 18, 17, 50, 0, 0, time.UTC)
+	fake.emit(textMessage(ada, "A1", false, t0.Add(2*time.Minute), "first"))
+	fake.emit(textMessage(grace, "G1", false, t0.Add(time.Minute), "hello"))
+	fake.emit(&waevents.Pin{JID: ada, Action: &waSyncAction.PinAction{Pinned: proto.Bool(true)}})
+	fake.emit(&waevents.Mute{JID: ada, Action: &waSyncAction.MuteAction{
+		Muted: proto.Bool(true), MuteEndTimestamp: proto.Int64(time.Now().Add(time.Hour).UnixMilli())}})
+	fake.emit(&waevents.Archive{JID: grace, Action: &waSyncAction.ArchiveChatAction{Archived: proto.Bool(true)}})
+	fake.emit(&waevents.Mute{JID: grace, Action: &waSyncAction.MuteAction{
+		Muted: proto.Bool(true), MuteEndTimestamp: proto.Int64(time.Now().Add(-time.Hour).UnixMilli())}})
+	fake.emit(&waevents.Mute{JID: group, Action: &waSyncAction.MuteAction{
+		Muted: proto.Bool(true), MuteEndTimestamp: proto.Int64(-1)}})
+
+	d, err := newDaemon(session, db)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	chats, err := serveInProcess(t, d).Chats(40)
+	if err != nil {
+		t.Fatalf("Chats: %v", err)
+	}
+	got := map[string][3]bool{}
+	for _, c := range chats.Chats {
+		got[c.JID] = [3]bool{c.Pinned, c.Archived, c.Muted}
+	}
+	want := map[string][3]bool{
+		ada.String():   {true, false, true},
+		grace.String(): {false, true, false},
+		group.String(): {false, false, true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("chat flags [pinned archived muted] = %v, want %v", got, want)
+	}
+}
+
+func TestDaemonWithoutStoreServesTheFixtureChatsAndNoMessages(t *testing.T) {
+	d, err := newDaemon(fixedSession(wa.StateUnlinked), nil)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	c := serveInProcess(t, d)
+	chats, err := c.Chats(40)
+	if err != nil {
+		t.Fatalf("Chats: %v", err)
+	}
+	assertFixtureChats(t, chats.Chats)
+	msgs, err := c.Messages("15551230001@s.whatsapp.net", 50)
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	if len(msgs.Messages) != 0 || msgs.Messages == nil {
+		t.Errorf("Messages() while unlinked = %#v, want an empty list", msgs.Messages)
+	}
+}
+
+func TestDaemonAnswersEmptyMessagesForAChatNotInTheStore(t *testing.T) {
+	d, err := newDaemon(fixedSession(wa.StateLinked), openTestStore(t))
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	c := serveInProcess(t, d)
+	msgs, err := c.Messages("15551239999@s.whatsapp.net", 50)
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	if msgs.JID != "15551239999@s.whatsapp.net" || len(msgs.Messages) != 0 {
+		t.Errorf("Messages() = %+v, want an empty list for that jid", msgs)
+	}
+	chats, err := c.Chats(40)
+	if err != nil {
+		t.Fatalf("Chats: %v", err)
+	}
+	if len(chats.Chats) != 0 {
+		t.Errorf("Chats() over an empty store = %+v, want none (not the fixture)", chats.Chats)
+	}
+}
+
+func jsonOf(t *testing.T, v any) string {
+	t.Helper()
+	data, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(data)
+}
+
+// subscriber dials sock, handshakes and subscribes, and returns a reader of the frames that
+// follow.
+func subscriber(t *testing.T, sock string) (net.Conn, *bufio.Reader) {
+	t.Helper()
+	conn, err := net.Dial("unix", sock)
+	if err != nil {
+		t.Fatalf("dial %s: %v", sock, err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	br := bufio.NewReader(conn)
+	for _, step := range []struct{ send, reply string }{
+		{`{"v":1,"op":"hello","client":"test/0.1.0"}`, `"op":"hello_ok"`},
+		{`{"v":1,"op":"subscribe"}`, `{"v":1,"op":"subscribed"}`},
+	} {
+		if _, err := io.WriteString(conn, step.send+"\n"); err != nil {
+			t.Fatalf("write %s: %v", step.send, err)
+		}
+		if got := readFrame(t, conn, br, 5*time.Second); !strings.Contains(got, step.reply) {
+			t.Fatalf("reply to %s = %s, want %s", step.send, got, step.reply)
+		}
+	}
+	return conn, br
+}
+
+// readFrame reads one frame within wait; it returns "" when none arrives in time.
+func readFrame(t *testing.T, conn net.Conn, br *bufio.Reader, wait time.Duration) string {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(wait)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	line, err := br.ReadString('\n')
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return ""
+	}
+	if err != nil {
+		t.Fatalf("read frame: %v", err)
+	}
+	return strings.TrimSuffix(line, "\n")
+}
+
+func TestTwoSubscribedClientsBothReceiveAStoredMessage(t *testing.T) {
+	db := openTestStore(t)
+	fake := &fakeWAClient{}
+	session := wa.NewSession(fake, db, nil)
+	events := ipc.NewBroker()
+	session.SetEvents(events)
+	if err := session.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	d, err := newDaemon(session, db)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	sock := serveSocket(t, d, events)
+	first, firstR := subscriber(t, sock)
+	second, secondR := subscriber(t, sock)
+
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	msg := textMessage(ada, "3EB0AAA3", false, time.Date(2026, 10, 18, 17, 58, 0, 0, time.UTC), "Running late")
+	fake.emit(msg)
+	want := []string{
+		`{"v":1,"op":"event_message","jid":"15551230001@s.whatsapp.net","message":{"id":"3EB0AAA3","kind":"text","text":"Running late","from_me":false,"timestamp":"2026-10-18T17:58:00Z"}}`,
+		`{"v":1,"op":"event_unread","unread":1,"jid":"15551230001@s.whatsapp.net","chat_unread":1}`,
+	}
+	for i, r := range []struct {
+		conn net.Conn
+		br   *bufio.Reader
+	}{{first, firstR}, {second, secondR}} {
+		for _, w := range want {
+			if got := readFrame(t, r.conn, r.br, 5*time.Second); got != w {
+				t.Errorf("subscriber %d got %s, want %s", i+1, got, w)
+			}
+		}
+	}
+
+	// The same message again is a duplicate: stored once, published once.
+	fake.emit(msg)
+	if got := readFrame(t, first, firstR, 200*time.Millisecond); got != "" {
+		t.Errorf("a duplicate message published %s, want nothing", got)
+	}
+}
+
+func TestDaemonSendWhileUnlinkedAnswersNotLinked(t *testing.T) {
+	session := wa.NewSession(nil, nil, nil)
+	d, err := newDaemon(session, nil)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	c := serveInProcess(t, d)
+	_, err = c.Send("15551230001@s.whatsapp.net", "On my way", "c-1")
+	var perr *ipc.ProtocolError
+	if !errors.As(err, &perr) || perr.Code != ipc.CodeNotLinked {
+		t.Errorf("Send while unlinked = %v, want a %s error", err, ipc.CodeNotLinked)
+	}
+}
+
+// linkedDaemon is a daemon over a started session with a fake linked client and a real store,
+// served with events on a private socket.
+func linkedDaemon(t *testing.T) (*wa.Session, *fakeWAClient, string) {
+	t.Helper()
+	db := openTestStore(t)
+	fake := &fakeWAClient{sendID: "3EB0BBB1", sendTime: time.Date(2026, 10, 18, 17, 56, 10, 0, time.UTC)}
+	session := wa.NewSession(fake, db, nil)
+	t.Cleanup(session.Close)
+	events := ipc.NewBroker()
+	session.SetEvents(events)
+	if err := session.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	d, err := newDaemon(session, db)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	return session, fake, serveSocket(t, d, events)
+}
+
+func dial(t *testing.T, sock string) *ipc.Client {
+	t.Helper()
+	c, err := ipc.Dial(sock, "test/0.1.0")
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c
+}
+
+func TestDaemonSendWhileLinkedAnswersSentStoresAndPublishes(t *testing.T) {
+	_, fake, sock := linkedDaemon(t)
+	ui, uiR := subscriber(t, sock)
+	c := dial(t, sock)
+
+	sent, err := c.Send("15551230001@s.whatsapp.net", "On my way", "c-7f3a9e21")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	want := ipc.Sent{V: 1, Op: ipc.OpSent, ClientID: "c-7f3a9e21", State: ipc.SendSent, ID: "3EB0BBB1", Timestamp: "2026-10-18T17:56:10Z"}
+	if sent != want {
+		t.Errorf("Send = %+v, want %+v", sent, want)
+	}
+	if n := fake.sends.Load(); n != 1 {
+		t.Errorf("client sends = %d, want 1", n)
+	}
+	msgs, err := c.Messages("15551230001@s.whatsapp.net", 10)
+	if err != nil {
+		t.Fatalf("Messages: %v", err)
+	}
+	wantMsg := ipc.Message{ID: "3EB0BBB1", Kind: ipc.KindText, Text: "On my way", FromMe: true, Timestamp: "2026-10-18T17:56:10Z"}
+	if len(msgs.Messages) != 1 || !reflect.DeepEqual(msgs.Messages[0], wantMsg) {
+		t.Errorf("Messages after a send = %+v, want only %+v", msgs.Messages, wantMsg)
+	}
+	wantEvent := `{"v":1,"op":"event_message","jid":"15551230001@s.whatsapp.net","message":{"id":"3EB0BBB1","kind":"text","text":"On my way","from_me":true,"timestamp":"2026-10-18T17:56:10Z"}}`
+	if got := readFrame(t, ui, uiR, 5*time.Second); got != wantEvent {
+		t.Errorf("subscriber got %s, want %s", got, wantEvent)
+	}
+}
+
+func TestDaemonSendWhileOfflineAnswersQueuedAndDrainsOnReconnect(t *testing.T) {
+	_, fake, sock := linkedDaemon(t)
+	fake.emit(&waevents.Disconnected{})
+	c := dial(t, sock)
+	const ada = "15551230001@s.whatsapp.net"
+
+	sent, err := c.Send(ada, "On my way", "c-7f3a9e22")
+	if err != nil {
+		t.Fatalf("Send while offline: %v", err)
+	}
+	if want := (ipc.Sent{V: 1, Op: ipc.OpSent, ClientID: "c-7f3a9e22", State: ipc.SendQueued}); sent != want {
+		t.Errorf("Send while offline = %+v, want %+v", sent, want)
+	}
+	if n := fake.sends.Load(); n != 0 {
+		t.Errorf("client sends = %d, want 0 while offline", n)
+	}
+	msgs, err := c.Messages(ada, 10)
+	if err != nil || len(msgs.Messages) != 1 || msgs.Messages[0].State != ipc.MessageQueued || msgs.Messages[0].ClientID != "c-7f3a9e22" {
+		t.Fatalf("Messages while queued = %+v, %v; want the queued message", msgs.Messages, err)
+	}
+
+	fake.emit(&waevents.Connected{})
+	want := ipc.Message{ID: "3EB0BBB1", Kind: ipc.KindText, Text: "On my way", FromMe: true, Timestamp: "2026-10-18T17:56:10Z"}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		msgs, err = c.Messages(ada, 10)
+		if err == nil && len(msgs.Messages) == 1 && reflect.DeepEqual(msgs.Messages[0], want) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Messages after reconnect = %+v, %v; want only %+v", msgs.Messages, err, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := fake.sends.Load(); n != 1 {
+		t.Errorf("client sends = %d, want exactly 1", n)
+	}
+}
+
+// A send whose ack times out while the connection drops answers sent with state queued, never
+// not_confirmed, and the reconnect's drain sends it once under the same WhatsApp id; one whose ack
+// times out while the session stays linked still answers not_confirmed.
+func TestDaemonSendWhoseAckTimesOutAsTheConnectionDropsAnswersQueued(t *testing.T) {
+	_, fake, sock := linkedDaemon(t)
+	c := dial(t, sock)
+	const ada = "15551230001@s.whatsapp.net"
+	fake.dropped.Store(true)
+	fake.onSend = func() { fake.emit(&waevents.Disconnected{}) }
+
+	sent, err := c.Send(ada, "On my way", "c-1")
+	if want := (ipc.Sent{V: 1, Op: ipc.OpSent, ClientID: "c-1", State: ipc.SendQueued}); err != nil || sent != want {
+		t.Fatalf("Send = %+v, %v; want %+v", sent, err, want)
+	}
+	msgs, err := c.Messages(ada, 10)
+	if err != nil || len(msgs.Messages) != 1 || msgs.Messages[0].State != ipc.MessageQueued || msgs.Messages[0].ID != "3EB0BBB1" {
+		t.Fatalf("Messages = %+v, %v; want the message queued under 3EB0BBB1", msgs.Messages, err)
+	}
+
+	fake.dropped.Store(false)
+	fake.emit(&waevents.Connected{})
+	want := ipc.Message{ID: "3EB0BBB1", Kind: ipc.KindText, Text: "On my way", FromMe: true, Timestamp: "2026-10-18T17:56:10Z"}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		msgs, err = c.Messages(ada, 10)
+		if err == nil && len(msgs.Messages) == 1 && reflect.DeepEqual(msgs.Messages[0], want) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Messages after reconnect = %+v, %v; want only %+v", msgs.Messages, err, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := fake.sends.Load(); n != 2 {
+		t.Errorf("client sends = %d, want 2 (the timed-out one and one drained resend)", n)
+	}
+
+	fake.timeout.Store(true)
+	_, err = c.Send(ada, "Still there?", "c-2")
+	var pe *ipc.ProtocolError
+	if !errors.As(err, &pe) || pe.Code != ipc.CodeNotConfirmed {
+		t.Errorf("Send whose ack timed out while linked = %v, want a %s error", err, ipc.CodeNotConfirmed)
+	}
+}
+
+func TestDaemonRetrySendsANotSentMessageAgain(t *testing.T) {
+	_, fake, sock := linkedDaemon(t)
+	c := dial(t, sock)
+	const ada = "15551230001@s.whatsapp.net"
+	fake.fail.Store(true)
+	_, err := c.Send(ada, "On my way", "c-1")
+	var notSent *ipc.NotSentError
+	if !errors.As(err, &notSent) || notSent.ClientID != "c-1" {
+		t.Fatalf("Send that fails = %v, want send_failed for c-1", err)
+	}
+	if msgs, err := c.Messages(ada, 10); err != nil || len(msgs.Messages) != 1 || msgs.Messages[0].State != ipc.MessageNotSent {
+		t.Fatalf("Messages after a failed send = %+v, %v; want it listed as not sent", msgs.Messages, err)
+	}
+
+	fake.fail.Store(false)
+	sent, err := c.Retry("c-1")
+	want := ipc.Sent{V: 1, Op: ipc.OpSent, ClientID: "c-1", State: ipc.SendSent, ID: "3EB0BBB1", Timestamp: "2026-10-18T17:56:10Z"}
+	if err != nil || sent != want {
+		t.Errorf("Retry = %+v, %v; want %+v", sent, err, want)
+	}
+	if n := fake.sends.Load(); n != 2 {
+		t.Errorf("client sends = %d, want 2 (the failed one and the retry)", n)
+	}
+	if _, err := c.Retry("c-unknown"); !errors.As(err, &notSent) {
+		t.Errorf("Retry of an unknown client_id = %v, want send_failed", err)
+	}
+}
+
+func TestDaemonFocusReachesASubscribedUI(t *testing.T) {
+	_, _, sock := linkedDaemon(t)
+	ui, uiR := subscriber(t, sock)
+	c := dial(t, sock)
+	focused, err := c.Focus("15551230002@s.whatsapp.net")
+	if err != nil {
+		t.Fatalf("Focus: %v", err)
+	}
+	if focused.Delivered != 1 || focused.JID != "15551230002@s.whatsapp.net" {
+		t.Errorf("Focus = %+v, want delivered 1", focused)
+	}
+	if got, want := readFrame(t, ui, uiR, 5*time.Second), `{"v":1,"op":"event_focus","jid":"15551230002@s.whatsapp.net"}`; got != want {
+		t.Errorf("subscriber got %s, want %s", got, want)
+	}
+}
+
+// fakeKeyring is an in-memory keyring; tests never touch the real one.
+type fakeKeyring struct {
+	mu    sync.Mutex
+	items map[string]string
+}
+
+func (k *fakeKeyring) Set(service, user, secret string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.items[service+"/"+user] = secret
+	return nil
+}
+
+func (k *fakeKeyring) Get(service, user string) (string, error) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	secret, ok := k.items[service+"/"+user]
+	if !ok {
+		return "", store.ErrKeyNotFound
+	}
+	return secret, nil
+}
+
+func (k *fakeKeyring) Delete(service, user string) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if _, ok := k.items[service+"/"+user]; !ok {
+		return store.ErrKeyNotFound
+	}
+	delete(k.items, service+"/"+user)
+	return nil
+}
+
+func (k *fakeKeyring) count() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return len(k.items)
+}
+
+// deviceKeyItems are the keyring items the device store writes under the nuncio service.
+var deviceKeyItems = []string{"device.noise_key", "device.identity_key", "device.signed_pre_key", "device.adv_secret_key"}
+
+// wipeRig is a daemon over a started session with a fake linked client, a real store in a temp
+// data dir that also holds media and exports, a fake keyring full of device items, served on
+// $XDG_RUNTIME_DIR/nuncio/core.sock of a temp runtime dir.
+type wipeRig struct {
+	fake    *fakeWAClient
+	keyring *fakeKeyring
+	dataDir string
+	runtime string
+	socket  string
+	// served is closed when serve returns.
+	served chan struct{}
+}
+
+// shortTempDir is a temp dir with a short path, removed at cleanup, for every dir a unix socket
+// lives in (the daemon's runtime dir, a private bus): a socket path must fit in sun_path (104 bytes
+// on macOS, 108 on Linux, both with the NUL; dbus-daemon allows 99), and t.TempDir carries up to 64
+// bytes of the test name plus 14 more, too long under a deep $TMPDIR such as makepkg's check() sets.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "nw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// newWipeRig builds the rig; configure, when not nil, sets up the rig's fake client before anything
+// serves, so the daemon's goroutines only read it.
+func newWipeRig(t *testing.T, configure func(*wipeRig)) *wipeRig {
+	t.Helper()
+	root := t.TempDir()
+	r := &wipeRig{
+		fake:    &fakeWAClient{sendID: "3EB0BBB1"},
+		keyring: &fakeKeyring{items: map[string]string{}},
+		dataDir: filepath.Join(root, "data", "nuncio"),
+		runtime: shortTempDir(t),
+		served:  make(chan struct{}),
+	}
+	r.socket = socketPath(r.runtime)
+	db, err := store.Open(filepath.Join(r.dataDir, store.DBFile))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	if err := store.EnsureSchema(db); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+	for _, p := range []string{filepath.Join(r.dataDir, store.MediaDir, "0f3a.jpg"), filepath.Join(r.dataDir, store.ExportsDir, "chat.txt")} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("synthetic"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, name := range deviceKeyItems {
+		_ = r.keyring.Set(store.KeyringService, name, "synthetic")
+	}
+	if configure != nil {
+		configure(r)
+	}
+	session := wa.NewSession(r.fake, db, db.Close)
+	t.Cleanup(session.Close)
+	events := ipc.NewBroker()
+	session.SetEvents(events)
+	if err := session.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	d, err := newDaemon(session, db)
+	if err != nil {
+		t.Fatalf("newDaemon: %v", err)
+	}
+	d.dataDir, d.keyring, d.socket = r.dataDir, r.keyring, r.socket
+	if err := os.MkdirAll(filepath.Dir(r.socket), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("unix", r.socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	// Closing the listener must not unlink the socket: only the daemon's own removal may, so a
+	// test can tell whether it happened.
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = serve(ctx, ln, d, events); close(r.served) }()
+	t.Cleanup(func() { cancel(); <-r.served })
+	return r
+}
+
+// assertNothingLeft checks the S12 outcome: no data dir (so no DB, WAL, SHM, media or exports),
+// an empty keyring, no socket, and a daemon that stopped serving.
+func (r *wipeRig) assertNothingLeft(t *testing.T) {
+	t.Helper()
+	if _, err := os.Lstat(r.dataDir); !errors.Is(err, fs.ErrNotExist) {
+		entries, _ := os.ReadDir(r.dataDir)
+		t.Errorf("data dir %s still exists (%v), holding %v", r.dataDir, err, entries)
+	}
+	if n := r.keyring.count(); n != 0 {
+		t.Errorf("keyring holds %d items, want 0", n)
+	}
+	select {
+	case <-r.served:
+	case <-time.After(5 * time.Second):
+		t.Error("the daemon kept serving after the wipe")
+	}
+	// Checked after the listener closed: it does not unlink the socket (see newWipeRig), so only
+	// the daemon's removal makes it go.
+	if _, err := os.Lstat(r.socket); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("socket %s still exists: %v", r.socket, err)
+	}
+}
+
+// assertNothingDeleted checks that a refused wipe left the data, the keys and the socket alone.
+func (r *wipeRig) assertNothingDeleted(t *testing.T) {
+	t.Helper()
+	for _, p := range []string{filepath.Join(r.dataDir, store.DBFile), filepath.Join(r.dataDir, store.MediaDir, "0f3a.jpg"), filepath.Join(r.dataDir, store.ExportsDir, "chat.txt"), r.socket} {
+		if _, err := os.Lstat(p); err != nil {
+			t.Errorf("%s is gone after a refused wipe: %v", p, err)
+		}
+	}
+	if n := r.keyring.count(); n != len(deviceKeyItems) {
+		t.Errorf("keyring holds %d items after a refused wipe, want %d", n, len(deviceKeyItems))
+	}
+}
+
+// TestLogoutUnlinksFirstThenLeavesNothingBehind drives the real CLI binary against the daemon:
+// `nuncio logout --confirm` makes the daemon call the client's Logout exactly once, while the
+// data is still there, and then leaves nothing behind.
+func TestLogoutUnlinksFirstThenLeavesNothingBehind(t *testing.T) {
+	// Set in the daemon's connection goroutine, read here after the CLI exits.
+	var dbAtLogout, keysAtLogout atomic.Bool
+	r := newWipeRig(t, func(r *wipeRig) {
+		r.fake.onLogout = func() {
+			_, err := os.Stat(filepath.Join(r.dataDir, store.DBFile))
+			dbAtLogout.Store(err == nil)
+			keysAtLogout.Store(r.keyring.count() == len(deviceKeyItems))
+		}
+	})
+	cmd := exec.Command(nuncioBin, "logout", "--confirm")
+	cmd.Env = []string{
+		"PATH=" + os.Getenv("PATH"),
+		"XDG_RUNTIME_DIR=" + r.runtime,
+		"XDG_DATA_HOME=" + filepath.Dir(r.dataDir),
+		"DBUS_SESSION_BUS_ADDRESS=" + noBus(t),
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("nuncio logout --confirm: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "logged out") {
+		t.Errorf("nuncio logout printed %q, want it to say logged out", out)
+	}
+	if n := r.fake.logouts.Load(); n != 1 {
+		t.Errorf("client Logout called %d times, want 1", n)
+	}
+	if !dbAtLogout.Load() || !keysAtLogout.Load() {
+		t.Errorf("at Logout the database existed=%t and the keys were all there=%t; the network step must come before any deletion", dbAtLogout.Load(), keysAtLogout.Load())
+	}
+	r.assertNothingLeft(t)
+}
+
+func TestPurgeThroughTheDaemonNeverCallsTheNetworkAndLeavesNothingBehind(t *testing.T) {
+	r := newWipeRig(t, nil)
+	c := dial(t, r.socket)
+	got, err := c.Wipe(false)
+	if err != nil {
+		t.Fatalf("Wipe(false): %v", err)
+	}
+	if got.Unlinked {
+		t.Errorf("Wipe(false) = %+v, want unlinked false", got)
+	}
+	if n := r.fake.logouts.Load(); n != 0 {
+		t.Errorf("client Logout called %d times by a purge, want 0", n)
+	}
+	r.assertNothingLeft(t)
+}
+
+func TestLogoutThatWhatsAppDoesNotConfirmDeletesNothing(t *testing.T) {
+	r := newWipeRig(t, func(r *wipeRig) { r.fake.logoutErr = errors.New("error sending logout request: timed out") })
+	c := dial(t, r.socket)
+	_, err := c.Wipe(true)
+	var perr *ipc.ProtocolError
+	if !errors.As(err, &perr) || perr.Code != ipc.CodeInternal || !strings.Contains(perr.Message, "nothing was deleted") {
+		t.Errorf("Wipe(true) with a refused logout = %v, want an internal error saying nothing was deleted", err)
+	}
+	r.assertNothingDeleted(t)
+	if _, err := c.Status(); err != nil {
+		t.Errorf("the daemon stopped serving after a refused logout: %v", err)
+	}
+}
+
+func TestLogoutWhileUnlinkedAnswersNotLinkedAndDeletesNothing(t *testing.T) {
+	r := newWipeRig(t, nil)
+	// The device is gone (an external logout): the session is unlinked, the local data is still
+	// there and only purge may delete it.
+	r.fake.emit(&waevents.LoggedOut{})
+	c := dial(t, r.socket)
+	_, err := c.Wipe(true)
+	var perr *ipc.ProtocolError
+	if !errors.As(err, &perr) || perr.Code != ipc.CodeNotLinked {
+		t.Errorf("Wipe(true) while unlinked = %v, want a %s error", err, ipc.CodeNotLinked)
+	}
+	if n := r.fake.logouts.Load(); n != 0 {
+		t.Errorf("client Logout called %d times while unlinked, want 0", n)
+	}
+	r.assertNothingDeleted(t)
+}
+
+// A wipe that fails after the session was closed must not leave the daemon claiming a live,
+// linked session or serving the closed store; a retry once the cause is gone finishes the job.
+func TestFailedLocalWipeDoesNotReportLinkedAndARetryFinishes(t *testing.T) {
+	r := newWipeRig(t, nil)
+	if err := os.Chmod(r.dataDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(r.dataDir, 0o700) })
+	c := dial(t, r.socket)
+	_, err := c.Wipe(false)
+	var perr *ipc.ProtocolError
+	if !errors.As(err, &perr) || !strings.Contains(perr.Message, "nuncio purge --confirm") {
+		t.Fatalf("Wipe(false) into a read-only data dir = %v, want an error with the purge hint", err)
+	}
+	st, err := c.Status()
+	if err != nil {
+		t.Fatalf("Status after a failed wipe: %v", err)
+	}
+	if st.Session == ipc.SessionLinked {
+		t.Errorf("status after a failed wipe = %+v; the session is closed", st)
+	}
+	_, err = c.Messages("15551230001@s.whatsapp.net", 10)
+	if !errors.As(err, &perr) || perr.Code != ipc.CodeInternal || !strings.Contains(perr.Message, "nuncio purge --confirm") {
+		t.Errorf("Messages after a failed wipe = %v, want an internal error with the purge hint", err)
+	}
+
+	if err := os.Chmod(r.dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Wipe(false); err != nil {
+		t.Fatalf("retried Wipe(false): %v", err)
+	}
+	r.assertNothingLeft(t)
+}
+
+// fakeDownloader stands in for whatsmeow's Client.Download (network fetch plus decryption with
+// the media key, both delegated to whatsmeow), so it returns the known decrypted bytes and
+// counts its calls. It never touches the network.
+type fakeDownloader struct {
+	plain []byte
+	calls atomic.Int64
+}
+
+func (f *fakeDownloader) Download(context.Context, whatsmeow.DownloadableMessage) ([]byte, error) {
+	f.calls.Add(1)
+	return f.plain, nil
+}
+
+var photo = []byte("fake decrypted photo bytes")
+
+func sha(b []byte) []byte { s := sha256.Sum256(b); return s[:] }
+
+func imageEvent(chat types.JID, id string, ts time.Time, fileSHA []byte) *waevents.Message {
+	return &waevents.Message{
+		Info: types.MessageInfo{MessageSource: types.MessageSource{Chat: chat, Sender: chat}, ID: id, Timestamp: ts},
+		Message: &waE2E.Message{ImageMessage: &waE2E.ImageMessage{
+			Caption: proto.String("the venue"), Mimetype: proto.String("image/jpeg"),
+			FileLength: proto.Uint64(48213), DirectPath: proto.String("/v/t62.fake/0001"),
+			MediaKey: bytes.Repeat([]byte{7}, 32), FileSHA256: fileSHA, FileEncSHA256: bytes.Repeat([]byte{9}, 32),
+		}},
+	}
+}
+
+// mediaDaemon is linkedDaemon with a media cache in a temp dir served by a fake downloader.
+func mediaDaemon(t *testing.T) (*fakeWAClient, *fakeDownloader, string, string) {
+	t.Helper()
+	session, fake, sock := linkedDaemon(t)
+	dl := &fakeDownloader{plain: photo}
+	dir := filepath.Join(t.TempDir(), "media")
+	session.SetMedia(dir, dl)
+	return fake, dl, dir, sock
+}
+
+func permOf(t *testing.T, p string) os.FileMode {
+	t.Helper()
+	fi, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fi.Mode().Perm()
+}
+
+func TestDaemonStoresMediaWithoutFetchingAndDownloadsItOnRequestOnce(t *testing.T) {
+	fake, dl, dir, sock := mediaDaemon(t)
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	fake.emit(imageEvent(ada, "3EB0AAA0", time.Date(2026, 10, 18, 17, 50, 30, 0, time.UTC), sha(photo)))
+	c := dial(t, sock)
+
+	// messages and chats describe the attachment; nothing has been fetched.
+	want := ipc.Message{ID: "3EB0AAA0", Kind: ipc.KindImage, Text: "the venue", Timestamp: "2026-10-18T17:50:30Z",
+		Media: &ipc.Media{Mime: "image/jpeg", Size: 48213}}
+	msgs, err := c.Messages(ada.String(), 10)
+	if err != nil || len(msgs.Messages) != 1 || !reflect.DeepEqual(msgs.Messages[0], want) {
+		t.Fatalf("Messages = %s, %v; want only %s", jsonOf(t, msgs.Messages), err, jsonOf(t, want))
+	}
+	chats, err := c.Chats(40)
+	if err != nil || len(chats.Chats) != 1 || !reflect.DeepEqual(chats.Chats[0].LastMessage, &want) {
+		t.Fatalf("Chats = %s, %v; want the image as last_message", jsonOf(t, chats.Chats), err)
+	}
+	if n := dl.calls.Load(); n != 0 {
+		t.Fatalf("downloader called %d times before any request, want 0", n)
+	}
+	if _, err := os.Stat(dir); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the media cache exists before any request: %v", err)
+	}
+
+	ready, err := c.DownloadMedia(ada.String(), "3EB0AAA0")
+	if err != nil {
+		t.Fatalf("DownloadMedia: %v", err)
+	}
+	if ready.Op != ipc.OpMediaReady || ready.JID != ada.String() || ready.ID != "3EB0AAA0" ||
+		ready.Mime != "image/jpeg" || filepath.Dir(ready.Path) != dir {
+		t.Errorf("DownloadMedia = %+v, want media_ready with a file in %s", ready, dir)
+	}
+	if got, err := os.ReadFile(ready.Path); err != nil || !bytes.Equal(got, photo) {
+		t.Errorf("cached bytes = %q, %v; want %q", got, err, photo)
+	}
+	if m := permOf(t, dir); m != 0o700 {
+		t.Errorf("cache dir mode %o, want 700", m)
+	}
+	if m := permOf(t, ready.Path); m != 0o600 {
+		t.Errorf("cached file mode %o, want 600", m)
+	}
+
+	again, err := c.DownloadMedia(ada.String(), "3EB0AAA0")
+	if err != nil || again != ready {
+		t.Errorf("second DownloadMedia = %+v, %v; want %+v", again, err, ready)
+	}
+	if n := dl.calls.Load(); n != 1 {
+		t.Errorf("downloader called %d times for two requests, want 1 (the second is a cache hit)", n)
+	}
+}
+
+func TestDaemonDownloadMediaRejectsASHA256MismatchAndCachesNothing(t *testing.T) {
+	fake, dl, dir, sock := mediaDaemon(t)
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	fake.emit(imageEvent(ada, "3EB0AAA0", time.Date(2026, 10, 18, 17, 50, 30, 0, time.UTC), sha([]byte("other"))))
+	c := dial(t, sock)
+
+	_, err := c.DownloadMedia(ada.String(), "3EB0AAA0")
+	var perr *ipc.ProtocolError
+	if !errors.As(err, &perr) || perr.Code != ipc.CodeInternal || perr.Message != wa.ErrMediaCorrupt.Error() {
+		t.Fatalf("DownloadMedia of a mismatch = %v, want an internal error saying %q", err, wa.ErrMediaCorrupt)
+	}
+	des, err := os.ReadDir(dir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
+	}
+	if len(des) != 0 {
+		t.Errorf("cache dir holds %d entries after a mismatch, want none", len(des))
+	}
+	if n := dl.calls.Load(); n != 1 {
+		t.Errorf("downloader called %d times, want 1", n)
+	}
+}
+
+func TestDaemonDownloadMediaCorners(t *testing.T) {
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	codeOf := func(err error) (string, string) {
+		var perr *ipc.ProtocolError
+		if !errors.As(err, &perr) {
+			return "", fmt.Sprint(err)
+		}
+		return perr.Code, perr.Message
+	}
+	t.Run("unknown id, a text message and a bad jid", func(t *testing.T) {
+		fake, dl, _, sock := mediaDaemon(t)
+		fake.emit(textMessage(ada, "TXT1", false, time.Date(2026, 10, 18, 17, 0, 0, 0, time.UTC), "plain"))
+		c := dial(t, sock)
+		for _, id := range []string{"NOPE", "TXT1"} {
+			if code, msg := codeOf(downloadErr(c, ada.String(), id)); code != ipc.CodeInternal || msg != wa.ErrNoMedia.Error() {
+				t.Errorf("DownloadMedia(%s) = %s %q, want internal %q", id, code, msg, wa.ErrNoMedia)
+			}
+		}
+		if code, _ := codeOf(downloadErr(c, "status@broadcast", "TXT1")); code != ipc.CodeBadFrame {
+			t.Errorf("DownloadMedia with a bad jid = %s, want %s", code, ipc.CodeBadFrame)
+		}
+		if n := dl.calls.Load(); n != 0 {
+			t.Errorf("downloader called %d times, want 0", n)
+		}
+	})
+	t.Run("unlinked", func(t *testing.T) {
+		d, err := newDaemon(wa.NewSession(nil, nil, nil), nil)
+		if err != nil {
+			t.Fatalf("newDaemon: %v", err)
+		}
+		c := serveInProcess(t, d)
+		if code, _ := codeOf(downloadErr(c, ada.String(), "3EB0AAA0")); code != ipc.CodeNotLinked {
+			t.Errorf("DownloadMedia while unlinked = %s, want %s", code, ipc.CodeNotLinked)
+		}
+	})
+	t.Run("offline", func(t *testing.T) {
+		fake, dl, _, sock := mediaDaemon(t)
+		fake.emit(imageEvent(ada, "3EB0AAA0", time.Date(2026, 10, 18, 17, 50, 30, 0, time.UTC), sha(photo)))
+		fake.emit(&waevents.Disconnected{})
+		c := dial(t, sock)
+		if code, msg := codeOf(downloadErr(c, ada.String(), "3EB0AAA0")); code != ipc.CodeInternal || msg != wa.ErrMediaOffline.Error() {
+			t.Errorf("DownloadMedia while offline = %s %q, want internal %q", code, msg, wa.ErrMediaOffline)
+		}
+		if n := dl.calls.Load(); n != 0 {
+			t.Errorf("downloader called %d times while offline, want 0", n)
+		}
+	})
+}
+
+func downloadErr(c *ipc.Client, jid, id string) error {
+	_, err := c.DownloadMedia(jid, id)
+	return err
+}
+
+// messages and search serve an image with the thumbnail embedded in it and its size, read from the
+// store (never the network); chats lists it as last_message without them. A chat full of photos
+// with large thumbnails still answers messages in one frame: the oldest ones leave the thumb out.
+func TestDaemonServesImageThumbnailsInMessagesAndSearchWithoutDownloading(t *testing.T) {
+	session, fake, sock := linkedDaemon(t)
+	dl := &fakeDownloader{plain: photo}
+	session.SetMedia(filepath.Join(t.TempDir(), "media"), dl)
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	thumb := []byte("\xff\xd8\xff fake embedded thumbnail")
+	ev := imageEvent(ada, "3EB0AAA0", time.Date(2026, 10, 18, 17, 50, 30, 0, time.UTC), sha(photo))
+	ev.Message.ImageMessage.JPEGThumbnail = thumb
+	ev.Message.ImageMessage.Width, ev.Message.ImageMessage.Height = proto.Uint32(1280), proto.Uint32(960)
+	fake.emit(ev)
+	c := dial(t, sock)
+
+	want := ipc.Message{ID: "3EB0AAA0", Kind: ipc.KindImage, Text: "the venue", Timestamp: "2026-10-18T17:50:30Z",
+		Media: &ipc.Media{Mime: "image/jpeg", Size: 48213}, Thumb: thumb, ThumbMime: "image/jpeg", Width: 1280, Height: 960}
+	msgs, err := c.Messages(ada.String(), 10)
+	if err != nil || len(msgs.Messages) != 1 || !reflect.DeepEqual(msgs.Messages[0], want) {
+		t.Fatalf("Messages = %s, %v; want only %s", jsonOf(t, msgs.Messages), err, jsonOf(t, want))
+	}
+	d, err := newDaemon(session, session.Store())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, err := d.Search(ada.String(), "venue", 10)
+	if err != nil || len(hits) != 1 || !reflect.DeepEqual(hits[0], want) {
+		t.Fatalf("Search = %s, %v; want only %s", jsonOf(t, hits), err, jsonOf(t, want))
+	}
+	chats, err := c.Chats(40)
+	last := want
+	last.Thumb, last.ThumbMime, last.Width, last.Height = nil, "", 0, 0
+	if err != nil || len(chats.Chats) != 1 || !reflect.DeepEqual(chats.Chats[0].LastMessage, &last) {
+		t.Fatalf("Chats = %s, %v; want the image as last_message without its preview", jsonOf(t, chats.Chats), err)
+	}
+
+	big := jpegOf(wa.MaxThumb)
+	for i := 0; i < 30; i++ {
+		ev := imageEvent(ada, fmt.Sprintf("3EB0BIG%02d", i), time.Date(2026, 10, 18, 18, i, 0, 0, time.UTC), sha(photo))
+		ev.Message.ImageMessage.JPEGThumbnail = big
+		fake.emit(ev)
+	}
+	msgs, err = c.Messages(ada.String(), 200)
+	if err != nil || len(msgs.Messages) != 31 {
+		t.Fatalf("Messages of 31 photos = %d, %v; want all 31 in one frame", len(msgs.Messages), err)
+	}
+	if len(msgs.Messages[0].Thumb) != wa.MaxThumb || msgs.Messages[30].Thumb != nil {
+		t.Errorf("the newest photo carries %d thumb bytes and the oldest %d; want %d and none",
+			len(msgs.Messages[0].Thumb), len(msgs.Messages[30].Thumb), wa.MaxThumb)
+	}
+	if n := dl.calls.Load(); n != 0 {
+		t.Errorf("serving thumbnails called the downloader %d times, want 0", n)
+	}
+}
+
+// jpegOf is a fake JPEG thumbnail of n bytes: the JPEG magic bytes, then padding.
+func jpegOf(n int) []byte {
+	return append([]byte{0xff, 0xd8, 0xff}, bytes.Repeat([]byte{0xff}, n-3)...)
+}
+
+// A chat with a few large thumbnails and long texts answers messages in one frame, as before thumbnails.
+func TestThumbnailsNeverPushAMessagesReplyOverTheFrameLimit(t *testing.T) {
+	session, fake, sock := linkedDaemon(t)
+	ada := types.NewJID("15551230001", types.DefaultUserServer)
+	base := time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 6; i++ {
+		ev := imageEvent(ada, fmt.Sprintf("3EB0P%04d", i), base.Add(time.Duration(i)*time.Minute), sha(photo))
+		ev.Message.ImageMessage.JPEGThumbnail = jpegOf(wa.MaxThumb)
+		fake.emit(ev)
+	}
+	for i := 0; i < 194; i++ {
+		ev := imageEvent(ada, fmt.Sprintf("3EB0T%04d", i), base.Add(time.Duration(100+i)*time.Minute), sha(photo))
+		ev.Message.ImageMessage, ev.Message.Conversation = nil, proto.String("venue "+strings.Repeat("a", 2800))
+		fake.emit(ev)
+	}
+	c := dial(t, sock)
+	msgs, err := c.Messages(ada.String(), 200)
+	if err != nil || len(msgs.Messages) != 200 {
+		t.Fatalf("Messages = %d, %v; want all 200 in one frame", len(msgs.Messages), err)
+	}
+	if _, err := c.Status(); err != nil {
+		t.Errorf("the connection did not survive the reply: %v", err)
+	}
+	if msgs.Messages[194].Thumb == nil {
+		t.Errorf("the newest photo lost its thumb although some room was left")
+	}
+
+	// search answers with the same frame, so it keeps under the limit the same way.
+	d, err := newDaemon(session, session.Store())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits, err := d.Search(ada.String(), "venue", 200)
+	if err != nil || len(hits) != 200 {
+		t.Fatalf("Search = %d, %v; want all 200", len(hits), err)
+	}
+	if err := ipc.WriteFrame(io.Discard, ipc.MessagesResponse{V: ipc.Version, Op: ipc.OpMessages, JID: ada.String(), Messages: hits}); err != nil {
+		t.Errorf("the search reply does not fit in one frame: %v", err)
 	}
 }

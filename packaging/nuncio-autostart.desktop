@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=nuncio
+Comment=Start nuncio in the background at login, for its notifications
+Exec=nuncio-desktop --gapplication-service
+Icon=io.github.pwn27sbx.nuncio.Desktop
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

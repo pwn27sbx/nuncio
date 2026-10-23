@@ -1,8 +1,10 @@
 // Package wa is the whatsmeow integration.
 //
-// M0 contains the linking path and nothing else, and every entry into it is gated behind an
-// explicit, per-run Consent. There is deliberately no code path that links a device as a side
-// effect of starting the daemon or the clients.
+// It holds three things: the linking path, where every entry is gated behind an explicit, per-run
+// Consent; the Session the daemon owns, which connects a device that is already linked and
+// otherwise stays unlinked; and Events, the event watcher that `nuncio link` and the Session
+// share. There is deliberately no code path that links a device as a side effect of starting the
+// daemon or the clients.
 package wa
 
 import (

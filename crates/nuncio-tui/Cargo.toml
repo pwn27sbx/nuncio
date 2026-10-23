@@ -8,6 +8,18 @@ rust-version.workspace = true
 
 [dependencies]
 nuncio-client = { path = "../nuncio-client" }
-ratatui = "0.30"
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
-image = { version = "0.25", default-features = false, features = ["png"] }
+# Inline pictures: JPEG thumbnails, PNG sticker thumbnails, WebP stickers (first frame).
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# Already in Cargo.lock: the wire's `thumb` is standard base64.
+base64 = "0.22"
+# Already in Cargo.lock: tcflush, to drop a late answer to the picture query (Unix only).
+libc = "0.2"
+# Already in Cargo.lock (through ratatui-widgets, with local-offset): local message times.
+time = { version = "0.3", features = ["local-offset"] }
+# Already in Cargo.lock (through ratatui): the composer's cursor moves by grapheme.
+unicode-segmentation = "1.13"
+
+[dev-dependencies]
+serde_json = "1.0"

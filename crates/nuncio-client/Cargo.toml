@@ -12,3 +12,10 @@ serde_json = "1.0"
 thiserror = "2.0"
 toml = "0.9"
 notify = "8"
+# Already in Cargo.lock (through ratatui): the composer's cursor moves by grapheme.
+unicode-segmentation = "1.13"
+# Already in Cargo.lock (through nuncio-tui): the picture rules both clients share decode
+# JPEG thumbnails, PNG sticker thumbnails and WebP stickers (first frame), nothing else.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# Already in Cargo.lock: the wire's `thumb` is standard base64.
+base64 = "0.22"

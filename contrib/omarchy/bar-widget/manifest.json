@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "pwn27sbx.nuncio-unread",
+  "name": "nuncio unread",
+  "version": "0.1.0",
+  "author": "pwn27sbx",
+  "license": "GPL-3.0-only",
+  "description": "Unread WhatsApp messages from the nuncio daemon (only the count, never message text); click opens nuncio-desktop",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "nuncio unread",
+    "description": "Unread WhatsApp messages from nuncio",
+    "category": "Status",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

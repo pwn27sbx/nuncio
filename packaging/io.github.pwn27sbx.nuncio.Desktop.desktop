@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=nuncio
+GenericName=WhatsApp Client
+Comment=Chat on WhatsApp as a linked device
+Exec=nuncio-desktop %U
+Icon=io.github.pwn27sbx.nuncio.Desktop
+Terminal=false
+StartupNotify=true
+StartupWMClass=io.github.pwn27sbx.nuncio.Desktop
+DBusActivatable=true
+Categories=Network;InstantMessaging;Chat;
+Keywords=whatsapp;chat;messages;
+MimeType=x-scheme-handler/whatsapp;

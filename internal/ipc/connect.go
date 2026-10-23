@@ -19,6 +19,11 @@ const (
 	DaemonName = "io.github.pwn27sbx.nuncio"
 	ObjectPath = "/io/github/pwn27sbx/nuncio"
 	Interface  = "io.github.pwn27sbx.nuncio"
+	// UnreadCountProperty is the read-only int32 property with the total unread count, and
+	// UnreadChangedSignal the signal (one int32, the new total) emitted with PropertiesChanged
+	// whenever that total changes.
+	UnreadCountProperty = "UnreadCount"
+	UnreadChangedSignal = "UnreadChanged"
 )
 
 // ClientName is what the thin `nuncio` CLI sends in its hello frame.
@@ -44,20 +49,31 @@ func (e *ProtocolError) Error() string {
 	return fmt.Sprintf("ipc: daemon error %s: %s", e.Code, e.Message)
 }
 
+// DefaultReadTimeout bounds every read a Client makes, so a wedged daemon cannot wedge the CLI.
+const DefaultReadTimeout = 5 * time.Second
+
 // Client is a decoded connection to the daemon, past the hello handshake.
 type Client struct {
-	conn net.Conn
-	rd   *Reader
+	conn    net.Conn
+	rd      *Reader
+	timeout time.Duration
 }
 
 // Dial connects to the daemon's socket at path, sends hello and returns a
-// ready client.
+// ready client whose reads are bounded by DefaultReadTimeout.
 func Dial(path, clientName string) (*Client, error) {
+	return DialTimeout(path, clientName, DefaultReadTimeout)
+}
+
+// DialTimeout is Dial with an explicit bound on every read, the handshake included. A read that
+// hits the bound fails with an error matching os.ErrDeadlineExceeded, and the client is then
+// unusable: close it.
+func DialTimeout(path, clientName string, timeout time.Duration) (*Client, error) {
 	conn, err := net.Dial("unix", path)
 	if err != nil {
 		return nil, fmt.Errorf("ipc: dial %s: %w", path, err)
 	}
-	c := &Client{conn: conn, rd: NewReader(conn)}
+	c := &Client{conn: conn, rd: NewReader(conn), timeout: timeout}
 	if err := WriteFrame(conn, Hello{V: Version, Op: OpHello, Client: clientName}); err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -188,14 +204,151 @@ func (c *Client) Chats(limit int) (ChatsResponse, error) {
 	return resp, nil
 }
 
+// Messages asks the daemon for up to limit messages of the chat jid, newest first.
+func (c *Client) Messages(jid string, limit int) (MessagesResponse, error) {
+	if err := WriteFrame(c.conn, MessagesRequest{V: Version, Op: OpMessages, JID: jid, Limit: limit}); err != nil {
+		return MessagesResponse{}, err
+	}
+	var resp MessagesResponse
+	if err := c.readReply(&resp); err != nil {
+		return MessagesResponse{}, err
+	}
+	if resp.Op != OpMessages {
+		return MessagesResponse{}, fmt.Errorf("ipc: expected op %s, got %q", OpMessages, resp.Op)
+	}
+	return resp, nil
+}
+
+// NotSentError is a send_failed reply: the daemon did not send the message.
+type NotSentError struct {
+	ClientID string
+	Reason   string
+}
+
+func (e *NotSentError) Error() string { return "not sent: " + e.Reason }
+
+// SendTimeout bounds the wait for a send reply: the daemon waits for WhatsApp's acknowledgement
+// before it answers, which can take longer than an ordinary read.
+const SendTimeout = 30 * time.Second
+
+// Send asks the daemon to send text to the chat jid once. It returns the sent reply (state sent
+// or queued), a *NotSentError when the daemon answered send_failed, or a *ProtocolError such as
+// not_linked.
+func (c *Client) Send(jid, text, clientID string) (Sent, error) {
+	return c.sendFrame(SendRequest{V: Version, Op: OpSend, JID: jid, Text: text, ClientID: clientID})
+}
+
+// Retry asks the daemon to send again, once, the send it stored under clientID when it ended not
+// sent; any other send only reports its stored state. The replies are those of Send.
+func (c *Client) Retry(clientID string) (Sent, error) {
+	return c.sendFrame(RetryRequest{V: Version, Op: OpRetry, ClientID: clientID})
+}
+
+// sendFrame writes a send or retry frame and reads its reply.
+func (c *Client) sendFrame(frame any) (Sent, error) {
+	if err := WriteFrame(c.conn, frame); err != nil {
+		return Sent{}, err
+	}
+	// Both replies decode into one value: Sent's fields plus send_failed's message.
+	var reply struct {
+		Sent
+		Message string `json:"message"`
+	}
+	timeout := c.timeout
+	c.timeout = max(timeout, SendTimeout)
+	err := c.readReply(&reply)
+	c.timeout = timeout
+	if err != nil {
+		return Sent{}, err
+	}
+	switch reply.Op {
+	case OpSent:
+		return reply.Sent, nil
+	case OpSendFailed:
+		return Sent{}, &NotSentError{ClientID: reply.ClientID, Reason: reply.Message}
+	}
+	return Sent{}, fmt.Errorf("ipc: expected op %s or %s, got %q", OpSent, OpSendFailed, reply.Op)
+}
+
+// Focus asks the running UIs to open the chat jid. Delivered in the reply is how many subscribed
+// UIs got the request; 0 means no UI is running.
+func (c *Client) Focus(jid string) (Focused, error) {
+	if err := WriteFrame(c.conn, FocusRequest{V: Version, Op: OpFocus, JID: jid}); err != nil {
+		return Focused{}, err
+	}
+	var resp Focused
+	if err := c.readReply(&resp); err != nil {
+		return Focused{}, err
+	}
+	if resp.Op != OpFocused {
+		return Focused{}, fmt.Errorf("ipc: expected op %s, got %q", OpFocused, resp.Op)
+	}
+	return resp, nil
+}
+
+// WipeTimeout bounds the wait for a wipe reply: with unlink the daemon first waits for WhatsApp
+// to confirm the unlink.
+const WipeTimeout = 30 * time.Second
+
+// Wipe asks the daemon to delete everything it keeps for the device and exit; with unlink it
+// first tells WhatsApp to unlink the device. It returns the wiped reply, or a *ProtocolError such
+// as not_linked, in which case nothing was deleted.
+func (c *Client) Wipe(unlink bool) (Wiped, error) {
+	if err := WriteFrame(c.conn, WipeRequest{V: Version, Op: OpWipe, Unlink: unlink}); err != nil {
+		return Wiped{}, err
+	}
+	var resp Wiped
+	timeout := c.timeout
+	c.timeout = max(timeout, WipeTimeout)
+	err := c.readReply(&resp)
+	c.timeout = timeout
+	if err != nil {
+		return Wiped{}, err
+	}
+	if resp.Op != OpWiped {
+		return Wiped{}, fmt.Errorf("ipc: expected op %s, got %q", OpWiped, resp.Op)
+	}
+	return resp, nil
+}
+
+// MediaTimeout bounds the wait for a media_ready reply: the daemon downloads the attachment from
+// WhatsApp before it answers, which can take longer than an ordinary read.
+const MediaTimeout = 90 * time.Second
+
+// DownloadMedia asks the daemon for the attachment of message id in the chat jid. It returns the
+// media_ready reply, whose Path is the cached file, or a *ProtocolError such as not_linked.
+func (c *Client) DownloadMedia(jid, id string) (MediaReady, error) {
+	if err := WriteFrame(c.conn, DownloadMediaRequest{V: Version, Op: OpDownloadMedia, JID: jid, ID: id}); err != nil {
+		return MediaReady{}, err
+	}
+	var resp MediaReady
+	timeout := c.timeout
+	c.timeout = max(timeout, MediaTimeout)
+	err := c.readReply(&resp)
+	c.timeout = timeout
+	if err != nil {
+		return MediaReady{}, err
+	}
+	if resp.Op != OpMediaReady {
+		return MediaReady{}, fmt.Errorf("ipc: expected op %s, got %q", OpMediaReady, resp.Op)
+	}
+	return resp, nil
+}
+
 // Close closes the connection.
 func (c *Client) Close() error { return c.conn.Close() }
 
 // readReply decodes the next frame into v, turning an error frame into a
 // *ProtocolError.
 func (c *Client) readReply(v any) error {
+	if err := c.conn.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
+		return fmt.Errorf("ipc: set read deadline: %w", err)
+	}
 	line, err := c.rd.Next()
 	if err != nil {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return fmt.Errorf("ipc: the daemon did not answer within %v: %w", c.timeout, err)
+		}
 		return err
 	}
 	var head struct {

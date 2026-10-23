@@ -1,0 +1,371 @@
+//! The rules that span the chat list, the transcript and the composer. The terminal client's
+//! integration tests (`crates/nuncio-tui/tests`) cover them end to end through keys and a daemon;
+//! these pin each one where it lives.
+
+use super::*;
+use crate::wire::{PROTOCOL_VERSION, SendState};
+
+const ANA_PN: &str = "15551230001@s.whatsapp.net";
+const ANA_LID: &str = "99000000000001@lid";
+const BEN: &str = "15551230002@s.whatsapp.net";
+
+fn chat(jid: &str, name: &str, unread: u32) -> Chat {
+    Chat {
+        jid: jid.to_owned(),
+        name: name.to_owned(),
+        unread,
+        archived: false,
+        pinned: false,
+        muted: false,
+        aliases: Vec::new(),
+        phone: None,
+        last_message: None,
+    }
+}
+
+fn message(id: &str, from_me: bool) -> Message {
+    serde_json::from_value(serde_json::json!({
+        "id": id, "kind": "text", "text": "hello", "from_me": from_me,
+        "timestamp": "2026-10-20T10:00:00Z",
+    }))
+    .expect("a message")
+}
+
+fn model(chats: Vec<Chat>) -> Model {
+    Model::new(
+        Snapshot {
+            daemon: "test".to_owned(),
+            linked: true,
+            session: Session::Linked,
+            unread: 0,
+            chats,
+            stop_reason: None,
+        },
+        "t",
+    )
+}
+
+fn chats_frame(chats: Vec<Chat>) -> DaemonFrame {
+    DaemonFrame::Chats {
+        v: PROTOCOL_VERSION,
+        chats,
+    }
+}
+
+fn messages_frame(jid: &str, messages: Vec<Message>) -> DaemonFrame {
+    DaemonFrame::Messages {
+        v: PROTOCOL_VERSION,
+        jid: jid.to_owned(),
+        messages,
+    }
+}
+
+fn type_draft(model: &mut Model, text: &str) {
+    text.chars().for_each(|c| model.composer_mut().insert(c));
+}
+
+#[test]
+fn a_listed_alias_moves_the_conversation_and_the_selection_to_the_lid_chat() {
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), chat(BEN, "Ben", 0)]);
+    m.set_open(true);
+    m.apply(&messages_frame(ANA_PN, vec![message("M1", false)]));
+    let mut ana = chat(ANA_LID, "Ana", 0);
+    ana.aliases = vec![ANA_PN.to_owned()];
+    m.apply(&chats_frame(vec![ana, chat(BEN, "Ben", 0)]));
+    assert_eq!(m.selected_jid(), Some(ANA_LID));
+    assert_eq!(
+        m.loaded().len(),
+        1,
+        "the PN chat's messages are the LID chat's"
+    );
+    assert_eq!(m.chat_list().canonical(ANA_PN), Some(ANA_LID));
+    assert!(m.chat_list().orphan().is_none());
+}
+
+#[test]
+fn a_vanished_open_chat_keeps_the_draft_and_blocks_the_send() {
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), chat(BEN, "Ben", 0)]);
+    m.set_open(true);
+    type_draft(&mut m, "for Ana only");
+    // Ana's chat is gone with no alias naming where it went.
+    m.apply(&chats_frame(vec![chat(BEN, "Ben", 0)]));
+    assert_eq!(m.selected_jid(), Some(ANA_PN));
+    assert_eq!(m.chat_list().highlighted(), None);
+    assert_eq!(m.send(), None, "no Send to another contact");
+    assert_eq!(m.composer().text(), "for Ana only");
+    assert_eq!(m.notice(), Some(MERGED_NOTICE));
+}
+
+#[test]
+fn a_reply_naming_another_chat_is_adopted_only_when_paired_with_its_request() {
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0)]);
+    let request = m.open_selected().expect("opens");
+    // An unpaired messages frame for the LID chat adopts nothing.
+    m.apply(&messages_frame(ANA_LID, vec![message("M0", false)]));
+    assert_eq!(m.selected_jid(), Some(ANA_PN));
+    m.apply_reply(
+        &request,
+        &messages_frame(ANA_LID, vec![message("M1", false)]),
+    );
+    assert_eq!(m.selected_jid(), Some(ANA_LID));
+    assert_eq!(m.chat_list().chats()[0].jid, ANA_LID);
+}
+
+#[test]
+fn only_one_mark_read_is_in_flight_per_chat() {
+    let mut m = model(vec![chat(BEN, "Ben", 2)]);
+    let request = m.open_selected().expect("opens");
+    let first = m.apply_reply(&request, &messages_frame(BEN, Vec::new()));
+    assert_eq!(
+        first,
+        Some(Effect::Request(ClientFrame::mark_read(BEN))),
+        "an unread chat opened is marked read"
+    );
+    let event = DaemonFrame::EventMessage {
+        v: PROTOCOL_VERSION,
+        jid: BEN.to_owned(),
+        message: message("M2", false),
+    };
+    assert_eq!(m.apply(&event), None, "one is already in flight");
+    m.apply(&DaemonFrame::MarkedRead {
+        v: PROTOCOL_VERSION,
+        jid: BEN.to_owned(),
+        unread: 0,
+    });
+    let event = DaemonFrame::EventMessage {
+        v: PROTOCOL_VERSION,
+        jid: BEN.to_owned(),
+        message: message("M3", false),
+    };
+    assert!(
+        m.apply(&event).is_some(),
+        "the open chat reads a new message"
+    );
+}
+
+#[test]
+fn a_send_is_shown_at_once_and_settled_by_its_reply() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    m.open_selected();
+    type_draft(&mut m, "On my way");
+    let frame = m.send().expect("sends");
+    assert_eq!(frame, ClientFrame::send(BEN, "On my way", "t-1"));
+    assert!(m.composer().is_empty());
+    assert!(m.take_view_reset(), "a send goes back to the newest");
+    assert!(m.transcript().is_sending(&m.loaded()[0]));
+    m.apply(&DaemonFrame::Sent {
+        v: PROTOCOL_VERSION,
+        client_id: "t-1".to_owned(),
+        state: SendState::Sent,
+        id: Some("3EB0".to_owned()),
+        timestamp: Some("2026-10-20T10:01:00Z".to_owned()),
+    });
+    assert_eq!(m.loaded()[0].id, "3EB0");
+    assert!(!m.transcript().is_sending(&m.loaded()[0]));
+}
+
+#[test]
+fn search_results_fill_the_search_not_the_conversation() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    assert!(m.open_search());
+    "late".chars().for_each(|c| m.search_type(c));
+    let request = m.submit_search().expect("searches");
+    assert_eq!(request, ClientFrame::search(BEN, "late", SEARCH_LIMIT));
+    m.apply_reply(&request, &messages_frame(BEN, vec![message("M9", false)]));
+    let search = m.transcript().search().expect("open");
+    assert_eq!(search.results().map(<[Message]>::len), Some(1));
+    assert_eq!(search.selected(), Some(0));
+    assert!(m.transcript().conversation(BEN).is_none());
+}
+
+#[test]
+fn a_notice_taken_is_shown_once() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    m.set_notice("daemon: internal: oops");
+    assert_eq!(m.take_notice().as_deref(), Some("daemon: internal: oops"));
+    assert_eq!(m.notice(), None);
+    assert_eq!(m.take_notice(), None);
+}
+
+#[test]
+fn a_retry_waiting_for_its_answer_is_not_asked_again() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    m.open_selected();
+    type_draft(&mut m, "hi");
+    m.send().expect("sends");
+    m.apply(&DaemonFrame::SendFailed {
+        v: PROTOCOL_VERSION,
+        client_id: "t-1".to_owned(),
+        message: "no".to_owned(),
+    });
+    assert!(m.select_message(0));
+    assert_eq!(m.retry_selected(), Some(ClientFrame::retry("t-1")));
+    assert_eq!(m.retry_selected(), None, "one attempt in flight at a time");
+    // Its answer ends the attempt: not sent again, so one more retry may be asked for.
+    m.apply(&DaemonFrame::SendFailed {
+        v: PROTOCOL_VERSION,
+        client_id: "t-1".to_owned(),
+        message: "no".to_owned(),
+    });
+    assert_eq!(m.retry_selected(), Some(ClientFrame::retry("t-1")));
+}
+
+#[test]
+fn a_new_message_in_the_open_chat_is_read_only_while_the_view_is_seen() {
+    let incoming = |id: &str| DaemonFrame::EventMessage {
+        v: PROTOCOL_VERSION,
+        jid: BEN.to_owned(),
+        message: message(id, false),
+    };
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    let request = m.open_selected().expect("opens");
+    m.apply_reply(&request, &messages_frame(BEN, Vec::new()));
+    assert!(m.is_seen(), "a view is seen unless the UI says otherwise");
+    m.set_seen(false);
+    assert_eq!(
+        m.apply(&incoming("M1")),
+        None,
+        "a hidden window marks nothing read"
+    );
+    m.apply(&DaemonFrame::EventUnread {
+        v: PROTOCOL_VERSION,
+        unread: 1,
+        jid: BEN.to_owned(),
+        chat_unread: 1,
+    });
+    // Seen again: the open chat's unread messages are read now.
+    assert_eq!(
+        m.set_seen(true),
+        Some(Effect::Request(ClientFrame::mark_read(BEN)))
+    );
+    m.apply(&DaemonFrame::MarkedRead {
+        v: PROTOCOL_VERSION,
+        jid: BEN.to_owned(),
+        unread: 0,
+    });
+    assert_eq!(
+        m.apply(&incoming("M2")),
+        Some(Effect::Request(ClientFrame::mark_read(BEN)))
+    );
+    assert_eq!(m.set_seen(true), None, "nothing unread, nothing to mark");
+}
+
+const CAL_PN: &str = "15551230003@s.whatsapp.net";
+
+#[test]
+fn opening_a_listed_jid_selects_and_opens_it() {
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), chat(BEN, "Ben", 2)]);
+    assert_eq!(
+        m.open_jid(BEN),
+        Some(ClientFrame::messages(BEN, MESSAGE_LIMIT))
+    );
+    assert_eq!(m.selected_jid(), Some(BEN));
+    assert!(m.is_open());
+    assert_eq!(m.chat_list().chats().len(), 2, "nothing is added");
+    assert_eq!(
+        m.apply_reply(
+            &ClientFrame::messages(BEN, MESSAGE_LIMIT),
+            &messages_frame(BEN, Vec::new())
+        ),
+        Some(Effect::Request(ClientFrame::mark_read(BEN))),
+        "opened as a click opens it: read once shown"
+    );
+}
+
+#[test]
+fn opening_a_number_merged_into_a_lid_chat_opens_the_lid_chat() {
+    let mut ana = chat(ANA_LID, "Ana", 0);
+    ana.aliases = vec![ANA_PN.to_owned()];
+    let mut m = model(vec![chat(BEN, "Ben", 0), ana]);
+    assert_eq!(
+        m.open_jid(ANA_PN),
+        Some(ClientFrame::messages(ANA_LID, MESSAGE_LIMIT))
+    );
+    assert_eq!(m.selected_jid(), Some(ANA_LID));
+    assert_eq!(m.chat_list().chats().len(), 2);
+}
+
+#[test]
+fn opening_an_unknown_number_adds_an_empty_chat_that_a_new_list_keeps() {
+    let mut archived = chat(BEN, "Ben", 0);
+    archived.archived = true;
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), archived.clone()]);
+    assert_eq!(
+        m.open_jid(CAL_PN),
+        Some(ClientFrame::messages(CAL_PN, MESSAGE_LIMIT))
+    );
+    assert_eq!(m.selected_jid(), Some(CAL_PN));
+    let order: Vec<&str> = m
+        .chat_list()
+        .chats()
+        .iter()
+        .map(|c| c.jid.as_str())
+        .collect();
+    assert_eq!(order, [ANA_PN, CAL_PN, BEN], "archived chats stay last");
+    type_draft(&mut m, "hola");
+    // A resync before the first send: the daemon does not list the new chat yet.
+    m.apply(&chats_frame(vec![chat(ANA_PN, "Ana", 0), archived.clone()]));
+    assert_eq!(
+        m.selected_jid(),
+        Some(CAL_PN),
+        "the new chat stays selected"
+    );
+    assert!(m.chat_list().orphan().is_none(), "it is not a merged chat");
+    assert_eq!(m.notice(), None);
+    let frame = m.send().expect("the first send goes to the new chat");
+    assert_eq!(frame, ClientFrame::send(CAL_PN, "hola", "t-1"));
+    // Once the daemon lists it, the listed entry is the one kept.
+    let mut listed = chat(CAL_PN, "Cal", 0);
+    listed.unread = 0;
+    m.apply(&chats_frame(vec![listed, chat(ANA_PN, "Ana", 0), archived]));
+    assert_eq!(m.chat_list().chats().len(), 3);
+    assert_eq!(m.selected_chat().map(|c| c.name.as_str()), Some("Cal"));
+}
+
+#[test]
+fn a_new_chat_answered_as_a_lid_chat_is_adopted() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    let request = m.open_jid(ANA_PN).expect("opens");
+    m.apply_reply(&request, &messages_frame(ANA_LID, Vec::new()));
+    assert_eq!(m.selected_jid(), Some(ANA_LID));
+    let mut ana = chat(ANA_LID, "Ana", 0);
+    ana.aliases = vec![ANA_PN.to_owned()];
+    m.apply(&chats_frame(vec![chat(BEN, "Ben", 0), ana]));
+    let jids: Vec<&str> = m
+        .chat_list()
+        .chats()
+        .iter()
+        .map(|c| c.jid.as_str())
+        .collect();
+    assert_eq!(jids, [BEN, ANA_LID], "no leftover entry for the number");
+    assert_eq!(m.selected_jid(), Some(ANA_LID));
+}
+
+#[test]
+fn a_new_chat_put_where_the_selected_chat_was_still_resets_the_view() {
+    let mut ben = chat(BEN, "Ben", 0);
+    ben.archived = true;
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), ben]);
+    m.select_chat(1);
+    m.open_selected();
+    m.apply(&messages_frame(BEN, vec![message("M1", false)]));
+    assert!(m.select_message(0));
+    m.take_view_reset();
+    // The new chat goes before the archived ones: at Ben's own index.
+    m.open_jid(CAL_PN);
+    assert_eq!(m.chat_list().selected(), 1);
+    assert!(m.take_view_reset(), "another chat: back to the newest");
+    assert_eq!(m.transcript().cursor(), None, "no message carried over");
+}
+
+#[test]
+fn a_new_chat_answered_as_a_lid_chat_stays_listed_until_the_daemon_lists_it() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    let request = m.open_jid(ANA_PN).expect("opens");
+    m.apply_reply(&request, &messages_frame(ANA_LID, Vec::new()));
+    type_draft(&mut m, "hola");
+    m.apply(&chats_frame(vec![chat(BEN, "Ben", 0)]));
+    assert_eq!(m.selected_jid(), Some(ANA_LID));
+    assert!(m.chat_list().orphan().is_none(), "not a merged chat");
+    assert_eq!(m.send(), Some(ClientFrame::send(ANA_LID, "hola", "t-1")));
+}

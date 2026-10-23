@@ -148,7 +148,8 @@ swaps the title for a 32 px input, and typing narrows the listed chats to those 
 the list shows it) holds the typed text anywhere, ignoring case (`an` finds `Ana` and `Joan`). It
 narrows the rail's filter shown (All, Unread or Archived), the open chat's row too; the rail's
 counts stay those of every chat. With nothing matching the list says `No matching chats`. Escape
-(in the input, or in the chat list) clears the filter and lists every chat again. It is drawn
+(in the input, or in the chat list) clears the filter and lists every chat again; from the input
+it also gives the focus back to the chat list (its selected row, else its first). It is drawn
 from the chats the app already has: nothing is asked of `nunciod`.
 
 ## Settings
@@ -250,7 +251,8 @@ surfaces in the live Omarchy palette's roles, toasts for notices.
   name, and `★` pinned, `⊘` muted, `▤` archived follow it (archived chats last). Unread is a small
   accent square, the name in the full text tone and, from two messages, a count chip. The selected
   row is one tone up with a 2 px accent bar. An empty filter says so (`No unread chats`…).
-- **Conversation:** square bubbles, mine on the right one tone up, theirs on the left on the chrome
+- **Conversation:** at most 72 characters of the message text wide, at the left of its pane (on a
+  wider window the room past it stays empty, on the right). Square bubbles, mine on the right one tone up, theirs on the left on the chrome
   with a 1 px border, at most 68 characters wide. Consecutive messages of one author at most five
   minutes apart form a group: their author line above the first (theirs), the time and send state
   (`not sent` in the warning colour) once under the last; a send not sent yet or failed says its
@@ -299,6 +301,53 @@ The app follows the rest of an Omarchy desktop, as it follows the palette:
 
 The windows carry the `nuncio-window` class and their content `nuncio-root`, for your own CSS.
 
+## Design rules
+
+The whole design, with its numbers, is the plan in
+[`docs/design/redesign-plan.md`](../../docs/design/redesign-plan.md); this is the one-page version
+to check a change against.
+
+- **Palette roles, never hex.** Every colour comes from the live Omarchy palette's roles
+  (`surface`, `surface_chrome`, `surface_hover`, `surface_active`, `border`, `text`,
+  `text_muted`, `text_faint`, `accent`, `accent_on`, `warning`), all in one generated stylesheet
+  (`src/style.rs`) that a theme switch reloads. No font family names: the font is Omarchy's.
+- **Flat and square.** Three tones (chrome, content, one step up for hover and selection), panes
+  split by 1 px lines, no cards, shadows or gradients. Corners are Hyprland's rounding, 0 without
+  it ([Font and corners](#font-and-corners)).
+- **One accent, one filled button.** New message, and Send only while there is text. The accent
+  otherwise marks only what is alive: the unread square, the selection bar, the focus ring.
+- **Type carries the hierarchy:** 15 px titles, 13 px body and names, 11 px meta.
+- **Icons until they matter.** Header and composer actions are 28 px icon buttons with no
+  border, a hover fill (`surface_hover`) and, for the toggles, `surface_active` while on. Every
+  icon-only button has a tooltip and an accessible name; Send's tooltip names its keys
+  (`Enter`; `Alt+Enter` starts a new line).
+- **Focus is visible, never a glow:** a 1 px `accent` ring on buttons and rows (outside the filled
+  buttons, where it shows), the bubble's own 1 px ring on a message, the accent line of the
+  composer and of the search inputs, and the 2 px selection bar in the chat list.
+- **Motion:** only the hover fill and the palette's scrim fade, in 120 ms; libadwaita's own
+  transitions are off. With the desktop's animations off (`gsettings set
+  org.gnome.desktop.interface enable-animations false`, which GTK reads as
+  `gtk-enable-animations`) nothing moves, and the change applies live; animated stickers stay
+  still too. The composer's height change is not animated.
+- **The transcript is the content:** at most 72 characters wide, left-aligned; bubbles at most
+  68 characters.
+
+### On Omarchy
+
+The look can only be judged on screen, so before the redesign is called done, on the Omarchy
+machine:
+
+- [ ] Screenshots at 1920, 960 and 600 px wide, each in a dark theme (Gruvbox) and a light one
+      (Catppuccin Latte).
+- [ ] A live theme switch (`omarchy-theme-set`) repaints everything with no restart.
+- [ ] A keyboard-only pass: every action reachable, the focus always visible, and Escape in the
+      chat filter's input leaves the focus in the chat list.
+- [ ] An animations-off pass (`gsettings set org.gnome.desktop.interface enable-animations
+      false`): no hover or scrim fade, stickers still; back on, they return without a restart.
+- [ ] The transcript stays 72 characters wide and left-aligned on a wide window, and fills a
+      narrow one.
+- [ ] `cargo test -p nuncio-desktop --test smoke` prints `smoke: ok` (elsewhere it is skipped).
+
 ## Keys
 
 Tab moves between the chat list, the conversation and the composer.
@@ -307,7 +356,7 @@ Tab moves between the chat list, the conversation and the composer.
 | --- | --- | --- |
 | chat list | Up, Down, `j`, `k` | move |
 | chat list | Enter, click | open the chat (only opening marks it read) |
-| chat list | Escape | clear and close the chat filter; with it closed, close the search |
+| chat list | Escape | clear and close the chat filter (from its input, the focus goes back to the list); with it closed, close the search |
 | conversation | Up, Down, `j`, `k` | move between messages |
 | conversation | `g`, Shift+G | the first, the last message |
 | conversation | `r` | reply |
@@ -346,7 +395,8 @@ sticker says `Photo` or `Sticker` instead of `[image]` / `[sticker]`).
 ## Tests
 
 `cargo test -p nuncio-desktop`: the command line, the Omarchy font and Hyprland rounding in the
-generated CSS, the panes' CSS from the palette roles, the layout chosen at each width, the rail's
+generated CSS, the panes' CSS from the palette roles (the hover fills, the focus ring, the 120 ms
+transitions and none with animations off), the transcript's 72-character measure, the layout chosen at each width, the rail's
 filters and connection line, `hyprctl`'s answer (through a fake runner: never the real one), the view data, the controller (notifications, links, New message's number rules), the
 lifecycle (background, start hidden), the palette's commands, matching, groups and keys, the search
 hint, the settings' rules, the
@@ -360,7 +410,8 @@ through a click on it (its dialog's Enter and Escape through its key handler: Es
 invalid number keeps it open with its error, a valid one opens the chat with an empty, focused
 composer and sends nothing), the search through `/` and
 Ctrl+F (in the conversation pane, its hint only while empty and focused, and `/` checked to be
-typed in the composer), and the settings window is built (not shown)
+typed in the composer), the chat filter (Escape in its input giving the focus back to the
+chat list), the header icon buttons' tooltips and accessible names, and the settings window is built (not shown)
 over a temporary `config.toml`, never yours (its file 0600 in a 0700 directory). A photo and a
 sticker bubble are checked to reserve their box before decoding, to get a texture of the
 thumbnail's size, and to take the full picture only after a click; an animated sticker's full

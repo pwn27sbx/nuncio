@@ -15,7 +15,7 @@
 //! - chat list: Up/Down (or `j`/`k`) move, Enter opens the chat (and only opening marks it
 //!   read), Escape clears the name filter, else closes the search; the rail's All / Unread /
 //!   Archived choose which chats it lists, and the list header's ⌕ filters them by name as you
-//!   type (S7; Escape in its input clears it too);
+//!   type (S7; Escape in its input clears it too and gives the focus back to the chat list);
 //! - conversation: Up/Down (or `j`/`k`) move between messages, `g` goes to the first and Shift+G
 //!   to the last; `r` replies, `e` reacts, Shift+R retries a send
 //!   that was not sent, `o` opens a media file (a picture's full file is shown in its bubble),
@@ -55,11 +55,17 @@ use crate::present::{self, Bubble, ChatRow, Filter, PictureView};
 use crate::style::{self, LIST_WIDTH, Layout, RAIL_COMPACT_WIDTH, RAIL_WIDTH, SETTINGS_WIDTH};
 use crate::worker::{Backlog, EVENT_BACKLOG, Incoming, Settings, Worker};
 use crate::{ROOT_CLASS, WINDOW_CLASS};
+use measure::Measure;
 use nuncio_client::TitleBar;
 use nuncio_client::config::App;
 
+mod measure;
+
 /// The rail's one filled button: its label, its accessible name and its tooltip (S6).
 const NEW_MESSAGE: &str = "New message";
+
+/// The class that shows the palette's scrim (plan §4.4: it fades in and out).
+const SCRIM_SHOWN: &str = "nuncio-scrim-shown";
 
 /// The window and the state behind it. Cheap to clone. The window itself keeps the state alive
 /// until it is closed, so a caller may drop every `Ui` once the window is shown.
@@ -91,6 +97,10 @@ struct Inner {
     offset_minutes: i32,
     window: adw::ApplicationWindow,
     list_header: adw::HeaderBar,
+    /// The app menu, in the chat list's header.
+    menu_button: gtk::MenuButton,
+    /// Closes the reply strip.
+    cancel_reply: gtk::Button,
     /// The chat list's name filter (S7) is open while this (the list header's ⌕) is active.
     chat_filter_toggle: gtk::ToggleButton,
     /// The name filter's input: the listed chats are those whose name holds its text.
@@ -433,6 +443,7 @@ impl Ui {
             .tooltip_text("Menu")
             .menu_model(&menu)
             .build();
+        menu_button.add_css_class("nuncio-icon-button");
         menu_button.update_property(&[Property::Label("Menu")]);
         list_header.pack_end(&menu_button);
         // The chat list's name filter (S7, plan §6.6): the header's ⌕ swaps the title for a 32 px
@@ -441,6 +452,7 @@ impl Ui {
             .icon_name("edit-find-symbolic")
             .tooltip_text("Filter the chats by name")
             .build();
+        chat_filter_toggle.add_css_class("nuncio-icon-button");
         chat_filter_toggle.update_property(&[Property::Label("Filter the chats by name")]);
         list_header.pack_end(&chat_filter_toggle);
         let chat_filter_entry = gtk::SearchEntry::builder()
@@ -481,6 +493,7 @@ impl Ui {
             .tooltip_text("Back to the chats (Escape)")
             .visible(false)
             .build();
+        back.add_css_class("nuncio-icon-button");
         back.update_property(&[Property::Label("Back to the chats")]);
         content_header.pack_start(&back);
         // A stop reason: one line under the header, in the warning colour, while it holds.
@@ -497,6 +510,7 @@ impl Ui {
             .icon_name("edit-find-symbolic")
             .tooltip_text("Search in this chat (/ or Ctrl+F)")
             .build();
+        search_toggle.add_css_class("nuncio-icon-button");
         search_toggle.update_property(&[Property::Label("Search in this chat")]);
         content_header.pack_end(&search_toggle);
         let search_entry = gtk::SearchEntry::builder()
@@ -545,11 +559,15 @@ impl Ui {
         transcript.update_property(&[Property::Label("Messages")]);
         let transcript_empty = Empty::new("mail-unread-symbolic");
         transcript.set_placeholder(Some(&transcript_empty.root));
+        // At most 72 characters wide, at the left (plan §5).
         let transcript_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
-            .child(&transcript)
+            .child(&Measure::new(&transcript))
             .build();
+        // The list box only adopts a scrollable parent's adjustment, and `Measure` is not one:
+        // without this PageUp/PageDown and keeping the focused row in view stop working.
+        transcript.set_adjustment(Some(&transcript_scroll.vadjustment()));
 
         let blocked = adw::Banner::new("");
         // The composer (plan §6.4): a bar docked under the transcript, a 1 px line above it that
@@ -627,12 +645,11 @@ impl Ui {
         let lists = seam(&list_view, &content_view, LIST_WIDTH);
         let panes = seam(&rail.root, &lists, RAIL_WIDTH);
         // The palette's scrim (plan §6.5): the window dimmed behind it while it is open; the
-        // palette's own grab takes the clicks.
+        // palette's own grab takes the clicks. It is shown by its opacity, so it can fade.
         let scrim = gtk::Box::builder()
             .hexpand(true)
             .vexpand(true)
             .can_target(false)
-            .visible(false)
             .build();
         scrim.add_css_class("nuncio-scrim");
         let dimmed = gtk::Overlay::builder().child(&panes).build();
@@ -665,6 +682,8 @@ impl Ui {
             offset_minutes,
             window,
             list_header,
+            menu_button,
+            cancel_reply: cancel_reply.clone(),
             chat_filter_toggle,
             chat_filter_entry,
             content_header,
@@ -1204,7 +1223,7 @@ impl Ui {
                     let mut open = inner.palette.borrow_mut();
                     if open.as_ref().is_some_and(|view| &view.popover == popover) {
                         open.take();
-                        inner.scrim.set_visible(false);
+                        inner.scrim.remove_css_class(SCRIM_SHOWN);
                     }
                 }
                 let popover = popover.clone();
@@ -1214,7 +1233,7 @@ impl Ui {
 
         view.filter("");
         *self.0.palette.borrow_mut() = Some(Rc::clone(&view));
-        self.0.scrim.set_visible(true);
+        self.0.scrim.add_css_class(SCRIM_SHOWN);
         view.popover.popup();
         view.entry.grab_focus();
     }
@@ -1229,7 +1248,7 @@ impl Ui {
         let Some(view) = self.0.palette.borrow_mut().take() else {
             return;
         };
-        self.0.scrim.set_visible(false);
+        self.0.scrim.remove_css_class(SCRIM_SHOWN);
         view.popover.popdown();
         // A palette never mapped (a hidden window) is not `closed`: let it go here too.
         let popover = view.popover.clone();
@@ -1327,7 +1346,7 @@ impl Ui {
 
     /// Whether the window is dimmed behind the palette (tests).
     pub fn palette_scrim_shown(&self) -> bool {
-        self.0.scrim.get_visible()
+        self.0.scrim.has_css_class(SCRIM_SHOWN)
     }
 
     /// Ask for a phone number ("New message", the rail's button or the palette): a §6.8 dialog
@@ -2249,6 +2268,9 @@ impl Ui {
     /// every chat of the rail's filter is listed again).
     fn set_chat_filter_mode(&self, on: bool) {
         let inner = &self.0;
+        let typing = self
+            .focused_widget()
+            .is_some_and(|widget| widget.is_ancestor(&inner.chat_filter_entry));
         inner.list_title.set_visible(!on);
         inner.chat_filter_entry.set_visible(on);
         if on {
@@ -2256,7 +2278,49 @@ impl Ui {
         } else {
             // Its `changed` handler renders.
             inner.chat_filter_entry.set_text("");
+            if typing {
+                // The input is gone: the focus goes back to the chat list, not nowhere.
+                self.focus_chat_row();
+            }
         }
+    }
+
+    /// Put the focus on the chat list's selected row, else its first, else the list itself.
+    fn focus_chat_row(&self) {
+        let chats = &self.0.chats;
+        match chats.selected_row().or_else(|| chats.row_at_index(0)) {
+            Some(row) => row.grab_focus(),
+            None => chats.grab_focus(),
+        };
+    }
+
+    /// Whether the keyboard focus is in the chat list (tests).
+    pub fn chat_list_focused(&self) -> bool {
+        self.focused_widget().is_some_and(|widget| {
+            &widget == self.0.chats.upcast_ref::<gtk::Widget>() || widget.is_ancestor(&self.0.chats)
+        })
+    }
+
+    /// Every icon-only button of the window's headers and composer: its tooltip, and whether it
+    /// carries an accessible name (tests; GTK gives no way to read the name back).
+    pub fn icon_buttons(&self) -> Vec<(Option<String>, bool)> {
+        let inner = &self.0;
+        let buttons: [&gtk::Widget; 5] = [
+            inner.menu_button.upcast_ref(),
+            inner.chat_filter_toggle.upcast_ref(),
+            inner.back.upcast_ref(),
+            inner.search_toggle.upcast_ref(),
+            inner.cancel_reply.upcast_ref(),
+        ];
+        buttons
+            .iter()
+            .map(|button| {
+                (
+                    button.tooltip_text().map(|t| t.to_string()),
+                    gtk::test_accessible_has_property(*button, gtk::AccessibleProperty::Label),
+                )
+            })
+            .collect()
     }
 
     /// Close the chat list's name filter, as Escape in it or in the chat list does.
@@ -2695,10 +2759,12 @@ impl Ui {
                     .tooltip_text("Remove my reaction")
                     .build()
             } else {
-                gtk::Button::builder()
+                let button = gtk::Button::builder()
                     .label(emoji)
                     .tooltip_text(format!("React with {emoji}"))
-                    .build()
+                    .build();
+                button.update_property(&[Property::Label(&format!("React with {emoji}"))]);
+                button
             };
             button.add_css_class("flat");
             let popover = popover.clone();

@@ -470,7 +470,8 @@ fn a_filter_keeps_the_open_chat_and_its_selection() {
 
 /// The list header's ⌕ filters the chats by name as you type, together with the rail's filter;
 /// the rail's counts stay whole; the open chat's row stays selected while it matches; Escape
-/// in the input or in the chat list clears the filter.
+/// in the input or in the chat list clears the filter, and from the input gives the focus back to
+/// the chat list. The headers' icon-only buttons carry tooltips and accessible names.
 fn the_list_header_filters_the_chats_by_name() {
     let ui = three_chats();
     check(!ui.chat_filter_open(), "no name filter at first");
@@ -515,6 +516,17 @@ fn the_list_header_filters_the_chats_by_name() {
         !ui.chat_filter_open() && ui.drawn().0 == 3,
         "Escape in the input clears it too",
     );
+    check(
+        ui.chat_list_focused(),
+        "and the focus goes back to the chat list, not nowhere",
+    );
+    // Plan §8: no information in icons alone.
+    for (tooltip, named) in ui.icon_buttons() {
+        check(
+            tooltip.is_some_and(|t| !t.is_empty()) && named,
+            "every icon-only button has a tooltip and an accessible name",
+        );
+    }
 }
 
 /// A new message gives a notification (kept, since no `GApplication` is attached: nothing is

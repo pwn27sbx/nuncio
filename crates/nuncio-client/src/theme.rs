@@ -17,6 +17,8 @@ use serde::{Deserialize, Deserializer};
 
 use notify::Watcher as _;
 
+mod roles;
+
 /// A 24-bit colour, as written in `colors.toml`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rgb {
@@ -76,7 +78,8 @@ pub enum Mode {
 ///
 /// Missing keys fall back to [`Palette::default`], so a partial or unrecognised
 /// `colors.toml` still yields something a client can draw with. The `bright_*` entries are
-/// optional because not every Omarchy theme writes them.
+/// optional because not every Omarchy theme writes them, and so are the extra background and
+/// foreground tones the semantic roles ([`Palette::surface`] and the rest) are built from.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Palette {
@@ -90,6 +93,10 @@ pub struct Palette {
     pub blue: Rgb,
     pub magenta: Rgb,
     pub cyan: Rgb,
+    pub lighter_background: Option<Rgb>,
+    pub darker_background: Option<Rgb>,
+    pub dark_foreground: Option<Rgb>,
+    pub light_foreground: Option<Rgb>,
     pub bright_foreground: Option<Rgb>,
     pub bright_red: Option<Rgb>,
     pub bright_green: Option<Rgb>,
@@ -146,6 +153,10 @@ impl Default for Palette {
             blue: Rgb::new(0x45, 0x85, 0x88),
             magenta: Rgb::new(0xb1, 0x62, 0x86),
             cyan: Rgb::new(0x68, 0x9d, 0x6a),
+            lighter_background: None,
+            darker_background: None,
+            dark_foreground: None,
+            light_foreground: None,
             bright_foreground: None,
             bright_red: None,
             bright_green: None,
@@ -259,8 +270,8 @@ bright_magenta = "#f254a0"
             palette.bright_cyan.map(|c| c.to_hex()),
             Some("#2aeddd".to_owned())
         );
-        // `selection`, `muted`, `orange`, `lighter_background` and the `*_foreground`
-        // variants are in the file but are not part of the palette this client keeps.
+        // `selection`, `muted` and `orange` are in the file but are not part of the palette
+        // this client keeps; the background and foreground variants are (see `roles`).
     }
 
     #[test]

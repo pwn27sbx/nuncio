@@ -9,7 +9,7 @@ use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier};
 
 const ADA: &str = "15551230001@s.whatsapp.net";
 const GRACE: &str = "15551230002@s.whatsapp.net";
@@ -161,57 +161,58 @@ fn accent() -> Color {
     Color::Rgb(rgb.r, rgb.g, rgb.b)
 }
 
-/// The column of the chat pane's right border (its top-right corner, either style).
+/// The column of the one line between the panes (it meets the header rule with `┬`).
 fn split(buffer: &Buffer) -> u16 {
     (0..buffer.area.width)
-        .find(|&x| matches!(buffer[(x, 1)].symbol(), "┐" | "┓"))
-        .expect("the chat pane's top-right corner")
+        .find(|&x| buffer[(x, 1)].symbol() == "┬")
+        .expect("the line between the panes")
 }
 
 // --- keys -------------------------------------------------------------------------------
 
+/// Whether the pane title starting at column `x` of the header rule is drawn as the focused
+/// one: bold and not dim (the other pane's title is dim), never in the accent.
+fn focused_title(screen: &Buffer, x: u16) -> bool {
+    let cell = &screen[(x, 1)];
+    assert_ne!(cell.fg, accent(), "a title is never in the accent");
+    cell.modifier.contains(Modifier::BOLD) && !cell.modifier.contains(Modifier::DIM)
+}
+
 #[test]
-fn tab_switches_focus_and_only_the_focused_pane_has_the_highlighted_border() {
+fn tab_switches_focus_and_only_the_focused_pane_has_the_bold_title() {
     let mut app = two_chats();
     let screen = render(&mut app, 80, 24);
     let right = split(&screen);
-    let chats_corner = &screen[(0, 1)];
-    let conversation_corner = &screen[(right + 1, 1)];
-    assert_eq!(
-        chats_corner.symbol(),
-        "┏",
-        "the focused list:\n{}",
-        text(&screen)
-    );
-    assert_eq!(chats_corner.fg, accent());
-    assert_eq!(conversation_corner.symbol(), "┌");
-    assert_ne!(
-        conversation_corner.fg,
-        accent(),
+    // The titles sit on the header rule: `─ Chats (2) ─…┬─ Ada Lovelace ─…`.
+    let chats_title = 2;
+    let conversation_title = right + 3;
+    assert_eq!(screen[(chats_title, 1)].symbol(), "C", "{}", text(&screen));
+    assert_eq!(screen[(conversation_title, 1)].symbol(), "A");
+    assert!(focused_title(&screen, chats_title), "the focused list");
+    assert!(
+        !focused_title(&screen, conversation_title),
         "the other pane is not highlighted"
     );
 
     assert_eq!(app.handle_key(key(KeyCode::Tab)), None);
     assert_eq!(app.pane(), Pane::Messages);
     let screen = render(&mut app, 80, 24);
-    assert_eq!(screen[(0, 1)].symbol(), "┌");
-    assert_ne!(screen[(0, 1)].fg, accent());
-    assert_eq!(screen[(right + 1, 1)].symbol(), "┏");
-    assert_eq!(screen[(right + 1, 1)].fg, accent());
+    assert!(!focused_title(&screen, chats_title));
+    assert!(focused_title(&screen, conversation_title));
 
     assert_eq!(app.handle_key(key(KeyCode::Tab)), None);
     assert_eq!(app.pane(), Pane::Chats);
 }
 
 #[test]
-fn the_composer_counts_as_the_conversation_pane_for_the_border() {
+fn the_composer_counts_as_the_conversation_pane_for_the_focus() {
     let mut app = two_chats();
     open_ada(&mut app, three());
     assert_eq!(app.pane(), Pane::Compose);
     let screen = render(&mut app, 80, 24);
     let right = split(&screen);
-    assert_eq!(screen[(0, 1)].symbol(), "┌");
-    assert_eq!(screen[(right + 1, 1)].symbol(), "┏");
+    assert!(!focused_title(&screen, 2));
+    assert!(focused_title(&screen, right + 3));
 }
 
 #[test]
@@ -242,7 +243,7 @@ fn j_k_and_the_arrows_select_messages_in_the_conversation_and_shift_k_j_do_nothi
     open_ada(&mut app, three());
     assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
     assert_eq!(app.pane(), Pane::Messages);
-    // The conversation row under the selected message's `›` header: its body.
+    // The conversation row of the selected message, marked by the `▌` bar: its text.
     let selected = |app: &mut App| -> Option<String> {
         let screen = render(app, 80, 24);
         let right = split(&screen);
@@ -252,12 +253,8 @@ fn j_k_and_the_arrows_select_messages_in_the_conversation_and_shift_k_j_do_nothi
                 .collect()
         };
         (0..screen.area.height)
-            .find(|&y| {
-                conversation(y)
-                    .trim_start_matches(['│', '┃'])
-                    .starts_with("› ")
-            })
-            .map(|y| conversation(y + 1))
+            .find(|&y| conversation(y).starts_with("▌ "))
+            .map(conversation)
     };
 
     // Shift-K / Shift-J are gone: they select nothing.
@@ -406,8 +403,9 @@ fn the_help_is_grouped_by_context_and_fits_at_eighty_by_twenty_four() {
     for needle in ["Tab", "Enter", "send", "Ctrl-C", "Shift"] {
         assert!(shown.contains(needle), "{needle:?}:\n{shown}");
     }
-    // The help's bottom border is on screen: nothing was cut off.
-    assert!(shown.contains('└') || shown.contains('┗'), "{shown}");
+    // The help's last key is on screen, above the footer: nothing was cut off.
+    let (_, last_key) = find(&screen, "selects text");
+    assert!(last_key < 23, "{shown}");
     let (_, reactions) = find(&screen, "Reactions");
     let (_, ctrl_c) = find(&screen, "Ctrl-C");
     assert!(ctrl_c > reactions, "{shown}");
@@ -447,7 +445,7 @@ fn a_click_in_the_conversation_focuses_it_and_selects_the_clicked_message() {
     assert_eq!(app.pane(), Pane::Messages);
     let shown = text(&render(&mut app, 80, 24));
     assert!(
-        shown.contains("› you · 17:02"),
+        shown.contains("▌ you · 17:02"),
         "the clicked message:\n{shown}"
     );
     // `r` now replies to it.
@@ -467,7 +465,7 @@ fn a_click_in_the_conversation_focuses_it_and_selects_the_clicked_message() {
     click(&mut app, at);
     assert_eq!(app.pane(), Pane::Messages);
     let shown = text(&render(&mut app, 80, 24));
-    assert!(shown.contains("› Ada Lovelace · 17:01"), "{shown}");
+    assert!(shown.contains("▌ Ada Lovelace · 17:01"), "{shown}");
 }
 
 #[test]

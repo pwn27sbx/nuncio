@@ -203,8 +203,9 @@ fn draw(app: &mut App, width: u16, height: u16) -> Buffer {
     terminal.backend().buffer().clone()
 }
 
-/// At 80x24 the conversation's message rows are y 2..20, columns 33..79.
-const ROWS: std::ops::Range<u16> = 2..20;
+/// At 80x24 the conversation's message rows are y 2..21 (under the header rule, over the
+/// composer rule), columns 33..79 (the last column is kept free).
+const ROWS: std::ops::Range<u16> = 2..21;
 const COLUMNS: std::ops::Range<u16> = 33..79;
 
 fn row_text(buffer: &Buffer, y: u16) -> String {
@@ -306,36 +307,38 @@ fn a_picture_with_no_size_gets_no_box_and_no_thumbnail() {
 
 #[test]
 fn a_partially_visible_picture_is_cut_at_the_top_and_at_the_bottom() {
-    // Cut at the top: five two-row messages after the photo scroll its first rows away.
+    // Cut at the top: ten one-row messages after the photo scroll its first rows away.
     let mut app = pictures_app();
     let mut messages = vec![photo("IMG1", 1)];
-    messages.extend(texts("after", 5, 10));
+    messages.extend(texts("after", 10, 10));
     open_ada(&mut app, messages);
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
     let top_cut = draw(&mut app, 80, 24);
-    // 2 + 12 + 10 rows in 18: the header, the caption and 4 picture rows are above the view.
+    // 2 + 12 + 10 rows in 19: the day label, the caption line and 3 picture rows are above the
+    // view.
     assert_eq!(
         rows_in(&top_cut, RED),
-        (2..10).collect::<Vec<_>>(),
+        (2..11).collect::<Vec<_>>(),
         "{}",
         screen(&top_cut)
     );
     assert_eq!(row_of(&top_cut, "after line 0"), Some(11));
 
-    // Cut at the bottom: the same photo after four messages, scrolled to the oldest.
+    // Cut at the bottom: the same photo after eight messages, scrolled to the oldest.
     let mut app = pictures_app();
-    let mut messages = texts("before", 4, 1);
+    let mut messages = texts("before", 8, 1);
     messages.push(photo("IMG1", 9));
     open_ada(&mut app, messages);
     app.handle_key(key(KeyCode::Char('g')));
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
     let bottom_cut = draw(&mut app, 80, 24);
+    // The day label, eight rows, the caption line: 9 picture rows fit before the composer.
     assert_eq!(row_of(&bottom_cut, "before line 0"), Some(3));
     assert_eq!(
         rows_in(&bottom_cut, RED),
-        (12..20).collect::<Vec<_>>(),
+        (12..21).collect::<Vec<_>>(),
         "{}",
         screen(&bottom_cut)
     );
@@ -370,10 +373,11 @@ fn a_corrupt_thumbnail_keeps_the_box_with_a_label_and_never_panics() {
         image_box.contains("[image]"),
         "the box keeps a label:\n{text}"
     );
+    // The sticker's caption is on its message line; its box starts on the next row.
     let sticker_box = text
         .lines()
         .skip_while(|line| !line.contains("Ada Lovelace · 17:02"))
-        .nth(2)
+        .nth(1)
         .unwrap_or_default();
     assert!(
         sticker_box.contains("[sticker]"),
@@ -738,17 +742,17 @@ fn a_sticker_shows_its_first_frame_and_an_animated_one_a_marker() {
         .position(|l| l.contains("Ada Lovelace · 17:02"))
         .expect("the second sticker");
     assert!(
-        lines[still + 1].contains("[sticker]") && !lines[still + 1].contains('▶'),
+        lines[still].contains("[sticker]") && !lines[still].contains('▶'),
         "{text}"
     );
     assert!(
-        lines[moving + 1].contains("[sticker] ▶"),
+        lines[moving].contains("[sticker] ▶"),
         "an animated sticker is marked:\n{text}"
     );
     // Both are drawn from their PNG thumbnails, green, in 12-row boxes.
     let green = is(GREEN);
     let drawn = |from: usize| {
-        (from + 2..from + 2 + usize::from(IMAGE_ROWS))
+        (from + 1..from + 1 + usize::from(IMAGE_ROWS))
             .filter(|&y| {
                 (0..buffer.area.width).any(|x| {
                     buffer
@@ -915,7 +919,7 @@ fn a_picture_with_no_thumbnail_says_its_label_once_and_its_box_stays_empty() {
     assert_eq!(count(&buffer, "[sticker]"), 2, "one per sticker:\n{text}");
     assert_eq!(count(&buffer, "[sticker] ▶"), 1, "{text}");
     assert_eq!(count(&buffer, "[image]"), 1, "{text}");
-    // Each label is the caption under its header; the 12 rows below it are blank.
+    // Each label is the caption on its message line; the 12 rows below it are blank.
     let lines: Vec<&str> = text.lines().collect();
     for minute in 1..=3 {
         let header = lines
@@ -923,11 +927,11 @@ fn a_picture_with_no_thumbnail_says_its_label_once_and_its_box_stays_empty() {
             .position(|l| l.contains(&format!("Ada Lovelace · 17:0{minute}")))
             .expect("the header");
         assert!(
-            lines[header + 1].contains("[sticker]") || lines[header + 1].contains("[image]"),
+            lines[header].contains("[sticker]") || lines[header].contains("[image]"),
             "{text}"
         );
-        for row in &lines[header + 2..header + 2 + usize::from(IMAGE_ROWS)] {
-            let inside = row.split('┃').nth(1).unwrap_or_default();
+        for row in &lines[header + 1..header + 1 + usize::from(IMAGE_ROWS)] {
+            let inside = row.split('│').nth(1).unwrap_or_default();
             assert!(inside.trim().is_empty(), "the box is empty:\n{text}");
         }
     }
@@ -954,16 +958,16 @@ fn frames_with_pictures_stay_intact_at_eighty_by_twenty_four_and_two_forty_by_si
             assert_eq!(rows.len(), usize::from(height));
             assert!(rows[0].starts_with("nuncio"), "{text}");
             assert!(rows[usize::from(height) - 1].contains("? help"), "{text}");
-            // Every body row is closed by the conversation pane's right border.
-            for (y, row) in rows
-                .iter()
-                .enumerate()
-                .take(usize::from(height) - 2)
-                .skip(2)
-            {
+            // On every body row the line between the panes stays in its column and the
+            // conversation's last column stays free: no picture spilled over either.
+            let split = (0..width)
+                .find(|&x| buffer[(x, 1)].symbol() == "┬")
+                .expect("the line between the panes");
+            for y in 2..height - 2 {
                 assert!(
-                    matches!(row.chars().last(), Some('│' | '┃')),
-                    "row {y} lost its border at {width}x{height}:\n{text}"
+                    ["│", "├"].contains(&buffer[(split, y)].symbol())
+                        && [" ", "─"].contains(&buffer[(width - 1, y)].symbol()),
+                    "row {y} lost its frame at {width}x{height}:\n{text}"
                 );
             }
         }

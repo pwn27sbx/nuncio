@@ -65,8 +65,8 @@ glue_line='require("hypr.nuncio")'
 shipped_sha256() { # shipped_sha256 NAME: the SHA-256 of contrib/omarchy's file NAME
 	case $1 in
 	manifest.json) printf '%s' 53211026bb57e51ea3387e1df09863546779881b0396493b25ddf38417d25c2f ;;
-	BarWidget.qml) printf '%s' f6f07ce83b38c0e1b3d992fe0370b444bd7bd16a5c4c739e0a55e63227b93c3a ;;
-	nuncio.lua) printf '%s' 32561451d038b8169e098d34c83613cc45f600eb08845de6fbbb53f324ba9b32 ;;
+	BarWidget.qml) printf '%s' cf806d590cf4478b5f2f5d89741d7fccb525f0f9e0f7ba33c45e3711a12fafc3 ;;
+	nuncio.lua) printf '%s' e7a4fb405e8ddc94ce3b99d08078f86a4e554e18b9cb796d20a2b5a0a9a9bd2e ;;
 	*) return 1 ;;
 	esac
 }

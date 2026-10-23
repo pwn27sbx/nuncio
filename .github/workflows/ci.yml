@@ -5,10 +5,7 @@ name: CI
 
 on:
   push:
-    # feat/m4-omarchy: until this workflow is on main, the only way to see its results on that
-    # branch (workflow_dispatch only works for workflows on the default branch). Drop it once the
-    # branch has a pull request.
-    branches: [main, feat/m4-omarchy]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 

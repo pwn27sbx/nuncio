@@ -303,18 +303,24 @@ fn notifications_and_the_open_chat_action() {
 }
 
 fn a_link_fills_the_composer_and_sends_nothing() {
-    // `HANDLES_OPEN` hands a command-line link over as a `GFile`: its URI must come back intact.
+    // `HANDLES_OPEN` hands a command-line link over as a `GFile`. GLib normalises the URI it
+    // returns (`whatsapp://send?…` gains the empty path, `whatsapp://send/?…`), so what has to
+    // survive is the request the link names, not the exact bytes.
     for link in [
         "whatsapp://send?phone=15551230002&text=hola%20Ben",
         "https://wa.me/15551230002?text=hola%20Ben",
     ] {
+        let given = nuncio_client::parse_link(link);
+        let normalised = gtk::gio::File::for_commandline_arg(link).uri();
         check(
-            gtk::gio::File::for_commandline_arg(link).uri() == link,
-            &format!("the open handler gets the link as given: {link}"),
+            given.is_ok() && given == nuncio_client::parse_link(&normalised),
+            &format!("the open handler gets the link's request through GFile: {link}"),
         );
     }
     let ui = listed();
-    ui.open_link("https://wa.me/15551230002?text=hola%20Ben");
+    ui.open_link(
+        &gtk::gio::File::for_commandline_arg("https://wa.me/15551230002?text=hola%20Ben").uri(),
+    );
     check(
         ui.draft() == "hola Ben",
         "the link's text is in the composer",

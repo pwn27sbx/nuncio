@@ -119,20 +119,20 @@ impl Screen {
             .collect()
     }
 
-    /// The column of the chat pane's right border (thick when the list has the focus).
+    /// The column of the one line between the panes (it meets the header rule with `┬`).
     fn split(&self) -> usize {
         self.rows[1]
             .iter()
-            .position(|cell| cell == "┐" || cell == "┓")
-            .expect("the chat pane's top-right corner")
+            .position(|cell| cell == "┬")
+            .expect("the line between the panes")
     }
 
-    /// The chat pane, borders included.
+    /// The chat pane, the line after it included.
     fn chats(&self) -> String {
         self.columns(0, self.split() + 1)
     }
 
-    /// The conversation pane, borders included.
+    /// The conversation pane.
     fn conversation(&self) -> String {
         self.columns(self.split() + 1, usize::MAX)
     }
@@ -254,21 +254,18 @@ fn emoji_zwj_cjk_and_rtl_text_keep_the_frame_intact() {
     );
     for (width, height) in [(80u16, 24u16), (240, 60), (37, 11)] {
         let screen = render(&mut app, width, height);
-        // The chat pane's right border and the screen's right border stay in their columns on
-        // every body row: no wide character pushed a border out.
+        // The line between the panes and the conversation's free last column stay in their
+        // columns on every body row: no wide character pushed one out.
         let chat_right = screen.split() as u16;
-        // The list's border is thin (the conversation has the focus), the conversation's thick.
         for y in 2..height - 2 {
-            assert_eq!(
-                screen.cell(chat_right, y),
-                "│",
-                "chat pane border at row {y}, {width}x{height}:\n{}",
+            assert!(
+                ["│", "├"].contains(&screen.cell(chat_right, y)),
+                "the line between the panes at row {y}, {width}x{height}:\n{}",
                 screen.text()
             );
-            assert_eq!(
-                screen.cell(width - 1, y),
-                "┃",
-                "right border at row {y}, {width}x{height}:\n{}",
+            assert!(
+                [" ", "─"].contains(&screen.cell(width - 1, y)),
+                "the last column at row {y}, {width}x{height}:\n{}",
                 screen.text()
             );
         }
@@ -349,7 +346,7 @@ fn two_hundred_messages_scroll_to_the_top_and_back_quickly() {
 
     // Select the newest (it stays in view), then page by page, then all the way.
     let after_k = timed(&mut app, KeyCode::Char('k'));
-    assert!(after_k.contains("› Ada Lovelace ·") && after_k.contains("message 199"));
+    assert!(after_k.contains("▌ Ada Lovelace ·") && after_k.contains("message 199"));
     timed(&mut app, KeyCode::PageUp);
     let top = timed(&mut app, KeyCode::Char('g'));
     assert!(top.contains("message 000"), "top:\n{top}");
@@ -768,7 +765,7 @@ fn a_reply_quotes_the_selected_message_and_the_transcript_shows_the_quote() {
     assert_eq!(app.handle_key(key(KeyCode::Char('k'))), None);
     assert_eq!(app.handle_key(key(KeyCode::Char('k'))), None);
     let screen = render(&mut app, 80, 24).conversation();
-    assert!(screen.contains("› Ada Lovelace · 17:01"), "{screen}");
+    assert!(screen.contains("▌ Ada Lovelace · 17:01"), "{screen}");
     assert_eq!(app.handle_key(key(KeyCode::Char('r'))), None);
     assert_eq!(app.pane(), Pane::Compose);
     let screen = render(&mut app, 80, 24).conversation();
@@ -927,7 +924,7 @@ fn search_sends_search_lists_results_newest_first_and_esc_closes() {
     });
     let screen = render(&mut app, 80, 24).text();
     let row_of = |needle: &str| screen.lines().position(|l| l.contains(needle));
-    let newest = row_of("› you · 17:02 Yes, see").unwrap_or_else(|| panic!("{screen}"));
+    let newest = row_of("▌ you · 17:02 Yes, see").unwrap_or_else(|| panic!("{screen}"));
     assert_eq!(
         row_of("Ada Lovelace · 17:01 Are we"),
         Some(newest + 1),
@@ -938,7 +935,7 @@ fn search_sends_search_lists_results_newest_first_and_esc_closes() {
     assert_eq!(app.handle_key(key(KeyCode::Enter)), None);
     let screen = render(&mut app, 80, 24).text();
     assert!(!screen.contains("Search"), "{screen}");
-    assert!(screen.contains("› Ada Lovelace · 17:01"), "{screen}");
+    assert!(screen.contains("▌ Ada Lovelace · 17:01"), "{screen}");
     assert_eq!(app.pane(), Pane::Messages);
     // The conversation was not replaced by the results.
     app.handle_key(key(KeyCode::Char('/')));
@@ -1149,7 +1146,7 @@ fn a_search_result_far_up_the_conversation_is_scrolled_into_view() {
     });
     app.handle_key(key(KeyCode::Enter));
     let screen = render(&mut app, 80, 24).conversation();
-    assert!(screen.contains("› Ada Lovelace · 17:05"), "{screen}");
+    assert!(screen.contains("▌ Ada Lovelace · 17:05"), "{screen}");
     assert!(screen.contains("message 005"), "{screen}");
     assert!(!screen.contains("message 199"), "{screen}");
 }
@@ -2049,16 +2046,18 @@ fn alt_enter_and_ctrl_j_insert_a_newline_and_enter_sends_the_text_with_its_newli
         )))
     );
     assert_eq!(app.composer(), "");
-    // The transcript draws each line of the message on its own row.
+    // The transcript draws each line of the message on its own row: the first after its author
+    // and time, the others from the pane's first column.
     let screen = render(&mut app, 80, 24).conversation();
     let rows: Vec<&str> = screen
         .lines()
         .filter(|l| l.contains("first") || l.contains("second") || l.contains("third"))
         .collect();
     assert_eq!(rows.len(), 3, "{screen}");
-    assert!(rows[0].contains("┃first "), "{screen}");
-    assert!(rows[1].contains("┃second "), "{screen}");
-    assert!(rows[2].contains("┃third "), "{screen}");
+    assert!(rows[0].starts_with("you · "), "{screen}");
+    assert!(rows[0].contains("  first "), "{screen}");
+    assert!(rows[1].starts_with("second "), "{screen}");
+    assert!(rows[2].starts_with("third "), "{screen}");
 }
 
 #[test]
@@ -2197,12 +2196,10 @@ fn a_draft_longer_than_the_pane_wraps_and_the_cursor_follows_it() {
     let (screen, cursor) = render_with_cursor(&mut app, 80, 24);
     let prompt = find_cell(&screen, "›");
     assert!(cursor.1 > prompt.1, "the draft wrapped:\n{}", screen.text());
-    let border = screen.rows[usize::from(cursor.1)]
-        .iter()
-        .rposition(|cell| cell == "┃")
-        .expect("the right border (thick: the composer has the focus)");
+    // The conversation's last column is kept free: the cursor stays before it.
+    let last = screen.rows[usize::from(cursor.1)].len() - 1;
     assert!(
-        usize::from(cursor.0) < border,
+        usize::from(cursor.0) < last,
         "the cursor is inside the pane"
     );
     // Every word is on screen: nothing was cut off.

@@ -19,12 +19,10 @@ use ratatui::Frame;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap,
-};
+use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui_image::StatefulImage;
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::sliced::{SignedPosition, SlicedImage};
@@ -71,15 +69,15 @@ pub enum Action {
 /// it ([`hit_test`]). Built by [`App::draw`]; empty before the first draw.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ScreenMap {
-    /// The chat pane, borders included.
+    /// The chat pane, its header rule and the line after it included.
     pub chats: Rect,
-    /// The rows of the chat list inside its border; each chat takes [`CHAT_ROWS`] rows.
+    /// The rows of the chat list under its header rule; each chat takes [`CHAT_ROWS`] rows.
     pub chat_rows: Rect,
     /// The list's scroll: the index of the chat on its first row.
     pub chat_offset: usize,
     /// How many chats are listed.
     pub chat_count: usize,
-    /// The conversation pane, borders included (the composer is inside it).
+    /// The conversation pane, its header rule included (the composer is inside it).
     pub conversation: Rect,
     /// The rows the conversation's messages are drawn in.
     pub message_area: Rect,
@@ -92,7 +90,8 @@ pub struct ScreenMap {
 /// What is under a screen cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
-    /// The chat pane: the chat at this list index, or none (a border, below the last chat).
+    /// The chat pane: the chat at this list index, or none (a rule or line, below the last
+    /// chat).
     Chats(Option<usize>),
     /// The conversation pane: the loaded message at this index, or none.
     Conversation(Option<usize>),
@@ -249,6 +248,8 @@ pub struct App {
     search_list: ListState,
     /// The inline pictures, when the terminal draws them.
     images: Option<images::Images>,
+    /// The pictures' protocol name, shown on the right of the footer.
+    protocol: Option<&'static str>,
     utc_offset: time::UtcOffset,
     /// Where things were on the last drawn screen, for the mouse.
     map: ScreenMap,
@@ -279,6 +280,7 @@ impl App {
             picking: false,
             search_list: ListState::default(),
             images: None,
+            protocol: None,
             utc_offset: time::UtcOffset::UTC,
             map: ScreenMap::default(),
         };
@@ -298,6 +300,7 @@ impl App {
     /// `[image]` label only and `o` opens media externally.
     pub fn with_graphics(mut self, graphics: images::Graphics) -> Self {
         self.images = Some(images::Images::new(&graphics));
+        self.protocol = Some(graphics.protocol_name());
         self
     }
 
@@ -726,12 +729,21 @@ impl App {
         Some(Action::Request(frame))
     }
 
-    /// Draw the whole screen into `frame`.
+    /// Draw the whole screen into `frame` (design plan §9): the header, the chat list on the
+    /// chrome and the conversation on the surface with one line between them, and the footer.
     pub fn draw(&mut self, frame: &mut Frame) {
         if let Some(images) = self.images.as_mut() {
             let failures = images.collect();
             self.picture_failures(failures);
         }
+        frame.render_widget(
+            Block::new().style(
+                Style::default()
+                    .bg(rgb(self.palette.surface()))
+                    .fg(rgb(self.palette.text())),
+            ),
+            frame.area(),
+        );
         let [header, body, footer] = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(0),
@@ -740,10 +752,16 @@ impl App {
         .areas(frame.area());
 
         self.draw_header(frame, header);
-        let [chats, messages] =
-            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
-                .areas(body);
+        let [chats, line, messages] = Layout::horizontal([
+            Constraint::Percentage(40),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(body);
+        self.draw_separator(frame, line);
         self.draw_chats(frame, chats);
+        // The line between the panes is part of the chat pane for the mouse.
+        self.map.chats = chats.union(line);
         self.draw_messages(frame, messages);
         self.draw_footer(frame, footer);
         if self.help {
@@ -757,47 +775,120 @@ impl App {
         }
     }
 
+    /// The one line between the panes: it meets the header rule with `┬`.
+    fn draw_separator(&self, frame: &mut Frame, area: Rect) {
+        if area.is_empty() {
+            return;
+        }
+        let lines: Vec<Line> = (0..area.height)
+            .map(|row| Line::from(if row == 0 { "┬" } else { "│" }))
+            .collect();
+        frame.render_widget(Paragraph::new(lines).style(self.line_style()), area);
+    }
+
+    /// A pane's header: its title on the header rule. The focused pane's title is bold, the
+    /// other's dim, so where the keys go shows without colour.
+    fn draw_rule_title(&self, frame: &mut Frame, area: Rect, title: String, focused: bool) {
+        if area.is_empty() {
+            return;
+        }
+        let style = if focused {
+            Style::default()
+                .fg(rgb(self.palette.text()))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            self.muted()
+        };
+        let mut spans = vec![Span::styled("─", self.line_style())];
+        let mut used = 1;
+        if !title.is_empty() {
+            let title = fit(
+                &format!(" {title} "),
+                usize::from(area.width).saturating_sub(1),
+            );
+            used += display_width(&title);
+            spans.push(Span::styled(title, style));
+        }
+        spans.push(Span::styled(
+            "─".repeat(usize::from(area.width).saturating_sub(used)),
+            self.line_style(),
+        ));
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    /// A panel over `area` hidden behind a solid `surface` scrim (a terminal has no alpha): the
+    /// centred panel is the chrome, its content inset by one column on each side.
+    fn panel(&self, frame: &mut Frame, area: Rect, scrim: bool, width: u16, height: u16) -> Rect {
+        if scrim {
+            frame.render_widget(Clear, area);
+            frame.render_widget(
+                Block::new().style(Style::default().bg(rgb(self.palette.surface()))),
+                area,
+            );
+        }
+        let panel = popup(area, width, height);
+        frame.render_widget(Clear, panel);
+        frame.render_widget(
+            Block::new().style(
+                Style::default()
+                    .bg(rgb(self.palette.surface_chrome()))
+                    .fg(rgb(self.palette.text())),
+            ),
+            panel,
+        );
+        Rect {
+            x: panel.x.saturating_add(1).min(panel.right()),
+            width: panel.width.saturating_sub(2),
+            ..panel
+        }
+    }
+
     fn draw_picker(&self, frame: &mut Frame, area: Rect) {
         let mut spans = Vec::new();
         for (n, emoji) in REACTIONS.iter().enumerate() {
-            spans.push(Span::styled(
-                format!(" {} ", n + 1),
-                Style::default().fg(rgb(self.palette.accent)),
-            ));
+            spans.push(Span::styled(format!(" {} ", n + 1), self.muted()));
             spans.push(Span::raw(plain(emoji)));
         }
         spans.push(Span::styled("  x remove mine", self.muted()));
-        let area = popup(area, 48, 4);
-        frame.render_widget(Clear, area);
+        let inner = self.panel(frame, area, false, 48, 3);
         frame.render_widget(
-            Paragraph::new(Line::from(spans))
-                .wrap(Wrap { trim: false })
-                .style(Style::default().bg(rgb(self.palette.background)))
-                .block(bordered(&self.palette).title(" React ")),
-            area,
+            Paragraph::new(vec![
+                self.panel_title("React"),
+                Line::default(),
+                Line::from(spans),
+            ])
+            .wrap(Wrap { trim: false }),
+            inner,
         );
+    }
+
+    fn panel_title(&self, title: &str) -> Line<'static> {
+        Line::from(Span::styled(
+            title.to_owned(),
+            Style::default()
+                .fg(rgb(self.palette.text()))
+                .add_modifier(Modifier::BOLD),
+        ))
     }
 
     fn draw_search(&mut self, frame: &mut Frame, area: Rect) {
         let chat = self.model.selected_chat().cloned();
-        let palette = self.palette.clone();
         let muted = self.muted();
+        let text = Style::default().fg(rgb(self.palette.text()));
+        let bar = Line::from(vec![
+            Span::styled("▌", Style::default().fg(rgb(self.palette.accent()))),
+            Span::raw(" "),
+        ]);
+        let active = Style::default().bg(rgb(self.palette.surface_active()));
+        let inner = self.panel(frame, area, true, 72, area.height);
         let Some(search) = self.model.transcript().search() else {
             return;
         };
-        let area = popup(area, 72, area.height);
-        frame.render_widget(Clear, area);
-        let block = bordered(&palette)
-            .title(" Search ")
-            .style(Style::default().bg(rgb(palette.background)));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
         let [prompt, results] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(inner);
         let cursor = if search.is_editing() { "▏" } else { "" };
         frame.render_widget(
-            Paragraph::new(format!("Search: {}{cursor}", plain(search.query())))
-                .style(Style::default().fg(rgb(palette.foreground))),
+            Paragraph::new(format!("Search: {}{cursor}", plain(search.query()))).style(text),
             prompt,
         );
         let items: Vec<ListItem> = match (search.results(), search.is_awaiting()) {
@@ -815,9 +906,9 @@ impl App {
                 .collect(),
         };
         let list = List::new(items)
-            .style(Style::default().fg(rgb(palette.foreground)))
-            .highlight_symbol("› ")
-            .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+            .style(text)
+            .highlight_symbol(bar)
+            .highlight_style(active);
         // The list clamps the chosen result to what it shows; the model keeps that choice.
         self.search_list.select(search.selected());
         frame.render_stateful_widget(list, results, &mut self.search_list);
@@ -825,6 +916,9 @@ impl App {
     }
 
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
+        let warning = Style::default()
+            .fg(rgb(self.palette.warning()))
+            .add_modifier(Modifier::BOLD);
         let status = match self.source {
             Source::Daemon if !self.model.connected() => Span::styled(
                 format!(
@@ -832,9 +926,7 @@ impl App {
                     self.model.status().daemon,
                     self.model.status().unread
                 ),
-                Style::default()
-                    .fg(rgb(self.palette.yellow))
-                    .add_modifier(Modifier::BOLD),
+                warning,
             ),
             Source::Daemon => Span::styled(
                 format!(
@@ -856,21 +948,22 @@ impl App {
                     " · FIXTURE DATA · no daemon · {} unread",
                     self.model.status().unread
                 ),
-                Style::default()
-                    .fg(rgb(self.palette.yellow))
-                    .add_modifier(Modifier::BOLD),
+                warning,
             ),
         };
         let line = Line::from(vec![
             Span::styled(
                 "nuncio",
                 Style::default()
-                    .fg(rgb(self.palette.accent))
+                    .fg(rgb(self.palette.text()))
                     .add_modifier(Modifier::BOLD),
             ),
             status,
         ]);
-        frame.render_widget(Paragraph::new(line), area);
+        frame.render_widget(
+            Paragraph::new(line).style(Style::default().bg(rgb(self.palette.surface_chrome()))),
+            area,
+        );
     }
 
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
@@ -878,103 +971,190 @@ impl App {
         let base = |enter: &str| {
             format!(" ? help · Tab switch pane · Enter {enter} · / search · q quit · ")
         };
-        let keys = match self.pane {
-            _ if self.model.transcript().search().is_some() => {
-                " Enter search/select · j/k move · / edit · Esc close ".to_owned()
-            }
-            _ if self.picking => " 1-6 react · x remove mine · Esc cancel ".to_owned(),
-            Pane::Chats => base("open") + "j/k move · l open to read · Ctrl-C quit ",
-            Pane::Messages if self.model.transcript().cursor().is_some() => {
+        // The primary key where the focus is: the one hint in the accent (plan §9.2).
+        let (keys, primary) = match self.pane {
+            _ if self.model.transcript().search().is_some() => (
+                " Enter search/select · j/k move · / edit · Esc close ".to_owned(),
+                "Enter",
+            ),
+            _ if self.picking => (" 1-6 react · x remove mine · Esc cancel ".to_owned(), "1-6"),
+            Pane::Chats => (
+                base("open") + "j/k move · l open to read · Ctrl-C quit ",
+                "Enter",
+            ),
+            Pane::Messages if self.model.transcript().cursor().is_some() => (
                 base("write")
-                    + "j/k select · r reply · e react · R retry · o open media · Esc chats "
-            }
-            Pane::Messages => base("write") + "j/k select · PgUp/PgDn scroll · Esc chats ",
-            Pane::Compose if self.model.composer().reply_to().is_some() => {
+                    + "j/k select · r reply · e react · R retry · o open media · Esc chats ",
+                "Enter",
+            ),
+            Pane::Messages => (
+                base("write") + "j/k select · PgUp/PgDn scroll · Esc chats ",
+                "Enter",
+            ),
+            Pane::Compose if self.model.composer().reply_to().is_some() => (
                 " Enter send reply · Alt-Enter newline · ←/→ move · Esc conversation · Ctrl-C quit "
-                    .to_owned()
-            }
-            Pane::Compose => {
+                    .to_owned(),
+                "Enter",
+            ),
+            Pane::Compose => (
                 " Enter send · Alt-Enter newline · ←/→ move · Esc conversation · Ctrl-C quit "
-                    .to_owned()
-            }
+                    .to_owned(),
+                "Enter",
+            ),
         };
         // The notice comes first, so a narrow terminal still shows it.
         let mut spans = Vec::new();
         if let Some(notice) = self.model.notice() {
             spans.push(Span::styled(
                 format!(" {notice} ·"),
-                Style::default().fg(rgb(self.palette.red)),
+                Style::default().fg(rgb(self.palette.warning())),
             ));
         }
-        spans.push(Span::styled(keys, self.muted()));
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        // The primary key is the first one standing alone (` Enter `, never `Alt-Enter`).
+        match keys.find(&format!(" {primary} ")) {
+            Some(at) => {
+                let start = at + 1;
+                let end = start + primary.len();
+                spans.push(Span::styled(keys[..start].to_owned(), self.muted()));
+                spans.push(Span::styled(
+                    keys[start..end].to_owned(),
+                    Style::default().fg(rgb(self.palette.accent())),
+                ));
+                spans.push(Span::styled(keys[end..].to_owned(), self.muted()));
+            }
+            None => spans.push(Span::styled(keys, self.muted())),
+        }
+        let line = Line::from(spans);
+        let used = line.width();
+        frame.render_widget(
+            Paragraph::new(line).style(Style::default().bg(rgb(self.palette.surface_chrome()))),
+            area,
+        );
+        // The pictures' protocol on the right, when it fits after the keys.
+        if let Some(protocol) = self.protocol {
+            let right = format!("{protocol} ");
+            if used + display_width(&right) < usize::from(area.width) {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(right, self.muted())).alignment(Alignment::Right),
+                    area,
+                );
+            }
+        }
     }
 
     fn draw_help(&self, frame: &mut Frame, area: Rect) {
-        let key = Style::default().fg(rgb(self.palette.accent));
-        let what = Style::default().fg(rgb(self.palette.foreground));
-        let heading = key.add_modifier(Modifier::BOLD);
-        // A heading per context, then its keys on one wrapped line, so it fits in 80x24.
-        let mut lines: Vec<Line> = Vec::new();
+        let key = self.muted();
+        let what = Style::default().fg(rgb(self.palette.text()));
+        let heading = what.add_modifier(Modifier::BOLD);
         let pictures = self.images.is_some();
-        for (context, keys) in KEYS {
-            lines.push(Line::from(Span::styled(*context, heading)));
-            let mut spans = vec![Span::raw("  ")];
-            // With pictures off, `o` opens every media externally and `O` is the same key.
-            let keys: Vec<(&str, &str)> = keys
-                .iter()
-                .filter(|(keys, _)| pictures || *keys != "O")
-                .map(|&(keys, does)| match keys {
-                    "o" if !pictures => (keys, "open its media externally"),
-                    _ => (keys, does),
-                })
-                .collect();
-            for (n, (keys, does)) in keys.iter().enumerate() {
-                if n > 0 {
-                    spans.push(Span::styled(" · ", self.muted()));
+        // With pictures off, `o` opens every media externally and `O` is the same key.
+        let contexts: Vec<(&str, Vec<(&str, &str)>)> = KEYS
+            .iter()
+            .map(|(context, keys)| {
+                let keys = keys
+                    .iter()
+                    .filter(|(keys, _)| pictures || *keys != "O")
+                    .map(|&(keys, does)| match keys {
+                        "o" if !pictures => (keys, "open its media externally"),
+                        _ => (keys, does),
+                    })
+                    .collect();
+                (*context, keys)
+            })
+            .collect();
+        let width = area.width.min(76);
+        let inner_width = usize::from(width.saturating_sub(2));
+        let tall: usize = 1 + contexts
+            .iter()
+            .map(|(_, keys)| 1 + keys.len())
+            .sum::<usize>();
+        let mut lines: Vec<Line> = vec![self.panel_title("Keys")];
+        if tall <= usize::from(area.height) {
+            // A row per key: what it does, then the key right-aligned and dim.
+            for (context, keys) in &contexts {
+                lines.push(Line::from(Span::styled(*context, heading)));
+                for (keys, does) in keys {
+                    let does = format!("  {}", plain(does));
+                    let keys = plain(keys);
+                    let pad = inner_width
+                        .saturating_sub(display_width(&does))
+                        .saturating_sub(display_width(&keys))
+                        .max(1);
+                    lines.push(Line::from(vec![
+                        Span::styled(does, what),
+                        Span::raw(" ".repeat(pad)),
+                        Span::styled(keys, key),
+                    ]));
                 }
-                spans.push(Span::styled(plain(keys), key));
-                spans.push(Span::styled(format!(" {}", plain(does)), what));
             }
-            lines.push(Line::from(spans));
+        } else {
+            // A heading per context, then its keys on one wrapped line, so it fits in 80x24.
+            for (context, keys) in &contexts {
+                lines.push(Line::from(Span::styled(*context, heading)));
+                let mut spans = vec![Span::raw("  ")];
+                for (n, (keys, does)) in keys.iter().enumerate() {
+                    if n > 0 {
+                        spans.push(Span::styled(" · ", self.muted()));
+                    }
+                    spans.push(Span::styled(plain(keys), key));
+                    spans.push(Span::styled(format!(" {}", plain(does)), what));
+                }
+                lines.push(Line::from(spans));
+            }
         }
         // As tall as the wrapped lines need, so the last keys are not cut off.
-        let help = Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .style(Style::default().bg(rgb(self.palette.background)))
-            .block(bordered(&self.palette).title(" Keys "));
-        // `line_count` counts the block's rows but wraps at the width it is given: the inner one.
-        let height = help.line_count(area.width.min(76).saturating_sub(2));
-        let popup = popup(area, 76, u16::try_from(height).unwrap_or(u16::MAX));
-        frame.render_widget(Clear, popup);
-        frame.render_widget(help, popup);
+        let help = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let height = help.line_count(width.saturating_sub(2));
+        let inner = self.panel(
+            frame,
+            area,
+            true,
+            width,
+            u16::try_from(height).unwrap_or(u16::MAX),
+        );
+        frame.render_widget(help, inner);
     }
 
     fn draw_chats(&mut self, frame: &mut Frame, area: Rect) {
-        let block = pane_block(&self.palette, self.pane == Pane::Chats)
-            .title(format!(" Chats ({}) ", self.chats().len()));
-        let rows = block.inner(area);
-        // Inside the border, less the highlight symbol's column (reserved on every row).
-        let width = usize::from(area.width.saturating_sub(4));
+        frame.render_widget(
+            Block::new().style(Style::default().bg(rgb(self.palette.surface_chrome()))),
+            area,
+        );
+        let [rule, rows] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        self.draw_rule_title(
+            frame,
+            rule,
+            format!("Chats ({})", self.chats().len()),
+            self.pane == Pane::Chats,
+        );
+        // Less the gutter: the bar, the dot and a space.
+        let width = usize::from(area.width.saturating_sub(3));
+        let highlighted = self.model.chat_list().highlighted();
         let items: Vec<ListItem> = self
             .chats()
             .iter()
-            .map(|chat| chat_item(chat, &self.palette, width, self.utc_offset))
+            .enumerate()
+            .map(|(index, chat)| {
+                chat_item(
+                    chat,
+                    &self.palette,
+                    width,
+                    self.utc_offset,
+                    highlighted == Some(index),
+                )
+            })
             .collect();
-        let list = List::new(items)
-            .block(block)
-            .highlight_symbol("› ")
-            // Even with no chat highlighted (a vanished open chat), so the columns never move.
-            .highlight_spacing(HighlightSpacing::Always)
-            .highlight_style(
-                Style::default()
-                    .bg(rgb(self.palette.accent))
-                    .fg(rgb(self.palette.background))
-                    .add_modifier(Modifier::BOLD),
+        if items.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled("   No chats yet · ? for keys", self.muted())),
+                rows,
             );
-        self.list.select(self.model.chat_list().highlighted());
-        frame.render_stateful_widget(list, area, &mut self.list);
-        self.map.chats = area;
+        }
+        let list = List::new(items)
+            .highlight_style(Style::default().bg(rgb(self.palette.surface_active())));
+        self.list.select(highlighted);
+        frame.render_stateful_widget(list, rows, &mut self.list);
         self.map.chat_rows = rows;
         self.map.chat_offset = self.list.offset();
         self.map.chat_count = self.chats().len();
@@ -985,15 +1165,16 @@ impl App {
             .model
             .selected_chat()
             .map(|chat| plain(&chat_title(chat)))
-            .unwrap_or_else(|| "no chat selected".to_owned());
-        let block = pane_block(&self.palette, self.pane != Pane::Chats).title(Span::styled(
-            format!(" {title} "),
-            Style::default()
-                .fg(rgb(self.palette.foreground))
-                .add_modifier(Modifier::BOLD),
-        ));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
+            // With no chat the pane still has a title, so its focus shows.
+            .unwrap_or_else(|| "Conversation".to_owned());
+        let [rule, body] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        self.draw_rule_title(frame, rule, title, self.pane != Pane::Chats);
+        // A free column on the right, as in the list.
+        let inner = Rect {
+            width: body.width.saturating_sub(1),
+            ..body
+        };
         self.map.conversation = area;
         self.map.message_area = Rect::default();
         self.map.message_rows.clear();
@@ -1017,8 +1198,7 @@ impl App {
             frame.render_stateful_widget(StatefulImage::new(), image_area, image);
         }
 
-        // The composer is the last rows (up to five, growing upwards), under a rule, inside the
-        // same border.
+        // The composer is the last rows (up to five, growing upwards), under its rule.
         let draft = self.draft_rows(rest.width);
         let height = draft
             .as_ref()
@@ -1036,11 +1216,37 @@ impl App {
             .reply_to()
             .filter(|_| self.pane == Pane::Compose)
             .map(|id| match quoted(self.model.loaded(), id) {
-                Some(message) => format!("── replying to: {} ", snippet(message)),
-                None => "── replying ".to_owned(),
+                Some(message) => format!("replying to: {} ", snippet(message)),
+                None => "replying ".to_owned(),
             });
-        let rule_text = quoted.unwrap_or_default() + &"─".repeat(usize::from(rule.width));
-        frame.render_widget(Paragraph::new(rule_text).style(self.muted()), rule);
+        if !rule.is_empty() {
+            let width = usize::from(area.width);
+            let mut spans = Vec::new();
+            let mut used = 0;
+            if let Some(quoted) = quoted {
+                spans.push(Span::styled("── ", self.line_style()));
+                used += 3 + display_width(&quoted);
+                spans.push(Span::styled(quoted, self.muted()));
+            }
+            spans.push(Span::styled(
+                "─".repeat(width.saturating_sub(used)),
+                self.line_style(),
+            ));
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect {
+                    width: area.width,
+                    ..rule
+                },
+            );
+            // The composer rule meets the line between the panes.
+            if let Some(x) = area.x.checked_sub(1)
+                && let Some(cell) = frame.buffer_mut().cell_mut((x, rule.y))
+                && cell.symbol() == "│"
+            {
+                cell.set_symbol("├");
+            }
+        }
         self.map.composer = rule.union(composer);
         self.draw_composer(frame, composer, draft);
     }
@@ -1070,7 +1276,7 @@ impl App {
         // The rows shown: from the first, or scrolled so the cursor's row is the last one.
         let visible = usize::from(area.height);
         let top = (row + 1).saturating_sub(visible);
-        let text = Style::default().fg(rgb(self.palette.foreground));
+        let text = Style::default().fg(rgb(self.palette.text()));
         let lines: Vec<Line> = rows
             .into_iter()
             .enumerate()
@@ -1079,7 +1285,7 @@ impl App {
             .map(|(index, shown)| {
                 let prompt = if index == 0 { "› " } else { "  " };
                 Line::from(vec![
-                    Span::styled(prompt, Style::default().fg(rgb(self.palette.accent))),
+                    Span::styled(prompt, self.muted()),
                     Span::styled(shown, text),
                 ])
             })
@@ -1097,7 +1303,7 @@ impl App {
         }
         if let Some(images) = self.images.as_mut() {
             images.resized(area.width);
-            let background = self.palette.background;
+            let background = self.palette.surface();
             images.backdrop([background.r, background.g, background.b]);
         }
         let (lines, selected, owners, boxes) = self.conversation_lines(area.width);
@@ -1159,6 +1365,21 @@ impl App {
         } else {
             let offset = u16::try_from(top - self.scroll).unwrap_or(u16::MAX);
             frame.render_widget(paragraph.scroll((offset, 0)), area);
+        }
+        // The selected message's rows, the whole width, on the active surface: its picture box
+        // and reactions included (a picture draws its own cells over the box after this).
+        if let Some(cursor) = self.model.transcript().cursor() {
+            let active = Style::default().bg(rgb(self.palette.surface_active()));
+            for (y, owner) in self.map.message_rows.iter().enumerate() {
+                if *owner == Some(cursor) {
+                    let row = Rect {
+                        y: area.y + y as u16,
+                        height: 1,
+                        ..area
+                    };
+                    frame.buffer_mut().set_style(row, active);
+                }
+            }
         }
         self.draw_pictures(frame, area, &boxes, &heights, first_row);
     }
@@ -1318,12 +1539,26 @@ impl App {
     }
 
     /// The selected chat's conversation, oldest first, laid out `columns` wide; before it is
-    /// loaded, its last message. Also the index of the selected message's header line, for each
+    /// loaded, its last message. Also the index of the selected message's first line, for each
     /// line the index of the loaded message it belongs to, and the picture boxes (blank lines the
     /// pictures are drawn over).
+    ///
+    /// One line per message (plan §9.4): the author in bold and the time dim, then the text. A
+    /// day starts with its label in dim caps, after a blank line; an author's run of messages has
+    /// no blank line in it, and the next author starts after one.
     fn conversation_lines(&self, columns: u16) -> ConversationLines {
         let Some(chat) = self.model.selected_chat() else {
-            return (Vec::new(), None, Vec::new(), Vec::new());
+            let hint = if self.chats().is_empty() {
+                "No chats yet"
+            } else {
+                "No chat open · Enter opens the selected one"
+            };
+            return (
+                vec![Line::from(Span::styled(hint, self.muted()))],
+                None,
+                vec![None],
+                Vec::new(),
+            );
         };
         let loaded = self.model.transcript().conversation(&chat.jid);
         let messages: Vec<&Message> = match loaded {
@@ -1332,46 +1567,58 @@ impl App {
         };
         if messages.is_empty() {
             return (
-                vec![Line::from(Span::styled("(no messages)", self.muted()))],
+                vec![Line::from(Span::styled(
+                    "No messages yet · i to write",
+                    self.muted(),
+                ))],
                 None,
                 vec![None],
                 Vec::new(),
             );
         }
-        let body = Style::default().fg(rgb(self.palette.foreground));
+        let body = Style::default().fg(rgb(self.palette.text()));
+        let name = body.add_modifier(Modifier::BOLD);
         let mut lines = Vec::with_capacity(messages.len() * 2);
         let mut owners = Vec::with_capacity(messages.len() * 2);
         let mut selected = None;
         let mut boxes = Vec::new();
+        // The day whose label was drawn last, and the author of the message before.
+        let mut labelled: Option<time::Date> = None;
+        let mut previous: Option<String> = None;
         for (index, message) in messages.iter().enumerate() {
             let owner = loaded.is_some().then_some(index);
             let chosen = loaded.is_some() && self.model.transcript().cursor() == Some(index);
-            let mut header = if chosen {
-                selected = Some(lines.len());
-                format!("› {}", self.header_of(chat, message))
-            } else {
-                self.header_of(chat, message)
-            };
-            if self.model.transcript().is_sending(message) {
-                header.push_str(" · sending");
+            let who = author(Some(chat), message);
+            // A message with no readable time (a send not answered yet) stays in its day.
+            match local_day(message, self.utc_offset).filter(|day| labelled != Some(*day)) {
+                Some(day) => {
+                    if !lines.is_empty() {
+                        lines.push(Line::default());
+                    }
+                    lines.push(Line::from(Span::styled(day_label(day), self.muted())));
+                    labelled = Some(day);
+                }
+                None if previous.as_ref().is_some_and(|before| *before != who) => {
+                    lines.push(Line::default());
+                }
+                None => {}
             }
-            let header_style = match message.state {
-                Some(MessageState::NotSent) => Style::default().fg(rgb(self.palette.red)),
-                _ if message.from_me => Style::default().fg(rgb(self.palette.accent)),
-                _ => self.muted(),
-            };
-            let header_style = if chosen {
-                header_style.add_modifier(Modifier::REVERSED)
-            } else {
-                header_style
-            };
-            lines.push(Line::from(Span::styled(header, header_style)));
-            if let Some(quoted_id) = &message.reply_to {
-                let quote = match quoted(messages.iter().copied(), quoted_id) {
-                    Some(original) => snippet(original),
-                    None => "(a message not loaded)".to_owned(),
-                };
-                lines.push(Line::from(Span::styled(format!("> {quote}"), self.muted())));
+            owners.resize(lines.len(), None);
+            previous = Some(who.clone());
+            let first = lines.len();
+            if chosen {
+                selected = Some(first);
+            }
+            let mut meta = format!(
+                " · {}",
+                meta_of(
+                    message,
+                    self.utc_offset,
+                    self.model.transcript().is_unconfirmed(message)
+                )
+            );
+            if self.model.transcript().is_sending(message) {
+                meta.push_str(" · sending");
             }
             let text = if message.kind == "text" {
                 message.text.clone()
@@ -1382,17 +1629,71 @@ impl App {
                 } else {
                     ""
                 };
-                let text = format!("[{}]{marker} {}", message.kind, message.text);
-                if self.fetching(&chat.jid, message, columns) {
-                    downloading(&text, columns)
-                } else {
-                    text
-                }
+                format!("[{}]{marker} {}", message.kind, message.text)
             };
-            lines.extend(
-                text.lines()
-                    .map(|line| Line::from(Span::styled(plain(line), body))),
-            );
+            let bar = if chosen { "▌ " } else { "" };
+            // A reply's quote goes between its author and time and its text, so the author and
+            // time get a row of their own there; otherwise the text's first line follows them.
+            let quote = message.reply_to.as_ref().map(|quoted_id| {
+                match quoted(messages.iter().copied(), quoted_id) {
+                    Some(original) => snippet(original),
+                    None => "(a message not loaded)".to_owned(),
+                }
+            });
+            let head = if quote.is_some() {
+                format!("{bar}{who}{meta}")
+            } else {
+                format!("{bar}{who}{meta}  ")
+            };
+            // The text's further lines get rows of their own. A caption being fetched says so
+            // on its last row, never wrapping it to more rows (the box under it never moves).
+            let mut rows: Vec<String> = text.lines().map(plain).collect();
+            if rows.is_empty() {
+                rows.push(String::new());
+            }
+            if quote.is_some() {
+                rows.insert(0, head.clone());
+            } else {
+                rows[0].insert_str(0, &head);
+            }
+            if message.kind != "text" && self.fetching(&chat.jid, message, columns) {
+                let last = rows.len() - 1;
+                rows[last] = downloading(&rows[last], columns);
+            }
+            let meta_style = match message.state {
+                Some(MessageState::NotSent) => Style::default().fg(rgb(self.palette.warning())),
+                _ => self.muted(),
+            };
+            let mut rows = rows.into_iter();
+            let line = rows.next().unwrap_or_default();
+            let mut spans = Vec::new();
+            if chosen {
+                spans.push(Span::styled(
+                    "▌",
+                    Style::default().fg(rgb(self.palette.accent())),
+                ));
+                spans.push(Span::raw(" "));
+            }
+            match line.strip_prefix(head.as_str()) {
+                Some(shown) => {
+                    spans.push(Span::styled(who.clone(), name));
+                    spans.push(Span::styled(meta, meta_style));
+                    if quote.is_none() {
+                        spans.push(Span::raw("  "));
+                        spans.push(Span::styled(shown.to_owned(), body));
+                    }
+                }
+                // Cut into the author and time by a very narrow pane: drawn as one dim run.
+                None => spans.push(Span::styled(
+                    line.strip_prefix(bar).unwrap_or(&line).to_owned(),
+                    meta_style,
+                )),
+            }
+            lines.push(Line::from(spans));
+            if let Some(quote) = quote {
+                lines.push(Line::from(Span::styled(format!("> {quote}"), self.muted())));
+            }
+            lines.extend(rows.map(|row| Line::from(Span::styled(row, body))));
             if let Some(size) = loaded
                 .is_some()
                 .then(|| self.picture_box(&chat.jid, message, columns))
@@ -1411,11 +1712,7 @@ impl App {
             if !message.reactions.is_empty() {
                 let mut spans = vec![Span::raw("  ")];
                 for reaction in &message.reactions {
-                    let style = if reaction.from_me {
-                        Style::default().fg(rgb(self.palette.accent))
-                    } else {
-                        body
-                    };
+                    let style = if reaction.from_me { name } else { body };
                     spans.push(Span::styled(format!("{} ", plain(&reaction.emoji)), style));
                 }
                 lines.push(Line::from(spans));
@@ -1425,19 +1722,16 @@ impl App {
         (lines, selected, owners, boxes)
     }
 
-    fn header_of(&self, chat: &Chat, message: &Message) -> String {
-        sent_by(
-            Some(chat),
-            message,
-            self.utc_offset,
-            self.model.transcript().is_unconfirmed(message),
-        )
-    }
-
+    /// Meta text: the text role, dim (plan §9.3).
     fn muted(&self) -> Style {
         Style::default()
-            .fg(rgb(self.palette.foreground))
+            .fg(rgb(self.palette.text()))
             .add_modifier(Modifier::DIM)
+    }
+
+    /// The one-cell lines: the header rule, the line between the panes, the composer rule.
+    fn line_style(&self) -> Style {
+        Style::default().fg(rgb(self.palette.border()))
     }
 }
 
@@ -1625,58 +1919,76 @@ fn plain(text: &str) -> String {
         .collect()
 }
 
-/// A bordered pane in the theme's accent colour.
-fn bordered(palette: &Palette) -> Block<'static> {
-    Block::bordered().border_style(Style::default().fg(rgb(palette.accent)))
-}
-
-/// One of the two panes: the focused one has a thick border in the accent colour, the other a
-/// thin dim one, so where the keys go is visible at a glance (and without colour).
-fn pane_block(palette: &Palette, focused: bool) -> Block<'static> {
-    if focused {
-        bordered(palette)
-            .border_type(BorderType::Thick)
-            .border_style(
-                Style::default()
-                    .fg(rgb(palette.accent))
-                    .add_modifier(Modifier::BOLD),
-            )
-    } else {
-        Block::bordered().border_style(
-            Style::default()
-                .fg(rgb(palette.foreground))
-                .add_modifier(Modifier::DIM),
-        )
-    }
-}
-
 fn rgb(colour: Rgb) -> Color {
     Color::Rgb(colour.r, colour.g, colour.b)
 }
 
-/// Who sent the message (us, the group member the daemon names in `sender`, or the chat) and
-/// when; a send of ours that is not sent yet says so, so a failure stays visible, and one that
-/// was not confirmed (`unconfirmed`) says that instead, since it may have been delivered.
-fn sent_by(
-    chat: Option<&Chat>,
-    message: &Message,
-    offset: time::UtcOffset,
-    unconfirmed: bool,
-) -> String {
+/// Who sent the message: us, the group member the daemon names in `sender`, or the chat.
+fn author(chat: Option<&Chat>, message: &Message) -> String {
     let sender = message.sender.as_deref().filter(|s| !s.is_empty());
-    let who = match (message.from_me, sender, chat) {
+    match (message.from_me, sender, chat) {
         (true, _, _) => "you".to_owned(),
         (false, Some(sender), _) => plain(sender),
         (false, None, Some(chat)) => plain(&chat_title(chat)),
         (false, None, None) => "them".to_owned(),
-    };
+    }
+}
+
+/// When the message was sent; a send of ours that is not sent yet says so, so a failure stays
+/// visible, and one that was not confirmed (`unconfirmed`) says that instead, since it may have
+/// been delivered.
+fn meta_of(message: &Message, offset: time::UtcOffset, unconfirmed: bool) -> String {
     let state = match message.state {
         Some(MessageState::Queued) => " · queued",
         Some(MessageState::NotSent) if unconfirmed => " · not confirmed",
         Some(MessageState::NotSent) => " · not sent",
         Some(MessageState::Unknown) | None => "",
     };
-    format!("{who} · {}{state}", local_hhmm(message, offset))
+    format!("{}{state}", local_hhmm(message, offset))
+}
+
+/// [`author`] and [`meta_of`]: `Ada · 17:55 · not sent`.
+fn sent_by(
+    chat: Option<&Chat>,
+    message: &Message,
+    offset: time::UtcOffset,
+    unconfirmed: bool,
+) -> String {
+    format!(
+        "{} · {}",
+        author(chat, message),
+        meta_of(message, offset, unconfirmed)
+    )
+}
+
+/// The local day the message was sent on, at `offset` from UTC; `None` when its timestamp is
+/// not RFC 3339.
+fn local_day(message: &Message, offset: time::UtcOffset) -> Option<time::Date> {
+    let (date, clock) = message.timestamp.split_once('T')?;
+    let mut parts = date.splitn(3, '-');
+    let year: i32 = parts.next()?.parse().ok()?;
+    let month: u8 = parts.next()?.parse().ok()?;
+    let day: u8 = parts.next()?.parse().ok()?;
+    let hours: u8 = clock.get(..2)?.parse().ok()?;
+    let minutes: u8 = clock.get(3..5)?.parse().ok()?;
+    let date =
+        time::Date::from_calendar_date(year, time::Month::try_from(month).ok()?, day).ok()?;
+    let utc = time::PrimitiveDateTime::new(date, time::Time::from_hms(hours, minutes, 0).ok()?)
+        .assume_utc();
+    Some(utc.checked_to_offset(offset)?.date())
+}
+
+/// A day label in caps: `SUN 18 OCT 2026`.
+fn day_label(day: time::Date) -> String {
+    let short = |name: String| name.chars().take(3).collect::<String>();
+    format!(
+        "{} {} {} {}",
+        short(day.weekday().to_string()),
+        day.day(),
+        short(day.month().to_string()),
+        day.year()
+    )
+    .to_uppercase()
 }
 
 /// The message's time as `HH:MM` at `offset` from UTC (the wire's timestamps are UTC), or
@@ -1699,15 +2011,28 @@ const MARKERS: usize = 6;
 /// has are drawn, right after the name, so a very narrow list still shows who the chat is.
 const NARROW_NAME: usize = 6;
 
-/// A chat in the list: its name and unread badge, padded to the marker column, then its markers;
-/// under it, its last message cut to `width` columns with `…` so the ` · HH:MM` after it is
-/// always whole. The name is cut first, so the badge and the markers always show.
+/// A chat in the list, after a three-column gutter: the selection bar `▌` (both rows, when it is
+/// the highlighted chat), the unread dot `●`, a space. Then its name in bold and its unread count,
+/// padded to the marker column, then its markers; under it, its last message cut to `width`
+/// columns with `…` so the ` · HH:MM` after it is always whole. The name is cut first, so the
+/// count and the markers always show. Only the bar and the dot are in the accent (plan §9.2).
 fn chat_item(
     chat: &Chat,
     palette: &Palette,
     width: usize,
     offset: time::UtcOffset,
+    selected: bool,
 ) -> ListItem<'static> {
+    let accent = Style::default().fg(rgb(palette.accent()));
+    let text = Style::default().fg(rgb(palette.text()));
+    let dim = text.add_modifier(Modifier::DIM);
+    let bar = || {
+        if selected {
+            Span::styled("▌", accent)
+        } else {
+            Span::raw(" ")
+        }
+    };
     let badge = (chat.unread > 0).then(|| format!(" ({})", chat.unread));
     let badge_width = badge.as_deref().map_or(0, display_width);
     let column = width.saturating_sub(MARKERS).saturating_sub(badge_width) >= NARROW_NAME;
@@ -1738,30 +2063,25 @@ fn chat_item(
         .saturating_sub(markers_width)
         .saturating_sub(badge_width);
     let name = fit(&plain(&chat_title(chat)), room);
-    let mut title = vec![Span::styled(
-        name.clone(),
-        Style::default()
-            .fg(rgb(palette.foreground))
-            .add_modifier(Modifier::BOLD),
-    )];
+    let mut title = vec![
+        bar(),
+        if chat.unread > 0 {
+            Span::styled("●", accent)
+        } else {
+            Span::raw(" ")
+        },
+        Span::raw(" "),
+        Span::styled(name.clone(), text.add_modifier(Modifier::BOLD)),
+    ];
     let mut used = display_width(&name);
     if let Some(badge) = badge {
         used += display_width(&badge);
         title.push(Span::raw(" "));
-        title.push(Span::styled(
-            badge.trim_start().to_owned(),
-            Style::default()
-                .bg(rgb(palette.red))
-                .fg(rgb(palette.background))
-                .add_modifier(Modifier::BOLD),
-        ));
+        title.push(Span::styled(badge.trim_start().to_owned(), dim));
     }
     let pad = width.saturating_sub(markers_width).saturating_sub(used);
     title.push(Span::raw(" ".repeat(pad)));
-    title.push(Span::styled(
-        markers,
-        Style::default().fg(rgb(palette.accent)),
-    ));
+    title.push(Span::styled(markers, dim));
 
     // A message with no text (a non-text kind) shows its kind instead of an empty row.
     let detail = match chat.last_message.as_ref() {
@@ -1776,12 +2096,7 @@ fn chat_item(
 
     ListItem::new(vec![
         Line::from(title),
-        Line::from(Span::styled(
-            detail,
-            Style::default()
-                .fg(rgb(palette.foreground))
-                .add_modifier(Modifier::DIM),
-        )),
+        Line::from(vec![bar(), Span::raw("  "), Span::styled(detail, dim)]),
     ])
 }
 

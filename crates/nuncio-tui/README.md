@@ -54,10 +54,19 @@ nuncio-tui [--image <png>]
   same way (an older daemon sends no `phone`), else `unnamed group` for a group or `hidden number`
   for anyone else. A LID chat's digits are never shown: they are a hidden id, not a number (ADR
   0002).
-- **Group senders**: in a group, an incoming message's header names who wrote it, the daemon's
+- **Group senders**: in a group, an incoming message's line names who wrote it, the daemon's
   `sender` (her name, else her masked number, else `unknown`); without one (an older daemon, a
   message stored before senders were recorded) it shows the group's name as before.
-- **Chat list** (left): name and unread count `(n)`, then `★` pinned, `⊘` muted, `▤` archived in
+- **Look** (the design plan's §9, the desktop app's rules in a terminal): no boxes. The chat
+  list and the conversation are separated by one `│` line; each has its title on the header rule
+  under the status line, and the composer sits under its own rule. The tones are the palette's
+  roles: the list on `surface_chrome`, the conversation on `surface`, the selected chat on
+  `surface_active`. The accent marks only the unread dot `●`, the selection bar `▌` and the one
+  primary key in the footer (`Enter`, or `1-6` in the reaction picker); names are bold, times
+  and other meta are dim, and senders are never colour-coded. The colours are sent as 24-bit
+  RGB, as before.
+- **Chat list** (left): an unread chat has the dot `●` before its name; the selected one has the
+  bar `▌` down both its rows. Then the name and unread count `(n)`, then `★` pinned, `⊘` muted, `▤` archived in
   a fixed column at the end of the row (one cell apart, a missing marker left blank), so the
   markers line up whatever the name; a name too long is cut with `…` before the column. In a list
   too narrow for that column (under six columns left for the name), only a chat's own markers are
@@ -72,7 +81,12 @@ nuncio-tui [--image <png>]
   side of a daylight-saving change shows an hour off until the next start). If the offset cannot
   be read, times are UTC and the footer says so.
 - **Conversation** (right): the selected chat, newest message at the bottom. Before a chat is
-  opened it shows the chat's last message only.
+  opened it shows the chat's last message only. One line per message: the author in bold and
+  the time dim, then the text (a message's further lines get rows of their own). Each day starts
+  with its local date in dim caps (`SUN 18 OCT 2026`) after a blank line; the messages of one
+  author follow each other with no blank line, and the next author starts after one. With no
+  message it says `No messages yet · i to write`, with no chats `No chats yet` (its title is
+  then `Conversation`, so the focus still shows).
 - **Read**: opening a chat that has unread messages marks it read, here and on WhatsApp too, as
   the official clients do: your other devices clear it and the sender sees blue ticks, unless read
   receipts are off in WhatsApp's privacy settings (then only your own devices clear it). A new
@@ -97,13 +111,17 @@ nuncio-tui [--image <png>]
   message state. A connection that dies silently still counts as linked for up to 3 minutes,
   until its keepalive fails, so a send in that window shows `not confirmed` rather than `queued`.
 - **Focus**: one pane has the keys at a time, the chat list or the conversation (the composer
-  counts as the conversation); it is drawn with a thick border in the theme's accent colour, the
-  other with a thin dim one. `Tab` switches between them.
-- **Footer**: always one line of hints. Outside the composer it starts with
+  counts as the conversation); its title on the header rule is bold, the other's dim. `Tab`
+  switches between them.
+- **Footer**: always one line of hints, dim, with the focused pane's primary key in the accent
+  and, when pictures are drawn and there is room, their protocol (`kitty`, `half blocks`, ...) on
+  the right. Outside the composer it starts with
   `? help · Tab switch pane · Enter open · / search · q quit` (`Enter write` in the conversation)
   and adds the focused pane's keys after it; in the composer, where `q` and `/` are text, it says
-  how to send and `Esc conversation · Ctrl-C quit`. `?` shows every key, grouped by context.
-- **Selected message**: in the conversation, `k`/`↑` select a message (`›`, the newest first,
+  how to send and `Esc conversation · Ctrl-C quit`. `?` shows every key, grouped by context, on
+  a panel over a solid `surface` scrim: one key per row, right-aligned and dim, when the terminal
+  is tall enough, else each context's keys on one wrapped line.
+- **Selected message**: in the conversation, `k`/`↑` select a message (marked with the bar `▌`, the newest first,
   then older) and `j`/`↓` a newer one; `r` replies to it, `e` reacts, `R`
   retries a send of mine that is `not sent` or `not confirmed` (one attempt per key press, under
   the same WhatsApp message id, so a send that did arrive is never sent as a second message;
@@ -113,14 +131,15 @@ nuncio-tui [--image <png>]
   `r`/`e` send nothing and the footer says `that message was not sent, so it cannot be replied
   to` (or `reacted to`).
 - **Quotes and reactions**: a reply shows `> ` and the start of the message it quotes (or
-  `(a message not loaded)`); reactions show on the line under the message, mine in the accent
-  colour. A reaction the daemon refuses (offline, unknown sender, ...) shows its error in the
+  `(a message not loaded)`) between its author and time and its text, which then starts on the
+  next row; reactions show on the line under the message, mine in bold. The selected message's
+  rows (its picture box and reactions included) are on `surface_active`. A reaction the daemon refuses (offline, unknown sender, ...) shows its error in the
   footer and changes nothing. Reactions are never queued: react again once linked.
 - **Search** (`/`): searches the open chat through the daemon; the results are listed newest
   first, and `Enter` on one closes the search and selects that message in the conversation
   (scrolled into view) when it is among the loaded messages; otherwise the footer says so.
 - **Media**: image, sticker, audio, video and document messages show `[kind]` before their
-  caption (`[sticker] ▶` for an animated sticker). Pictures are drawn under it (see
+  caption on the message line (`[sticker] ▶` for an animated sticker). Pictures are drawn under it (see
   [Pictures](#pictures)). On audio, video and documents `o` asks the daemon to download the file
   and opens it with `xdg-open` (`open` on macOS); `O` does the same for a picture.
 - Live updates: new messages, a send's state changes, unread counts, the connection state, and a
@@ -247,7 +266,7 @@ keys. Setting the variable (or the config key) skips the query.
 The TUI turns on the terminal's mouse reporting:
 
 - a left click on a chat selects it and opens it with the composer focused (as `Enter`);
-- a click in the conversation focuses it and selects the message clicked (its header or its text);
+- a click in the conversation focuses it and selects the message clicked (any of its rows);
 - a click in the composer focuses it;
 - the wheel scrolls the pane under the pointer: three lines of the conversation, or one chat in
   the list (which moves the selection, as `j`/`k` do).

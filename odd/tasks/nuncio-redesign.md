@@ -34,7 +34,7 @@ against `main`, each merged on its own with the six CI checks green. Runner: `ca
 | R0 | P0 tokens: palette roles, contrast tests | S1, S4, S5 | delegated (session backstop) | done, Risk: none | PR #4, merged `e0c137a` |
 | R1 | P1 window chrome and layout | S1, S2, S5 | delegated (session backstop) | done, Risk: item 6 (visual, checked on Omarchy) | PR, see L11 |
 | R2 | P2 chat list and transcript | S1, S5 | delegated (session backstop) | done, Risk: item 6 (visual, checked on Omarchy) | PR, see L12 |
-| R3 | P3 composer | S1, S3, S5 | delegated (session backstop) | pending | |
+| R3 | P3 composer | S1, S3, S5 | delegated (session backstop) | done, Risk: item 6 (visual); inline checks, no verifier (plan: low-medium; send path unchanged) | PR, see L13 |
 | R4 | P4 palette, search, settings, dialogs | S1, S5 | delegated (session backstop) | pending | |
 | R5 | P5 TUI parity | S1, S5 | delegated (session backstop) | pending | |
 | R6 | P6 polish and proof (folds into R4/R5 if small) | S1 | delegated (session backstop) | pending | |
@@ -62,6 +62,9 @@ writer with a clean context writes each phase; an independent verifier checks ea
   it); check it still reads as failed.
 - **F7.** Not built (S5, no model data): system rows, read ticks, group member count. The
   transcript's left-aligned 72-character measure moves to R6.
+- **F8.** The composer: no attach button (no attach action exists, S5); Shift+Enter kept as a newline
+  besides Alt+Enter (existing key, plan §7 keeps current keys); `Sending…` shows while a send of
+  the open chat waits and nothing new is typed (the draft empties on send). Judge on screen.
 
 ## Log
 
@@ -107,3 +110,8 @@ writer with a clean context writes each phase; an independent verifier checks ea
   message (day label and author line inside it, so the row index stays the message index),
   grouping by author within 300 s inclusive. Verifier: S1 and S5 pass, no blockers; advisories
   logged as F4–F7. Parent reran the `present` tests.
+- **L13** (2026-10-23, R3): docked composer per §6.4 with the S3 keys; Send only with non-blank
+  text, `Sending…` insensitive while a send of the open chat waits; reply strip; 6-line cap from
+  the measured line height. RED (16 compile errors, one real smoke failure), GREEN; 4 mutants
+  killed. Parent checked the scope (desktop only, the send call unchanged) and reran the key test
+  and the smoke test. Choices for the owner: F8.

@@ -212,8 +212,14 @@ surfaces in the live Omarchy palette's roles, toasts for notices.
   and size; photos (in a 1 px frame) and stickers (bare) are drawn in their bubble (see
   [Pictures](#pictures)). With no messages it says why: `This chat has no messages`, or `Pick a
   chat to read it here`.
-- **Composer:** several lines; a "Replying to" bar with a cancel button; a banner when the open chat
-  was merged away, which blocks the send until you choose the chat again.
+- **Composer:** a bar docked under the conversation, behind a 1 px line that turns the accent
+  colour while the composer has the focus. It is 48 px tall with one line and grows to six lines,
+  then scrolls. The Send button (filled, at the right) is there only while the draft has text, so
+  an empty composer has no button; while a send of the open chat waits for `nunciod` and nothing
+  new is typed it says `Sending…` and cannot be pressed (the bubble shows the send's state too). A
+  reply shows a strip above the field with the quoted message and a close button (Escape does the
+  same). A banner says when the open chat was merged away, which blocks the send until you choose
+  the chat again. There is no attach button: the app has no way to send a file.
 
 The title bar's window controls follow `[app] title_bar` in `config.toml`: `auto` (the default)
 hides them on Hyprland (`HYPRLAND_INSTANCE_SIGNATURE`, or Hyprland in `XDG_CURRENT_DESKTOP`) and
@@ -262,8 +268,8 @@ Tab moves between the chat list, the conversation and the composer.
 | conversation | Enter | on a photo or sticker, show it in full; on any other message, its menu |
 | conversation | Menu, Shift+F10, right click | the message's menu |
 | conversation | Escape | go to the composer (with one pane shown, back to the chat list) |
-| composer | Enter | send |
-| composer | Shift+Enter | new line |
+| composer | Enter, Ctrl+Enter | send |
+| composer | Alt+Enter, Shift+Enter | new line |
 | composer | Escape | cancel the reply (else go to the conversation; with one pane shown and no message, back to the chat list) |
 | anywhere | Ctrl+F | search the open chat (Enter searches, Escape closes) |
 | anywhere | F1, Ctrl+K | the command palette (type to filter, Up/Down, Enter runs, Escape closes) |

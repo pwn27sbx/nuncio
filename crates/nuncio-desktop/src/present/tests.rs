@@ -933,3 +933,55 @@ fn reactions_are_chips_counted_by_emoji() {
         ]
     );
 }
+
+#[test]
+fn the_send_button_shows_only_with_text_and_says_sending_while_a_send_waits() {
+    let mut m = open_with(Vec::new());
+    assert_eq!(composer_view(&m).send, SendButton::Hidden, "an empty draft");
+    type_draft(&mut m, " \n\t");
+    assert_eq!(
+        composer_view(&m).send,
+        SendButton::Hidden,
+        "a blank draft sends nothing, so no button"
+    );
+    m.composer_mut().set_text("");
+    type_draft(&mut m, "hi");
+    assert_eq!(composer_view(&m).send, SendButton::Send);
+
+    m.send().expect("sends");
+    assert_eq!(
+        composer_view(&m).send,
+        SendButton::Sending,
+        "the send waits for the daemon"
+    );
+    type_draft(&mut m, "and");
+    assert_eq!(
+        composer_view(&m).send,
+        SendButton::Send,
+        "a new draft can be sent while the first one waits"
+    );
+    m.composer_mut().set_text("");
+    m.apply(&DaemonFrame::Sent {
+        v: PROTOCOL_VERSION,
+        client_id: "d-1".to_owned(),
+        state: SendState::Sent,
+        id: Some("3EB0".to_owned()),
+        timestamp: Some("2026-10-20T10:06:00Z".to_owned()),
+    });
+    assert_eq!(
+        composer_view(&m).send,
+        SendButton::Hidden,
+        "answered, and nothing typed"
+    );
+}
+
+#[test]
+fn a_send_waiting_in_another_chat_does_not_say_sending_here() {
+    let mut m = model(vec![chat(ANA, "Ana"), chat(BEN, "Ben")]);
+    m.open_selected().expect("opens");
+    type_draft(&mut m, "hi");
+    m.send().expect("sends");
+    m.select_chat(1);
+    m.open_selected().expect("opens");
+    assert_eq!(composer_view(&m).send, SendButton::Hidden);
+}

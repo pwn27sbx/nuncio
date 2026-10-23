@@ -124,8 +124,10 @@ BarWidget {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: ""
-    labelText: root.unread > 99 ? "99+" : String(root.unread)
+    // Omarchy 4.0.6's BarIconButton draws one text string and has no separate label
+    // (`labelText` does not exist), and the badge is only visible when something is unread,
+    // so the count is what the button shows. Above 99 it says 99+.
+    text: root.unread > 99 ? "99+" : String(root.unread)
     tooltipText: root.unread === 1 ? "1 unread WhatsApp message" : root.unread + " unread WhatsApp messages"
     onPressed: root.openApp()
   }

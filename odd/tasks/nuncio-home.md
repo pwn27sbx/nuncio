@@ -66,3 +66,14 @@ Runner: `cargo test --workspace --no-fail-fast`, `go test -race ./...`.
   still produced the package (exit 0); the first `nuncio-desktop` start measured 1724 ms (cold disk
   cache, right after the release build) against 353 ms on a warm cache, both under the 1.5 s target
   once warm; RSS baseline 125–131 MiB, the 24 h check is part of the T19 soak.
+- **L9.** T5.8 first run on Linux: the bar widget failed to load —
+  `Plugin widget pwn27sbx.nuncio-unread failed: Cannot assign to non-existent property
+  "labelText"`. Omarchy 4.0.6's `BarIconButton` (`/usr/share/omarchy/shell/Ui/BarIconButton.qml`)
+  draws `text` and inherits `WidgetButton`, which has no `labelText`; the widget was written against
+  an API that does not exist here. Fixed by drawing the count in the button's only text slot
+  (`unread > 99 ? "99+" : String(unread)`), which is what the badge needs, and the widget is hidden
+  at 0 anyway. `qmllint` went from 12 warnings to **0** once the import path was right: the
+  documented `-I "$OMARCHY_PATH/shell"` cannot resolve `qs.*` here, because the modules under
+  `/usr/share/omarchy/shell/{Commons,Ui}` declare `module qs.*`; a scratch dir with `qs ->
+  /usr/share/omarchy/shell` resolves them. Quickshell caches the failed compile, so the live check
+  needed `omarchy-restart-shell`; after it, no widget error appears in `qs log`.

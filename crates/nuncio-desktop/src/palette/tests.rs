@@ -42,9 +42,10 @@ fn message(id: &str, kind: &str) -> Message {
     }
 }
 
+/// A send of mine nunciod lists as not sent: under the WhatsApp id it stored it with.
 fn not_sent(client_id: &str) -> Message {
     Message {
-        id: String::new(),
+        id: format!("3EB0{client_id}"),
         from_me: true,
         state: Some(MessageState::NotSent),
         client_id: Some(client_id.to_owned()),

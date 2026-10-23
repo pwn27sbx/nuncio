@@ -202,6 +202,15 @@ fn what_a_bubble_offers_follows_what_whatsapp_has() {
         client_id: "d-1".to_owned(),
         message: "no".to_owned(),
     });
+    // nunciod publishes the send it refused under the WhatsApp id it stored it with.
+    let mut refused = message("3EB0D1", "text", "fail", true);
+    refused.state = Some(MessageState::NotSent);
+    refused.client_id = Some("d-1".to_owned());
+    m.apply(&DaemonFrame::EventMessage {
+        v: PROTOCOL_VERSION,
+        jid: ANA.to_owned(),
+        message: refused,
+    });
     let failed = &bubbles(&m, 0)[2];
     assert!(failed.can_retry && !failed.can_target);
     // The retry the bubble offers is the model's; while it waits, none is offered.

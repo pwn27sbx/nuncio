@@ -884,6 +884,15 @@ fn retry_sends_retry_with_the_client_id_of_a_send_that_is_not_sent() {
         client_id: client_id.clone(),
         message: "not accepted".to_owned(),
     });
+    // nunciod publishes the send it refused under the WhatsApp id it stored it with.
+    let mut refused = message("3EB0R1", "on my way", true, 6);
+    refused.state = Some(MessageState::NotSent);
+    refused.client_id = Some(client_id.clone());
+    app.apply(&DaemonFrame::EventMessage {
+        v: 1,
+        jid: GRACE.to_owned(),
+        message: refused,
+    });
     // R on a message that was received does nothing.
     app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.handle_key(shift('R')), None);

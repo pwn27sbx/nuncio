@@ -30,6 +30,24 @@ pub fn composer_max_height(line: i32) -> i32 {
     COMPOSER_LINES * line.max(1) + 2 * COMPOSER_PAD
 }
 
+/// The command palette's width (plan §6.5).
+pub const PALETTE_WIDTH: i32 = 560;
+/// The settings' column width (plan §6.7).
+pub const SETTINGS_WIDTH: i32 = 480;
+/// The room kept on each side of the palette on a window narrower than it.
+const GUTTER: i32 = 16;
+
+/// The palette's width over a window `window` pixels wide: [`PALETTE_WIDTH`], or less on a
+/// narrow window, with a 16 px gutter each side. A window not laid out yet (0) gets the full
+/// width.
+pub fn palette_width(window: i32) -> i32 {
+    if window <= 0 {
+        PALETTE_WIDTH
+    } else {
+        PALETTE_WIDTH.min(window - 2 * GUTTER).max(0)
+    }
+}
+
 /// From this tile width up, three panes.
 pub const THREE_PANES_FROM: i32 = 1100;
 /// From this tile width up (and below [`THREE_PANES_FROM`]), the rail is an icon strip; below it,
@@ -192,6 +210,106 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
         header = HEADER_HEIGHT,
         composer = COMPOSER_MIN_HEIGHT,
     ) + &list_and_transcript_css(palette)
+        + &overlays_css(palette)
+}
+
+/// The rules for the command palette (plan §6.5), the inline search (§6.6) and the settings
+/// (§6.7).
+fn overlays_css(palette: &Palette) -> String {
+    let root = ROOT_CLASS;
+    format!(
+        ".{root} .nuncio-scrim {{ background-color: alpha({surface}, 0.7); }}\n\
+         popover.{root}.nuncio-palette > contents {{\n  \
+           background-color: {chrome};\n  \
+           color: {text};\n  \
+           border: 1px solid {border};\n  \
+           padding: 0;\n  \
+           box-shadow: none;\n\
+         }}\n\
+         .{root} .nuncio-palette-input {{\n  \
+           min-height: 44px;\n  \
+           padding: 0 12px;\n  \
+           border-bottom: 1px solid {border};\n\
+         }}\n\
+         .{root} entry.nuncio-palette-entry {{\n  \
+           min-height: 44px;\n  \
+           background-color: transparent;\n  \
+           border: none;\n  \
+           box-shadow: none;\n  \
+           outline: none;\n  \
+           font-size: 13px;\n  \
+           color: {text};\n\
+         }}\n\
+         .{root} .nuncio-palette-list {{ background-color: transparent; }}\n\
+         .{root} .nuncio-palette-list > row {{\n  \
+           min-height: 36px;\n  \
+           padding: 0 12px;\n  \
+           font-size: 13px;\n  \
+           background-color: transparent;\n  \
+           box-shadow: none;\n\
+         }}\n\
+         .{root} .nuncio-palette-list > row:hover {{ background-color: {hover}; }}\n\
+         .{root} .nuncio-palette-list > row:selected {{\n  \
+           background-color: {active};\n  \
+           color: {text};\n\
+         }}\n\
+         .{root} .nuncio-palette-key {{ font-size: 11px; color: {faint}; }}\n\
+         .{root} .nuncio-palette-header {{\n  \
+           padding: 8px 12px 4px 12px;\n  \
+           font-size: 11px;\n  \
+           letter-spacing: 0.06em;\n  \
+           color: {faint};\n\
+         }}\n\
+         .{root} .nuncio-search {{\n  \
+           min-height: 32px;\n  \
+           background-color: {surface};\n  \
+           color: {text};\n  \
+           border: 1px solid {border};\n  \
+           box-shadow: none;\n  \
+           outline: none;\n\
+         }}\n\
+         .{root} .nuncio-search:focus-within {{ border-color: {accent}; }}\n\
+         .{root} .nuncio-search-row {{ padding: 6px 12px; }}\n\
+         .{root} .nuncio-search-hint {{ padding: 4px 16px; }}\n\
+         .{root} .nuncio-results > row {{\n  \
+           min-height: 36px;\n  \
+           padding: 0 16px;\n  \
+           background-color: transparent;\n  \
+           box-shadow: none;\n\
+         }}\n\
+         .{root} .nuncio-results > row:hover {{ background-color: {hover}; }}\n\
+         .{root} .nuncio-results > row:selected {{ background-color: {active}; }}\n\
+         .{root}.nuncio-settings {{ background-color: {surface}; color: {text}; }}\n\
+         .{root} .nuncio-settings-header {{\n  \
+           padding: 24px 0 4px 0;\n  \
+           font-size: 11px;\n  \
+           letter-spacing: 0.06em;\n  \
+           color: {muted};\n  \
+           border-bottom: 1px solid {border};\n\
+         }}\n\
+         .{root} .nuncio-settings-list {{ background-color: transparent; }}\n\
+         .{root} .nuncio-settings-list > row {{\n  \
+           min-height: 40px;\n  \
+           background-color: transparent;\n  \
+           box-shadow: none;\n\
+         }}\n\
+         .{root} .nuncio-settings-list > row > box.header {{\n  \
+           min-height: 40px;\n  \
+           padding-top: 4px;\n  \
+           padding-bottom: 4px;\n\
+         }}\n\
+         .{root} .nuncio-settings-list > row .title {{ font-size: 13px; color: {text}; }}\n\
+         .{root} .nuncio-settings-list > row .subtitle {{ font-size: 11px; color: {muted}; }}\n",
+        chrome = palette.surface_chrome().to_hex(),
+        surface = palette.surface().to_hex(),
+        border = palette.border().to_hex(),
+        text = palette.text().to_hex(),
+        muted = palette.text_muted().to_hex(),
+        faint = palette.text_faint().to_hex(),
+        hover = palette.surface_hover().to_hex(),
+        active = palette.surface_active().to_hex(),
+        accent = palette.accent().to_hex(),
+    )
 }
 
 /// How far an avatar's tone is mixed from the chrome toward its palette colour: a muted tone.
@@ -318,8 +436,8 @@ fn list_and_transcript_css(palette: &Palette) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPOSER_LINES, COMPOSER_PAD, Layout, THREE_PANES_FROM, TWO_PANES_FROM, breakpoints,
-        composer_max_height, layout_css, layout_for,
+        COMPOSER_LINES, COMPOSER_PAD, Layout, PALETTE_WIDTH, SETTINGS_WIDTH, THREE_PANES_FROM,
+        TWO_PANES_FROM, breakpoints, composer_max_height, layout_css, layout_for, palette_width,
     };
     use crate::{Look, ROOT_CLASS, WINDOW_CLASS, css_for};
     use nuncio_client::{Palette, Rgb};
@@ -690,5 +808,142 @@ mod tests {
         let close = rule(&css, &format!("{root} button.nuncio-icon-button"));
         assert!(close.contains("min-width: 28px;"), "{close}");
         assert!(close.contains("min-height: 28px;"), "{close}");
+    }
+
+    /// Every declaration of `wanted` is in the rule for `selector`.
+    fn has(css: &str, selector: &str, wanted: &[String]) {
+        let body = rule(css, selector);
+        for declaration in wanted {
+            assert!(
+                body.contains(declaration.as_str()),
+                "{declaration} in {selector}: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_palette_is_a_560_px_chrome_panel_over_a_70_percent_scrim() {
+        let palette = gruvbox();
+        let css = layout_css(&palette, 0);
+        let root = format!(".{ROOT_CLASS}");
+        let (chrome, surface, border) = (
+            palette.surface_chrome().to_hex(),
+            palette.surface().to_hex(),
+            palette.border().to_hex(),
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-scrim"),
+            &[format!("background-color: alpha({surface}, 0.7);")],
+        );
+        has(
+            &css,
+            &format!("popover{root}.nuncio-palette > contents"),
+            &[
+                format!("background-color: {chrome};"),
+                format!("border: 1px solid {border};"),
+                "padding: 0;".to_owned(),
+                "box-shadow: none;".to_owned(),
+            ],
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-palette-input"),
+            &[
+                "min-height: 44px;".to_owned(),
+                format!("border-bottom: 1px solid {border};"),
+            ],
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-palette-list > row"),
+            &[
+                "min-height: 36px;".to_owned(),
+                "font-size: 13px;".to_owned(),
+            ],
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-palette-list > row:selected"),
+            &[format!(
+                "background-color: {};",
+                palette.surface_active().to_hex()
+            )],
+        );
+        let faint = palette.text_faint().to_hex();
+        for meta in [".nuncio-palette-key", ".nuncio-palette-header"] {
+            has(
+                &css,
+                &format!("{root} {meta}"),
+                &["font-size: 11px;".to_owned(), format!("color: {faint};")],
+            );
+        }
+        assert_eq!(PALETTE_WIDTH, 560);
+        assert_eq!(palette_width(1920), 560);
+        assert_eq!(palette_width(0), 560, "a window not laid out yet");
+        assert_eq!(palette_width(400), 368, "a 16 px gutter on a narrow window");
+    }
+
+    #[test]
+    fn the_search_input_is_32_px_with_a_1_px_line_that_turns_accent_on_focus() {
+        let palette = gruvbox();
+        let css = layout_css(&palette, 0);
+        let root = format!(".{ROOT_CLASS}");
+        has(
+            &css,
+            &format!("{root} .nuncio-search"),
+            &[
+                "min-height: 32px;".to_owned(),
+                format!("border: 1px solid {};", palette.border().to_hex()),
+                "box-shadow: none;".to_owned(),
+            ],
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-search:focus-within"),
+            &[format!("border-color: {};", palette.accent().to_hex())],
+        );
+    }
+
+    #[test]
+    fn the_settings_are_a_480_px_column_of_40_px_rows_under_meta_headers() {
+        let palette = gruvbox();
+        let css = layout_css(&palette, 0);
+        let root = format!(".{ROOT_CLASS}");
+        let (muted, border) = (palette.text_muted().to_hex(), palette.border().to_hex());
+        has(
+            &css,
+            &format!("{root}.nuncio-settings"),
+            &[format!("background-color: {};", palette.surface().to_hex())],
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-settings-header"),
+            &[
+                "font-size: 11px;".to_owned(),
+                "letter-spacing: 0.06em;".to_owned(),
+                format!("color: {muted};"),
+                format!("border-bottom: 1px solid {border};"),
+            ],
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-settings-list > row"),
+            &[
+                "min-height: 40px;".to_owned(),
+                "box-shadow: none;".to_owned(),
+            ],
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-settings-list > row .title"),
+            &["font-size: 13px;".to_owned()],
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-settings-list > row .subtitle"),
+            &["font-size: 11px;".to_owned(), format!("color: {muted};")],
+        );
+        assert_eq!(SETTINGS_WIDTH, 480);
     }
 }

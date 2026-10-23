@@ -26,6 +26,11 @@ against `main`, each merged on its own with the six CI checks green. Runner: `ca
   phone number and opens that chat with an empty composer, through the same path as a
   `whatsapp://send?phone=…` link (which only fills the composer and never sends). It sends nothing
   by itself; the ban-risk rules are unchanged.
+- **S7. Search placement (owner, L15: "C").** Message search stays in the conversation (its header
+  ⌕ and Ctrl+F), styled per plan §6.6 (32 px input, 1 px border, `accent` on focus, the hint only
+  while empty and focused), since it searches the open chat only. The chat list header gets a
+  filter of the chats by name instead (task R8): typing narrows the listed chats; it is client-side,
+  with no wire or daemon change.
 
 ## Tasks
 
@@ -35,10 +40,11 @@ against `main`, each merged on its own with the six CI checks green. Runner: `ca
 | R1 | P1 window chrome and layout | S1, S2, S5 | delegated (session backstop) | done, Risk: item 6 (visual, checked on Omarchy) | PR, see L11 |
 | R2 | P2 chat list and transcript | S1, S5 | delegated (session backstop) | done, Risk: item 6 (visual, checked on Omarchy) | PR, see L12 |
 | R3 | P3 composer | S1, S3, S5 | delegated (session backstop) | done, Risk: item 6 (visual); inline checks, no verifier (plan: low-medium; send path unchanged) | PR, see L13 |
-| R4 | P4 palette, search, settings, dialogs | S1, S5 | delegated (session backstop) | pending | |
+| R4 | P4 palette, search, settings, dialogs | S1, S5 | delegated (session backstop) | done, Risk: item 6 (visual); verifier passed | PR, see L16 |
 | R5 | P5 TUI parity | S1, S5 | delegated (session backstop) | pending | |
 | R6 | P6 polish and proof (folds into R4/R5 if small) | S1 | delegated (session backstop) | pending | |
 | R7 | "New message" in the rail (after R1) | S6 | delegated (session backstop) | pending | |
+| R8 | Chat filter by name in the list header (after R4) | S7 | delegated (session backstop) | pending | |
 
 Route reason: this session resumed after a compaction, so the parent orchestrates and an Opus
 writer with a clean context writes each phase; an independent verifier checks each phase
@@ -115,3 +121,14 @@ writer with a clean context writes each phase; an independent verifier checks ea
   the measured line height. RED (16 compile errors, one real smoke failure), GREEN; 4 mutants
   killed. Parent checked the scope (desktop only, the send call unchanged) and reran the key test
   and the smoke test. Choices for the owner: F8.
+- **L14** (2026-10-23, R4): the plan's §6.6 global search with `from:`/`is:unread` does not exist;
+  the only search is the per-chat wire `search`. The writer moved it into the list header.
+  Verifier: S1 and S5 pass, no blockers. Owner asked: A keep it there, B back to the conversation,
+  C back to the conversation plus a chat filter by name in the list header.
+- **L15** (2026-10-23, owner): "si la C". → S7; R4 moves search back; R8 builds the filter.
+- **L16** (2026-10-23, R4): palette per §6.5 (560 px popover, scrim, groups, best match first),
+  settings per §6.7 (480 px column, `meta` headers, libadwaita rows, 0600/0700 kept), keys `/`,
+  j/k, g/G; §6.8 skipped (the app has no dialogs), u/Shift+U skipped (no action). After L15 the
+  per-chat search is back in the conversation, restyled per §6.6; the list header keeps its title
+  and its existing menu. Verifier (before the move): S1 and S5 pass, no blockers. Parent reran the
+  smoke test after the move.

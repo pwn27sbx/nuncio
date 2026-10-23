@@ -906,6 +906,16 @@ pub fn search_view(model: &Model, offset_minutes: i32) -> Option<SearchView> {
     })
 }
 
+/// The search's hint (plan §6.6): what the search does, as the daemon does it (every word of
+/// the query must be in the message; no `from:` or `is:` syntax exists).
+pub const SEARCH_HINT: &str = "Messages of this chat holding every word";
+
+/// The hint under the search input: only while the search is open, its query is blank and the
+/// input has the focus.
+pub fn search_hint(open: bool, query: &str, focused: bool) -> Option<&'static str> {
+    (open && focused && query.trim().is_empty()).then_some(SEARCH_HINT)
+}
+
 /// Whether the window shows its title bar (window controls and title): `auto` hides it on a
 /// tiling desktop, Hyprland (`HYPRLAND_INSTANCE_SIGNATURE` set, or Hyprland in
 /// `XDG_CURRENT_DESKTOP`), as Sealwax does.

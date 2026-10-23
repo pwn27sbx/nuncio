@@ -214,6 +214,7 @@ fn main() {
     closing_in_background_mode_hides_and_keeps_the_state_and_worker(&daemon);
     the_palette_opens_on_f1_and_jumps_to_a_chat();
     the_settings_write_the_file_and_apply_at_once();
+    the_search_is_inline_in_the_conversation();
     pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click();
     the_panes_the_filters_and_the_strip();
     a_filter_keeps_the_open_chat_and_its_selection();
@@ -901,7 +902,7 @@ fn the_palette_opens_on_f1_and_jumps_to_a_chat() {
     check(ui.press("F1"), "F1 is a window shortcut");
     check(ui.palette_open(), "F1 opens the palette");
     let all = ui.palette_titles();
-    for wanted in ["Settings", "Quit", "Chat: Ana", "Chat: Ben"] {
+    for wanted in ["Settings", "Quit", "Ana", "Ben"] {
         check(
             all.iter().any(|t| t == wanted),
             &format!("the palette lists {wanted}: {all:?}"),
@@ -911,10 +912,41 @@ fn the_palette_opens_on_f1_and_jumps_to_a_chat() {
         !all.iter().any(|t| t.starts_with("Send")),
         "the palette has no send",
     );
+    // Plan §6.5: a 560 px panel over a scrim, groups under headers, the first row selected.
+    check(ui.palette_scrim_shown(), "a scrim dims the window behind");
+    check(ui.palette_width() == 560, "the panel is 560 px wide");
+    check(
+        ui.palette_headers() == ["COMMANDS", "CHATS"],
+        &format!("groups have headers: {:?}", ui.palette_headers()),
+    );
+    check(
+        ui.palette_selected().as_deref() == Some("Settings"),
+        "the first row is selected",
+    );
+    check(ui.palette_key(Key::Down), "Down is the palette's");
+    check(
+        ui.palette_selected().as_deref() == Some("Quit"),
+        "Down moves the selection",
+    );
+    check(ui.palette_key(Key::Up), "Up is the palette's");
+    check(
+        ui.palette_selected().as_deref() == Some("Settings"),
+        "Up moves it back",
+    );
+    check(ui.palette_key(Key::Up), "Up at the top");
+    check(
+        ui.palette_selected().as_deref() == Some("Settings"),
+        "and stays on the first row",
+    );
+    check(!ui.palette_key(Key::a), "a letter is typed");
     ui.palette_type("BEN");
     check(
-        ui.palette_titles().first().map(String::as_str) == Some("Chat: Ben"),
+        ui.palette_titles().first().map(String::as_str) == Some("Ben"),
         "typing filters the palette, ignoring case",
+    );
+    check(
+        ui.palette_selected().as_deref() == Some("Ben"),
+        "and selects the first match",
     );
     ui.type_draft("half a thought");
     ui.palette_enter();
@@ -943,9 +975,10 @@ fn the_palette_opens_on_f1_and_jumps_to_a_chat() {
         ui.take_undelivered().is_empty(),
         "Enter on nothing does nothing",
     );
-    ui.palette_escape();
+    check(ui.palette_key(Key::Escape), "Escape is the palette's");
     iterate();
     check(!ui.palette_open(), "Escape closes the palette");
+    check(!ui.palette_scrim_shown(), "and its scrim");
     // Another chat opening while the palette is open (a notification click, a link) closes it,
     // so none of its commands runs on the other conversation.
     ui.open_jid(ANA);
@@ -965,6 +998,86 @@ fn the_palette_opens_on_f1_and_jumps_to_a_chat() {
         ui.press("<Control>comma"),
         "Ctrl+, is the settings shortcut",
     );
+}
+
+/// Plan §6.6 with S7: the search of the open chat sits in the conversation, its results above the
+/// transcript, its hint shows only while it is empty and focused, and `/` opens it unless the
+/// composer is being typed in. Ctrl+F opens it too; the chat list keeps its title.
+fn the_search_is_inline_in_the_conversation() {
+    let empty = Ui::new(None, Controller::new("smoke"), 0, true);
+    check(
+        !empty.press("slash") && !empty.search_open(),
+        "with no chat there is nothing to search",
+    );
+    let ui = listed();
+    check(!ui.search_open(), "no search at first");
+    ui.open_chat(0);
+    ui.take_undelivered();
+    check(ui.composer_focused(), "opening a chat focuses the composer");
+    check(
+        !ui.press("slash") && !ui.search_open(),
+        "/ in the composer is typed, not a search",
+    );
+    ui.focus_chat_list();
+    check(
+        ui.press("slash") && ui.search_open(),
+        "/ outside the composer opens the search",
+    );
+    check(
+        ui.search_in_conversation(),
+        "the input is in the conversation pane",
+    );
+    check(ui.list_title_shown(), "the chat list keeps its title");
+    check(
+        ui.search_hint()
+            .is_some_and(|hint| hint.contains("every word")),
+        &format!("the hint, while empty and focused: {:?}", ui.search_hint()),
+    );
+    ui.focus_chat_list();
+    iterate();
+    check(
+        ui.search_hint().is_none(),
+        "no hint once the input loses the focus",
+    );
+    check(
+        ui.press("slash"),
+        "/ takes the focus back to the open search",
+    );
+    check(ui.search_hint().is_some(), "and the hint comes back");
+    ui.type_search("beach");
+    check(ui.search_hint().is_none(), "no hint once typed");
+    check(!ui.results_shown(), "no results until they come");
+    ui.submit_search();
+    let sent = ui.take_undelivered();
+    let Some(Command::Send(request)) = sent.first().cloned() else {
+        check(false, &format!("a search is asked: {sent:?}"));
+        return;
+    };
+    check(
+        matches!(&request, ClientFrame::Search { query, .. } if query == "beach"),
+        &format!("the daemon is asked: {request:?}"),
+    );
+    ui.incoming(Incoming::Reply {
+        request,
+        result: Ok(DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: ANA.to_owned(),
+            messages: vec![message("S1", "the beach at noon", false)],
+        }),
+    });
+    check(
+        ui.results_shown(),
+        "the results show in the conversation, above the transcript",
+    );
+    check(ui.drawn().0 == 2, "and the chat rows stay listed");
+    ui.close_search();
+    check(!ui.search_open(), "Escape closes it");
+    check(!ui.results_shown(), "and its results go");
+    check(
+        ui.press("<Control>f") && ui.search_open(),
+        "Ctrl+F still opens the search",
+    );
+    ui.close_search();
 }
 
 /// The settings over a temporary `config.toml` (never the owner's): a change is written at once
@@ -988,6 +1101,25 @@ fn the_settings_write_the_file_and_apply_at_once() {
     check(
         ui.controller().config().notifications.show_preview,
         "and the running app follows it",
+    );
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| {
+            std::fs::metadata(p)
+                .map(|m| m.permissions().mode() & 0o777)
+                .unwrap_or(0)
+        };
+        check(mode(&path) == 0o600, "the file is private (0600)");
+        check(
+            path.parent().is_some_and(|dir| mode(dir) == 0o700),
+            "in a private directory (0700)",
+        );
+    }
+    // Plan §6.7: one 480 px column, sections under meta headers.
+    check(view.window.default_width() == 480, "a 480 px column");
+    check(
+        view.headers() == ["NOTIFICATIONS", "WINDOW", "TERMINAL CLIENT"],
+        &format!("the sections' headers: {:?}", view.headers()),
     );
     check(ui.title_bar_shown(), "the title bar is shown at first");
     view.title_bar.set_selected(2);

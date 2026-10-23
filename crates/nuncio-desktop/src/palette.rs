@@ -5,7 +5,8 @@
 //!   selected message's reply, react, retry and open (only those the message's menu would enable:
 //!   the same [`Bubble`] `can_*` rules), the settings and Quit.
 //! - A query keeps the commands whose title holds its characters in order, ignoring case and
-//!   spaces ([`score`]); the best matches come first.
+//!   spaces ([`score`]); the best match comes first, and each [`Group`]'s commands stay together
+//!   under its header (plan §6.5: groups with headers, no category in the row text).
 //! - Nothing in it sends a message: there is no send command, and opening a chat or a link only
 //!   ever fills the composer. A retry is the user's own explicit choice, as Shift+R is.
 
@@ -33,6 +34,39 @@ pub enum Action {
     Settings,
     /// Quit the app (also in background mode).
     Quit,
+}
+
+impl Action {
+    /// The group the command is listed under.
+    pub fn group(&self) -> Group {
+        match self {
+            Self::Reply(_) | Self::React(_) | Self::Retry(_) | Self::OpenMedia(_) => Group::Message,
+            Self::Search | Self::Settings | Self::Quit => Group::Commands,
+            Self::OpenChat(_) => Group::Chats,
+        }
+    }
+}
+
+/// The palette's groups, in the order they are listed when nothing is typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Group {
+    /// What can be done to the selected message.
+    Message,
+    /// The app's commands.
+    Commands,
+    /// Every chat, to open it.
+    Chats,
+}
+
+impl Group {
+    /// The group's header, in capitals as `meta` section headers are (plan §4.2).
+    pub fn header(self) -> &'static str {
+        match self {
+            Self::Message => "SELECTED MESSAGE",
+            Self::Commands => "COMMANDS",
+            Self::Chats => "CHATS",
+        }
+    }
 }
 
 /// The message a command was chosen for: its chat and its id (a send with no id yet by its
@@ -81,11 +115,20 @@ impl Entry {
         }
     }
 
-    /// What a screen reader says for the entry.
+    pub fn group(&self) -> Group {
+        self.action.group()
+    }
+
+    /// What a screen reader says for the entry: a chat says it is one, as its row's text no
+    /// longer does.
     pub fn label(&self) -> String {
+        let title = match self.action {
+            Action::OpenChat(_) => format!("Chat: {}", self.title),
+            _ => self.title.clone(),
+        };
         match self.shortcut {
-            Some(key) => format!("{}, shortcut {key}", self.title),
-            None => self.title.clone(),
+            Some(key) => format!("{title}, shortcut {key}"),
+            None => title,
         }
     }
 }
@@ -143,13 +186,13 @@ pub fn entries(model: &Model, message: Option<usize>) -> Vec<Entry> {
     }
     entries.push(Entry::new("Settings", Some("Ctrl+,"), Action::Settings));
     entries.push(Entry::new("Quit", Some("Ctrl+Q"), Action::Quit));
-    entries.extend(model.chat_list().chats().iter().map(|chat| {
-        Entry::new(
-            format!("Chat: {}", chat_title(chat)),
-            None,
-            Action::OpenChat(chat.jid.clone()),
-        )
-    }));
+    entries.extend(
+        model
+            .chat_list()
+            .chats()
+            .iter()
+            .map(|chat| Entry::new(chat_title(chat), None, Action::OpenChat(chat.jid.clone()))),
+    );
     entries
 }
 
@@ -199,16 +242,55 @@ fn score_from(query: &[char], text: &[char], start: usize) -> Option<u32> {
     Some(total)
 }
 
-/// The positions in `entries` of the commands `query` matches, best first; equal matches keep
-/// their order.
+/// The positions in `entries` of the commands `query` matches, grouped: the group holding the
+/// best match first (equal ones in [`Group`]'s order), and within a group the best first; equal
+/// matches keep their order. So the first row is always a best match, and no group is split.
 pub fn filter(entries: &[Entry], query: &str) -> Vec<usize> {
     let mut matched: Vec<(usize, u32)> = entries
         .iter()
         .enumerate()
         .filter_map(|(index, entry)| score(query, &entry.title).map(|s| (index, s)))
         .collect();
-    matched.sort_by_key(|&(_, s)| std::cmp::Reverse(s));
+    let best = |group: Group| {
+        matched
+            .iter()
+            .filter(|&&(index, _)| entries[index].group() == group)
+            .map(|&(_, s)| s)
+            .max()
+            .unwrap_or(0)
+    };
+    let ranks: Vec<(Group, u32)> = [Group::Message, Group::Commands, Group::Chats]
+        .into_iter()
+        .map(|group| (group, best(group)))
+        .collect();
+    let rank = |group: Group| ranks.iter().find(|(g, _)| *g == group).map_or(0, |r| r.1);
+    matched.sort_by_key(|&(index, s)| {
+        let group = entries[index].group();
+        (std::cmp::Reverse(rank(group)), group, std::cmp::Reverse(s))
+    });
     matched.into_iter().map(|(index, _)| index).collect()
+}
+
+/// For each position of `shown` (as [`filter`] orders them), the header drawn above it: its
+/// group's, on the first row of each group.
+pub fn headers(entries: &[Entry], shown: &[usize]) -> Vec<Option<Group>> {
+    let mut previous = None;
+    shown
+        .iter()
+        .map(|&index| {
+            let group = entries[index].group();
+            (previous.replace(group) != Some(group)).then_some(group)
+        })
+        .collect()
+}
+
+/// The row selected after moving `step` rows from `at` in a list of `count`: it stops at both
+/// ends.
+pub fn moved(at: usize, step: i32, count: usize) -> usize {
+    let last = count.saturating_sub(1);
+    let at = i64::try_from(at).unwrap_or(i64::MAX);
+    let next = at.saturating_add(i64::from(step)).max(0);
+    usize::try_from(next).unwrap_or(usize::MAX).min(last)
 }
 
 /// What the window does once a command is chosen.

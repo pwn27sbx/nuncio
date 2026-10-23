@@ -157,7 +157,10 @@ nuncio-tui's rules (the decode rules are shared: `nuncio_client::pictures`):
   decode. The thumbnail never plays. When the desktop turns animations off (GTK's
   `gtk-enable-animations` setting) a playing sticker stops at its first frame and none starts;
   turned back on, a sticker plays the next time its bubble is drawn. nuncio-tui keeps drawing the
-  first frame.
+  first frame. On GTK 4.24 that setting comes from GSettings, not from a `settings.ini`: turning it
+  off is `gsettings set org.gnome.desktop.interface enable-animations false` (a
+  `~/.config/gtk-4.0/settings.ini` with `gtk-enable-animations=0` no longer reaches GtkSettings,
+  verified on Omarchy 4.0.6).
 - **Screen readers.** A picture bubble reads as what it is, then its caption: `Ana, 10:05: Photo,
   the beach`, `Ana, 10:05: Sticker`; the picture itself says the same (`Photo, the beach`).
 

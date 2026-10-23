@@ -85,3 +85,11 @@ Runner: `cargo test --workspace --no-fail-fast`, `go test -race ./...`.
   `omarchy-launch-or-focus '<class>' 'uwsm-app -- nuncio-desktop'`), preceded by a guarded
   `hl.unbind` so the key is not bound twice. After the reload: `hyprctl configerrors` empty and
   exactly one bind on SUPER+SHIFT+ALT+G, described "WhatsApp (nuncio)".
+- **L11.** T9.2 on Linux: a `~/.config/gtk-4.0/settings.ini` holding `[Settings]
+  gtk-enable-animations=0` did **not** stop an animated sticker, even after restarting the app. GTK
+  4.24 no longer routes that file into `GtkSettings`; the key is GSettings, and
+  `gsettings set org.gnome.desktop.interface enable-animations false` (then a restart) does keep the
+  sticker on its first frame, as the code expects. The code was right; the handoff's instruction for
+  turning animations off was not. Recorded in `crates/nuncio-desktop/README.md`. Q3 and G1 also
+  passed: the queued message reached the contact once, and a real group shows its message with the
+  author's name, not digits.

@@ -767,3 +767,103 @@ fn an_invalid_link_says_why() {
         Some("cannot open the link: not a WhatsApp chat link")
     );
 }
+
+#[test]
+fn a_typed_number_stands_for_its_link_by_the_link_rules() {
+    for (written, digits) in [
+        ("15551230003", "15551230003"),
+        ("+15551230003", "15551230003"),
+        ("+1 555 123 0003", "15551230003"),
+        ("1-555-123-0003", "15551230003"),
+        ("  +1 (555) 123.0003  ", "15551230003"),
+        ("1555123", "1555123"),
+        ("155512300031234", "155512300031234"),
+    ] {
+        assert_eq!(
+            number_link(written).as_deref(),
+            Ok(format!("whatsapp://send?phone={digits}").as_str()),
+            "{written:?}"
+        );
+    }
+    for written in [
+        "",
+        "   ",
+        "+",
+        "155512",
+        "1555123000312345",
+        "1555abc0003",
+        "+1 555 CALL ME",
+        "15551230003&text=hi",
+        "15551230003#",
+        "1555%31230003",
+        "١٥٥٥١٢٣٠٠٠٣",
+    ] {
+        assert_eq!(number_link(written), Err(BAD_NUMBER), "{written:?}");
+    }
+    assert_eq!(BAD_NUMBER, "the phone number is not 7 to 15 digits");
+}
+
+#[test]
+fn a_new_message_opens_the_chat_as_its_link_with_no_text_does_and_sends_nothing() {
+    for (written, link, jid) in [
+        ("+1 555 123 0003", "whatsapp://send?phone=15551230003", CAL),
+        ("1-555-123-0002", "whatsapp://send?phone=15551230002", BEN),
+    ] {
+        let mut typed = connected(0);
+        let mut linked = connected(0);
+        let commands = typed.new_message(written).expect("a valid number");
+        assert_eq!(commands, linked.open_link(link), "{written:?}");
+        assert_eq!(frames(&commands), [ClientFrame::messages(jid, 200)]);
+        assert!(!frames(&commands).iter().any(is_a_send), "never a send");
+        assert_eq!(typed.model().selected_jid(), Some(jid));
+        assert!(typed.model().is_open());
+        assert_eq!(typed.model().composer().text(), "", "the composer is empty");
+        assert!(!typed.take_draft_changed(), "no draft was put there");
+        assert_eq!(typed.take_notice(), None);
+        // The messages arrive: still nothing is sent.
+        let next = typed.incoming(reply(
+            &ClientFrame::messages(jid, 200),
+            DaemonFrame::Messages {
+                v: PROTOCOL_VERSION,
+                jid: jid.to_owned(),
+                messages: Vec::new(),
+            },
+        ));
+        assert!(!frames(&next).iter().any(is_a_send));
+    }
+}
+
+#[test]
+fn an_invalid_number_opens_nothing_and_says_why_without_a_notice() {
+    let mut c = connected(0);
+    for written in ["12", "1555abc0003", ""] {
+        assert_eq!(c.new_message(written), Err(BAD_NUMBER), "{written:?}");
+    }
+    assert_eq!(c.model().selected_jid(), Some(ANA), "nothing opened");
+    assert!(!c.model().is_open());
+    assert_eq!(c.take_notice(), None, "the dialog says it, not a toast");
+}
+
+#[test]
+fn a_new_message_always_opens_with_an_empty_composer_and_a_second_enter_sends_nothing() {
+    let mut c = opened(vec![message("M1", "text")]);
+    c.set_draft("meant for ana");
+    assert_eq!(c.new_message("12"), Err(BAD_NUMBER));
+    assert_eq!(
+        c.model().composer().text(),
+        "meant for ana",
+        "an invalid number clears nothing"
+    );
+    let commands = c.new_message("+1 555 123 0003").expect("a valid number");
+    assert!(!frames(&commands).iter().any(is_a_send));
+    assert_eq!(c.model().selected_jid(), Some(CAL));
+    assert_eq!(
+        c.model().composer().text(),
+        "",
+        "never another chat's draft"
+    );
+    assert!(c.take_draft_changed(), "the composer widget must empty too");
+    let (sent_it, commands) = c.send();
+    assert!(!sent_it, "a second Enter sends nothing");
+    assert!(commands.is_empty());
+}

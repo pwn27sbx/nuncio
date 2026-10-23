@@ -34,6 +34,8 @@ pub fn composer_max_height(line: i32) -> i32 {
 pub const PALETTE_WIDTH: i32 = 560;
 /// The settings' column width (plan §6.7).
 pub const SETTINGS_WIDTH: i32 = 480;
+/// A dialog's width (plan §6.8).
+pub const DIALOG_WIDTH: i32 = 480;
 /// The room kept on each side of the palette on a window narrower than it.
 const GUTTER: i32 = 16;
 
@@ -41,10 +43,22 @@ const GUTTER: i32 = 16;
 /// narrow window, with a 16 px gutter each side. A window not laid out yet (0) gets the full
 /// width.
 pub fn palette_width(window: i32) -> i32 {
+    fit(PALETTE_WIDTH, window)
+}
+
+/// A dialog's width over a window `window` pixels wide: [`DIALOG_WIDTH`], narrowed as
+/// [`palette_width`] is.
+pub fn dialog_width(window: i32) -> i32 {
+    fit(DIALOG_WIDTH, window)
+}
+
+/// `width`, or less on a window narrower than it with a 16 px gutter each side; a window not
+/// laid out yet (0) gets the full width.
+fn fit(width: i32, window: i32) -> i32 {
     if window <= 0 {
-        PALETTE_WIDTH
+        width
     } else {
-        PALETTE_WIDTH.min(window - 2 * GUTTER).max(0)
+        width.min(window - 2 * GUTTER).max(0)
     }
 }
 
@@ -213,8 +227,8 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
         + &overlays_css(palette)
 }
 
-/// The rules for the command palette (plan §6.5), the inline search (§6.6) and the settings
-/// (§6.7).
+/// The rules for the command palette (plan §6.5), the inline search (§6.6), the settings
+/// (§6.7) and the dialogs (§6.8).
 fn overlays_css(palette: &Palette) -> String {
     let root = ROOT_CLASS;
     format!(
@@ -299,7 +313,22 @@ fn overlays_css(palette: &Palette) -> String {
            padding-bottom: 4px;\n\
          }}\n\
          .{root} .nuncio-settings-list > row .title {{ font-size: 13px; color: {text}; }}\n\
-         .{root} .nuncio-settings-list > row .subtitle {{ font-size: 11px; color: {muted}; }}\n",
+         .{root} .nuncio-settings-list > row .subtitle {{ font-size: 11px; color: {muted}; }}\n\
+         popover.{root}.nuncio-dialog > contents {{\n  \
+           background-color: {surface};\n  \
+           color: {text};\n  \
+           border: 1px solid {border};\n  \
+           padding: 16px;\n  \
+           box-shadow: none;\n\
+         }}\n\
+         .{root} .nuncio-dialog-body {{ font-size: 13px; color: {text}; }}\n\
+         .{root} .nuncio-dialog-error {{ font-size: 11px; color: {warning}; }}\n\
+         .{root} button.nuncio-dialog-primary {{\n  \
+           background-color: transparent;\n  \
+           color: {accent};\n  \
+           box-shadow: none;\n\
+         }}\n\
+         .{root} button.nuncio-dialog-primary:hover {{ background-color: {hover}; }}\n",
         chrome = palette.surface_chrome().to_hex(),
         surface = palette.surface().to_hex(),
         border = palette.border().to_hex(),
@@ -309,6 +338,7 @@ fn overlays_css(palette: &Palette) -> String {
         hover = palette.surface_hover().to_hex(),
         active = palette.surface_active().to_hex(),
         accent = palette.accent().to_hex(),
+        warning = palette.warning().to_hex(),
     )
 }
 
@@ -436,8 +466,9 @@ fn list_and_transcript_css(palette: &Palette) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        COMPOSER_LINES, COMPOSER_PAD, Layout, PALETTE_WIDTH, SETTINGS_WIDTH, THREE_PANES_FROM,
-        TWO_PANES_FROM, breakpoints, composer_max_height, layout_css, layout_for, palette_width,
+        COMPOSER_LINES, COMPOSER_PAD, DIALOG_WIDTH, Layout, PALETTE_WIDTH, SETTINGS_WIDTH,
+        THREE_PANES_FROM, TWO_PANES_FROM, breakpoints, composer_max_height, dialog_width,
+        layout_css, layout_for, palette_width,
     };
     use crate::{Look, ROOT_CLASS, WINDOW_CLASS, css_for};
     use nuncio_client::{Palette, Rgb};
@@ -945,5 +976,49 @@ mod tests {
             &["font-size: 11px;".to_owned(), format!("color: {muted};")],
         );
         assert_eq!(SETTINGS_WIDTH, 480);
+    }
+
+    #[test]
+    fn a_dialog_is_a_480_px_surface_with_a_1_px_border_and_an_accent_text_button() {
+        let palette = gruvbox();
+        let css = layout_css(&palette, 0);
+        let root = format!(".{ROOT_CLASS}");
+        has(
+            &css,
+            &format!("popover{root}.nuncio-dialog > contents"),
+            &[
+                format!("background-color: {};", palette.surface().to_hex()),
+                format!("color: {};", palette.text().to_hex()),
+                format!("border: 1px solid {};", palette.border().to_hex()),
+                "box-shadow: none;".to_owned(),
+            ],
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-dialog-body"),
+            &["font-size: 13px;".to_owned()],
+        );
+        // The primary is a text button in `accent`, not filled (plan §6.8).
+        let primary = rule(&css, &format!("{root} button.nuncio-dialog-primary"));
+        assert!(
+            primary.contains(&format!("color: {};", palette.accent().to_hex())),
+            "{primary}"
+        );
+        assert!(
+            primary.contains("background-color: transparent;"),
+            "{primary}"
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-dialog-error"),
+            &[
+                "font-size: 11px;".to_owned(),
+                format!("color: {};", palette.warning().to_hex()),
+            ],
+        );
+        assert_eq!(DIALOG_WIDTH, 480);
+        assert_eq!(dialog_width(1920), 480);
+        assert_eq!(dialog_width(0), 480, "a window not laid out yet");
+        assert_eq!(dialog_width(400), 368, "a 16 px gutter on a narrow window");
     }
 }

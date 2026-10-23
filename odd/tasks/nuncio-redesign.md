@@ -31,6 +31,10 @@ against `main`, each merged on its own with the six CI checks green. Runner: `ca
   while empty and focused), since it searches the open chat only. The chat list header gets a
   filter of the chats by name instead (task R8): typing narrows the listed chats; it is client-side,
   with no wire or daemon change.
+- **S8. Drafts (owner, L18: "si").** "New message" always opens the chat with an empty composer,
+  even when a draft was typed in another chat (a double Enter must never send another chat's
+  text to a new number). Next, task R9: the desktop keeps one draft per chat, so switching chats
+  (click, link, New message) never carries a draft to another chat and never loses one.
 
 ## Tasks
 
@@ -43,8 +47,9 @@ against `main`, each merged on its own with the six CI checks green. Runner: `ca
 | R4 | P4 palette, search, settings, dialogs | S1, S5 | delegated (session backstop) | done, Risk: item 6 (visual); verifier passed | PR, see L16 |
 | R5 | P5 TUI parity | S1, S5 | delegated (session backstop) | pending | |
 | R6 | P6 polish and proof (folds into R4/R5 if small) | S1 | delegated (session backstop) | pending | |
-| R7 | "New message" in the rail (after R1) | S6 | delegated (session backstop) | pending | |
+| R7 | "New message" in the rail (after R1) | S6 | delegated (session backstop) | done, Risk: item 6 (visual); verifier passed after the S8 fix | PR, see L19 |
 | R8 | Chat filter by name in the list header (after R4) | S7 | delegated (session backstop) | pending | |
+| R9 | One draft per chat in the desktop app (follow-up, high priority) | S8 | delegated (session backstop) | pending | |
 
 Route reason: this session resumed after a compaction, so the parent orchestrates and an Opus
 writer with a clean context writes each phase; an independent verifier checks each phase
@@ -132,3 +137,12 @@ writer with a clean context writes each phase; an independent verifier checks ea
   per-chat search is back in the conversation, restyled per §6.6; the list header keeps its title
   and its existing menu. Verifier (before the move): S1 and S5 pass, no blockers. Parent reran the
   smoke test after the move.
+- **L17** (2026-10-23, R7): "New message" built through `number_link` (percent-encodes every
+  typed byte, then `parse_link`) and `open_link`; never a send; the error never repeats the
+  number. Verifier: ban-risk, validation (24 probes) and privacy pass. Blocker: the desktop
+  composer is one global draft, so a draft typed for Ana stays in the new chat and a double
+  Enter sends it to the new number. Owner asked A (keep, as links do) or B (always empty).
+- **L18** (2026-10-23, owner): "si" to B plus one draft per chat next. → S8, R9.
+- **L19** (2026-10-23, R7): S8 fix: `new_message` empties the draft once the number is valid;
+  RED smoke and unit tests reproduce the verifier's double Enter and now see no send; the
+  mutation (no clear) fails both. Parent reran both tests.

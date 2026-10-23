@@ -128,12 +128,13 @@ fn an_empty_query_keeps_every_entry_in_order_and_no_match_keeps_none() {
 }
 
 #[test]
-fn with_no_chat_open_it_lists_settings_quit_and_every_chat_by_its_title() {
+fn with_no_chat_open_it_lists_new_message_settings_quit_and_every_chat_by_its_title() {
     let c = listed();
     let entries = entries(c.model(), Some(0));
     assert_eq!(
         titles(&entries),
         [
+            "New message…",
             "Settings",
             "Quit",
             // No category in the row text: the chats are under their group's header.
@@ -143,11 +144,12 @@ fn with_no_chat_open_it_lists_settings_quit_and_every_chat_by_its_title() {
             &nuncio_client::chat_title(&chat(NO_NAME, ""))
         ]
     );
-    assert_eq!(entries[2].action, Action::OpenChat(ANA.to_owned()));
-    assert_eq!(entries[0].shortcut, Some("Ctrl+,"));
-    assert_eq!(entries[1].label(), "Quit, shortcut Ctrl+Q");
+    assert_eq!(entries[3].action, Action::OpenChat(ANA.to_owned()));
+    assert_eq!(entries[0].label(), "New message…", "no key to name");
+    assert_eq!(entries[1].shortcut, Some("Ctrl+,"));
+    assert_eq!(entries[2].label(), "Quit, shortcut Ctrl+Q");
     // A screen reader still hears what the row is.
-    assert_eq!(entries[2].label(), "Chat: Ana");
+    assert_eq!(entries[3].label(), "Chat: Ana");
 }
 
 #[test]
@@ -160,6 +162,7 @@ fn commands_are_grouped_under_meta_headers_in_a_fixed_order() {
         [
             Group::Message,
             Group::Message,
+            Group::Commands,
             Group::Commands,
             Group::Commands,
             Group::Commands,
@@ -178,6 +181,7 @@ fn commands_are_grouped_under_meta_headers_in_a_fixed_order() {
             Some(Group::Message),
             None,
             Some(Group::Commands),
+            None,
             None,
             None,
             Some(Group::Chats),
@@ -243,11 +247,12 @@ fn an_open_chat_adds_its_search_and_the_selected_message_its_actions() {
     // Oldest first: 0 is the text, 1 the picture.
     let text = entries(c.model(), Some(0));
     assert_eq!(
-        titles(&text)[..4],
+        titles(&text)[..5],
         [
             "Reply to the selected message",
             "React to the selected message…",
             "Search in this chat",
+            "New message…",
             "Settings",
         ]
     );
@@ -472,4 +477,21 @@ fn a_message_command_follows_its_message_when_the_conversation_grows() {
         [Command::Send(ClientFrame::download_media(ANA, "A2"))],
         "the picture chosen, wherever it is now"
     );
+}
+
+#[test]
+fn new_message_is_a_command_with_no_key_that_only_asks_for_a_number() {
+    for c in [listed(), opened(vec![message("M1", "text")])] {
+        let entries = entries(c.model(), None);
+        let new = entries
+            .iter()
+            .find(|e| e.action == Action::NewMessage)
+            .expect("listed");
+        assert_eq!(new.title, "New message…");
+        assert_eq!(new.shortcut, None, "plan §7 gives it no key");
+        assert_eq!(new.group(), Group::Commands);
+        let mut c = c.clone();
+        assert_eq!(run(&mut c, &Action::NewMessage), Step::NewMessage);
+        assert_eq!(c.model().selected_jid(), Some(ANA), "nothing opened yet");
+    }
 }

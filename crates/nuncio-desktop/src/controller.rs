@@ -49,6 +49,29 @@ pub enum Alert {
     Withdraw(String),
 }
 
+/// What "New message" says when the number typed cannot open a chat: the link's own rule
+/// ([`LinkError::BadPhone`]), said of a typed number. It never repeats the number.
+pub const BAD_NUMBER: &str = "the phone number is not 7 to 15 digits";
+
+/// The `whatsapp://send?phone=<digits>` link, with no text, that a phone number typed into "New
+/// message" stands for. The number is judged by the link's own rules ([`parse_link`]): every
+/// character typed goes into the link percent-encoded, so `+`, spaces, dashes, dots and
+/// parentheses are ignored as a link's are, 7 to 15 digits must remain, and nothing typed can
+/// add a `text` or anything else to the link.
+pub fn number_link(written: &str) -> Result<String, &'static str> {
+    let encoded: String = written
+        .trim()
+        .bytes()
+        .map(|byte| format!("%{byte:02X}"))
+        .collect();
+    let target = parse_link(&format!("whatsapp://send?phone={encoded}")).map_err(|_| BAD_NUMBER)?;
+    let digits = target
+        .jid
+        .strip_suffix("@s.whatsapp.net")
+        .ok_or(BAD_NUMBER)?;
+    Ok(format!("whatsapp://send?phone={digits}"))
+}
+
 /// The model and what the window needs to drive it.
 #[derive(Debug, Clone)]
 pub struct Controller {
@@ -255,6 +278,21 @@ impl Controller {
                 Vec::new()
             }
         }
+    }
+
+    /// "New message": open the chat of the phone number `written` as its link with no text does
+    /// ([`number_link`], then [`Controller::open_link`]), so nothing is ever sent, and always
+    /// with an empty composer (S8): a draft typed in another chat is cleared first, so a double
+    /// Enter can never send it to the new number. An invalid number opens nothing, clears
+    /// nothing and leaves no notice: the error ([`BAD_NUMBER`]) is for the dialog that asked,
+    /// which stays open.
+    pub fn new_message(&mut self, written: &str) -> Result<Vec<Command>, &'static str> {
+        let link = number_link(written)?;
+        if !self.model.composer().is_empty() {
+            self.model.composer_mut().set_text("");
+            self.draft_changed = true;
+        }
+        Ok(self.open_link(&link))
     }
 
     fn open_or_wait(&mut self, jid: &str, draft: Option<String>) -> Vec<Command> {

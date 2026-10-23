@@ -80,6 +80,21 @@ the composer. **A link never sends anything**: the message goes only when you pr
 invite link (`https://chat.whatsapp.com/…`) says `group invite links are not supported yet`; any
 other link says why it was not opened. A link given at a cold start waits for the chat list.
 
+## New message
+
+The rail's filled button, **New message** (on the 48 px icon strip an icon with the tooltip `New
+message`; also `New message…` in the command palette, with no key), asks for a phone number in a
+480 px dialog (design plan §6.8): the number field, then Cancel and Open chat bottom-right. Enter
+(or Open chat) opens that number's chat exactly as the link `whatsapp://send?phone=<number>` with
+no text does, through the same path (`Controller::new_message`): the chat opens, or an empty
+conversation for a number with no chat yet, with the focus in the composer. **New message always
+opens with an empty composer**: a draft typed in another chat is cleared first, so a double Enter
+never sends another chat's text to the new number. **It sends nothing**: the message goes only
+when you press Enter in the composer. The number follows the link's rules: `+`, spaces,
+dashes, dots and parentheses are ignored and 7 to 15 digits must remain; anything else (letters,
+too short, too long) keeps the dialog open with `the phone number is not 7 to 15 digits` and opens
+nothing. Escape (or Cancel, or a click outside) closes it.
+
 For a browser to hand `whatsapp:` links to the app, its desktop entry (packaging, M4) needs:
 
 ```ini
@@ -93,7 +108,7 @@ link on the command line.
 
 ## Command palette
 
-F1 or Ctrl+K (or the rail's `Commands` button, or Command palette in the chat list header's menu)
+F1 or Ctrl+K (or Command palette in the chat list header's menu)
 opens a 560 px panel (narrower on a narrow window) centred over the window, which a scrim dims
 behind it (design plan §6.5): a 44 px input with a magnifier and an × that closes, then 36 px rows,
 each command with its key right-aligned, grouped under `SELECTED MESSAGE`, `COMMANDS` and `CHATS`
@@ -105,6 +120,8 @@ headers. It lists what can be done now:
 - for the focused message, only what its menu enables: `Reply to the selected message` (`r`),
   `React to the selected message…` (`e`, opens the picker), `Retry the selected message`
   (Shift+R, a send that ended not sent or not confirmed) and `Open the selected media` (`o`);
+- `New message…` (no key): asks for a phone number, as the rail's button does
+  ([New message](#new-message));
 - `Settings` (Ctrl+,) and `Quit` (Ctrl+Q).
 
 Typing filters the list: the commands holding the typed letters in order, ignoring case and spaces
@@ -202,7 +219,7 @@ the design plan (`docs/design/redesign-plan.md` §5) sets it: three panes that f
 no outer margin, separated by 1 px lines that can be dragged (a `gtk::Paned` at each seam), flat
 surfaces in the live Omarchy palette's roles, toasts for notices.
 
-- **Rail (200 px):** the one filled button (`Commands`, the command palette), then the filters
+- **Rail (200 px):** the one filled button (**New message**, see [New message](#new-message)), then the filters
   **All**, **Unread** (chats with unread messages) and **Archived**, each with how many chats it
   lists, then the connection line at the bottom. A chat opened from the list stays in the filter
   it was opened from while that filter is shown, so reading an unread chat does not pull its row
@@ -296,6 +313,8 @@ Tab moves between the chat list, the conversation and the composer.
 | anywhere | Ctrl+F, `/` | search the selected chat (Enter searches, Escape closes); `/` is typed as usual in the composer or any text field |
 | anywhere | F1, Ctrl+K | the command palette (type to filter, Up/Down, Enter runs, Escape closes) |
 | anywhere | Ctrl+, | the settings |
+| New message dialog | Enter | open the number's chat (an invalid number says why and opens nothing) |
+| New message dialog | Escape | cancel |
 | anywhere | Ctrl+Q | quit (closing the window only hides it in background mode) |
 
 Requests go to `nunciod` one at a time, in order, on one connection. Opening a media file waits up
@@ -317,7 +336,7 @@ sticker says `Photo` or `Sticker` instead of `[image]` / `[sticker]`).
 
 `cargo test -p nuncio-desktop`: the command line, the Omarchy font and Hyprland rounding in the
 generated CSS, the panes' CSS from the palette roles, the layout chosen at each width, the rail's
-filters and connection line, `hyprctl`'s answer (through a fake runner: never the real one), the view data, the controller (notifications, links), the
+filters and connection line, `hyprctl`'s answer (through a fake runner: never the real one), the view data, the controller (notifications, links, New message's number rules), the
 lifecycle (background, start hidden), the palette's commands, matching, groups and keys, the search
 hint, the settings' rules, the
 pictures (boxes, what is decoded when, the cache, two decoding threads) and the worker (against a
@@ -325,7 +344,10 @@ fake daemon) are plain unit tests; `tests/smoke.rs` builds the real window on GT
 `harness = false`) and skips when GTK cannot start. It never shows a window or a real notification:
 no `GApplication` is attached, so notifications are only recorded, and the `open-chat` action is
 activated from a plain action group. The palette is opened through its F1 shortcut's action (its
-groups, first row selected, Up/Down/Escape through its key handler), the search through `/` and
+groups, first row selected, Up/Down/Escape through its key handler), the rail's New message
+through a click on it (its dialog's Enter and Escape through its key handler: Escape cancels, an
+invalid number keeps it open with its error, a valid one opens the chat with an empty, focused
+composer and sends nothing), the search through `/` and
 Ctrl+F (in the conversation pane, its hint only while empty and focused, and `/` checked to be
 typed in the composer), and the settings window is built (not shown)
 over a temporary `config.toml`, never yours (its file 0600 in a 0700 directory). A photo and a

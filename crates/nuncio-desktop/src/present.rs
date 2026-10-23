@@ -618,8 +618,14 @@ pub fn transcript_empty(model: &Model) -> Option<EmptyState> {
     })
 }
 
-/// What the chat list says when `filter` keeps no chat.
-pub fn list_empty(filter: Filter) -> EmptyState {
+/// What the chat list says when `filter` and the name filter `name` keep no chat.
+pub fn list_empty(filter: Filter, name: &str) -> EmptyState {
+    if !name.trim().is_empty() {
+        return EmptyState {
+            title: "No matching chats",
+            hint: "Escape clears the filter",
+        };
+    }
     match filter {
         Filter::All => EmptyState {
             title: "No chats",
@@ -793,23 +799,35 @@ impl Filter {
 /// `opened_from` is the filter the open conversation was opened from in the list: while that
 /// filter is the one shown, the open chat stays listed, so reading an unread chat does not pull
 /// its row away from under the cursor; no other filter lists it for that.
-pub fn listed(model: &Model, filter: Filter, opened_from: Option<Filter>) -> Vec<usize> {
+///
+/// `name` is the list header's filter (S7): a chat stays only when its name, as the list shows
+/// it ([`chat_title`]), holds `name` anywhere, ignoring case; the open chat too. A blank `name`
+/// keeps every chat.
+pub fn listed(
+    model: &Model,
+    filter: Filter,
+    opened_from: Option<Filter>,
+    name: &str,
+) -> Vec<usize> {
     let kept = (opened_from == Some(filter))
         .then(|| open_jid(model))
         .flatten();
+    let name = name.trim().to_lowercase();
     model
         .chat_list()
         .chats()
         .iter()
         .enumerate()
         .filter(|(_, chat)| filter.keeps(chat) || kept == Some(chat.jid.as_str()))
+        .filter(|(_, chat)| name.is_empty() || chat_title(chat).to_lowercase().contains(&name))
         .map(|(position, _)| position)
         .collect()
 }
 
-/// How many chats `filter` keeps, as the rail counts them (never the open chat's exception).
+/// How many chats `filter` keeps, as the rail counts them (never the open chat's exception, and
+/// never narrowed by the list header's name filter).
 pub fn count(model: &Model, filter: Filter) -> usize {
-    listed(model, filter, None).len()
+    listed(model, filter, None, "").len()
 }
 
 /// The chat whose conversation is open, if one is.

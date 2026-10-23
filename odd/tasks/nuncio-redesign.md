@@ -49,7 +49,7 @@ against `main`, each merged on its own with the six CI checks green. Runner: `ca
 | R5 | P5 TUI parity | S1, S5 | delegated (session backstop) | pending | |
 | R6 | P6 polish and proof (folds into R4/R5 if small) | S1 | delegated (session backstop) | pending | |
 | R7 | "New message" in the rail (after R1) | S6 | delegated (session backstop) | done, Risk: item 6 (visual); verifier passed after the S8 fix | PR, see L19 |
-| R8 | Chat filter by name in the list header (after R4) | S7 | delegated (session backstop) | pending | |
+| R8 | Chat filter by name in the list header (after R4) | S7 | delegated (session backstop) | done, Risk: item 6 (window wiring only runs on Omarchy); verifier passed | PR, see L22 |
 | R9 | One draft per chat in the desktop app (follow-up, high priority) | S8 | delegated (session backstop) | done, Risk: item 3 (shared model, TUI too); verifier passed | PR, see L20 |
 
 Route reason: this session resumed after a compaction, so the parent orchestrates and an Opus
@@ -158,3 +158,12 @@ writer with a clean context writes each phase; an independent verifier checks ea
 - **L21** (2026-10-23): the GTK smoke test only runs on Omarchy; on the Mac every cargo test
   runs with `GDK_BACKEND=broadway BROADWAY_DISPLAY=:99`, so it prints "smoke: skipped" (owner:
   no windows or Spaces changes on the Mac). Run it on Omarchy before closing the redesign.
+- **L22** (2026-10-23, R8): the list header's ⌕ swaps the title for a filter entry; typing keeps
+  the chats whose shown name (`chat_title`) holds the trimmed text, ignoring case; Escape clears
+  and closes it before closing the message search. Assumptions (plan silent): substring match,
+  the rail counts ignore the name filter, `/` still opens the message search. Mutation: 8 mutants,
+  all caught. Independent verifier: PASS, no blockers; the window wiring was checked by reading
+  only (the smoke test is skipped on the Mac and in CI), so check it on Omarchy. Parent fixed the
+  README key table row for Escape. Moved to R6: focus goes nowhere after Escape closes the filter
+  (the message search does the same at the baseline).
+- **L23** (2026-10-23): PR #10 (R7) merged after one rerun of the theme 500 ms test.

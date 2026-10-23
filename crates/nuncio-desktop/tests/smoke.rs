@@ -219,6 +219,7 @@ fn main() {
     pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click();
     the_panes_the_filters_and_the_strip();
     a_filter_keeps_the_open_chat_and_its_selection();
+    the_list_header_filters_the_chats_by_name();
     // The real demo daemon, when its binary is given (`go build -o DIR/nuncio-demo ./cmd/nuncio-demo`).
     if let Some(demo) = std::env::var_os("NUNCIO_DEMO_BIN") {
         let runtime = PathBuf::from(format!("/tmp/ndsd-{}", std::process::id()));
@@ -464,6 +465,55 @@ fn a_filter_keeps_the_open_chat_and_its_selection() {
     check(
         ui.selected_chat_row() == Some(0),
         "Ben, now at row 0, is selected",
+    );
+}
+
+/// The list header's ⌕ filters the chats by name as you type, together with the rail's filter;
+/// the rail's counts stay whole; the open chat's row stays selected while it matches; Escape
+/// in the input or in the chat list clears the filter.
+fn the_list_header_filters_the_chats_by_name() {
+    let ui = three_chats();
+    check(!ui.chat_filter_open(), "no name filter at first");
+    ui.open_chat(1);
+    ui.take_undelivered();
+    ui.filter_chats("BE");
+    check(
+        ui.chat_filter_open(),
+        "typing opens the filter in the header",
+    );
+    check(ui.drawn().0 == 1, "only Ben's name holds `be`");
+    check(
+        ui.selected_chat_row() == Some(0),
+        "the open Ben stays selected",
+    );
+    check(
+        ui.filter_count(Filter::All) == "3",
+        "the rail counts every chat still",
+    );
+    ui.filter_chats("a");
+    check(ui.drawn().0 == 2, "Ana and Cara");
+    check(ui.selected_chat_row().is_none(), "Ben is not listed");
+    ui.set_filter(Filter::Archived);
+    check(ui.drawn().0 == 1, "with Archived: Cara only");
+    ui.filter_chats("zoe");
+    let (list, _) = ui.empty_states();
+    check(
+        list.is_some_and(|(title, _)| title == "No matching chats"),
+        "no match says so",
+    );
+    ui.set_filter(Filter::All);
+    check(
+        ui.press_in_chat_list(Key::Escape),
+        "Escape in the list is handled",
+    );
+    check(!ui.chat_filter_open(), "and closes the filter");
+    check(ui.drawn().0 == 3, "every chat is listed again");
+    check(ui.selected_chat_row() == Some(1), "Ben is selected again");
+    ui.filter_chats("ana");
+    ui.stop_chat_filter();
+    check(
+        !ui.chat_filter_open() && ui.drawn().0 == 3,
+        "Escape in the input clears it too",
     );
 }
 

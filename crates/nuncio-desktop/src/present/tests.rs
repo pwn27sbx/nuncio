@@ -328,7 +328,7 @@ fn the_filters_list_all_unread_or_archived_chats() {
     cara.unread = 1;
     let m = model(vec![cara, ana, chat(BEN, "Ben")]);
     let names = |filter| -> Vec<String> {
-        listed(&m, filter, None)
+        listed(&m, filter, None, "")
             .into_iter()
             .map(|i| chat_title(&m.chat_list().chats()[i]))
             .collect()
@@ -355,24 +355,114 @@ fn ben_open() -> Model {
 fn the_open_chat_stays_only_in_the_filter_it_was_opened_from() {
     let m = ben_open();
     assert_eq!(
-        listed(&m, Filter::Unread, Some(Filter::Unread)),
+        listed(&m, Filter::Unread, Some(Filter::Unread), ""),
         [1],
         "read now, but opened from Unread: its row stays"
     );
     assert_eq!(
-        listed(&m, Filter::Archived, Some(Filter::Unread)),
+        listed(&m, Filter::Archived, Some(Filter::Unread), ""),
         [2],
         "Archived lists only the archived chat"
     );
     assert!(
-        listed(&m, Filter::Unread, None).is_empty(),
+        listed(&m, Filter::Unread, None, "").is_empty(),
         "opened elsewhere"
     );
     assert!(
-        listed(&m, Filter::Unread, Some(Filter::Archived)).is_empty(),
+        listed(&m, Filter::Unread, Some(Filter::Archived), "").is_empty(),
         "opened from another filter"
     );
-    assert_eq!(listed(&m, Filter::All, Some(Filter::Unread)), [0, 1, 2]);
+    assert_eq!(listed(&m, Filter::All, Some(Filter::Unread), ""), [0, 1, 2]);
+}
+
+/// The names `listed` keeps for `filter` and the name filter `name`, nothing open.
+fn named(m: &Model, filter: Filter, name: &str) -> Vec<String> {
+    listed(m, filter, None, name)
+        .into_iter()
+        .map(|i| chat_title(&m.chat_list().chats()[i]))
+        .collect()
+}
+
+/// Ana (unread), Ben and Cara (archived, unread).
+fn three() -> Model {
+    let mut ana = chat(ANA, "Ana");
+    ana.unread = 1;
+    let mut cara = chat("15551230003@s.whatsapp.net", "Cara");
+    cara.archived = true;
+    cara.unread = 1;
+    model(vec![ana, chat(BEN, "Ben"), cara])
+}
+
+#[test]
+fn the_name_filter_keeps_the_chats_whose_name_holds_it_ignoring_case() {
+    let m = three();
+    assert_eq!(named(&m, Filter::All, "an"), ["Ana"]);
+    assert_eq!(named(&m, Filter::All, "AN"), ["Ana"], "case is ignored");
+    assert_eq!(
+        named(&m, Filter::All, "ar"),
+        ["Cara"],
+        "anywhere in the name"
+    );
+    assert_eq!(named(&m, Filter::All, "a"), ["Ana", "Cara"]);
+    assert!(named(&m, Filter::All, "zoe").is_empty(), "no chat matches");
+}
+
+#[test]
+fn the_name_filter_matches_the_name_the_list_shows() {
+    let m = model(vec![
+        chat(ANA, "Ana"),
+        chat("15551230009@s.whatsapp.net", ""),
+    ]);
+    assert_eq!(named(&m, Filter::All, "0009"), ["…0009"], "a masked number");
+    assert!(
+        named(&m, Filter::All, "5551").is_empty(),
+        "the masked digits are not matched"
+    );
+}
+
+#[test]
+fn a_blank_name_filter_lists_every_chat() {
+    let m = three();
+    assert_eq!(named(&m, Filter::All, ""), ["Ana", "Ben", "Cara"]);
+    assert_eq!(named(&m, Filter::All, "  "), ["Ana", "Ben", "Cara"]);
+}
+
+#[test]
+fn the_name_filter_narrows_the_rail_filter_shown() {
+    let m = three();
+    assert_eq!(named(&m, Filter::Unread, "a"), ["Ana", "Cara"]);
+    assert_eq!(named(&m, Filter::Unread, "car"), ["Cara"]);
+    assert!(named(&m, Filter::Unread, "ben").is_empty(), "Ben is read");
+    assert_eq!(named(&m, Filter::Archived, "a"), ["Cara"]);
+    assert!(named(&m, Filter::Archived, "ana").is_empty());
+}
+
+#[test]
+fn the_name_filter_narrows_the_open_chat_too() {
+    let m = ben_open();
+    assert_eq!(
+        listed(&m, Filter::Unread, Some(Filter::Unread), "be"),
+        [1],
+        "Ben, opened from Unread, stays while his name matches"
+    );
+    assert!(
+        listed(&m, Filter::Unread, Some(Filter::Unread), "ana").is_empty(),
+        "and goes when it does not"
+    );
+    assert!(
+        listed(&m, Filter::Archived, Some(Filter::Unread), "be").is_empty(),
+        "never into another filter"
+    );
+}
+
+#[test]
+fn a_name_filter_that_keeps_no_chat_says_so() {
+    for filter in Filter::EACH {
+        let empty = list_empty(filter, "zoe");
+        assert_eq!(empty.title, "No matching chats", "{filter:?}");
+        assert_eq!(empty.hint, "Escape clears the filter", "{filter:?}");
+    }
+    assert_eq!(list_empty(Filter::Unread, " ").title, "No unread chats");
 }
 
 #[test]
@@ -844,11 +934,11 @@ fn the_transcript_says_why_it_is_empty() {
 
 #[test]
 fn the_list_says_why_it_is_empty_per_filter() {
-    assert_eq!(list_empty(Filter::All).title, "No chats");
-    assert_eq!(list_empty(Filter::Unread).title, "No unread chats");
-    assert_eq!(list_empty(Filter::Archived).title, "No archived chats");
+    assert_eq!(list_empty(Filter::All, "").title, "No chats");
+    assert_eq!(list_empty(Filter::Unread, "").title, "No unread chats");
+    assert_eq!(list_empty(Filter::Archived, "").title, "No archived chats");
     for filter in Filter::EACH {
-        assert!(!list_empty(filter).hint.is_empty(), "{filter:?}");
+        assert!(!list_empty(filter, "").hint.is_empty(), "{filter:?}");
     }
 }
 

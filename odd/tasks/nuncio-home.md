@@ -46,3 +46,23 @@ Runner: `cargo test --workspace --no-fail-fast`, `go test -race ./...`.
   normalised URI, which is what the app is actually handed. RED observed in L2.
 - **L5.** T2: `cargo test -p nuncio-desktop --test smoke` passes with a display (no
   `smoke: skipped`), and `cargo test --workspace --no-fail-fast` exits 0.
+- **L6.** Home run, what was executed and what was not, by the owner's decision at 21:52 (option
+  "B", T4 before everything else): executed 6.1–6.5, T1, T6, T2.1, B1, B2, B3 and Q2, plus the T4
+  subset (window, palette, settings, cold start). Not run tonight: T3 (the whole terminal matrix),
+  P2c (`queued`, it needs a ~5 minute outage, and a host outage also takes this session offline),
+  G1 group senders (no group available), T5, the rest of T8, T9 and T10. T2.11 relink and T5.9
+  uninstall were skipped by design.
+- **L7.** Observation from B3, open follow-up, not a blocker. With the daemon stopped, a send made
+  in the gap shows `not sent` (correct). Pressing `R` in the TUI did not fire the retry in three
+  attempts, while `nuncio retry <client_id>` on the same state worked
+  (`outbox.state` `not_confirmed` → `sent`, messages 14 → 15). The client's `retry_selected`
+  (`crates/nuncio-client/src/model/mod.rs:616`) needs the selected message to be
+  `MessageState::NotSent` with a `client_id`; the row the user sees is the daemon's `not_confirmed`
+  one, so the key does nothing and says nothing. Worth deciding: allow retrying `not_confirmed`, or
+  tell the user why it cannot.
+- **L8.** Observations, none of them a rule violation. `namcap` reports only `W:` lines (FULL RELRO
+  on the two Go binaries, implicitly-satisfied dependencies, `gcc-libs` possibly unneeded) and no
+  `E:`; `makepkg` printed `libfakeroot internal error: payload not recognized!` while stripping and
+  still produced the package (exit 0); the first `nuncio-desktop` start measured 1724 ms (cold disk
+  cache, right after the release build) against 353 ms on a warm cache, both under the 1.5 s target
+  once warm; RSS baseline 125–131 MiB, the 24 h check is part of the T19 soak.

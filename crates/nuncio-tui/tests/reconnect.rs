@@ -651,3 +651,113 @@ fn a_send_whose_reply_timed_out_is_not_confirmed_and_r_retries_it_under_the_same
     );
     let _ = std::fs::remove_file(&path);
 }
+
+/// The home report (B3): a send made while nunciod is down never reaches it, so nunciod stores
+/// nothing under its client_id and refuses a `retry` of it ("no send with that client_id"). Once
+/// reconnected, `R` on it sends it once, as a `send` under the same client_id (which nunciod
+/// would answer with its stored state, never a second message, had it stored it after all), and
+/// the message ends sent. Nothing is sent before `R`.
+#[test]
+fn r_sends_a_send_made_while_the_daemon_was_down_once_under_the_same_client_id() {
+    let path = socket_path();
+    let _socket = Socket(path.clone());
+    let listener = UnixListener::bind(&path).expect("bind");
+    let (ready, go) = mpsc::channel::<()>();
+    let server_path = path.clone();
+    let server = thread::spawn(move || {
+        let mut first = Life::accept(&listener);
+        assert_eq!(first.serve()["op"], "messages");
+        drop(listener);
+        let _ = std::fs::remove_file(&server_path);
+        drop(first);
+        go.recv().expect("the TUI sent");
+        let listener = UnixListener::bind(&server_path).expect("bind again");
+        let mut second = Life::accept(&listener);
+        let mut ops: Vec<Value> = (0..3).map(|_| second.serve()).collect();
+        // The outbox connection R opens: answered as nunciod answers.
+        let (mut outbox, mut outbox_writer) = accept_outbox(&listener);
+        let mut line = String::new();
+        outbox.read_line(&mut line).expect("what R sends");
+        let request: Value = serde_json::from_str(&line).expect("json");
+        let reply = match request["op"].as_str() {
+            Some("send") => json!({"v":1,"op":"sent","client_id":request["client_id"],
+                "state":"sent","id":"3EB0E","timestamp":"2026-10-18T17:40:00Z"}),
+            _ => json!({"v":1,"op":"send_failed","client_id":request["client_id"],
+                "message":"no send with that client_id"}),
+        };
+        send_line(&mut outbox_writer, reply);
+        ops.push(request);
+        drop(second);
+        ops
+    });
+
+    let mut daemon = Daemon::connect(&path, "nuncio-tui/test")
+        .expect("connect")
+        .with_backoff(Backoff::new(ms(20), ms(80)));
+    let mut app = app();
+    open_ada(&mut daemon, &mut app);
+    drain_until(&mut daemon, &mut app, "noticing the lost daemon", |s| {
+        first_line(s).contains("reconnecting…")
+    });
+    app.handle_key(key(KeyCode::Char('i')));
+    type_text(&mut app, "while it is down");
+    let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Enter)) else {
+        panic!("Enter sends");
+    };
+    let ClientFrame::Send { client_id, .. } = &frame else {
+        panic!("a send: {frame:?}");
+    };
+    let client_id = client_id.clone();
+    let _ = daemon.perform(&mut app, &frame);
+    assert!(render(&mut app, 100, 24).contains("not sent"));
+    ready.send(()).expect("server");
+    drain_until(&mut daemon, &mut app, "the reconnect", |s| {
+        last_line(s).contains("reconnected to nunciod")
+    });
+
+    assert_eq!(app.pane(), Pane::Messages);
+    app.handle_key(key(KeyCode::Char('k')));
+    let again = app.handle_key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT));
+    assert_eq!(
+        again,
+        Some(Action::Request(ClientFrame::send(
+            ADA,
+            "while it is down",
+            client_id.clone()
+        )))
+    );
+    let Some(Action::Request(again)) = again else {
+        unreachable!()
+    };
+    daemon
+        .perform(&mut app, &again)
+        .expect("handed to the outbox");
+    drain_until(&mut daemon, &mut app, "the answer", |s| {
+        !s.contains("sending")
+    });
+    let screen = render(&mut app, 100, 24);
+    assert!(screen.contains("while it is down"), "{screen}");
+    assert!(!screen.contains("not sent"), "{screen}");
+
+    let ops = server.join().expect("the fake daemon ran its script");
+    let ops: Vec<(&str, &str)> = ops
+        .iter()
+        .map(|op| {
+            (
+                op["op"].as_str().unwrap_or_default(),
+                op["client_id"].as_str().unwrap_or_default(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        ops,
+        [
+            ("status", ""),
+            ("chats", ""),
+            ("messages", ""),
+            ("send", client_id.as_str())
+        ],
+        "nothing is sent before R, and R sends it once under its client_id"
+    );
+    let _ = std::fs::remove_file(&path);
+}

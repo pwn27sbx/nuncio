@@ -12,7 +12,8 @@ tries again after 0.5 s, doubling up to every 5 s; once back it says `reconnecte
 says hello and subscribes again, and reloads the status, the chat list and the selected chat's
 messages, keeping the draft, the selected chat and message and the open pane. A send made while
 disconnected is shown as `not sent` and the footer says `not connected to nunciod`; nothing
-retries it by itself (`R` does, once reconnected).
+retries it by itself. `R` does, once reconnected: nunciod never got it, so `R` sends it once
+under the same client_id instead of asking nunciod to retry a send it does not have.
 
 After the session the header names why it is not connected when the daemon says so
 (`stop_reason`, `proto/wire.md`), in fixed text: a WhatsApp stop (`offline · WhatsApp temporarily

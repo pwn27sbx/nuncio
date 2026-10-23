@@ -98,7 +98,7 @@ listing what can be done now, each with its key:
 - `Search in this chat` (Ctrl+F), while a chat is open;
 - for the focused message, only what its menu enables: `Reply to the selected message` (`r`),
   `React to the selected message…` (`e`, opens the picker), `Retry the selected message`
-  (Shift+R, a send that ended not sent) and `Open the selected media` (`o`);
+  (Shift+R, a send that ended not sent or not confirmed) and `Open the selected media` (`o`);
 - `Settings` (Ctrl+,) and `Quit` (Ctrl+Q).
 
 Typing filters the list: the commands holding the typed letters in order, ignoring case and spaces
@@ -228,7 +228,7 @@ Tab moves between the chat list, the conversation and the composer.
 | conversation | Up, Down | move between messages |
 | conversation | `r` | reply |
 | conversation | `e` | react (👍 ❤️ 😂 😮 😢 🙏, or remove mine) |
-| conversation | Shift+R | retry a send that was not sent |
+| conversation | Shift+R | retry a send that was not sent or not confirmed (one made while disconnected is sent once under the same client_id) |
 | conversation | `o`, click on a picture | a photo or sticker: show the full picture in its bubble; any other media: open the file with the desktop's opener |
 | conversation | Shift+O | open the media file (a picture too) with the desktop's opener |
 | conversation | Enter | on a photo or sticker, show it in full; on any other message, its menu |

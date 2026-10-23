@@ -611,16 +611,34 @@ impl Model {
         }
     }
 
-    /// One more attempt of the selected send that ended not sent. Never automatic, and one at a
-    /// time: while an attempt waits for its answer, asking again asks for nothing.
+    /// One more attempt of the selected send that ended not sent or not confirmed, under its own
+    /// `client_id`. Never automatic, and one at a time: while an attempt waits for its answer,
+    /// asking again asks for nothing.
+    ///
+    /// It is a `retry` when nunciod stored the send: it was answered not confirmed, or nunciod
+    /// showed it with the WhatsApp id it stores every send it takes under. A send shown with
+    /// neither never reached nunciod (it was made while disconnected), so nunciod would refuse a
+    /// `retry` of it: it is sent again instead, as the same `send` (same text, quote and
+    /// `client_id`); had nunciod stored it after all, it answers that send's state and sends
+    /// nothing, so this can never become a second message.
     pub fn retry_selected(&mut self) -> Option<ClientFrame> {
+        let jid = self.chats.selected_jid()?.to_owned();
         let message = self.selected_message()?;
         if message.state != Some(MessageState::NotSent) || self.transcript.is_sending(message) {
             return None;
         }
         let client_id = message.client_id.clone()?;
-        self.transcript.sending.insert(client_id.clone());
-        Some(ClientFrame::retry(client_id))
+        let frame = if !message.id.is_empty() || self.transcript.is_unconfirmed(message) {
+            ClientFrame::retry(client_id.clone())
+        } else {
+            let text = message.text.clone();
+            match message.reply_to.clone() {
+                Some(quoted) => ClientFrame::send_reply(jid, text, client_id.clone(), quoted),
+                None => ClientFrame::send(jid, text, client_id.clone()),
+            }
+        };
+        self.transcript.sending.insert(client_id);
+        Some(frame)
     }
 
     /// Ask for the selected media message's file: to show a picture in full inline when the UI

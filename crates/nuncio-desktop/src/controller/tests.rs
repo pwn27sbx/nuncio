@@ -197,7 +197,12 @@ fn a_send_while_disconnected_is_not_sent_and_says_how_to_retry() {
         c.model().notice(),
         Some("not connected to nunciod: not sent (choose Retry on the message once reconnected)")
     );
-    assert_eq!(c.retry(0), [Command::Send(ClientFrame::retry("d-1"))]);
+    // nunciod never saw it, so it would refuse a `retry`: Retry sends it, once, under its id.
+    assert_eq!(
+        c.retry(0),
+        [Command::Send(ClientFrame::send(ANA, "hi", "d-1"))]
+    );
+    assert_eq!(c.retry(0), [], "one attempt at a time");
 }
 
 #[test]

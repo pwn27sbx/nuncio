@@ -76,8 +76,11 @@ and never touch a real keyring.
   was offline, or whose connection dropped before WhatsApp acknowledged it, is queued and sent
   **once** when the session reconnects (one pass, oldest first, one second apart, under the same
   message id). A message that ends `not sent` or `not confirmed` stays visible and is sent again
-  only by an explicit `retry`, under the same id. (Whether whatsmeow's own frame resend on a
-  quick reconnect can repeat a frame is still to be checked on the real account.)
+  only by an explicit `retry`, under the same id. A send made while an app could not reach the
+  daemon never left the app: its retry key sends it once as the same `send`, under the same client
+  id, which the daemon answers with the stored state if it already has it, sending nothing.
+  (Whether whatsmeow's own frame resend on a quick reconnect can repeat a frame is still to be
+  checked on the real account.)
 - **No reconnect storms.** whatsmeow's own unbounded reconnect loop is off; nuncio uses capped
   exponential backoff with jitter (2 s base, 5 min cap), and stops for good after a logout, a ban,
   a replaced stream or a refused connection. The systemd unit restarts the daemon only after a

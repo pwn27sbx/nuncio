@@ -198,6 +198,15 @@ fn a_retry_waiting_for_its_answer_is_not_asked_again() {
         client_id: "t-1".to_owned(),
         message: "no".to_owned(),
     });
+    // nunciod publishes the send it refused under the WhatsApp id it stored it with.
+    let mut refused = message("3EB0D1", true);
+    refused.state = Some(MessageState::NotSent);
+    refused.client_id = Some("t-1".to_owned());
+    m.apply(&DaemonFrame::EventMessage {
+        v: PROTOCOL_VERSION,
+        jid: BEN.to_owned(),
+        message: refused,
+    });
     assert!(m.select_message(0));
     assert_eq!(m.retry_selected(), Some(ClientFrame::retry("t-1")));
     assert_eq!(m.retry_selected(), None, "one attempt in flight at a time");
@@ -368,4 +377,101 @@ fn a_new_chat_answered_as_a_lid_chat_stays_listed_until_the_daemon_lists_it() {
     assert_eq!(m.selected_jid(), Some(ANA_LID));
     assert!(m.chat_list().orphan().is_none(), "not a merged chat");
     assert_eq!(m.send(), Some(ClientFrame::send(ANA_LID, "hola", "t-1")));
+}
+
+/// The home report (B3): a send made while nunciod was down never reached it, so nunciod has no
+/// send under that `client_id` and a `retry` of it is refused ("no send with that client_id").
+/// The explicit retry sends it instead, once, under the same `client_id`.
+#[test]
+fn a_send_that_never_reached_the_daemon_is_sent_again_under_its_client_id() {
+    use crate::driver::{self, Client};
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    let open = m.open_selected().expect("opens");
+    m.apply_reply(&open, &messages_frame(BEN, vec![message("M1", false)]));
+    type_draft(&mut m, "while it is down");
+    let frame = m.send().expect("sends");
+    let client = Client {
+        program: "test",
+        retry_hint: "R retries it once reconnected",
+    };
+    driver::not_connected(&mut m, &frame, client);
+    // The reconnect's resync lists only what nunciod stored, and the send stays shown.
+    for resync in driver::reconnected(&mut m) {
+        if let ClientFrame::Messages { .. } = resync {
+            m.apply_reply(&resync, &messages_frame(BEN, vec![message("M1", false)]));
+        }
+    }
+    assert!(m.select_message(1));
+    assert_eq!(
+        m.selected_message().map(|s| s.state.clone()),
+        Some(Some(MessageState::NotSent))
+    );
+    assert_eq!(
+        m.retry_selected(),
+        Some(ClientFrame::send(BEN, "while it is down", "t-1"))
+    );
+    assert_eq!(m.retry_selected(), None, "one attempt in flight at a time");
+}
+
+/// A reply that never reached the daemon is sent again still quoting what it quoted.
+#[test]
+fn a_reply_that_never_reached_the_daemon_is_sent_again_as_the_same_reply() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    let open = m.open_selected().expect("opens");
+    m.apply_reply(&open, &messages_frame(BEN, vec![message("M1", false)]));
+    assert!(m.select_message(0));
+    assert!(m.reply_to_selected());
+    type_draft(&mut m, "yes");
+    m.send().expect("sends");
+    m.apply(&DaemonFrame::SendFailed {
+        v: PROTOCOL_VERSION,
+        client_id: "t-1".to_owned(),
+        message: crate::driver::NOT_CONNECTED.to_owned(),
+    });
+    assert!(m.select_message(1));
+    assert_eq!(
+        m.retry_selected(),
+        Some(ClientFrame::send_reply(BEN, "yes", "t-1", "M1"))
+    );
+}
+
+/// A send nunciod answered `not_confirmed` is stored there: the explicit retry is a `retry`, one
+/// at a time, never a new send.
+#[test]
+fn a_send_shown_as_not_confirmed_is_retried_once_under_its_client_id() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    m.open_selected();
+    type_draft(&mut m, "hi");
+    m.send().expect("sends");
+    m.send_not_confirmed("t-1");
+    assert!(m.select_message(0));
+    assert!(
+        m.transcript()
+            .is_unconfirmed(m.selected_message().expect("selected"))
+    );
+    assert_eq!(m.retry_selected(), Some(ClientFrame::retry("t-1")));
+    assert_eq!(m.retry_selected(), None, "one attempt in flight at a time");
+}
+
+/// A send nunciod stored and published as not sent (its WhatsApp id with `state: "not_sent"`, as
+/// it lists a `not_confirmed` one too, after a restart) is retried, and a sent or received
+/// message offers no retry.
+#[test]
+fn a_stored_not_sent_send_is_retried_and_a_sent_or_received_one_is_not() {
+    let mut m = model(vec![chat(BEN, "Ben", 0)]);
+    let open = m.open_selected().expect("opens");
+    let mut stored: Message = message("3EB0BBB3", true);
+    stored.state = Some(MessageState::NotSent);
+    stored.client_id = Some("tui-9".to_owned());
+    m.apply_reply(
+        &open,
+        &messages_frame(BEN, vec![stored, message("M2", true), message("M1", false)]),
+    );
+    assert!(m.select_message(0), "the received one");
+    assert_eq!(m.retry_selected(), None);
+    assert!(m.select_message(1), "my sent one");
+    assert_eq!(m.retry_selected(), None);
+    assert!(m.select_message(2));
+    assert_eq!(m.retry_selected(), Some(ClientFrame::retry("tui-9")));
+    assert_eq!(m.retry_selected(), None, "one attempt in flight at a time");
 }

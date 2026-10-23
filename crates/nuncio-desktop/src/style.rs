@@ -139,7 +139,128 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
         accent_on = palette.accent_on().to_hex(),
         warning = palette.warning().to_hex(),
         header = HEADER_HEIGHT,
-    )
+    ) + &list_and_transcript_css(palette)
+}
+
+/// How far an avatar's tone is mixed from the chrome toward its palette colour: a muted tone.
+const AVATAR_TONE: f64 = 0.35;
+
+/// The rules for the chat rows (plan §6.2), the bubbles and everything around them (plan §6.3),
+/// the empty states, and the avatars' six muted tones (plan §4.3).
+fn list_and_transcript_css(palette: &Palette) -> String {
+    let root = ROOT_CLASS;
+    let mut css = format!(
+        ".{root} .nuncio-chats > row {{\n  \
+           min-height: 72px;\n  \
+           margin: 0;\n  \
+           padding: 0;\n  \
+           background-color: transparent;\n  \
+           box-shadow: none;\n\
+         }}\n\
+         .{root} .nuncio-chats > row:hover {{ background-color: {hover}; }}\n\
+         .{root} .nuncio-chats > row:selected {{\n  \
+           background-color: {active};\n  \
+           color: {text};\n  \
+           box-shadow: inset 2px 0 {accent};\n\
+         }}\n\
+         .{root} .nuncio-unread-mark {{ background-color: {accent}; }}\n\
+         .{root} .nuncio-name {{ font-size: 13px; font-weight: 600; color: {muted}; }}\n\
+         .{root} .nuncio-name.nuncio-name-unread {{ color: {text}; }}\n\
+         .{root} .nuncio-preview {{ font-size: 13px; color: {muted}; }}\n\
+         .{root} .nuncio-preview-author {{ font-size: 13px; color: {text}; }}\n\
+         .{root} .nuncio-ticks {{ font-size: 12px; color: {faint}; }}\n\
+         .{root} .nuncio-faint {{ color: {faint}; }}\n\
+         .{root} .nuncio-chip {{\n  \
+           min-width: 16px;\n  \
+           min-height: 16px;\n  \
+           padding: 0 3px;\n  \
+           font-size: 10px;\n  \
+           background-color: {accent};\n  \
+           color: {accent_on};\n\
+         }}\n\
+         .{root} .nuncio-transcript > row {{\n  \
+           padding: 0;\n  \
+           background-color: transparent;\n  \
+           box-shadow: none;\n\
+         }}\n\
+         .{root} .nuncio-day {{\n  \
+           margin-top: 16px;\n  \
+           margin-bottom: 8px;\n  \
+           font-size: 11px;\n  \
+           letter-spacing: 0.06em;\n  \
+           color: {faint};\n\
+         }}\n\
+         .{root} .nuncio-author-line {{ font-size: 11px; font-weight: 600; color: {text}; }}\n\
+         .{root} .nuncio-bubble {{\n  \
+           padding: 8px 12px;\n  \
+           color: {text};\n\
+         }}\n\
+         .{root} .nuncio-bubble.nuncio-mine {{ background-color: {active}; }}\n\
+         .{root} .nuncio-bubble.nuncio-theirs {{\n  \
+           background-color: {chrome};\n  \
+           border: 1px solid {border};\n\
+         }}\n\
+         .{root} .nuncio-bubble.nuncio-sticker {{\n  \
+           padding: 0;\n  \
+           background-color: transparent;\n  \
+           border: none;\n\
+         }}\n\
+         .{root} .nuncio-text {{ font-size: 13px; }}\n\
+         .{root} .nuncio-caption {{ font-size: 11px; color: {muted}; }}\n\
+         .{root} .nuncio-media {{ font-size: 11px; color: {muted}; }}\n\
+         .{root} .nuncio-meta-line {{ font-size: 11px; color: {faint}; }}\n\
+         .{root} .nuncio-meta-line.nuncio-warning {{ color: {warning}; }}\n\
+         .{root} .nuncio-quote {{\n  \
+           border-left: 2px solid {accent};\n  \
+           padding-left: 8px;\n\
+         }}\n\
+         .{root} .nuncio-quote-author {{ font-size: 11px; font-weight: 600; }}\n\
+         .{root} .nuncio-quote-text {{ font-size: 11px; color: {muted}; }}\n\
+         .{root} .nuncio-reaction {{\n  \
+           padding: 0 4px;\n  \
+           background-color: {surface};\n  \
+           border: 1px solid {border};\n\
+         }}\n\
+         .{root} .nuncio-reaction.nuncio-reaction-mine {{ background-color: {active}; }}\n\
+         .{root} .nuncio-reaction-emoji {{ font-size: 13px; }}\n\
+         .{root} .nuncio-frame {{ border: 1px solid {border}; }}\n\
+         .{root} .nuncio-document {{ min-height: 32px; }}\n\
+         .{root} row.nuncio-message:focus-visible .nuncio-bubble {{\n  \
+           outline: 1px solid {accent};\n  \
+           outline-offset: 0;\n\
+         }}\n",
+        chrome = palette.surface_chrome().to_hex(),
+        surface = palette.surface().to_hex(),
+        border = palette.border().to_hex(),
+        text = palette.text().to_hex(),
+        muted = palette.text_muted().to_hex(),
+        faint = palette.text_faint().to_hex(),
+        hover = palette.surface_hover().to_hex(),
+        active = palette.surface_active().to_hex(),
+        accent = palette.accent().to_hex(),
+        accent_on = palette.accent_on().to_hex(),
+        warning = palette.warning().to_hex(),
+    );
+    // libadwaita picks one of fourteen saturated colours by name; they fold into six muted tones
+    // of the palette, with the text on them.
+    let tones = [
+        palette.red,
+        palette.green,
+        palette.yellow,
+        palette.blue,
+        palette.magenta,
+        palette.cyan,
+    ];
+    for n in 1..=14 {
+        css.push_str(&format!(
+            ".{root} avatar.color{n} {{ background-image: none; \
+             background-color: mix({chrome}, {tone}, {AVATAR_TONE}); color: {text}; }}\n",
+            chrome = palette.surface_chrome().to_hex(),
+            tone = tones[(n - 1) % tones.len()].to_hex(),
+            text = palette.text().to_hex(),
+        ));
+    }
+    css
 }
 
 #[cfg(test)]
@@ -216,8 +337,61 @@ mod tests {
             ),
             ("nuncio-linked-mark", "background-color", palette.accent()),
             ("nuncio-strip", "color", palette.warning()),
+            // The chat list (plan §6.2).
+            (
+                "nuncio-chats > row:hover",
+                "background-color",
+                palette.surface_hover(),
+            ),
+            (
+                "nuncio-chats > row:selected",
+                "background-color",
+                palette.surface_active(),
+            ),
+            (
+                "nuncio-chats > row:selected",
+                "box-shadow",
+                palette.accent(),
+            ),
+            ("nuncio-unread-mark", "background-color", palette.accent()),
+            ("nuncio-name", "color", palette.text_muted()),
+            ("nuncio-name.nuncio-name-unread", "color", palette.text()),
+            ("nuncio-preview", "color", palette.text_muted()),
+            ("nuncio-preview-author", "color", palette.text()),
+            ("nuncio-ticks", "color", palette.text_faint()),
+            ("nuncio-faint", "color", palette.text_faint()),
+            ("nuncio-chip", "background-color", palette.accent()),
+            ("nuncio-chip", "color", palette.accent_on()),
+            // The transcript (plan §6.3).
+            ("nuncio-day", "color", palette.text_faint()),
+            (
+                "nuncio-bubble.nuncio-mine",
+                "background-color",
+                palette.surface_active(),
+            ),
+            (
+                "nuncio-bubble.nuncio-theirs",
+                "background-color",
+                palette.surface_chrome(),
+            ),
+            ("nuncio-bubble.nuncio-theirs", "border", palette.border()),
+            ("nuncio-bubble", "color", palette.text()),
+            ("nuncio-meta-line", "color", palette.text_faint()),
+            (
+                "nuncio-meta-line.nuncio-warning",
+                "color",
+                palette.warning(),
+            ),
+            ("nuncio-quote", "border-left", palette.accent()),
+            ("nuncio-quote-text", "color", palette.text_muted()),
+            ("nuncio-reaction", "background-color", palette.surface()),
+            ("nuncio-reaction", "border", palette.border()),
+            ("nuncio-frame", "border", palette.border()),
+            ("nuncio-caption", "color", palette.text_muted()),
         ] {
-            let selector = if selector.contains(['.', ' ']) {
+            let selector = if selector.starts_with("nuncio-") {
+                format!("{root} .{selector}")
+            } else if selector.contains(['.', ' ']) {
                 format!("{root} {selector}")
             } else {
                 format!("{root} .{selector}")
@@ -233,6 +407,52 @@ mod tests {
                 color.to_hex()
             );
         }
+    }
+
+    #[test]
+    fn rows_are_72_px_bubbles_square_padded_and_stickers_bare() {
+        let css = layout_css(&gruvbox(), 0);
+        let root = format!(".{ROOT_CLASS}");
+        let row = rule(&css, &format!("{root} .nuncio-chats > row"));
+        assert!(row.contains("min-height: 72px;"), "{row}");
+        let bubble = rule(&css, &format!("{root} .nuncio-bubble"));
+        assert!(bubble.contains("padding: 8px 12px;"), "{bubble}");
+        let chip = rule(&css, &format!("{root} .nuncio-chip"));
+        assert!(
+            chip.contains("min-width: 16px;") && chip.contains("min-height: 16px;"),
+            "{chip}"
+        );
+        assert!(chip.contains("font-size: 10px;"), "{chip}");
+        let sticker = rule(&css, &format!("{root} .nuncio-bubble.nuncio-sticker"));
+        for bare in [
+            "background-color: transparent;",
+            "border: none;",
+            "padding: 0;",
+        ] {
+            assert!(sticker.contains(bare), "{bare}: {sticker}");
+        }
+        assert!(
+            !css.contains("box-shadow: 0") && !css.contains("gradient"),
+            "no shadows or gradients: {css}"
+        );
+    }
+
+    #[test]
+    fn avatars_take_six_muted_tones_of_the_palette() {
+        let palette = gruvbox();
+        let css = layout_css(&palette, 0);
+        let root = format!(".{ROOT_CLASS}");
+        for n in 1..=14 {
+            let body = rule(&css, &format!("{root} avatar.color{n}"));
+            assert!(body.contains("background-image: none;"), "{body}");
+            assert!(body.contains(&palette.surface_chrome().to_hex()), "{body}");
+            assert!(body.contains(&palette.text().to_hex()), "{body}");
+        }
+        assert_eq!(
+            rule(&css, &format!("{root} avatar.color1")),
+            rule(&css, &format!("{root} avatar.color7")),
+            "fourteen libadwaita colours fold into six tones"
+        );
     }
 
     #[test]

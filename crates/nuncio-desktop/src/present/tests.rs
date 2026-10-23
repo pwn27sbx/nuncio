@@ -87,6 +87,7 @@ fn a_chat_row_has_its_title_badge_markers_and_last_message() {
     let rows = chat_rows(
         &model(vec![ana, ben, chat("120363000000000001@g.us", "")]),
         60,
+        None,
     );
 
     assert_eq!(rows[0].title, "…0001", "chat_title: the masked phone");
@@ -109,7 +110,7 @@ fn a_chat_row_has_its_title_badge_markers_and_last_message() {
 fn archived_chats_are_listed_last() {
     let mut old = chat(ANA, "Ana");
     old.archived = true;
-    let rows = chat_rows(&model(vec![old, chat(BEN, "Ben")]), 0);
+    let rows = chat_rows(&model(vec![old, chat(BEN, "Ben")]), 0, None);
     let titles: Vec<&str> = rows.iter().map(|r| r.title.as_str()).collect();
     assert_eq!(titles, ["Ben", "Ana"]);
     assert!(rows[1].archived);
@@ -122,7 +123,7 @@ fn bubbles_are_mine_or_theirs_with_the_sender_and_time() {
         message("M1", "text", "hi", false),
         message("M2", "text", "hello", true),
     ]);
-    let shown = bubbles(&m, -180);
+    let shown = bubbles(&m, -180, None);
     assert!(!shown[0].mine);
     assert_eq!(shown[0].sender, "Ana");
     assert_eq!(shown[0].time, "07:05");
@@ -136,8 +137,9 @@ fn bubbles_are_mine_or_theirs_with_the_sender_and_time() {
 #[test]
 fn a_send_is_marked_sending_then_sent_queued_not_sent_or_not_confirmed() {
     let mut m = open_with(Vec::new());
-    let marks =
-        |m: &Model| -> Vec<Option<SendMark>> { bubbles(m, 0).iter().map(|b| b.mark).collect() };
+    let marks = |m: &Model| -> Vec<Option<SendMark>> {
+        bubbles(m, 0, None).iter().map(|b| b.mark).collect()
+    };
     for text in ["one", "two", "three", "four"] {
         type_draft(&mut m, text);
         m.send().expect("sends");
@@ -172,7 +174,7 @@ fn a_send_is_marked_sending_then_sent_queued_not_sent_or_not_confirmed() {
             Some(SendMark::NotConfirmed)
         ]
     );
-    let shown = bubbles(&m, 0);
+    let shown = bubbles(&m, 0, None);
     assert!(
         shown[2].label.contains(", not sent: three"),
         "{}",
@@ -190,7 +192,7 @@ fn what_a_bubble_offers_follows_what_whatsapp_has() {
     ]);
     type_draft(&mut m, "fail");
     m.send().expect("sends");
-    let waiting = bubbles(&m, 0);
+    let waiting = bubbles(&m, 0, None);
     assert!(waiting[0].can_target && !waiting[0].can_open && !waiting[0].can_retry);
     assert!(waiting[1].can_open, "media with an id opens");
     assert!(
@@ -211,12 +213,12 @@ fn what_a_bubble_offers_follows_what_whatsapp_has() {
         jid: ANA.to_owned(),
         message: refused,
     });
-    let failed = &bubbles(&m, 0)[2];
+    let failed = &bubbles(&m, 0, None)[2];
     assert!(failed.can_retry && !failed.can_target);
     // The retry the bubble offers is the model's; while it waits, none is offered.
     assert!(m.select_message(2));
     assert_eq!(m.retry_selected(), Some(ClientFrame::retry("d-1")));
-    let retrying = &bubbles(&m, 0)[2];
+    let retrying = &bubbles(&m, 0, None)[2];
     assert_eq!(retrying.mark, Some(SendMark::Sending));
     assert!(!retrying.can_retry, "one attempt at a time");
 }
@@ -228,7 +230,7 @@ fn a_reply_shows_the_quoted_line_and_one_not_loaded_says_so() {
     let mut lost = message("M3", "text", "and?", false);
     lost.reply_to = Some("OLD".to_owned());
     let m = open_with(vec![message("M1", "text", "coffee?", false), quoting, lost]);
-    let shown = bubbles(&m, 0);
+    let shown = bubbles(&m, 0, None);
     assert_eq!(shown[0].quote, None);
     assert_eq!(shown[1].quote.as_deref(), Some("coffee?"));
     assert_eq!(
@@ -253,7 +255,7 @@ fn media_shows_its_label_and_reactions_are_listed_mine_marked() {
         },
     ];
     let m = open_with(vec![sticker, message("M2", "image", "the beach", false)]);
-    let shown = bubbles(&m, 0);
+    let shown = bubbles(&m, 0, None);
     assert_eq!(shown[0].media.as_deref(), Some("[sticker] ▶"));
     assert_eq!(
         shown[0].reactions,
@@ -279,7 +281,7 @@ fn a_media_file_being_fetched_to_open_says_downloading() {
     let mut m = open_with(vec![message("M1", "document", "", false)]);
     assert!(m.select_message(0));
     m.download_selected(false, true).expect("asks for the file");
-    let shown = bubbles(&m, 0);
+    let shown = bubbles(&m, 0, None);
     assert_eq!(shown[0].media.as_deref(), Some("[document] downloading…"));
     assert!(shown[0].selected);
 }
@@ -482,7 +484,7 @@ fn a_group_bubble_and_its_label_name_the_sender_and_fall_back_to_the_group() {
             messages: vec![message("G2", "text", "an old one", false), from_ana],
         },
     );
-    let shown = bubbles(&m, 0);
+    let shown = bubbles(&m, 0, None);
     assert_eq!(shown[0].sender, "Ana");
     assert_eq!(shown[0].label, "Ana, 10:05: rope?");
     assert_eq!(
@@ -557,4 +559,377 @@ fn the_strip_names_a_closed_device_and_clears() {
         stop_reason: None,
     });
     assert_eq!(stop_strip(&m), None);
+}
+
+/// A text message of Ana's (or mine) at `timestamp`.
+fn at(id: &str, timestamp: &str, from_me: bool) -> Message {
+    let mut m = message(id, "text", id, from_me);
+    m.timestamp = timestamp.to_owned();
+    m
+}
+
+/// Which bubbles start a group and which carry the meta line.
+fn groups(shown: &[Bubble]) -> Vec<(bool, bool)> {
+    shown
+        .iter()
+        .map(|b| (b.starts_group, b.shows_meta))
+        .collect()
+}
+
+#[test]
+fn one_author_within_five_minutes_is_one_group_with_the_meta_under_its_last_bubble() {
+    let m = open_with(vec![
+        at("A1", "2026-10-20T10:00:00Z", false),
+        at("A2", "2026-10-20T10:02:00Z", false),
+        // Exactly five minutes after the one before: still the same group.
+        at("A3", "2026-10-20T10:07:00Z", false),
+    ]);
+    let shown = bubbles(&m, 0, None);
+    assert_eq!(
+        groups(&shown),
+        [(true, false), (false, false), (false, true)]
+    );
+}
+
+#[test]
+fn a_new_author_or_a_gap_over_five_minutes_starts_a_new_group() {
+    let m = open_with(vec![
+        at("A1", "2026-10-20T10:00:00Z", false),
+        at("M1", "2026-10-20T10:01:00Z", true),
+        at("M2", "2026-10-20T10:02:00Z", true),
+        // Five minutes and one second after M2.
+        at("M3", "2026-10-20T10:07:01Z", true),
+        at("A2", "2026-10-20T10:07:30Z", false),
+    ]);
+    let shown = bubbles(&m, 0, None);
+    assert_eq!(
+        groups(&shown),
+        [
+            (true, true),
+            (true, false),
+            (false, true),
+            (true, true),
+            (true, true)
+        ]
+    );
+}
+
+#[test]
+fn group_members_are_separate_authors() {
+    const GROUP: &str = "120363000000000001@g.us";
+    let mut m = model(vec![chat(GROUP, "Climbing")]);
+    let request = m.open_selected().expect("opens");
+    let mut ana = at("G1", "2026-10-20T10:00:00Z", false);
+    ana.sender = Some("Ana".to_owned());
+    let mut ben = at("G2", "2026-10-20T10:01:00Z", false);
+    ben.sender = Some("Ben".to_owned());
+    m.apply_reply(
+        &request,
+        &DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: GROUP.to_owned(),
+            messages: vec![ben, ana],
+        },
+    );
+    assert_eq!(groups(&bubbles(&m, 0, None)), [(true, true), (true, true)]);
+}
+
+#[test]
+fn a_failed_send_inside_a_group_keeps_its_own_meta_line() {
+    let mut failed = at("M2", "2026-10-20T10:01:00Z", true);
+    failed.state = Some(MessageState::NotSent);
+    failed.client_id = Some("d-1".to_owned());
+    let m = open_with(vec![
+        at("M1", "2026-10-20T10:00:00Z", true),
+        failed,
+        at("M3", "2026-10-20T10:02:00Z", true),
+    ]);
+    let shown = bubbles(&m, 0, None);
+    assert_eq!(
+        groups(&shown),
+        [(true, false), (false, true), (false, true)]
+    );
+    assert_eq!(meta_line(&shown[1]), "10:01 · not sent");
+    assert_eq!(meta_line(&shown[2]), "10:02 · sent");
+}
+
+#[test]
+fn the_meta_line_is_the_time_and_the_state_of_a_send() {
+    let m = open_with(vec![
+        at("A1", "2026-10-20T10:00:00Z", false),
+        at("M1", "2026-10-20T10:01:00Z", true),
+    ]);
+    let shown = bubbles(&m, 60, None);
+    assert_eq!(
+        meta_line(&shown[0]),
+        "11:00",
+        "a received message: the time"
+    );
+    assert_eq!(meta_line(&shown[1]), "11:01 · sent");
+}
+
+#[test]
+fn a_day_label_goes_above_the_first_bubble_of_each_local_day() {
+    let m = open_with(vec![
+        at("A1", "2026-10-19T09:00:00Z", false),
+        at("A2", "2026-10-19T12:00:00Z", false),
+        // 22:58 and 23:01 UTC are 23:58 and 00:01 at +60: a new day, so a new group too.
+        at("A3", "2026-10-20T22:58:00Z", false),
+        at("A4", "2026-10-20T23:01:00Z", false),
+    ]);
+    let today = Some(Day::from_civil(2026, 10, 21));
+    let shown = bubbles(&m, 60, today);
+    let days: Vec<Option<&str>> = shown.iter().map(|b| b.day.as_deref()).collect();
+    assert_eq!(
+        days,
+        [Some("Mon 19 Oct"), None, Some("Yesterday"), Some("Today")]
+    );
+    assert!(shown[3].starts_group, "the day changed within five minutes");
+    assert!(shown[2].shows_meta);
+}
+
+#[test]
+fn a_day_reads_today_yesterday_or_its_date() {
+    let day = Day::from_civil(2026, 10, 20);
+    assert_eq!(day_label(day, Some(day)), "Today");
+    assert_eq!(
+        day_label(day, Some(Day::from_civil(2026, 10, 21))),
+        "Yesterday"
+    );
+    assert_eq!(
+        day_label(day, Some(Day::from_civil(2026, 11, 2))),
+        "Tue 20 Oct"
+    );
+    assert_eq!(
+        day_label(day, Some(Day::from_civil(2027, 1, 2))),
+        "Tue 20 Oct 2026"
+    );
+    assert_eq!(
+        day_label(day, None),
+        "Tue 20 Oct 2026",
+        "no clock: the full date"
+    );
+    assert_eq!(
+        day_label(Day::from_civil(2024, 2, 29), None),
+        "Thu 29 Feb 2024",
+        "a leap day"
+    );
+}
+
+#[test]
+fn a_message_with_no_timestamp_has_no_day_and_starts_its_own_group() {
+    let m = open_with(vec![
+        at("A1", "2026-10-20T10:00:00Z", false),
+        at("A2", "", false),
+    ]);
+    let shown = bubbles(&m, 0, None);
+    assert_eq!(shown[1].day, None);
+    assert_eq!(groups(&shown), [(true, true), (true, true)]);
+}
+
+#[test]
+fn the_count_chip_shows_only_more_than_one_unread() {
+    let mut one = chat(ANA, "Ana");
+    one.unread = 1;
+    let mut two = chat(BEN, "Ben");
+    two.unread = 2;
+    let rows = chat_rows(
+        &model(vec![one, two, chat("15551230003@s.whatsapp.net", "Cara")]),
+        0,
+        None,
+    );
+    assert_eq!(
+        rows[0].unread.as_deref(),
+        Some("1"),
+        "unread: the marker and name tone"
+    );
+    assert_eq!(rows[0].chip, None, "no chip for a single unread message");
+    assert_eq!(rows[1].chip.as_deref(), Some("2"));
+    assert_eq!(rows[2].chip, None);
+}
+
+#[test]
+fn a_row_shows_today_as_a_time_and_yesterday_as_a_word() {
+    let mut ana = chat(ANA, "Ana");
+    ana.last_message = Some(at("A1", "2026-10-20T10:05:00Z", false));
+    let rows = |today| chat_rows(&model(vec![ana.clone()]), 0, today);
+    assert_eq!(rows(Some(Day::from_civil(2026, 10, 20)))[0].when, "10:05");
+    assert_eq!(
+        rows(Some(Day::from_civil(2026, 10, 21)))[0].when,
+        "Yesterday"
+    );
+    assert_eq!(rows(Some(Day::from_civil(2026, 10, 25)))[0].when, "20 Oct");
+    assert_eq!(rows(None)[0].when, "10:05", "no clock: the time");
+    assert_eq!(
+        rows(Some(Day::from_civil(2026, 10, 21)))[0].label,
+        "Ana. Last message at 10:05: A1",
+        "the label is unchanged"
+    );
+}
+
+#[test]
+fn a_group_row_has_its_glyph_and_the_author_before_the_preview_unless_muted() {
+    const GROUP: &str = "120363000000000001@g.us";
+    let mut climbing = chat(GROUP, "Climbing");
+    let mut from_ana = message("G1", "text", "rope?", false);
+    from_ana.sender = Some("Ana".to_owned());
+    climbing.last_message = Some(from_ana);
+    let mut mine = chat("120363000000000002@g.us", "Runs");
+    mine.last_message = Some(message("G2", "text", "at six", true));
+    let mut muted = chat("120363000000000003@g.us", "Noise");
+    muted.muted = true;
+    let mut from_ben = message("G3", "text", "spam", false);
+    from_ben.sender = Some("Ben".to_owned());
+    muted.last_message = Some(from_ben);
+    let mut ana = chat(ANA, "Ana");
+    ana.last_message = Some(message("A1", "text", "hi", false));
+    let rows = chat_rows(&model(vec![climbing, mine, muted, ana]), 0, None);
+    let by = |title: &str| rows.iter().find(|r| r.title == title).expect(title);
+    assert!(by("Climbing").group && by("Runs").group && !by("Ana").group);
+    assert_eq!(by("Climbing").author.as_deref(), Some("Ana"));
+    assert_eq!(by("Runs").author.as_deref(), Some("You"));
+    assert_eq!(by("Noise").author, None, "a muted group: no author");
+    assert_eq!(by("Ana").author, None, "a direct chat: no author");
+    assert_eq!(
+        by("Climbing").label,
+        "Climbing. Last message at 10:05: Ana: rope?"
+    );
+}
+
+#[test]
+fn ticks_go_before_the_preview_of_my_last_message_only() {
+    let mut ana = chat(ANA, "Ana");
+    ana.last_message = Some(message("M1", "text", "hello", true));
+    let mut ben = chat(BEN, "Ben");
+    ben.last_message = Some(message("M2", "text", "hi", false));
+    let mut cara = chat("15551230003@s.whatsapp.net", "Cara");
+    let mut queued = message("", "text", "later", true);
+    queued.state = Some(MessageState::Queued);
+    cara.last_message = Some(queued);
+    let rows = chat_rows(&model(vec![ana, ben, cara]), 0, None);
+    let by = |title: &str| rows.iter().find(|r| r.title == title).expect(title);
+    assert_eq!(by("Ana").ticks, Some("✓"));
+    assert_eq!(by("Ben").ticks, None);
+    assert_eq!(by("Cara").ticks, Some("◷"));
+}
+
+#[test]
+fn the_transcript_says_why_it_is_empty() {
+    assert_eq!(
+        transcript_empty(&model(vec![])),
+        Some(EmptyState {
+            title: "No messages yet",
+            hint: "Pick a chat to read it here"
+        })
+    );
+    let mut opening = model(vec![chat(ANA, "Ana")]);
+    opening.open_selected().expect("opens");
+    assert_eq!(
+        transcript_empty(&opening),
+        None,
+        "loading: nothing to say yet"
+    );
+    assert_eq!(
+        transcript_empty(&open_with(vec![])),
+        Some(EmptyState {
+            title: "No messages yet",
+            hint: "This chat has no messages"
+        })
+    );
+    assert_eq!(
+        transcript_empty(&open_with(vec![message("M1", "text", "hi", false)])),
+        None
+    );
+}
+
+#[test]
+fn the_list_says_why_it_is_empty_per_filter() {
+    assert_eq!(list_empty(Filter::All).title, "No chats");
+    assert_eq!(list_empty(Filter::Unread).title, "No unread chats");
+    assert_eq!(list_empty(Filter::Archived).title, "No archived chats");
+    for filter in Filter::EACH {
+        assert!(!list_empty(filter).hint.is_empty(), "{filter:?}");
+    }
+}
+
+#[test]
+fn a_reply_names_the_quoted_author() {
+    let mut quoting = message("M2", "text", "yes", true);
+    quoting.reply_to = Some("M1".to_owned());
+    let mut back = message("M3", "text", "good", false);
+    back.reply_to = Some("M2".to_owned());
+    let mut lost = message("M4", "text", "and?", false);
+    lost.reply_to = Some("OLD".to_owned());
+    let m = open_with(vec![
+        message("M1", "text", "coffee?", false),
+        quoting,
+        back,
+        lost,
+    ]);
+    let shown = bubbles(&m, 0, None);
+    assert_eq!(shown[1].quote_author.as_deref(), Some("Ana"));
+    assert_eq!(shown[2].quote_author.as_deref(), Some("You"));
+    assert_eq!(shown[3].quote_author, None);
+}
+
+#[test]
+fn a_document_bubble_names_its_file_and_size() {
+    use nuncio_client::wire::Media;
+    let mut report = message("D1", "document", "", false);
+    report.media = Some(Media {
+        mime: "application/pdf".to_owned(),
+        size: 1_258_291,
+        file_name: "report.pdf".to_owned(),
+    });
+    let mut unnamed = message("D2", "document", "", false);
+    unnamed.media = Some(Media {
+        mime: "application/pdf".to_owned(),
+        size: 900,
+        file_name: String::new(),
+    });
+    let m = open_with(vec![report, unnamed, message("M1", "image", "", false)]);
+    let shown = bubbles(&m, 0, None);
+    assert_eq!(
+        shown[0].document,
+        Some(DocumentView {
+            name: "report.pdf".to_owned(),
+            size: "1.2 MB".to_owned()
+        })
+    );
+    assert_eq!(
+        shown[1].document,
+        Some(DocumentView {
+            name: "Document".to_owned(),
+            size: "900 B".to_owned()
+        })
+    );
+    assert_eq!(shown[2].document, None);
+    assert_eq!(
+        shown[0].label, "Ana, 10:05: [document]",
+        "the label is unchanged"
+    );
+}
+
+#[test]
+fn reactions_are_chips_counted_by_emoji() {
+    let reactions =
+        [("👍", false), ("😂", false), ("👍", true)].map(|(emoji, mine)| ReactionView {
+            emoji: emoji.to_owned(),
+            mine,
+        });
+    assert_eq!(
+        reaction_chips(&reactions),
+        [
+            ReactionChip {
+                emoji: "👍".to_owned(),
+                count: 2,
+                mine: true
+            },
+            ReactionChip {
+                emoji: "😂".to_owned(),
+                count: 1,
+                mine: false
+            }
+        ]
+    );
 }

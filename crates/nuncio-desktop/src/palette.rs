@@ -97,7 +97,7 @@ pub fn entries(model: &Model, message: Option<usize>) -> Vec<Entry> {
     let mut entries = Vec::new();
     let bubble: Option<Bubble> = message
         .filter(|_| model.is_open())
-        .and_then(|index| present::bubbles(model, 0).into_iter().nth(index));
+        .and_then(|index| present::bubbles(model, 0, None).into_iter().nth(index));
     let target = bubble.as_ref().and_then(|bubble| {
         let message = model.loaded().get(bubble.index)?;
         Some(Target {

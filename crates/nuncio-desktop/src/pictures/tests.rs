@@ -164,14 +164,18 @@ fn a_bubble_reserves_its_box_from_the_size_the_message_states() {
     );
     assert_eq!(picture_box(1000, 4000, false), (75, 300));
     let (c, _) = opened(vec![photo("P1")]);
-    let shown = bubbles(c.model(), 0);
+    let shown = bubbles(c.model(), 0, None);
     let picture = shown[0].picture.as_ref().expect("a photo has a picture");
     assert_eq!(picture.size, Some((300, 200)));
     let mut no_size = photo("P2");
     no_size.width = None;
     let (c, _) = opened(vec![no_size]);
     assert_eq!(
-        bubbles(c.model(), 0)[0].picture.as_ref().unwrap().size,
+        bubbles(c.model(), 0, None)[0]
+            .picture
+            .as_ref()
+            .unwrap()
+            .size,
         None
     );
 }
@@ -188,7 +192,7 @@ fn a_picture_bubble_is_labelled_photo_or_sticker_and_other_messages_have_no_pict
         sticker,
         photo("P1"),
     ]);
-    let shown = bubbles(c.model(), 0);
+    let shown = bubbles(c.model(), 0, None);
     // Newest first on the wire: the conversation is P1, S1, D1, T1.
     let photo = shown[0].picture.as_ref().expect("photo");
     assert_eq!(
@@ -221,7 +225,7 @@ fn a_thumbnail_is_asked_for_at_once_and_nothing_is_ever_downloaded_by_itself() {
     let (mut c, made) = opened(vec![photo("P1")]);
     assert!(!made.iter().any(is_download), "{made:?}");
     let cache = Cache::<u8>::default();
-    let shown = bubbles(c.model(), 0);
+    let shown = bubbles(c.model(), 0, None);
     assert_eq!(
         requests(c.model(), &shown[0], &cache),
         [Request {
@@ -240,7 +244,7 @@ fn a_thumbnail_is_asked_for_at_once_and_nothing_is_ever_downloaded_by_itself() {
     later.extend(c.set_seen(true));
     later.extend(c.incoming(Incoming::Connected));
     assert!(!later.iter().any(is_download), "{later:?}");
-    for bubble in bubbles(c.model(), 0) {
+    for bubble in bubbles(c.model(), 0, None) {
         assert!(
             requests(c.model(), &bubble, &cache)
                 .iter()
@@ -262,7 +266,7 @@ fn the_full_picture_is_fetched_only_when_asked_and_shown_in_the_bubble() {
         asked,
         [Command::Send(ClientFrame::download_media(ANA, "P1"))]
     );
-    let shown = bubbles(c.model(), 0);
+    let shown = bubbles(c.model(), 0, None);
     assert_eq!(shown[0].media.as_deref(), Some("[image] downloading…"));
     assert_eq!(shown[0].label, "Ana, 10:00: Photo, downloading…, the beach");
     assert!(requests(c.model(), &shown[0], &cache).is_empty());
@@ -271,7 +275,7 @@ fn the_full_picture_is_fetched_only_when_asked_and_shown_in_the_bubble() {
         c.incoming(ready("P1", path)).is_empty(),
         "shown here, not opened outside"
     );
-    let shown = bubbles(c.model(), 0);
+    let shown = bubbles(c.model(), 0, None);
     let picture = shown[0].picture.as_ref().unwrap();
     assert_eq!(picture.full, Some(PathBuf::from(path)));
     assert_eq!(
@@ -300,7 +304,7 @@ fn a_cached_picture_is_not_decoded_again_and_the_full_one_replaces_the_thumbnail
     let mut cache = Cache::<&str>::default();
     let thumb = Key::new(ANA, "P1", Variant::Thumb);
     let full = Key::new(ANA, "P1", Variant::Full);
-    let shown = bubbles(c.model(), 0);
+    let shown = bubbles(c.model(), 0, None);
     assert!(cache.start(&thumb));
     assert!(
         requests(c.model(), &shown[0], &cache).is_empty(),
@@ -312,7 +316,7 @@ fn a_cached_picture_is_not_decoded_again_and_the_full_one_replaces_the_thumbnail
     assert!(requests(c.model(), &shown[0], &cache).is_empty(), "a hit");
     c.open_media(0);
     c.incoming(ready("P1", "/tmp/nuncio-media/P1.png"));
-    let shown = bubbles(c.model(), 0);
+    let shown = bubbles(c.model(), 0, None);
     assert!(cache.start(&full));
     cache.finish(full, Ok(("full", 10, (480, 320))));
     assert_eq!(cache.best(ANA, "P1"), Some(("full", Variant::Full)));
@@ -367,7 +371,7 @@ fn a_picture_that_fails_is_not_asked_for_again_until_its_full_one_is_retried() {
     assert!(cache.start(&thumb));
     assert!(cache.finish(thumb.clone(), Err("bad".to_owned())));
     assert!(cache.has_failed(&thumb) && cache.best(ANA, "P1").is_none());
-    let shown = bubbles(c.model(), 0);
+    let shown = bubbles(c.model(), 0, None);
     assert!(requests(c.model(), &shown[0], &cache).is_empty());
     assert!(cache.start(&full));
     cache.finish(full.clone(), Err("bad".to_owned()));
@@ -523,7 +527,7 @@ fn a_picture_with_no_stated_size_takes_its_box_once_from_its_first_image() {
     let mut no_size = photo("P2");
     no_size.width = None;
     let (c, _) = opened(vec![no_size]);
-    let shown = bubbles(c.model(), 0);
+    let shown = bubbles(c.model(), 0, None);
     assert_eq!(requests(c.model(), &shown[0], &cache)[0].target, (300, 200));
 }
 
@@ -535,7 +539,7 @@ fn while_the_full_picture_downloads_an_evicted_thumbnail_is_asked_for_again() {
     assert!(cache.start(&thumb));
     cache.finish(thumb.clone(), Ok((1, 4, (48, 32))));
     c.open_media(0);
-    let shown = bubbles(c.model(), 0);
+    let shown = bubbles(c.model(), 0, None);
     assert!(
         shown[0]
             .media
@@ -724,7 +728,7 @@ fn only_the_full_picture_of_an_animated_sticker_is_asked_to_animate() {
     let cache = Cache::<u8>::default();
     // Newest first on the wire: S1, S2, P1.
     let asked = |c: &Controller| {
-        bubbles(c.model(), 0)
+        bubbles(c.model(), 0, None)
             .iter()
             .flat_map(|bubble| requests(c.model(), bubble, &cache))
             .map(|request| (request.key.id, request.key.variant, request.animated))

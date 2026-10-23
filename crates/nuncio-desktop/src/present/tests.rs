@@ -985,3 +985,19 @@ fn a_send_waiting_in_another_chat_does_not_say_sending_here() {
     m.open_selected().expect("opens");
     assert_eq!(composer_view(&m).send, SendButton::Hidden);
 }
+
+#[test]
+fn the_search_hint_shows_only_while_the_open_search_is_empty_and_focused() {
+    assert_eq!(search_hint(true, "", true), Some(SEARCH_HINT));
+    assert_eq!(
+        search_hint(true, "   ", true),
+        Some(SEARCH_HINT),
+        "blank is empty"
+    );
+    assert_eq!(search_hint(true, "beach", true), None, "typed");
+    assert_eq!(search_hint(true, "", false), None, "not focused");
+    assert_eq!(search_hint(false, "", true), None, "no search open");
+    // Only what the search does: every word must be in the message (no `from:` or `is:`).
+    assert!(!SEARCH_HINT.contains(':'), "{SEARCH_HINT}");
+    assert!(SEARCH_HINT.contains("every word"), "{SEARCH_HINT}");
+}

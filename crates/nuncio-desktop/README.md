@@ -94,10 +94,13 @@ link on the command line.
 ## Command palette
 
 F1 or Ctrl+K (or the rail's `Commands` button, or Command palette in the chat list header's menu)
-opens a search box over the window
-listing what can be done now, each with its key:
+opens a 560 px panel (narrower on a narrow window) centred over the window, which a scrim dims
+behind it (design plan §6.5): a 44 px input with a magnifier and an × that closes, then 36 px rows,
+each command with its key right-aligned, grouped under `SELECTED MESSAGE`, `COMMANDS` and `CHATS`
+headers. It lists what can be done now:
 
-- `Chat: <name>` for every chat (named as the list names it): opens it, as a click does;
+- every chat by its name (as the list names it; a screen reader hears `Chat: <name>`): opens it,
+  as a click does;
 - `Search in this chat` (Ctrl+F), while a chat is open;
 - for the focused message, only what its menu enables: `Reply to the selected message` (`r`),
   `React to the selected message…` (`e`, opens the picker), `Retry the selected message`
@@ -105,12 +108,28 @@ listing what can be done now, each with its key:
 - `Settings` (Ctrl+,) and `Quit` (Ctrl+Q).
 
 Typing filters the list: the commands holding the typed letters in order, ignoring case and spaces
-(`bn` finds `Chat: Ben`), best matches first. Up and Down choose, Enter runs, Escape closes. The
-palette never sends a message: there is no send command, and a draft stays in the composer.
+(`bn` finds `Ben`). The first row, selected, is always a best match, and each group stays together
+under its header (the group holding the best match first). Up and Down choose, Enter runs, Escape
+or the × closes. The palette never sends a message: there is no send command, and a draft stays in
+the composer.
+
+## Search
+
+The search of the selected chat sits in the conversation (design plan §6.6): the conversation
+header's ⌕, Ctrl+F, or `/` while no text field has the focus opens a 32 px input under the header,
+with a 1 px line that turns the accent colour while it has the focus. It searches as `nunciod`
+does: every word of the query must be in the message (there is no `from:` or `is:` syntax). While
+the input is empty and focused, a line under it says `Messages of this chat holding every word`.
+Enter asks the daemon; the results show above the transcript, and choosing one closes the search
+and shows that message in the conversation. Escape (in the input, or in the chat list) closes the
+search.
 
 ## Settings
 
-Ctrl+, (or Settings in the menu or the palette) opens the settings over the configuration file
+Ctrl+, (or Settings in the menu or the palette) opens the settings — one 480 px column of 40 px
+rows (label left, libadwaita's switch or choice right, the help text as a second small line) under
+`NOTIFICATIONS`, `WINDOW` and `TERMINAL CLIENT` headers, plan §6.7; Escape closes it — over the
+configuration file
 ([`docs/config.md`](../../docs/config.md)): notifications and their text, the title bar, background
 mode, starting hidden, and nuncio-tui's picture protocol. Each change is written at once
 (atomically: a temporary file renamed over it, mode 0600, in a 0700 directory), keeping only the
@@ -192,8 +211,9 @@ surfaces in the live Omarchy palette's roles, toasts for notices.
   rest); from 760 px the rail is a 48 px strip of icons with tooltips; below 760 px one pane at a
   time: the list, or the open conversation, with a back button and Escape (from a message, or from
   the composer when there is nothing else for Escape to do) going back to the list.
-- **Headers (44 px):** the pane's title at its start; the conversation's header holds only the chat's
-  name, with the search button.
+- **Headers (44 px):** the pane's title at its start; the chat list's header has the menu; the
+  conversation's header holds only the chat's name, with the search button (see
+  [Search](#search)).
 - **Corners:** every element's corners are Hyprland's `decoration:rounding` (see
   [Font and corners](#font-and-corners)), and square without Hyprland.
 - **Chat list:** 72 px rows: a square avatar, the name and the time (`21:52` today, `Yesterday`,
@@ -257,9 +277,11 @@ Tab moves between the chat list, the conversation and the composer.
 
 | Where | Key | Does |
 | --- | --- | --- |
-| chat list | Up, Down | move |
+| chat list | Up, Down, `j`, `k` | move |
 | chat list | Enter, click | open the chat (only opening marks it read) |
-| conversation | Up, Down | move between messages |
+| chat list | Escape | close the search |
+| conversation | Up, Down, `j`, `k` | move between messages |
+| conversation | `g`, Shift+G | the first, the last message |
 | conversation | `r` | reply |
 | conversation | `e` | react (👍 ❤️ 😂 😮 😢 🙏, or remove mine) |
 | conversation | Shift+R | retry a send that was not sent or not confirmed (one made while disconnected is sent once under the same client_id) |
@@ -271,7 +293,7 @@ Tab moves between the chat list, the conversation and the composer.
 | composer | Enter, Ctrl+Enter | send |
 | composer | Alt+Enter, Shift+Enter | new line |
 | composer | Escape | cancel the reply (else go to the conversation; with one pane shown and no message, back to the chat list) |
-| anywhere | Ctrl+F | search the open chat (Enter searches, Escape closes) |
+| anywhere | Ctrl+F, `/` | search the selected chat (Enter searches, Escape closes); `/` is typed as usual in the composer or any text field |
 | anywhere | F1, Ctrl+K | the command palette (type to filter, Up/Down, Enter runs, Escape closes) |
 | anywhere | Ctrl+, | the settings |
 | anywhere | Ctrl+Q | quit (closing the window only hides it in background mode) |
@@ -296,13 +318,17 @@ sticker says `Photo` or `Sticker` instead of `[image]` / `[sticker]`).
 `cargo test -p nuncio-desktop`: the command line, the Omarchy font and Hyprland rounding in the
 generated CSS, the panes' CSS from the palette roles, the layout chosen at each width, the rail's
 filters and connection line, `hyprctl`'s answer (through a fake runner: never the real one), the view data, the controller (notifications, links), the
-lifecycle (background, start hidden), the palette's commands and matching, the settings' rules, the
+lifecycle (background, start hidden), the palette's commands, matching, groups and keys, the search
+hint, the settings' rules, the
 pictures (boxes, what is decoded when, the cache, two decoding threads) and the worker (against a
 fake daemon) are plain unit tests; `tests/smoke.rs` builds the real window on GTK's main thread (its own `main`,
 `harness = false`) and skips when GTK cannot start. It never shows a window or a real notification:
 no `GApplication` is attached, so notifications are only recorded, and the `open-chat` action is
-activated from a plain action group. The palette is opened through its F1 shortcut's action and the
-settings window is built (not shown) over a temporary `config.toml`, never yours. A photo and a
+activated from a plain action group. The palette is opened through its F1 shortcut's action (its
+groups, first row selected, Up/Down/Escape through its key handler), the search through `/` and
+Ctrl+F (in the conversation pane, its hint only while empty and focused, and `/` checked to be
+typed in the composer), and the settings window is built (not shown)
+over a temporary `config.toml`, never yours (its file 0600 in a 0700 directory). A photo and a
 sticker bubble are checked to reserve their box before decoding, to get a texture of the
 thumbnail's size, and to take the full picture only after a click; an animated sticker's full
 picture to keep all its frames and play them, and to stay still with animations turned off.

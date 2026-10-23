@@ -12,19 +12,23 @@
 //!
 //! Keyboard (Tab moves between the chat list, the conversation and the composer):
 //!
-//! - chat list: Up/Down move, Enter opens the chat (and only opening marks it read); the rail's
-//!   All / Unread / Archived choose which chats it lists;
-//! - conversation: Up/Down move between messages; `r` replies, `e` reacts, Shift+R retries a send
+//! - chat list: Up/Down (or `j`/`k`) move, Enter opens the chat (and only opening marks it
+//!   read), Escape closes the search; the rail's All / Unread / Archived choose which chats it
+//!   lists;
+//! - conversation: Up/Down (or `j`/`k`) move between messages, `g` goes to the first and Shift+G
+//!   to the last; `r` replies, `e` reacts, Shift+R retries a send
 //!   that was not sent, `o` opens a media file (a picture's full file is shown in its bubble),
 //!   Shift+O opens it with the desktop's opener, Enter shows a picture in full (on any other
 //!   message it opens the menu), Menu or Shift+F10 opens the message's menu, Escape goes to the
 //!   composer (on a window narrow enough for one pane, back to the list);
 //! - composer: Enter (or Ctrl+Enter) sends, Alt+Enter (or Shift+Enter) starts a new line, Escape
 //!   cancels the reply, else goes to the last message;
-//! - Ctrl+F searches the open chat; Escape closes the search; Ctrl+Q quits (the app's
-//!   `app.quit`, also in the menu);
-//! - F1 or Ctrl+K opens the command palette ([`crate::palette`]): type to filter, Up/Down choose,
-//!   Enter runs, Escape closes; Ctrl+, opens the settings ([`crate::preferences`]).
+//! - Ctrl+F, the conversation header's ⌕, or `/` while no text field has the focus, searches the
+//!   selected chat: a 32 px input under the conversation header, the results above the
+//!   transcript (plan §6.6, S7); Escape closes the search; Ctrl+Q quits (the app's `app.quit`, also in the menu);
+//! - F1 or Ctrl+K opens the command palette ([`crate::palette`]) over a scrim: type to filter,
+//!   Up/Down choose, Enter runs, Escape closes; Ctrl+, opens the settings
+//!   ([`crate::preferences`]).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -44,7 +48,7 @@ use crate::palette::{self, Step};
 use crate::pictures::{self, Cache, Decoded, Decoder, Variant};
 use crate::preferences::{Change, IMAGE_PROTOCOLS, Preferences, TITLE_BARS, Takes};
 use crate::present::{self, Bubble, ChatRow, Filter, PictureView};
-use crate::style::{self, LIST_WIDTH, Layout, RAIL_COMPACT_WIDTH, RAIL_WIDTH};
+use crate::style::{self, LIST_WIDTH, Layout, RAIL_COMPACT_WIDTH, RAIL_WIDTH, SETTINGS_WIDTH};
 use crate::worker::{Backlog, EVENT_BACKLOG, Incoming, Settings, Worker};
 use crate::{ROOT_CLASS, WINDOW_CLASS};
 use nuncio_client::TitleBar;
@@ -83,10 +87,12 @@ struct Inner {
     content_header: adw::HeaderBar,
     /// The window controls are wanted (`[app] title_bar`).
     title_bar: Cell<bool>,
-    /// The window's own shortcuts (Ctrl+F, F1, Ctrl+K, Ctrl+,).
+    /// The window's own shortcuts (Ctrl+F, `/`, F1, Ctrl+K, Ctrl+,).
     shortcuts: gtk::ShortcutController,
     /// The command palette while it is open.
     palette: RefCell<Option<Rc<PaletteView>>>,
+    /// What dims the window while the palette is open.
+    scrim: gtk::Box,
     /// The configuration file the settings edit (`None`: there is none).
     config_path: RefCell<Option<PathBuf>>,
     toasts: adw::ToastOverlay,
@@ -96,6 +102,8 @@ struct Inner {
     lists: gtk::Paned,
     rail: Rail,
     list_view: adw::ToolbarView,
+    /// The chat list's title.
+    list_title: gtk::Label,
     content_view: adw::ToolbarView,
     /// Back to the chat list, when one pane is shown at a time.
     back: gtk::Button,
@@ -119,8 +127,13 @@ struct Inner {
     transcript_scroll: gtk::ScrolledWindow,
     /// Keep the conversation scrolled to the newest message as it grows.
     stick: Cell<bool>,
-    search_bar: gtk::SearchBar,
+    /// The search is open while this (the conversation header's ⌕) is active.
+    search_toggle: gtk::ToggleButton,
+    /// The search input's row, under the conversation header.
+    search_row: gtk::Box,
     search_entry: gtk::SearchEntry,
+    /// What the search does, while its input is empty and focused.
+    search_hint: gtk::Label,
     search_status: gtk::Label,
     results: gtk::ListBox,
     results_scroll: gtk::ScrolledWindow,
@@ -387,8 +400,9 @@ impl Ui {
 
         let rail = Rail::new();
 
-        // The chat list, with its header.
-        let list_header = header_bar(&pane_title("Chats"));
+        // The chat list, with its header (its title and the menu).
+        let list_title = pane_title("Chats");
+        let list_header = header_bar(&list_title);
         // The app menu: Quit really quits, also in background mode (Ctrl+Q).
         let menu = gio::Menu::new();
         menu.append(Some("Command palette"), Some("win.command-palette"));
@@ -439,28 +453,36 @@ impl Ui {
             .visible(false)
             .build();
         strip.add_css_class("nuncio-strip");
-        let search_button = gtk::ToggleButton::builder()
+        // The search of the open chat (plan §6.6, S7): the header's ⌕ opens a 32 px input under
+        // the header, with its hint under it while it is empty and focused; the results show
+        // above the transcript. It searches as the daemon does: every word must be in a message.
+        let search_toggle = gtk::ToggleButton::builder()
             .icon_name("edit-find-symbolic")
-            .tooltip_text("Search in this chat (Ctrl+F)")
+            .tooltip_text("Search in this chat (/ or Ctrl+F)")
             .build();
-        search_button.update_property(&[Property::Label("Search in this chat")]);
-        content_header.pack_end(&search_button);
-
+        search_toggle.update_property(&[Property::Label("Search in this chat")]);
+        content_header.pack_end(&search_toggle);
         let search_entry = gtk::SearchEntry::builder()
             .placeholder_text("Search this chat")
             .hexpand(true)
+            .valign(gtk::Align::Center)
             .build();
+        search_entry.add_css_class("nuncio-search");
         search_entry.update_property(&[Property::Label("Search this chat")]);
-        let search_bar = gtk::SearchBar::builder().child(&search_entry).build();
-        search_bar.connect_entry(&search_entry);
-        search_button
-            .bind_property("active", &search_bar, "search-mode-enabled")
-            .bidirectional()
+        let search_row = gtk::Box::builder().visible(false).build();
+        search_row.add_css_class("nuncio-search-row");
+        search_row.append(&search_entry);
+        let search_hint = gtk::Label::builder()
+            .xalign(0.0)
+            .wrap(true)
+            .visible(false)
             .build();
+        search_hint.add_css_class("nuncio-meta");
+        search_hint.add_css_class("nuncio-search-hint");
 
         let search_status = gtk::Label::builder().xalign(0.0).visible(false).build();
-        search_status.add_css_class("dim-label");
-        search_status.set_margin_start(12);
+        search_status.add_css_class("nuncio-meta");
+        search_status.add_css_class("nuncio-search-hint");
         let results = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
             .activate_on_single_click(true)
@@ -468,6 +490,7 @@ impl Ui {
             .build();
         results.update_property(&[Property::Label("Search results")]);
         results.add_css_class("navigation-sidebar");
+        results.add_css_class("nuncio-results");
         let results_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(true)
@@ -556,7 +579,8 @@ impl Ui {
         content_view.add_css_class("nuncio-content");
         content_view.add_top_bar(&content_header);
         content_view.add_top_bar(&strip);
-        content_view.add_top_bar(&search_bar);
+        content_view.add_top_bar(&search_row);
+        content_view.add_top_bar(&search_hint);
         content_view.set_content(Some(&content));
         content_view.add_bottom_bar(&blocked);
         content_view.add_bottom_bar(&bottom);
@@ -565,9 +589,20 @@ impl Ui {
         // window, with no outer margin.
         let lists = seam(&list_view, &content_view, LIST_WIDTH);
         let panes = seam(&rail.root, &lists, RAIL_WIDTH);
+        // The palette's scrim (plan §6.5): the window dimmed behind it while it is open; the
+        // palette's own grab takes the clicks.
+        let scrim = gtk::Box::builder()
+            .hexpand(true)
+            .vexpand(true)
+            .can_target(false)
+            .visible(false)
+            .build();
+        scrim.add_css_class("nuncio-scrim");
+        let dimmed = gtk::Overlay::builder().child(&panes).build();
+        dimmed.add_overlay(&scrim);
         let toasts = adw::ToastOverlay::new();
         toasts.add_css_class(ROOT_CLASS);
-        toasts.set_child(Some(&panes));
+        toasts.set_child(Some(&dimmed));
         window.set_content(Some(&toasts));
 
         let shortcuts = gtk::ShortcutController::new();
@@ -597,12 +632,14 @@ impl Ui {
             title_bar: Cell::new(title_bar),
             shortcuts,
             palette: RefCell::new(None),
+            scrim,
             config_path: RefCell::new(None),
             toasts,
             panes,
             lists,
             rail,
             list_view,
+            list_title,
             content_view,
             back,
             content_title,
@@ -617,8 +654,10 @@ impl Ui {
             transcript_empty,
             transcript_scroll,
             stick: Cell::new(true),
-            search_bar,
+            search_toggle,
+            search_row,
             search_entry,
+            search_hint,
             search_status,
             results,
             results_scroll,
@@ -1068,11 +1107,16 @@ impl Ui {
             let model = controller.model();
             (palette::entries(model, message), open_conversation(model))
         };
-        let view = Rc::new(PaletteView::new(entries, conversation));
-        view.popover.set_parent(&self.0.toasts);
         let width = self.0.toasts.width();
+        let view = Rc::new(PaletteView::new(
+            entries,
+            conversation,
+            style::palette_width(width),
+        ));
+        view.popover.set_parent(&self.0.toasts);
+        // Centred, a little under the top edge.
         view.popover
-            .set_pointing_to(Some(&gdk::Rectangle::new(width / 2, 12, 1, 1)));
+            .set_pointing_to(Some(&gdk::Rectangle::new(width / 2, 48, 1, 1)));
 
         view.entry.connect_changed({
             let view = Rc::downgrade(&view);
@@ -1082,29 +1126,28 @@ impl Ui {
                 }
             }
         });
-        let run_selected = Rc::new(self.with(|ui, (): ()| ui.palette_enter()));
-        view.entry.connect_activate({
-            let run = Rc::clone(&run_selected);
-            move |_| run(())
-        });
-        view.entry.connect_stop_search({
+        // The × at the right of the input closes the palette.
+        view.entry.connect_icon_press({
             let close = self.with(|ui, (): ()| ui.close_palette());
-            move |_| close(())
+            move |_, position| {
+                if position == gtk::EntryIconPosition::Secondary {
+                    close(());
+                }
+            }
         });
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         keys.connect_key_pressed({
-            let view = Rc::downgrade(&view);
+            let weak = self.weak();
             move |_, key, _, _| {
-                let step = match key {
-                    gdk::Key::Down | gdk::Key::KP_Down => 1,
-                    gdk::Key::Up | gdk::Key::KP_Up => -1,
-                    _ => return glib::Propagation::Proceed,
-                };
-                if let Some(view) = view.upgrade() {
-                    view.move_selection(step);
+                if weak
+                    .upgrade()
+                    .is_some_and(|inner| Ui(inner).palette_key(key))
+                {
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
                 }
-                glib::Propagation::Stop
             }
         });
         view.entry.add_controller(keys);
@@ -1119,6 +1162,7 @@ impl Ui {
                     let mut open = inner.palette.borrow_mut();
                     if open.as_ref().is_some_and(|view| &view.popover == popover) {
                         open.take();
+                        inner.scrim.set_visible(false);
                     }
                 }
                 let popover = popover.clone();
@@ -1128,6 +1172,7 @@ impl Ui {
 
         view.filter("");
         *self.0.palette.borrow_mut() = Some(Rc::clone(&view));
+        self.0.scrim.set_visible(true);
         view.popover.popup();
         view.entry.grab_focus();
     }
@@ -1142,6 +1187,7 @@ impl Ui {
         let Some(view) = self.0.palette.borrow_mut().take() else {
             return;
         };
+        self.0.scrim.set_visible(false);
         view.popover.popdown();
         // A palette never mapped (a hidden window) is not `closed`: let it go here too.
         let popover = view.popover.clone();
@@ -1187,10 +1233,59 @@ impl Ui {
 
     /// Close the palette, as Escape does.
     pub fn palette_escape(&self) {
-        let entry = self.0.palette.borrow().as_ref().map(|v| v.entry.clone());
-        if let Some(entry) = entry {
-            entry.emit_stop_search();
+        self.close_palette();
+    }
+
+    /// A key pressed in the open palette's input, as pressing it there does: true when the
+    /// palette acted on it (Up/Down, Enter, Escape), false when it is typed.
+    pub fn palette_key(&self, key: gdk::Key) -> bool {
+        let Some(action) = palette_key_action(key) else {
+            return false;
+        };
+        let Some(view) = self.0.palette.borrow().clone() else {
+            return false;
+        };
+        match action {
+            PaletteKey::Up => view.move_selection(-1),
+            PaletteKey::Down => view.move_selection(1),
+            PaletteKey::Run => self.palette_enter(),
+            PaletteKey::Close => self.close_palette(),
         }
+        true
+    }
+
+    /// The open palette's selected command (tests).
+    pub fn palette_selected(&self) -> Option<String> {
+        let view = self.0.palette.borrow().clone()?;
+        let position = usize::try_from(view.list.selected_row()?.index()).ok()?;
+        let index = *view.shown.borrow().get(position)?;
+        Some(view.entries[index].title.clone())
+    }
+
+    /// The open palette's group headers, in order (tests).
+    pub fn palette_headers(&self) -> Vec<String> {
+        let Some(view) = self.0.palette.borrow().clone() else {
+            return Vec::new();
+        };
+        (0..)
+            .map_while(|i| view.list.row_at_index(i))
+            .filter_map(|row| row.header()?.downcast::<gtk::Label>().ok())
+            .map(|header| header.text().to_string())
+            .collect()
+    }
+
+    /// The open palette's width, in pixels (tests).
+    pub fn palette_width(&self) -> i32 {
+        self.0
+            .palette
+            .borrow()
+            .as_ref()
+            .map_or(0, |view| view.column.width_request())
+    }
+
+    /// Whether the window is dimmed behind the palette (tests).
+    pub fn palette_scrim_shown(&self) -> bool {
+        self.0.scrim.get_visible()
     }
 
     /// Close the palette and run the command listed at `position`, once it is closed.
@@ -1226,7 +1321,9 @@ impl Ui {
                     self.reaction_picker(&row, index);
                 }
             }
-            Step::Search => self.start_search(),
+            Step::Search => {
+                self.start_search();
+            }
             Step::Settings => self.open_settings(),
             Step::Quit => {
                 // No application in the tests: nothing to quit.
@@ -1253,26 +1350,38 @@ impl Ui {
             self.0.config_path.borrow().clone(),
         )));
         let config = prefs.borrow().config().clone();
-        let window = adw::PreferencesWindow::builder()
+        // Plan §6.7: one 480 px column of 40 px rows (label left, libadwaita's control right),
+        // each section under a `meta` header with a 1 px rule; help text as a second line.
+        let window = adw::Window::builder()
             .title("Settings")
             .modal(true)
             .transient_for(&self.0.window)
-            .search_enabled(false)
-            .default_width(560)
+            .default_width(SETTINGS_WIDTH)
             .default_height(620)
             .build();
         window.add_css_class(ROOT_CLASS);
         window.add_css_class(WINDOW_CLASS);
-        let page = adw::PreferencesPage::new();
+        window.add_css_class("nuncio-settings");
+        // Escape closes it, as it closed the preferences window before.
+        let keys = gtk::ShortcutController::new();
+        keys.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("Escape"),
+            Some(gtk::NamedAction::new("window.close")),
+        ));
+        window.add_controller(keys);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        column.set_margin_start(16);
+        column.set_margin_end(16);
+        column.set_margin_bottom(24);
         let problem = prefs.borrow().problem().map(str::to_owned);
         if let Some(problem) = &problem {
-            let group = adw::PreferencesGroup::builder()
-                .title("The configuration file cannot be changed here")
-                .build();
+            column.append(&settings_header(
+                "The configuration file cannot be changed here",
+            ));
             let text = plain_label(problem);
             text.add_css_class("nuncio-error");
-            group.add(&text);
-            page.add(&group);
+            text.set_margin_top(8);
+            column.append(&text);
         }
 
         let switch = |title: &str, subtitle: &str, active: bool| {
@@ -1330,7 +1439,8 @@ impl Ui {
                 .position(|(p, _)| *p == config.ui.image_protocol)
                 .unwrap_or(0),
         );
-        let view = SettingsView {
+        let toasts = adw::ToastOverlay::new();
+        let mut view = SettingsView {
             window,
             notifications,
             show_preview,
@@ -1339,6 +1449,8 @@ impl Ui {
             title_bar,
             image_protocol,
             problem,
+            toasts: toasts.clone(),
+            headers: Vec::new(),
         };
 
         let editable = view.problem.is_none();
@@ -1363,12 +1475,21 @@ impl Ui {
                 vec![view.image_protocol.clone().upcast()],
             ),
         ] {
-            let group = adw::PreferencesGroup::builder().title(title).build();
+            let header = settings_header(title);
+            let list = gtk::ListBox::builder()
+                .selection_mode(gtk::SelectionMode::None)
+                .accessible_role(gtk::AccessibleRole::List)
+                .build();
+            list.add_css_class("nuncio-settings-list");
+            list.update_property(&[Property::Label(title)]);
             for row in rows {
-                group.add(&row);
+                row.add_css_class("nuncio-setting");
+                list.append(&row);
             }
-            group.set_sensitive(editable);
-            page.add(&group);
+            list.set_sensitive(editable);
+            column.append(&header);
+            column.append(&list);
+            view.headers.push(header);
         }
         let saved_to = match prefs.borrow().path() {
             Some(path) => format!(
@@ -1377,12 +1498,29 @@ impl Ui {
             ),
             None => "There is no configuration file.".to_owned(),
         };
-        let footer = adw::PreferencesGroup::new();
         let footer_text = plain_label(&saved_to);
-        footer_text.add_css_class("dim-label");
-        footer.add(&footer_text);
-        page.add(&footer);
-        view.window.add(&page);
+        footer_text.add_css_class("nuncio-meta");
+        footer_text.set_margin_top(24);
+        column.append(&footer_text);
+        let clamp = adw::Clamp::builder()
+            .maximum_size(SETTINGS_WIDTH)
+            .tightening_threshold(SETTINGS_WIDTH)
+            .child(&column)
+            .build();
+        let scroll = gtk::ScrolledWindow::builder()
+            .hscrollbar_policy(gtk::PolicyType::Never)
+            .vexpand(true)
+            .child(&clamp)
+            .build();
+        let header_bar = adw::HeaderBar::new();
+        header_bar.add_css_class("nuncio-headerbar");
+        header_bar.add_css_class("nuncio-header");
+        let shell = adw::ToolbarView::new();
+        shell.add_top_bar(&header_bar);
+        shell.set_content(Some(&scroll));
+        toasts.set_child(Some(&shell));
+        view.window.set_content(Some(&toasts));
+        let view = view;
 
         // Each change is written at once; a refused or failed one puts the rows back and says why.
         let syncing = Rc::new(Cell::new(false));
@@ -1623,7 +1761,7 @@ impl Ui {
                 ui.message_key(key, state);
             });
             move |_, key, _, state| {
-                if message_key_handled(key, state) {
+                if message_key_handled(key, state) || list_key_action(key, state).is_some() {
                     f((key, state));
                     glib::Propagation::Stop
                 } else {
@@ -1670,20 +1808,37 @@ impl Ui {
             });
             move |entry| f(entry.text().to_string())
         });
-        inner.search_bar.connect_search_mode_enabled_notify({
-            let f = self.with(|ui, enabled: bool| {
-                if !enabled {
-                    ui.0.controller.borrow_mut().close_search();
-                    ui.render();
-                }
-            });
-            move |bar| f(bar.is_search_mode())
+        inner.search_toggle.connect_toggled({
+            let f = self.with(|ui, on: bool| ui.set_search_mode(on));
+            move |toggle| f(toggle.is_active())
         });
+        inner.search_entry.connect_stop_search({
+            let f = self.with(|ui, (): ()| ui.close_search());
+            move |_| f(())
+        });
+        inner.search_entry.connect_changed({
+            let f = self.with(|ui, (): ()| ui.update_search_hint());
+            move |_| f(())
+        });
+        // The hint follows the focus once it has moved.
+        let focus = gtk::EventControllerFocus::new();
+        let refocused = Rc::new(self.with(|ui, (): ()| {
+            let later = ui.with(|ui, (): ()| ui.update_search_hint());
+            glib::idle_add_local_once(move || later(()));
+        }));
+        focus.connect_enter({
+            let refocused = Rc::clone(&refocused);
+            move |_| refocused(())
+        });
+        focus.connect_leave(move |_| refocused(()));
+        inner.search_entry.add_controller(focus);
         inner.results.connect_row_activated({
             let f = self.with(|ui, index: usize| ui.jump_to_result(index));
             move |_, row| f(usize::try_from(row.index()).unwrap_or(usize::MAX))
         });
-        let open_search = self.with(|ui, (): ()| ui.start_search());
+        let open_search = self.with(|ui, (): ()| {
+            ui.start_search();
+        });
         inner.shortcuts.add_shortcut(gtk::Shortcut::new(
             gtk::ShortcutTrigger::parse_string("<Control>f"),
             Some(gtk::CallbackAction::new(move |_, _| {
@@ -1691,6 +1846,34 @@ impl Ui {
                 glib::Propagation::Stop
             })),
         ));
+        // `/` opens the search too (plan §7), unless it is being typed in a text field.
+        let weak = self.weak();
+        inner.shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("slash"),
+            Some(gtk::CallbackAction::new(move |_, _| {
+                if weak.upgrade().is_some_and(|inner| Ui(inner).slash()) {
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            })),
+        ));
+        // The chat list's keys: `j`/`k` move as Down/Up do; Escape closes the search.
+        let keys = gtk::EventControllerKey::new();
+        keys.connect_key_pressed({
+            let weak = self.weak();
+            move |_, key, _, state| {
+                let handled = weak
+                    .upgrade()
+                    .is_some_and(|inner| Ui(inner).chat_list_key(key, state));
+                if handled {
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            }
+        });
+        inner.chats.add_controller(keys);
 
         // The command palette and the settings: window actions (also in the menu) with keys.
         for (name, triggers, run) in [
@@ -1717,12 +1900,149 @@ impl Ui {
         }
     }
 
-    /// Open the search of the selected chat (Ctrl+F).
-    fn start_search(&self) {
-        if self.0.controller.borrow().model().selected_chat().is_some() {
-            self.0.search_bar.set_search_mode(true);
-            self.0.search_entry.grab_focus();
+    /// Open the search of the selected chat (Ctrl+F, `/`, the ⌕): true when there is one to
+    /// search.
+    fn start_search(&self) -> bool {
+        if self.0.controller.borrow().model().selected_chat().is_none() {
+            return false;
         }
+        // Its `toggled` handler shows the input; already open, it only takes the focus.
+        self.0.search_toggle.set_active(true);
+        self.0.search_entry.grab_focus();
+        self.update_search_hint();
+        true
+    }
+
+    /// The search opens (its input shows under the conversation header) or closes (the input
+    /// and the model's search go).
+    fn set_search_mode(&self, on: bool) {
+        let inner = &self.0;
+        if on && inner.controller.borrow().model().selected_chat().is_none() {
+            inner.search_toggle.set_active(false);
+            return;
+        }
+        inner.search_row.set_visible(on);
+        if on {
+            inner.search_entry.grab_focus();
+        } else {
+            inner.search_entry.set_text("");
+            inner.controller.borrow_mut().close_search();
+            self.render();
+        }
+        self.update_search_hint();
+    }
+
+    /// Show the search's hint only while its input is empty and has the focus (plan §6.6).
+    fn update_search_hint(&self) {
+        let inner = &self.0;
+        let focused = self.focused_widget().is_some_and(|widget| {
+            &widget == inner.search_entry.upcast_ref::<gtk::Widget>()
+                || widget.is_ancestor(&inner.search_entry)
+        });
+        let hint = present::search_hint(
+            inner.search_toggle.is_active(),
+            &inner.search_entry.text(),
+            focused,
+        );
+        inner.search_hint.set_text(hint.unwrap_or_default());
+        inner.search_hint.set_visible(hint.is_some());
+    }
+
+    /// `/` pressed: it opens the search, unless a text field has the focus (the composer, the
+    /// search input itself), where it is typed. True when it opened the search.
+    fn slash(&self) -> bool {
+        let typing = self.focused_widget().is_some_and(|widget| {
+            widget.is::<gtk::TextView>() || widget.is::<gtk::Text>() || widget.is::<gtk::Entry>()
+        });
+        !typing && !self.palette_open() && self.start_search()
+    }
+
+    /// A key in the chat list: `j`/`k` move to the next or previous chat as Down/Up do (the
+    /// chat is selected, not opened); Escape closes the search. True when it was handled.
+    fn chat_list_key(&self, key: gdk::Key, state: gdk::ModifierType) -> bool {
+        let inner = &self.0;
+        if key == gdk::Key::Escape && inner.search_toggle.is_active() {
+            self.close_search();
+            return true;
+        }
+        let step = match list_key_action(key, state) {
+            Some(ListKey::Down) => 1,
+            Some(ListKey::Up) => -1,
+            _ => return false,
+        };
+        let count = count_rows(&inner.chats);
+        let at = inner
+            .chats
+            .focus_child()
+            .and_then(|row| row.downcast::<gtk::ListBoxRow>().ok())
+            .or_else(|| inner.chats.selected_row())
+            .and_then(|row| usize::try_from(row.index()).ok());
+        let next = at.map_or(0, |at| palette::moved(at, step, count));
+        if let Some(row) = i32::try_from(next)
+            .ok()
+            .and_then(|i| inner.chats.row_at_index(i))
+        {
+            inner.chats.select_row(Some(&row));
+            row.grab_focus();
+        }
+        true
+    }
+
+    /// Whether the search is open (tests).
+    pub fn search_open(&self) -> bool {
+        self.0.search_toggle.is_active()
+    }
+
+    /// Close the search, as Escape in it does.
+    pub fn close_search(&self) {
+        self.0.search_toggle.set_active(false);
+    }
+
+    /// Type `query` into the open search, replacing what was there (tests).
+    pub fn type_search(&self, query: &str) {
+        self.0.search_entry.set_text(query);
+    }
+
+    /// Search for what is typed, as Enter in the search does (tests).
+    pub fn submit_search(&self) {
+        self.0.search_entry.emit_activate();
+    }
+
+    /// The search's hint, while it is shown (tests).
+    pub fn search_hint(&self) -> Option<String> {
+        let hint = &self.0.search_hint;
+        hint.get_visible().then(|| hint.text().to_string())
+    }
+
+    /// Whether the chat list's header shows its title (tests).
+    pub fn list_title_shown(&self) -> bool {
+        self.0.list_title.get_visible()
+    }
+
+    /// Whether the search's input is shown in the conversation pane (tests).
+    pub fn search_in_conversation(&self) -> bool {
+        self.0.search_row.get_visible() && self.0.search_entry.is_ancestor(&self.0.content_view)
+    }
+
+    /// Whether the search's results are shown, above the transcript (tests).
+    pub fn results_shown(&self) -> bool {
+        self.0.results_scroll.get_visible()
+    }
+
+    /// Whether the composer has the focus (tests).
+    pub fn composer_focused(&self) -> bool {
+        self.focused_widget()
+            .is_some_and(|widget| &widget == self.0.composer.upcast_ref::<gtk::Widget>())
+    }
+
+    /// The widget with the keyboard focus in the window, if one has it.
+    fn focused_widget(&self) -> Option<gtk::Widget> {
+        RootExt::focus(&self.0.window)
+    }
+
+    /// Put the focus in the chat list, as Tab to it does (tests).
+    pub fn focus_chat_list(&self) {
+        self.0.chats.grab_focus();
     }
 
     /// A key pressed in the composer, as pressing it there does: true when the composer acted on
@@ -1807,6 +2127,23 @@ impl Ui {
     }
 
     fn message_key(&self, key: gdk::Key, state: gdk::ModifierType) {
+        if let Some(move_to) = list_key_action(key, state) {
+            let count = count_rows(&self.0.transcript);
+            let at = self.focused_message().map(|(index, _)| index);
+            let next = match move_to {
+                ListKey::Down => at.map_or(0, |at| palette::moved(at, 1, count)),
+                ListKey::Up => at.map_or(0, |at| palette::moved(at, -1, count)),
+                ListKey::Top => 0,
+                ListKey::Bottom => count.saturating_sub(1),
+            };
+            if let Some(row) = i32::try_from(next)
+                .ok()
+                .and_then(|i| self.0.transcript.row_at_index(i))
+            {
+                row.grab_focus();
+            }
+            return;
+        }
         if key == gdk::Key::Escape {
             if !self.go_back() {
                 self.0.composer.grab_focus();
@@ -1959,7 +2296,7 @@ impl Ui {
 
     fn jump_to_result(&self, index: usize) {
         let found = self.0.controller.borrow_mut().jump_to_result(index);
-        self.0.search_bar.set_search_mode(false);
+        self.close_search();
         self.0.stick.set(false);
         self.render();
         if let Some(row) = found
@@ -2256,7 +2593,7 @@ impl Ui {
         }
         // Its notify handler closes the model's search, so the model must be free.
         if close_search_bar {
-            inner.search_bar.set_search_mode(false);
+            inner.search_toggle.set_active(false);
         }
     }
 }
@@ -2282,7 +2619,7 @@ fn open_conversation(model: &nuncio_client::Model) -> Option<String> {
 /// The settings window and its rows.
 #[derive(Clone)]
 pub struct SettingsView {
-    pub window: adw::PreferencesWindow,
+    pub window: adw::Window,
     pub notifications: adw::SwitchRow,
     pub show_preview: adw::SwitchRow,
     pub background: adw::SwitchRow,
@@ -2291,6 +2628,9 @@ pub struct SettingsView {
     pub image_protocol: adw::ComboRow,
     /// Why the file cannot be changed (shown at the top; every row is insensitive).
     pub problem: Option<String>,
+    toasts: adw::ToastOverlay,
+    /// The sections' headers, in order.
+    headers: Vec<gtk::Label>,
 }
 
 impl SettingsView {
@@ -2314,8 +2654,29 @@ impl SettingsView {
         let toast = adw::Toast::new(text);
         toast.set_use_markup(false);
         toast.set_timeout(5);
-        self.window.add_toast(toast);
+        self.toasts.add_toast(toast);
     }
+
+    /// The sections' headers as shown, in order (tests).
+    pub fn headers(&self) -> Vec<String> {
+        self.headers
+            .iter()
+            .map(|header| header.text().to_string())
+            .collect()
+    }
+}
+
+/// A settings section's header (plan §6.7): `meta` capitals over a 1 px rule; a screen reader
+/// hears it as a heading, in the words' own case.
+fn settings_header(title: &str) -> gtk::Label {
+    let header = gtk::Label::builder()
+        .label(title.to_uppercase())
+        .xalign(0.0)
+        .accessible_role(gtk::AccessibleRole::Heading)
+        .build();
+    header.add_css_class("nuncio-settings-header");
+    header.update_property(&[Property::Label(title)]);
+    header
 }
 
 /// A wrapping, selectable label of plain text (no markup).
@@ -2332,10 +2693,13 @@ fn plain_label(text: &str) -> gtk::Label {
     label
 }
 
-/// The command palette's widgets and what it lists.
+/// The command palette's widgets and what it lists (plan §6.5): a panel of `width` pixels, the
+/// 44 px input row (a magnifier, the query, an × that closes) over a 1 px line, then 36 px rows
+/// grouped under `meta` headers, the first selected.
 struct PaletteView {
     popover: gtk::Popover,
-    entry: gtk::SearchEntry,
+    column: gtk::Box,
+    entry: gtk::Entry,
     list: gtk::ListBox,
     scroll: gtk::ScrolledWindow,
     entries: Vec<palette::Entry>,
@@ -2343,32 +2707,57 @@ struct PaletteView {
     conversation: Option<String>,
     /// The positions in `entries` listed now, in order.
     shown: RefCell<Vec<usize>>,
+    /// The header above each row listed now ([`palette::headers`]).
+    headers: Rc<RefCell<Vec<Option<palette::Group>>>>,
 }
 
 impl PaletteView {
-    fn new(entries: Vec<palette::Entry>, conversation: Option<String>) -> Self {
-        let entry = gtk::SearchEntry::builder()
+    fn new(entries: Vec<palette::Entry>, conversation: Option<String>, width: i32) -> Self {
+        let entry = gtk::Entry::builder()
             .placeholder_text("Type a command or a chat name")
+            .primary_icon_name("system-search-symbolic")
+            .secondary_icon_name("window-close-symbolic")
+            .secondary_icon_tooltip_text("Close (Escape)")
             .hexpand(true)
             .build();
+        entry.add_css_class("nuncio-palette-entry");
         entry.update_property(&[Property::Label("Command palette: type to filter")]);
+        let input = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        input.add_css_class("nuncio-palette-input");
+        input.append(&entry);
         let list = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
             .activate_on_single_click(true)
             .accessible_role(gtk::AccessibleRole::List)
             .build();
-        list.add_css_class("navigation-sidebar");
+        list.add_css_class("nuncio-palette-list");
         list.update_property(&[Property::Label("Commands")]);
-        list.set_placeholder(Some(&label("No matching command", "dim-label")));
+        let nothing = label("No matching command", "nuncio-palette-header");
+        list.set_placeholder(Some(&nothing));
+        let headers: Rc<RefCell<Vec<Option<palette::Group>>>> = Rc::default();
+        list.set_header_func({
+            let headers = Rc::clone(&headers);
+            move |row, _| {
+                let group = usize::try_from(row.index())
+                    .ok()
+                    .and_then(|i| headers.borrow().get(i).copied().flatten());
+                match group {
+                    Some(group) => {
+                        row.set_header(Some(&label(group.header(), "nuncio-palette-header")));
+                    }
+                    None => row.set_header(None::<&gtk::Widget>),
+                }
+            }
+        });
         let scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(true)
             .max_content_height(360)
-            .min_content_width(420)
             .child(&list)
             .build();
-        let column = gtk::Box::new(gtk::Orientation::Vertical, 6);
-        column.append(&entry);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        column.set_width_request(width);
+        column.append(&input);
         column.append(&scroll);
         let popover = gtk::Popover::builder()
             .child(&column)
@@ -2377,42 +2766,55 @@ impl PaletteView {
             .position(gtk::PositionType::Bottom)
             .build();
         popover.add_css_class(ROOT_CLASS);
+        popover.add_css_class("nuncio-palette");
         popover.update_property(&[Property::Label("Command palette")]);
         Self {
             popover,
+            column,
             entry,
             list,
             scroll,
             entries,
             conversation,
             shown: RefCell::new(Vec::new()),
+            headers,
         }
     }
 
-    /// List the commands `query` matches, best first, and select the first.
+    /// List the commands `query` matches, grouped with the best first, each group under its
+    /// header, and select the first.
     fn filter(&self, query: &str) {
         let shown = palette::filter(&self.entries, query);
         while let Some(row) = self.list.row_at_index(0) {
             self.list.remove(&row);
         }
+        *self.headers.borrow_mut() = palette::headers(&self.entries, &shown);
         for &index in &shown {
             self.list.append(&palette_row(&self.entries[index]));
         }
+        self.list.invalidate_headers();
         *self.shown.borrow_mut() = shown;
         if let Some(first) = self.list.row_at_index(0) {
             self.list.select_row(Some(&first));
         }
     }
 
-    /// Move the selection `step` rows (the focus stays in the search).
+    /// Move the selection `step` rows, stopping at both ends (the focus stays in the input).
     fn move_selection(&self, step: i32) {
-        let count = i32::try_from(self.shown.borrow().len()).unwrap_or(0);
+        let count = self.shown.borrow().len();
         if count == 0 {
             return;
         }
-        let at = self.list.selected_row().map_or(0, |row| row.index());
-        let next = (at + step).clamp(0, count - 1);
-        if let Some(row) = self.list.row_at_index(next) {
+        let at = self
+            .list
+            .selected_row()
+            .and_then(|row| usize::try_from(row.index()).ok())
+            .unwrap_or(0);
+        let next = palette::moved(at, step, count);
+        if let Some(row) = i32::try_from(next)
+            .ok()
+            .and_then(|i| self.list.row_at_index(i))
+        {
             self.list.select_row(Some(&row));
             // Keep it in view; the focus stays in the search.
             if let Some(bounds) = row.compute_bounds(&self.list) {
@@ -2431,18 +2833,15 @@ impl PaletteView {
     }
 }
 
+/// One palette row: the command in `body`, its key right-aligned in `meta`/`text_faint`.
 fn palette_row(entry: &palette::Entry) -> gtk::ListBoxRow {
     let title = label(&entry.title, "");
     title.set_hexpand(true);
     title.set_ellipsize(gtk::pango::EllipsizeMode::End);
     let line = gtk::Box::new(gtk::Orientation::Horizontal, 12);
-    line.set_margin_top(4);
-    line.set_margin_bottom(4);
     line.append(&title);
     if let Some(key) = entry.shortcut {
-        let key = label(key, "dim-label");
-        key.add_css_class("caption");
-        line.append(&key);
+        line.append(&label(key, "nuncio-palette-key"));
     }
     let row = gtk::ListBoxRow::builder()
         .accessible_role(gtk::AccessibleRole::ListItem)
@@ -2522,6 +2921,50 @@ fn is_enter(key: gdk::Key) -> bool {
         key,
         gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter
     )
+}
+
+/// A move the chat list or the conversation makes for a key (plan §7).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ListKey {
+    Down,
+    Up,
+    Top,
+    Bottom,
+}
+
+/// `j`/`k` move down/up, `g` to the top and Shift+G to the bottom, without Ctrl or Alt; the
+/// arrows stay GTK's.
+fn list_key_action(key: gdk::Key, state: gdk::ModifierType) -> Option<ListKey> {
+    if state.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK) {
+        return None;
+    }
+    match key {
+        gdk::Key::j => Some(ListKey::Down),
+        gdk::Key::k => Some(ListKey::Up),
+        gdk::Key::g => Some(ListKey::Top),
+        gdk::Key::G => Some(ListKey::Bottom),
+        _ => None,
+    }
+}
+
+/// What a key does in the palette's input (plan §6.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaletteKey {
+    Up,
+    Down,
+    Run,
+    Close,
+}
+
+/// Up/Down move the selection, Enter runs it, Escape closes; any other key is typed.
+fn palette_key_action(key: gdk::Key) -> Option<PaletteKey> {
+    match key {
+        gdk::Key::Up | gdk::Key::KP_Up => Some(PaletteKey::Up),
+        gdk::Key::Down | gdk::Key::KP_Down => Some(PaletteKey::Down),
+        gdk::Key::Escape => Some(PaletteKey::Close),
+        key if is_enter(key) => Some(PaletteKey::Run),
+        _ => None,
+    }
 }
 
 /// The keys the conversation acts on (the others move the focus as GTK does).
@@ -3154,8 +3597,54 @@ fn find_picture(widget: &gtk::Widget) -> Option<gtk::Picture> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ComposerKey, composer_key_action};
+    use super::{
+        ComposerKey, ListKey, PaletteKey, composer_key_action, list_key_action, palette_key_action,
+    };
     use gtk::gdk::{Key, ModifierType};
+
+    #[test]
+    fn the_palette_moves_with_up_and_down_runs_on_enter_and_closes_on_escape() {
+        for (key, wanted) in [
+            (Key::Up, PaletteKey::Up),
+            (Key::KP_Up, PaletteKey::Up),
+            (Key::Down, PaletteKey::Down),
+            (Key::KP_Down, PaletteKey::Down),
+            (Key::Return, PaletteKey::Run),
+            (Key::KP_Enter, PaletteKey::Run),
+            (Key::Escape, PaletteKey::Close),
+        ] {
+            assert_eq!(palette_key_action(key), Some(wanted), "{key:?}");
+        }
+        for typed in [Key::a, Key::j, Key::slash, Key::BackSpace] {
+            assert_eq!(palette_key_action(typed), None, "{typed:?} is typed");
+        }
+    }
+
+    #[test]
+    fn j_k_move_g_and_shift_g_go_to_the_ends_only_without_ctrl_or_alt() {
+        let none = ModifierType::empty();
+        assert_eq!(list_key_action(Key::j, none), Some(ListKey::Down));
+        assert_eq!(list_key_action(Key::k, none), Some(ListKey::Up));
+        assert_eq!(list_key_action(Key::g, none), Some(ListKey::Top));
+        assert_eq!(
+            list_key_action(Key::G, ModifierType::SHIFT_MASK),
+            Some(ListKey::Bottom)
+        );
+        for held in [ModifierType::CONTROL_MASK, ModifierType::ALT_MASK] {
+            assert_eq!(list_key_action(Key::j, held), None, "{held:?}");
+            assert_eq!(list_key_action(Key::g, held), None, "{held:?}");
+        }
+        assert_eq!(
+            list_key_action(Key::u, none),
+            None,
+            "no unread toggle exists"
+        );
+        assert_eq!(
+            list_key_action(Key::Down, none),
+            None,
+            "the arrows are GTK's"
+        );
+    }
 
     #[test]
     fn enter_and_ctrl_enter_send_alt_enter_starts_a_line_escape_cancels() {

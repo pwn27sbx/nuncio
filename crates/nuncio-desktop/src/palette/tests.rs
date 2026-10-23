@@ -136,16 +136,105 @@ fn with_no_chat_open_it_lists_settings_quit_and_every_chat_by_its_title() {
         [
             "Settings",
             "Quit",
-            "Chat: Ana",
-            "Chat: Ben",
+            // No category in the row text: the chats are under their group's header.
+            "Ana",
+            "Ben",
             // The list's own title for a chat with no name: its masked number.
-            &format!("Chat: {}", nuncio_client::chat_title(&chat(NO_NAME, "")))
+            &nuncio_client::chat_title(&chat(NO_NAME, ""))
         ]
     );
     assert_eq!(entries[2].action, Action::OpenChat(ANA.to_owned()));
     assert_eq!(entries[0].shortcut, Some("Ctrl+,"));
     assert_eq!(entries[1].label(), "Quit, shortcut Ctrl+Q");
+    // A screen reader still hears what the row is.
     assert_eq!(entries[2].label(), "Chat: Ana");
+}
+
+#[test]
+fn commands_are_grouped_under_meta_headers_in_a_fixed_order() {
+    let c = opened(vec![message("M1", "text")]);
+    let entries = entries(c.model(), Some(0));
+    let groups: Vec<Group> = entries.iter().map(Entry::group).collect();
+    assert_eq!(
+        groups,
+        [
+            Group::Message,
+            Group::Message,
+            Group::Commands,
+            Group::Commands,
+            Group::Commands,
+            Group::Chats,
+            Group::Chats,
+            Group::Chats,
+        ],
+        "{:?}",
+        titles(&entries)
+    );
+    let shown = filter(&entries, "");
+    // A header above the first row of each group, and nowhere else.
+    assert_eq!(
+        headers(&entries, &shown),
+        [
+            Some(Group::Message),
+            None,
+            Some(Group::Commands),
+            None,
+            None,
+            Some(Group::Chats),
+            None,
+            None,
+        ]
+    );
+    assert_eq!(Group::Message.header(), "SELECTED MESSAGE");
+    assert_eq!(Group::Commands.header(), "COMMANDS");
+    assert_eq!(Group::Chats.header(), "CHATS");
+    assert!(headers(&entries, &[]).is_empty());
+}
+
+#[test]
+fn a_query_keeps_its_best_match_first_and_each_group_together() {
+    let entries = vec![
+        Entry::new("Settings", Some("Ctrl+,"), Action::Settings),
+        Entry::new("Quit", Some("Ctrl+Q"), Action::Quit),
+        Entry::new("Sebastian", None, Action::OpenChat(ANA.to_owned())),
+        Entry::new("Rose", None, Action::OpenChat(BEN.to_owned())),
+        Entry::new("Search in this chat", Some("Ctrl+F"), Action::Search),
+    ];
+    // "se": the chat Sebastian and Settings/Search both start a word with it; Rose only holds it.
+    let shown = filter(&entries, "se");
+    let order: Vec<&str> = shown.iter().map(|&i| entries[i].title.as_str()).collect();
+    assert_eq!(
+        order,
+        ["Settings", "Search in this chat", "Sebastian", "Rose"]
+    );
+    // The best chat match beats a weak command one: the chats' group comes first.
+    let weak = vec![
+        Entry::new("Run a report", None, Action::Settings),
+        Entry::new("Rose", None, Action::OpenChat(BEN.to_owned())),
+    ];
+    assert_eq!(filter(&weak, "ro"), [1, 0]);
+    // Whatever the scores, a group's rows stay together under one header: the weak "Close this"
+    // stays with Settings, above the chat that outscores it.
+    let mixed = vec![
+        Entry::new("Settings", Some("Ctrl+,"), Action::Settings),
+        Entry::new("Close this", None, Action::Quit),
+        Entry::new("Sam", None, Action::OpenChat(ANA.to_owned())),
+    ];
+    let shown = filter(&mixed, "s");
+    assert_eq!(shown, [0, 1, 2]);
+    assert_eq!(
+        headers(&mixed, &shown),
+        [Some(Group::Commands), None, Some(Group::Chats)]
+    );
+}
+
+#[test]
+fn up_and_down_move_the_selection_and_stop_at_both_ends() {
+    assert_eq!(moved(0, 1, 3), 1);
+    assert_eq!(moved(2, 1, 3), 2, "the last row stays");
+    assert_eq!(moved(0, -1, 3), 0, "the first row stays");
+    assert_eq!(moved(1, -1, 3), 0);
+    assert_eq!(moved(0, 1, 0), 0, "nothing listed");
 }
 
 #[test]

@@ -18,6 +18,8 @@ use nuncio_client::{Backoff, Chat, ClientFrame, DaemonFrame, Message};
 use nuncio_desktop::controller::{Alert, Command, Controller};
 use nuncio_desktop::lifecycle::Lifecycle;
 use nuncio_desktop::palette::{Action, Target};
+use nuncio_desktop::present::Filter;
+use nuncio_desktop::style::Layout;
 use nuncio_desktop::window::{Ui, WeakUi};
 use nuncio_desktop::worker::{Incoming, Settings};
 
@@ -175,6 +177,8 @@ fn main() {
     the_palette_opens_on_f1_and_jumps_to_a_chat();
     the_settings_write_the_file_and_apply_at_once();
     pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click();
+    the_panes_the_filters_and_the_strip();
+    a_filter_keeps_the_open_chat_and_its_selection();
     // The real demo daemon, when its binary is given (`go build -o DIR/nuncio-demo ./cmd/nuncio-demo`).
     if let Some(demo) = std::env::var_os("NUNCIO_DEMO_BIN") {
         let runtime = PathBuf::from(format!("/tmp/ndsd-{}", std::process::id()));
@@ -239,6 +243,7 @@ fn connects_and_loads_the_chats_with_no_ui_handle_kept(socket: &Path, what: &str
 }
 
 const BEN: &str = "15551230002@s.whatsapp.net";
+const CARA: &str = "15551230003@s.whatsapp.net";
 
 /// A window with no worker and Ana and Ben listed (the commands stay undelivered).
 fn listed() -> Ui {
@@ -253,6 +258,173 @@ fn listed() -> Ui {
     });
     ui.take_undelivered();
     ui
+}
+
+/// The rail's filters list their chats by the row's own chat, the connection is said once (in
+/// the rail) with a stop reason as a strip under the conversation header, and one pane at a time
+/// goes back to the list.
+fn the_panes_the_filters_and_the_strip() {
+    let ui = Ui::new(None, Controller::new("smoke"), 0, true);
+    ui.incoming(Incoming::Connected);
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::chats(200),
+        result: Ok(DaemonFrame::Chats {
+            v: PROTOCOL_VERSION,
+            chats: vec![
+                Chat {
+                    unread: 0,
+                    ..chat(ANA, "Ana")
+                },
+                chat(BEN, "Ben"),
+            ],
+        }),
+    });
+    ui.take_undelivered();
+    check(ui.drawn().0 == 2, "All lists both chats");
+    ui.set_filter(Filter::Unread);
+    check(ui.drawn().0 == 1, "Unread lists only Ben");
+    ui.set_filter(Filter::Archived);
+    check(ui.drawn().0 == 0, "nothing is archived");
+    ui.set_filter(Filter::Unread);
+    check(
+        ui.roles(0, 0).0 == Some(gtk::AccessibleRole::ListItem),
+        "a filtered row is a list item",
+    );
+    ui.set_filter(Filter::All);
+
+    ui.incoming(Incoming::Event(DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: nuncio_client::Session::Linked,
+        stop_reason: None,
+    }));
+    check(ui.connection_word() == "linked", "the rail says linked");
+    check(ui.stop_strip().is_none(), "no strip without a stop reason");
+    ui.incoming(Incoming::Event(DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: nuncio_client::Session::Offline,
+        stop_reason: Some(nuncio_client::wire::StopReason::KeyringLocked),
+    }));
+    check(
+        ui.stop_strip().as_deref() == Some("keyring locked: unlock it to connect"),
+        "the stop reason is a strip under the header",
+    );
+    check(
+        ui.connection_word() == "offline",
+        "the rail keeps the short word",
+    );
+
+    ui.apply_layout(Layout::SinglePane);
+    check(
+        ui.panes_shown() == (false, true, false),
+        "one pane: the list",
+    );
+    ui.open_chat(1);
+    ui.take_undelivered();
+    check(
+        ui.panes_shown() == (false, false, true),
+        "opening shows the conversation",
+    );
+    check(
+        ui.conversation_title() == "Ben",
+        "the header names the chat only",
+    );
+    ui.apply_layout(Layout::CompactRail);
+    check(
+        ui.panes_shown() == (true, true, true),
+        "half a screen: three panes again",
+    );
+    ui.apply_layout(Layout::ThreePanes);
+    check(
+        ui.layout() == Layout::ThreePanes,
+        "the layout is the one applied",
+    );
+}
+
+/// A window listing Ana and Ben (both unread) and Cara (archived).
+fn three_chats() -> Ui {
+    let ui = Ui::new(None, Controller::new("smoke"), 0, true);
+    ui.incoming(Incoming::Connected);
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::chats(200),
+        result: Ok(DaemonFrame::Chats {
+            v: PROTOCOL_VERSION,
+            chats: vec![
+                chat(ANA, "Ana"),
+                chat(BEN, "Ben"),
+                Chat {
+                    archived: true,
+                    unread: 0,
+                    ..chat(CARA, "Cara")
+                },
+            ],
+        }),
+    });
+    ui.take_undelivered();
+    ui
+}
+
+/// Mark `jid` read, as the daemon does once its messages were shown.
+fn read(ui: &Ui, jid: &str) {
+    ui.incoming(Incoming::Event(DaemonFrame::EventUnread {
+        v: PROTOCOL_VERSION,
+        unread: 0,
+        jid: jid.to_owned(),
+        chat_unread: 0,
+    }));
+    ui.take_undelivered();
+}
+
+/// The open chat stays only in the filter it was opened from, the counts never include it, and
+/// the opened chat's row is the selected one whatever the rows around it did.
+fn a_filter_keeps_the_open_chat_and_its_selection() {
+    let ui = three_chats();
+    ui.set_filter(Filter::Unread);
+    ui.open_chat(1);
+    ui.take_undelivered();
+    read(&ui, BEN);
+    check(
+        ui.drawn().0 == 2,
+        "Ben, read, stays in Unread under the cursor",
+    );
+    check(
+        ui.filter_count(Filter::Unread) == "1",
+        "Unread counts only Ana",
+    );
+    check(
+        ui.filter_count(Filter::Archived) == "1",
+        "Archived counts only Cara",
+    );
+    ui.set_filter(Filter::Archived);
+    check(
+        ui.drawn().0 == 1,
+        "Archived lists only Cara, not the open Ben",
+    );
+    ui.open_chat(2);
+    ui.take_undelivered();
+    check(
+        ui.selected_chat_row() == Some(0),
+        "opening Cara in Archived selects her row",
+    );
+
+    let ui = three_chats();
+    ui.set_filter(Filter::Unread);
+    ui.open_chat(0);
+    ui.take_undelivered();
+    read(&ui, ANA);
+    check(
+        ui.selected_chat_row() == Some(0),
+        "Ana, read, stays selected",
+    );
+    ui.open_chat(1);
+    ui.take_undelivered();
+    check(
+        ui.drawn().0 == 1,
+        "Ana leaves Unread once another chat opens",
+    );
+    check(
+        ui.selected_chat_row() == Some(0),
+        "Ben, now at row 0, is selected",
+    );
 }
 
 /// A new message gives a notification (kept, since no `GApplication` is attached: nothing is

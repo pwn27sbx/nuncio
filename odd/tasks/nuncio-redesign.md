@@ -22,22 +22,38 @@ against `main`, each merged on its own with the six CI checks green. Runner: `ca
   moved toward `text` until it reaches 4.5:1; `text` itself is never changed.
 - **S5. Nothing outside the design.** Plan §12: no change to the wire, the store, the ban-risk
   rules, the notification rules or the media caps; no new dependency; no feature added.
+- **S6. "New message" (owner, L9: "B").** The rail's primary button is "New message": it asks for a
+  phone number and opens that chat with an empty composer, through the same path as a
+  `whatsapp://send?phone=…` link (which only fills the composer and never sends). It sends nothing
+  by itself; the ban-risk rules are unchanged.
 
 ## Tasks
 
 | ID | Phase (plan §10) | S# | Route | Status | PR / commit |
 |---|---|---|---|---|---|
-| R0 | P0 tokens: palette roles, contrast tests | S1, S4, S5 | delegated (session backstop) | done, Risk: none | branch `feat/redesign-p0-tokens` |
-| R1 | P1 window chrome and layout | S1, S2, S5 | delegated (session backstop) | pending | |
+| R0 | P0 tokens: palette roles, contrast tests | S1, S4, S5 | delegated (session backstop) | done, Risk: none | PR #4, merged `e0c137a` |
+| R1 | P1 window chrome and layout | S1, S2, S5 | delegated (session backstop) | done, Risk: item 6 (visual, checked on Omarchy) | PR, see L11 |
 | R2 | P2 chat list and transcript | S1, S5 | delegated (session backstop) | pending | |
 | R3 | P3 composer | S1, S3, S5 | delegated (session backstop) | pending | |
 | R4 | P4 palette, search, settings, dialogs | S1, S5 | delegated (session backstop) | pending | |
 | R5 | P5 TUI parity | S1, S5 | delegated (session backstop) | pending | |
 | R6 | P6 polish and proof (folds into R4/R5 if small) | S1 | delegated (session backstop) | pending | |
+| R7 | "New message" in the rail (after R1) | S6 | delegated (session backstop) | pending | |
 
 Route reason: this session resumed after a compaction, so the parent orchestrates and an Opus
 writer with a clean context writes each phase; an independent verifier checks each phase
 (R1 and R2 touch the shared view and layout).
+
+## Follow-ups (to judge by eye on the Omarchy machine, with several themes)
+
+- **F1.** `text` on `surface_chrome`: 7:1 (plan) cannot hold on Gruvbox and others. Parent's
+  proposal: 7:1 on `surface`, 4.5:1 (WCAG AA) on `surface_chrome`. Test:
+  `theme::roles::tests::text_reaches_7_to_1_on_the_chrome_of_gruvbox_and_latte` (ignored).
+- **F2.** `accent_on` under 4.5:1 on Latte and Rose Pine. Parent's proposal: when neither surface
+  nor text reaches 4.5:1 on the accent, use black or white, whichever contrasts more; the accent
+  never changes.
+- **F3.** If anything still looks rounded on Omarchy after R1, check `~/.config/gtk-4.0/gtk.css` and
+  `hyprchroma.css` first: a user `gtk.css` overrides the app's CSS.
 
 ## Log
 
@@ -60,12 +76,22 @@ writer with a clean context writes each phase; an independent verifier checks ea
 - **L6** (2026-10-23, owner): "todo esto lo dejamos como followups para verlo bien en mi omarchy
   cuando pruebe los temas y lo vea con mis ojos". → Follow-ups F1–F2; the code keeps the plan's
   literal rules, and the 7:1 text-on-chrome test stays `#[ignore]` with the open decision.
-
-## Follow-ups (to judge by eye on the Omarchy machine, with several themes)
-
-- **F1.** `text` on `surface_chrome`: 7:1 (plan) cannot hold on Gruvbox and others. Parent's
-  proposal: 7:1 on `surface`, 4.5:1 (WCAG AA) on `surface_chrome`. Test:
-  `theme::roles::tests::text_reaches_7_to_1_on_the_chrome_of_gruvbox_and_latte` (ignored).
-- **F2.** `accent_on` under 4.5:1 on Latte and Rose Pine. Parent's proposal: when neither surface
-  nor text reaches 4.5:1 on the accent, use black or white, whichever contrasts more; the accent
-  never changes.
+- **L7** (2026-10-23, owner): "no te deje indicaciones en otro lado pero tu haz el trabajo no
+  neceistas mi permiso a menos que sea sobre decisiones". Standing approval: push the
+  `feat/redesign-*` branches, open each phase's PR against `main`, and merge it with a merge commit
+  once the six checks are green (and the verifier passed for a risky phase), without asking. Only
+  product decisions go to the owner. Never force-push, tag or release.
+- **L8** (2026-10-23, R1): the model has no "new message" action, so P1's rail primary button is
+  `Commands` (opens the palette) for now; the wire's `Chat` has no member count, so a group's header
+  shows only its name. Owner asked: A keep `Commands`, B build "New message", C no primary button.
+- **L9** (2026-10-23, owner): "B". → S6, task R7. Until R7 lands, the button stays `Commands`.
+- **L10** (2026-10-23): the owner's machine has `~/.config/gtk-4.0/gtk.css` and `hyprchroma.css`
+  (home report §2); a user `gtk.css` has USER priority (800), above the app's provider (600). → F3.
+- **L11** (2026-10-23, R1): three `gtk::Paned` panes in `nuncio-root`, `src/style.rs` CSS from the
+  roles in the one reloaded provider, breakpoints at 1099/759, the stop strip, filters on the
+  existing `chat.archived`/`chat.unread`. Verifier: S2 and S5 pass; blockers B1 (the open chat
+  leaked into every filter and count) and B2 (lost selection after a row rebuild) and advisory A1
+  (window rounded without Hyprland) fixed in one batch, RED then GREEN, 5 mutants killed; parent
+  reran `present` tests and the smoke test. Open for the owner's eyes: the header lost the
+  "linked · N unread" total (rail counts are chats); switches are square too. Owner rule from now:
+  no visible windows or screenshots on the Mac.

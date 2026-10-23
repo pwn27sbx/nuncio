@@ -3,7 +3,7 @@
 //! Asked once at start, and only under Hyprland (`HYPRLAND_INSTANCE_SIGNATURE` set):
 //! `hyprctl -j getoption decoration:rounding` answers `{"option": "decoration:rounding", "int": N,
 //! "set": true}`. Anything else (no Hyprland, no `hyprctl`, a slow or failing one, output that is
-//! not that JSON) leaves libadwaita's own corners.
+//! not that JSON) leaves the corners square, the design's default.
 
 use std::ffi::OsStr;
 use std::time::Duration;

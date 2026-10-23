@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use nuncio_client::model::{MERGED_NOTICE, Model, chat_title, is_picture, quoted};
 use nuncio_client::wire::MessageState;
-use nuncio_client::{Chat, Message, TitleBar};
+use nuncio_client::{Chat, Message, Session, TitleBar};
 
 /// How many characters of a quoted message, a preview or a search result are shown.
 const SNIPPET: usize = 60;
@@ -115,13 +115,6 @@ pub struct PictureView {
     pub full: Option<PathBuf>,
     /// The picture's alternative text: `Photo` or `Sticker`, and the caption.
     pub alt: String,
-}
-
-/// A header's two lines.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Header {
-    pub title: String,
-    pub subtitle: String,
 }
 
 /// What the composer shows around the draft.
@@ -398,42 +391,105 @@ fn picture_view(model: &Model, message: &Message) -> Option<PictureView> {
     })
 }
 
-/// The connection as the headers say it: `reconnecting…` while the driver is, else the session,
-/// followed by why WhatsApp stopped it, or why nunciod keeps the device closed, when it did (fixed
-/// text, never WhatsApp's own).
-pub fn connection(model: &Model) -> String {
+/// A filter of the rail (plan §5): which chats the list shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Filter {
+    All,
+    Unread,
+    Archived,
+}
+
+impl Filter {
+    /// The rail's filters, in its order.
+    pub const EACH: [Self; 3] = [Self::All, Self::Unread, Self::Archived];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Unread => "Unread",
+            Self::Archived => "Archived",
+        }
+    }
+
+    fn keeps(self, chat: &Chat) -> bool {
+        match self {
+            Self::All => true,
+            Self::Unread => chat.unread > 0,
+            Self::Archived => chat.archived,
+        }
+    }
+}
+
+/// The positions in the model's chat list of the chats `filter` shows, in the list's order.
+/// `opened_from` is the filter the open conversation was opened from in the list: while that
+/// filter is the one shown, the open chat stays listed, so reading an unread chat does not pull
+/// its row away from under the cursor; no other filter lists it for that.
+pub fn listed(model: &Model, filter: Filter, opened_from: Option<Filter>) -> Vec<usize> {
+    let kept = (opened_from == Some(filter))
+        .then(|| open_jid(model))
+        .flatten();
+    model
+        .chat_list()
+        .chats()
+        .iter()
+        .enumerate()
+        .filter(|(_, chat)| filter.keeps(chat) || kept == Some(chat.jid.as_str()))
+        .map(|(position, _)| position)
+        .collect()
+}
+
+/// How many chats `filter` keeps, as the rail counts them (never the open chat's exception).
+pub fn count(model: &Model, filter: Filter) -> usize {
+    listed(model, filter, None).len()
+}
+
+/// The chat whose conversation is open, if one is.
+fn open_jid(model: &Model) -> Option<&str> {
+    model.is_open().then(|| model.selected_jid()).flatten()
+}
+
+/// The connection as the rail says it: one short word, and whether the device is linked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RailStatus {
+    /// `linked`, `offline`, `unlinked`…, or `reconnecting…` while the daemon connection is lost.
+    pub word: String,
+    /// Linked and connected: the rail shows the accent square.
+    pub linked: bool,
+}
+
+/// The rail's connection line.
+pub fn rail_status(model: &Model) -> RailStatus {
     if !model.connected() {
-        return "reconnecting…".to_owned();
+        return RailStatus {
+            word: "reconnecting…".to_owned(),
+            linked: false,
+        };
     }
-    let status = model.status();
-    match status.stop_reason {
-        Some(reason) => format!("{} · {}", status.session.as_str(), reason.describe()),
-        None => status.session.as_str().to_owned(),
-    }
-}
-
-/// The chat list's header: the app, the connection and the unread total.
-pub fn sidebar_header(model: &Model) -> Header {
-    let unread = model.status().unread;
-    let subtitle = if unread > 0 {
-        format!("{} · {unread} unread", connection(model))
-    } else {
-        connection(model)
-    };
-    Header {
-        title: "nuncio".to_owned(),
-        subtitle,
+    let session = &model.status().session;
+    RailStatus {
+        word: session.as_str().to_owned(),
+        linked: *session == Session::Linked,
     }
 }
 
-/// The conversation's header: the selected chat and the connection.
-pub fn conversation_header(model: &Model) -> Header {
-    Header {
-        title: model
-            .selected_chat()
-            .map_or_else(|| "No chat".to_owned(), chat_title),
-        subtitle: connection(model),
+/// The transcript header: the selected chat's name, or `No chat`.
+pub fn conversation_title(model: &Model) -> String {
+    model
+        .selected_chat()
+        .map_or_else(|| "No chat".to_owned(), chat_title)
+}
+
+/// The one-line strip under the transcript header: why WhatsApp stopped the session, or why
+/// nunciod keeps the device closed (fixed text, never WhatsApp's own), while that holds. None
+/// while the daemon connection is lost: reconnecting is ours to say, in the rail.
+pub fn stop_strip(model: &Model) -> Option<String> {
+    if !model.connected() {
+        return None;
     }
+    model
+        .status()
+        .stop_reason
+        .map(|reason| reason.describe().to_owned())
 }
 
 /// The banners around the draft.

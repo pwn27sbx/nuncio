@@ -13,6 +13,8 @@
 //! - [`worker`]: the daemon connections on their own threads, posting into the main loop;
 //! - [`args`]: the command line and the app id;
 //! - [`hyprland`]: Hyprland's window rounding (`hyprctl`), behind an injectable runner;
+//! - [`style`]: the design's tokens for GTK (the panes' CSS from the palette roles, the pane
+//!   widths and breakpoints), without GTK;
 //! - here: following Omarchy's live theme and font. The palette parser and the watcher live in
 //!   `nuncio-client`, because following the theme is client-side work the TUI needs too; what
 //!   lives here is turning a [`Palette`] and a [`Look`] (the Omarchy font, Hyprland's rounding)
@@ -26,6 +28,7 @@ pub mod palette;
 pub mod pictures;
 pub mod preferences;
 pub mod present;
+pub mod style;
 pub mod window;
 pub mod worker;
 
@@ -39,13 +42,15 @@ pub const ROOT_CLASS: &str = "nuncio-root";
 /// The CSS class the app's windows carry, for the corner radius.
 pub const WINDOW_CLASS: &str = "nuncio-window";
 
-/// What the desktop sets besides the palette. `None` keeps libadwaita's own.
+/// What the desktop sets besides the palette. A `None` font keeps libadwaita's; a `None`
+/// rounding is 0.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Look {
     /// Omarchy's font (the family fontconfig resolves `monospace` to), for the whole UI: Omarchy
     /// uses it as both the terminal and the system font.
     pub font_family: Option<String>,
-    /// Hyprland's `decoration:rounding`, in pixels, for the window corners.
+    /// Hyprland's `decoration:rounding`, in pixels, for the window corners and every element;
+    /// `None` (not on Hyprland, or no answer) squares them.
     pub corner_radius: Option<u32>,
 }
 
@@ -81,11 +86,11 @@ fn look_css(look: &Look) -> String {
             css_string(family)
         ));
     }
-    if let Some(radius) = look.corner_radius {
-        css.push_str(&format!(
-            "window.{WINDOW_CLASS}, window.{WINDOW_CLASS}.csd {{ border-radius: {radius}px; }}\n"
-        ));
-    }
+    // Square without Hyprland too, as every element in it (design plan §4.3, §5).
+    let radius = look.corner_radius.unwrap_or(0);
+    css.push_str(&format!(
+        "window.{WINDOW_CLASS}, window.{WINDOW_CLASS}.csd {{ border-radius: {radius}px; }}\n"
+    ));
     css
 }
 
@@ -94,7 +99,11 @@ fn look_css(look: &Look) -> String {
 /// Generated rather than read from a theme-supplied `<app>.css`: Omarchy only delivers those
 /// through its own per-app `omarchy-theme-set-<app>` hook (see `docs/`), so an app that is not on
 /// that hardcoded list must colour itself.
+///
+/// Every element's corners, the window's included, are Hyprland's rounding, and square without
+/// one (design plan §4.3).
 pub fn css_for(palette: &Palette, look: &Look) -> String {
+    let radius = look.corner_radius.unwrap_or(0);
     let bright_foreground = palette.bright_foreground.unwrap_or(palette.foreground);
     let mut css = format!(
         ".{ROOT_CLASS} {{\n  \
@@ -105,7 +114,7 @@ pub fn css_for(palette: &Palette, look: &Look) -> String {
          .{ROOT_CLASS} .nuncio-unread {{\n  \
            background-color: {accent};\n  \
            color: {background};\n  \
-           border-radius: 6px;\n  \
+           border-radius: {radius}px;\n  \
            padding: 0 6px;\n\
          }}\n\
          .{ROOT_CLASS} .nuncio-muted {{ color: {bright_foreground}; }}\n\
@@ -114,7 +123,7 @@ pub fn css_for(palette: &Palette, look: &Look) -> String {
          .{ROOT_CLASS} .nuncio-transcript {{ background-color: {background}; }}\n\
          .{ROOT_CLASS} .nuncio-bubble {{\n  \
            padding: 6px 10px;\n  \
-           border-radius: 12px;\n\
+           border-radius: {radius}px;\n\
          }}\n\
          .{ROOT_CLASS} .nuncio-bubble.nuncio-mine {{\n  \
            background-color: {accent};\n  \
@@ -145,7 +154,9 @@ pub fn css_for(palette: &Palette, look: &Look) -> String {
         accent = palette.accent.to_hex(),
         bright_foreground = bright_foreground.to_hex(),
         red = palette.red.to_hex(),
+        radius = radius,
     );
+    css.push_str(&style::layout_css(palette, radius));
     css.push_str(&look_css(look));
     css
 }
@@ -287,10 +298,14 @@ mod tests {
     }
 
     #[test]
-    fn without_a_font_or_a_rounding_libadwaita_keeps_its_own() {
+    fn without_a_font_libadwaita_keeps_its_own_and_without_a_rounding_the_window_is_square() {
         let css = css_for(&Palette::default(), &Look::default());
         assert!(!css.contains("font-family"), "{css}");
-        assert!(!css.contains(WINDOW_CLASS), "{css}");
+        let rule = css
+            .lines()
+            .find(|line| line.contains(&format!("window.{WINDOW_CLASS}")))
+            .expect("a window rule");
+        assert!(rule.contains("border-radius: 0px;"), "{rule}");
     }
 
     #[test]

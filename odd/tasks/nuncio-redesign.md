@@ -31,10 +31,11 @@ against `main`, each merged on its own with the six CI checks green. Runner: `ca
   while empty and focused), since it searches the open chat only. The chat list header gets a
   filter of the chats by name instead (task R8): typing narrows the listed chats; it is client-side,
   with no wire or daemon change.
-- **S8. Drafts (owner, L18: "si").** "New message" always opens the chat with an empty composer,
-  even when a draft was typed in another chat (a double Enter must never send another chat's
-  text to a new number). Next, task R9: the desktop keeps one draft per chat, so switching chats
-  (click, link, New message) never carries a draft to another chat and never loses one.
+- **S8. Drafts (owner, L18: "si"; widened in L20).** "New message" never shows another chat's
+  draft: a new number opens with an empty composer (a double Enter must never send another chat's
+  text to a new number), and an existing chat shows its own saved draft. Task R9: one draft per
+  chat, so switching chats (click, link, New message) never carries a draft to another chat and
+  never loses one. The model is shared, so this holds in both the desktop app and the TUI.
 
 ## Tasks
 
@@ -49,7 +50,7 @@ against `main`, each merged on its own with the six CI checks green. Runner: `ca
 | R6 | P6 polish and proof (folds into R4/R5 if small) | S1 | delegated (session backstop) | pending | |
 | R7 | "New message" in the rail (after R1) | S6 | delegated (session backstop) | done, Risk: item 6 (visual); verifier passed after the S8 fix | PR, see L19 |
 | R8 | Chat filter by name in the list header (after R4) | S7 | delegated (session backstop) | pending | |
-| R9 | One draft per chat in the desktop app (follow-up, high priority) | S8 | delegated (session backstop) | pending | |
+| R9 | One draft per chat in the desktop app (follow-up, high priority) | S8 | delegated (session backstop) | done, Risk: item 3 (shared model, TUI too); verifier passed | PR, see L20 |
 
 Route reason: this session resumed after a compaction, so the parent orchestrates and an Opus
 writer with a clean context writes each phase; an independent verifier checks each phase
@@ -146,3 +147,14 @@ writer with a clean context writes each phase; an independent verifier checks ea
 - **L19** (2026-10-23, R7): S8 fix: `new_message` empties the draft once the number is valid;
   RED smoke and unit tests reproduce the verifier's double Enter and now see no send; the
   mutation (no clear) fails both. Parent reran both tests.
+- **L20** (2026-10-23, R9): one draft per chat in the shared model (`drafts` by chat key plus a
+  loose draft; drafts follow a key rename and join on a merge). Independent verifier: PASS on
+  every S8 point, no blockers; differential against 680f35b shows the TUI also changed: at the
+  baseline j/k carried Ada's draft to Grace, so Enter could send it to the wrong chat. Accepted
+  as part of S8 (both clients) instead of TUI-only code that would bring that risk back; the TUI
+  README documents it. Also changed: a reply in progress now stays with its chat instead of being
+  cancelled on a chat switch (desktop README). Advisories kept as follow-ups: blank drafts are
+  kept per visited chat (no visible effect), a few README lines exceed 100 columns.
+- **L21** (2026-10-23): the GTK smoke test only runs on Omarchy; on the Mac every cargo test
+  runs with `GDK_BACKEND=broadway BROADWAY_DISPLAY=:99`, so it prints "smoke: skipped" (owner:
+  no windows or Spaces changes on the Mac). Run it on Omarchy before closing the redesign.

@@ -321,6 +321,7 @@ fn no_entry_sends_a_message_whatever_is_chosen() {
     assert!(every.iter().all(|e| !e.title.starts_with("Send")));
     for entry in every {
         let mut c = base.clone();
+        let typed_in = c.model().selected_jid().expect("a chat is open").to_owned();
         c.set_draft("a draft nobody sent");
         let commands = match run(&mut c, &entry.action) {
             Step::Opened(commands) | Step::Commands(commands) => commands,
@@ -333,6 +334,11 @@ fn no_entry_sends_a_message_whatever_is_chosen() {
             "{} sent: {commands:?}",
             entry.title
         );
+        // An entry that opens another chat shows that chat's own draft; the typed one stays
+        // with the chat it was typed in.
+        if c.model().selected_jid() != Some(typed_in.as_str()) {
+            c.open_jid(&typed_in);
+        }
         assert_eq!(
             c.model().composer().text(),
             "a draft nobody sent",

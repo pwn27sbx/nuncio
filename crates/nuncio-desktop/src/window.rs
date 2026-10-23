@@ -2794,7 +2794,8 @@ impl Ui {
             .borrow()
             .as_ref()
             .is_some_and(|view| view.conversation != conversation);
-        // A draft put there by the model (a link) is shown; a typed one is already there.
+        // A draft the model changed (another chat opened with its own draft, a link's text) is
+        // shown; a typed one is already there.
         let draft = controller
             .take_draft_changed()
             .then(|| controller.model().composer().text().to_owned());

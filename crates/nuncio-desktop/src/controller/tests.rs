@@ -363,13 +363,12 @@ fn a_draft_for_a_chat_that_was_merged_away_is_not_sent_until_a_chat_is_chosen() 
         Some(nuncio_client::model::MERGED_NOTICE)
     );
     assert_eq!(c.model().composer().text(), "for Ana", "the draft stays");
+    // Choosing Ben shows Ben's own draft: Ana's never goes to him (R9).
     c.open_chat(0);
-    let (sent_it, commands) = c.send();
-    assert!(sent_it);
-    assert_eq!(
-        commands,
-        [Command::Send(ClientFrame::send(BEN, "for Ana", "d-1"))]
-    );
+    assert_eq!(c.model().selected_jid(), Some(BEN));
+    assert_eq!(c.model().composer().text(), "");
+    assert!(c.take_draft_changed(), "the composer widget shows Ben's");
+    assert_eq!(c.send(), (false, Vec::new()), "nothing is sent to Ben");
 }
 
 #[test]
@@ -692,14 +691,19 @@ fn a_link_opens_the_chat_and_puts_its_text_in_the_composer_without_sending() {
 }
 
 #[test]
-fn a_link_without_text_keeps_the_draft_and_cancels_a_reply_to_another_chat() {
+fn a_link_without_text_shows_its_chats_own_draft_and_keeps_the_one_left() {
     let mut c = opened(vec![message("M1", "text")]);
     c.set_draft("typed");
     assert!(c.reply(0));
     c.open_link("whatsapp://send?phone=15551230002");
-    assert_eq!(c.model().composer().text(), "typed");
+    assert_eq!(c.model().selected_jid(), Some(BEN));
+    assert_eq!(c.model().composer().text(), "", "Ana's draft stays Ana's");
     assert_eq!(c.model().composer().reply_to(), None);
-    assert!(!c.take_draft_changed());
+    assert!(c.take_draft_changed(), "the composer widget shows Ben's");
+    c.open_chat(0);
+    assert_eq!(c.model().composer().text(), "typed");
+    assert_eq!(c.model().composer().reply_to(), Some("M1"));
+    assert!(c.take_draft_changed());
 }
 
 #[test]
@@ -845,7 +849,7 @@ fn an_invalid_number_opens_nothing_and_says_why_without_a_notice() {
 }
 
 #[test]
-fn a_new_message_always_opens_with_an_empty_composer_and_a_second_enter_sends_nothing() {
+fn a_new_message_opens_with_an_empty_composer_and_keeps_the_other_chats_draft() {
     let mut c = opened(vec![message("M1", "text")]);
     c.set_draft("meant for ana");
     assert_eq!(c.new_message("12"), Err(BAD_NUMBER));
@@ -866,4 +870,43 @@ fn a_new_message_always_opens_with_an_empty_composer_and_a_second_enter_sends_no
     let (sent_it, commands) = c.send();
     assert!(!sent_it, "a second Enter sends nothing");
     assert!(commands.is_empty());
+    // Ana's draft was never lost: it is back when her chat is.
+    c.open_chat(0);
+    assert_eq!(c.model().selected_jid(), Some(ANA));
+    assert_eq!(c.model().composer().text(), "meant for ana");
+    assert!(c.take_draft_changed());
+}
+
+#[test]
+fn a_new_message_to_a_chat_with_a_saved_draft_shows_that_draft() {
+    let mut c = connected(0);
+    c.open_chat(1);
+    c.set_draft("for ben");
+    c.open_chat(0);
+    c.set_draft("for ana");
+    c.new_message("1-555-123-0002").expect("Ben's number");
+    assert_eq!(c.model().selected_jid(), Some(BEN));
+    assert_eq!(c.model().composer().text(), "for ben", "never destroyed");
+    let (sent_it, commands) = c.send();
+    assert!(sent_it);
+    assert_eq!(
+        commands,
+        [Command::Send(ClientFrame::send(BEN, "for ben", "d-1"))]
+    );
+}
+
+#[test]
+fn switching_chats_shows_each_chats_own_draft_in_the_widget() {
+    let mut c = connected(0);
+    c.open_chat(0);
+    c.set_draft("for ana");
+    assert!(!c.take_draft_changed(), "a typed draft is already shown");
+    c.open_chat(1);
+    assert!(c.take_draft_changed());
+    assert_eq!(c.model().composer().text(), "");
+    c.set_draft("for ben");
+    c.open_chat(0);
+    assert!(c.take_draft_changed());
+    assert_eq!(c.model().composer().text(), "for ana");
+    assert!(!c.take_draft_changed(), "asked once");
 }

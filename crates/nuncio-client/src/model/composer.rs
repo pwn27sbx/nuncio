@@ -1,6 +1,7 @@
 //! The draft being written: its text (several lines allowed), a cursor that moves and deletes by
 //! grapheme, so an emoji sequence or an accented letter is one step, and the message it replies
-//! to. Sending it, and the rule that a draft never changes recipient, live in
+//! to. Each chat has its own composer, kept by [`Model`](super::Model) under the chat's JID.
+//! Sending it, and the rule that a draft never changes recipient, live in
 //! [`Model::send`](super::Model::send).
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -16,6 +17,13 @@ pub struct Composer {
 }
 
 impl Composer {
+    /// A composer with nothing written, for a chat that has no draft.
+    pub(crate) const EMPTY: Composer = Composer {
+        text: String::new(),
+        caret: 0,
+        reply_to: None,
+    };
+
     /// The draft.
     pub fn text(&self) -> &str {
         &self.text
@@ -113,6 +121,26 @@ impl Composer {
 
     pub(crate) fn take_reply_to(&mut self) -> Option<String> {
         self.reply_to.take()
+    }
+
+    /// Whether nothing is written and nothing quoted.
+    pub(crate) fn is_blank(&self) -> bool {
+        self.text.is_empty() && self.reply_to.is_none()
+    }
+
+    /// Fold `other`, the draft of a chat merged into this one, in: its text after this one's
+    /// (on a new line), so neither is lost, and its reply when this one quotes nothing.
+    pub(crate) fn absorb(&mut self, other: Composer) {
+        if self.text.is_empty() {
+            self.text = other.text;
+        } else if !other.text.is_empty() {
+            self.text.push('\n');
+            self.text.push_str(&other.text);
+        }
+        self.caret = self.text.len();
+        if self.reply_to.is_none() {
+            self.reply_to = other.reply_to;
+        }
     }
 }
 

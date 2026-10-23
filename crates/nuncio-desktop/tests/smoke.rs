@@ -647,6 +647,17 @@ fn the_rail_button_asks_for_a_number_and_opens_its_chat() {
             .any(|c| matches!(c, Command::Send(ClientFrame::Send { .. }))),
         &format!("a double Enter sends nothing: {after:?}"),
     );
+    // R9: Ana's draft was kept for Ana, not lost.
+    ui.open_chat(0);
+    check(
+        ui.controller().model().selected_jid() == Some(ANA),
+        "Ana's chat opens again",
+    );
+    check(
+        ui.draft() == "meant for ana",
+        &format!("and her draft is back: {:?}", ui.draft()),
+    );
+    ui.take_undelivered();
 
     // The palette's "New message…" opens the same dialog.
     check(ui.press("F1") && ui.palette_open(), "F1 opens the palette");
@@ -1090,7 +1101,17 @@ fn the_palette_opens_on_f1_and_jumps_to_a_chat() {
         ui.take_undelivered() == [Command::Send(ClientFrame::messages(BEN, 200))],
         "it asks for its messages and sends nothing",
     );
-    check(ui.draft() == "half a thought", "the draft stays unsent");
+    check(
+        ui.draft().is_empty(),
+        &format!("Ben shows his own draft, not Ana's: {:?}", ui.draft()),
+    );
+    ui.open_chat(0);
+    check(
+        ui.draft() == "half a thought",
+        "Ana's draft stays unsent, for Ana",
+    );
+    ui.open_chat(1);
+    ui.take_undelivered();
 
     check(
         ui.press("<Control>k") && ui.palette_open(),

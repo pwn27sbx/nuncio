@@ -2,8 +2,9 @@
 
 The GTK 4 + libadwaita client. It draws the shared view model (`nuncio_client::Model`: chat list,
 transcript, composer and their rules) and talks to `nunciod` with the shared driver rules
-(`nuncio_client::driver`), so it behaves as `nuncio-tui` does: one chat per contact, a draft never
-changes recipient, sends marked sending, queued, sent, not sent or not confirmed, a retry only when
+(`nuncio_client::driver`), so it behaves as `nuncio-tui` does: one chat per contact, one draft per
+chat (switching chats shows that chat's own draft and reply, and keeps the one left for its chat),
+a draft never changes recipient, sends marked sending, queued, sent, not sent or not confirmed, a retry only when
 you ask, read receipts only when you open a chat. A connection that dies silently still counts as
 linked for up to 3 minutes, until its keepalive fails, so a send in that window is marked not
 confirmed rather than queued.
@@ -75,8 +76,8 @@ window back. With `background = false`, closing the window quits.
 `whatsapp://send?phone=…&text=…`, `https://wa.me/<number>?text=…` or
 `https://api.whatsapp.com/send?phone=…&text=…` link (`nuncio_client::link`): the chat with that
 number opens (its merged chat for a contact the daemon knows by LID; an empty conversation for a
-number with no chat yet, which the first send creates), and the link's text replaces the draft in
-the composer. **A link never sends anything**: the message goes only when you press Enter. A group
+number with no chat yet, which the first send creates), and the link's text replaces that chat's
+draft in the composer; a link without text shows that chat's own draft, never another chat's. **A link never sends anything**: the message goes only when you press Enter. A group
 invite link (`https://chat.whatsapp.com/…`) says `group invite links are not supported yet`; any
 other link says why it was not opened. A link given at a cold start waits for the chat list.
 
@@ -87,9 +88,10 @@ message`; also `New message…` in the command palette, with no key), asks for a
 480 px dialog (design plan §6.8): the number field, then Cancel and Open chat bottom-right. Enter
 (or Open chat) opens that number's chat exactly as the link `whatsapp://send?phone=<number>` with
 no text does, through the same path (`Controller::new_message`): the chat opens, or an empty
-conversation for a number with no chat yet, with the focus in the composer. **New message always
-opens with an empty composer**: a draft typed in another chat is cleared first, so a double Enter
-never sends another chat's text to the new number. **It sends nothing**: the message goes only
+conversation for a number with no chat yet, with the focus in the composer. **New message never
+shows another chat's draft**: the composer shows that chat's own draft, empty for a new number, so
+a double Enter never sends another chat's text to the new number; a draft typed in another chat
+stays saved for that chat. A chat that already has a saved draft shows it. **It sends nothing**: the message goes only
 when you press Enter in the composer. The number follows the link's rules: `+`, spaces,
 dashes, dots and parentheses are ignored and 7 to 15 digits must remain; anything else (letters,
 too short, too long) keeps the dialog open with `the phone number is not 7 to 15 digits` and opens
@@ -127,8 +129,8 @@ headers. It lists what can be done now:
 Typing filters the list: the commands holding the typed letters in order, ignoring case and spaces
 (`bn` finds `Ben`). The first row, selected, is always a best match, and each group stays together
 under its header (the group holding the best match first). Up and Down choose, Enter runs, Escape
-or the × closes. The palette never sends a message: there is no send command, and a draft stays in
-the composer.
+or the × closes. The palette never sends a message: there is no send command, and a draft stays with
+its chat.
 
 ## Search
 

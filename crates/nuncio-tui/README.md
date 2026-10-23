@@ -37,7 +37,8 @@ names her LID chat is a second source. If a new chat list no longer has the sele
 nothing explains it, the TUI never moves a draft to another chat: in the conversation or the
 composer, or in the chat list with a draft written, it keeps the vanished chat selected (no chat
 highlighted), Enter sends nothing and the footer says `that chat was merged; choose it again before
-sending`, until the user chooses a chat again or the daemon names the chat it became. When the chat
+sending`, until the user chooses a chat again (which shows that chat's own draft; the vanished
+chat's draft is kept for it) or the daemon names the chat it became (and the draft follows it). When the chat
 it became is not in the list either (more chats than the list holds, or a number recycled after
 the merge), the vanished chat takes its LID JID and stays blocked the same way: the selection never
 falls to another chat in the list.
@@ -159,6 +160,9 @@ nuncio-tui [--image <png>]
   display changes: what is sent, quoted or reacted keeps the original text.
 
 ## Keys
+
+Each chat keeps its own draft: moving to another chat shows that chat's draft (empty if it has
+none), and coming back shows the one left there, intact. A send sends only the open chat's draft.
 
 Everything works from the keyboard. `?` shows these keys on screen, grouped the same way.
 

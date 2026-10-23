@@ -90,8 +90,9 @@ pub struct Controller {
     chats_loaded: bool,
     /// The chat (and the link's draft) waiting for the first chat list.
     waiting: Option<(String, Option<String>)>,
-    /// The draft was set here (a link), not typed: the composer widget must show it.
-    draft_changed: bool,
+    /// The draft the composer widget shows. When the model's draft differs (another chat
+    /// opened, which keeps its own draft, or a link's text), the widget must show the model's.
+    shown_draft: String,
     /// Pictures whose full file was asked for again ([`Controller::open_media`]), by chat and
     /// id: one that could not be shown may be decoded once more.
     picture_retries: Vec<(String, String)>,
@@ -145,7 +146,7 @@ impl Controller {
             alerts: Vec::new(),
             chats_loaded,
             waiting: None,
-            draft_changed: false,
+            shown_draft: String::new(),
             picture_retries: Vec::new(),
         }
     }
@@ -244,11 +245,9 @@ impl Controller {
         if index >= self.model.chat_list().chats().len() {
             return Vec::new();
         }
-        let other = self.model.chat_list().highlighted() != Some(index);
+        // Each chat keeps its own draft and reply ([`Model::composer`]): opening another chat
+        // shows its own, and the one left stays for its chat.
         self.model.select_chat(index);
-        if other {
-            self.model.composer_mut().cancel_reply();
-        }
         let frame = self.model.open_selected();
         self.withdraw_selected();
         send(frame)
@@ -263,7 +262,8 @@ impl Controller {
     }
 
     /// Open a `whatsapp:` / `wa.me` link ([`parse_link`]): its chat as [`Controller::open_jid`]
-    /// does, and its text, if any, in the composer in place of the draft. Nothing is ever sent:
+    /// does, and its text, if any, in that chat's composer in place of its draft (without text,
+    /// the chat shows its own draft, never another chat's). Nothing is ever sent:
     /// only the user's own send does. A group invite or an invalid link only says why.
     pub fn open_link(&mut self, link: &str) -> Vec<Command> {
         match parse_link(link) {
@@ -281,17 +281,13 @@ impl Controller {
     }
 
     /// "New message": open the chat of the phone number `written` as its link with no text does
-    /// ([`number_link`], then [`Controller::open_link`]), so nothing is ever sent, and always
-    /// with an empty composer (S8): a draft typed in another chat is cleared first, so a double
-    /// Enter can never send it to the new number. An invalid number opens nothing, clears
-    /// nothing and leaves no notice: the error ([`BAD_NUMBER`]) is for the dialog that asked,
-    /// which stays open.
+    /// ([`number_link`], then [`Controller::open_link`]), so nothing is ever sent. The composer
+    /// shows that chat's own draft (S8): empty for a new number, so a double Enter can never
+    /// send a draft typed in another chat, which stays saved for that chat. An invalid number
+    /// opens nothing and leaves no notice: the error ([`BAD_NUMBER`]) is for the dialog that
+    /// asked, which stays open.
     pub fn new_message(&mut self, written: &str) -> Result<Vec<Command>, &'static str> {
         let link = number_link(written)?;
-        if !self.model.composer().is_empty() {
-            self.model.composer_mut().set_text("");
-            self.draft_changed = true;
-        }
         Ok(self.open_link(&link))
     }
 
@@ -305,14 +301,9 @@ impl Controller {
     }
 
     fn open_now(&mut self, jid: &str, draft: Option<String>) -> Vec<Command> {
-        let before = self.model.selected_jid().map(str::to_owned);
         let frame = self.model.open_jid(jid);
-        if self.model.selected_jid() != before.as_deref() {
-            self.model.composer_mut().cancel_reply();
-        }
         if let Some(draft) = draft {
             self.model.composer_mut().set_text(&draft);
-            self.draft_changed = true;
         }
         self.withdraw_selected();
         send(frame)
@@ -323,9 +314,16 @@ impl Controller {
         std::mem::take(&mut self.alerts)
     }
 
-    /// Whether the draft was replaced here (a link) since the last call.
+    /// Whether the model's draft differs from the one the composer widget shows (another chat
+    /// opened with its own draft, or a link's text): the widget must show the model's. Once
+    /// asked, the widget is taken to show it.
     pub fn take_draft_changed(&mut self) -> bool {
-        std::mem::take(&mut self.draft_changed)
+        let draft = self.model.composer().text();
+        if self.shown_draft == draft {
+            return false;
+        }
+        draft.clone_into(&mut self.shown_draft);
+        true
     }
 
     /// The notification an event deserves ([`notification_for`], seen from what the window shows
@@ -378,6 +376,7 @@ impl Controller {
 
     /// The composer's text widget changed: the draft is now `text`.
     pub fn set_draft(&mut self, text: &str) {
+        text.clone_into(&mut self.shown_draft);
         if self.model.composer().text() != text {
             self.model.composer_mut().set_text(text);
         }
@@ -386,6 +385,9 @@ impl Controller {
     /// Send the draft (see [`Model::send`]); `true` when it was sent, so the text widget empties.
     pub fn send(&mut self) -> (bool, Vec<Command>) {
         let frame = self.model.send();
+        if frame.is_some() {
+            self.shown_draft.clear();
+        }
         (frame.is_some(), send(frame))
     }
 

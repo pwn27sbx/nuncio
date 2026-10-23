@@ -475,3 +475,119 @@ fn a_stored_not_sent_send_is_retried_and_a_sent_or_received_one_is_not() {
     assert_eq!(m.retry_selected(), Some(ClientFrame::retry("tui-9")));
     assert_eq!(m.retry_selected(), None, "one attempt in flight at a time");
 }
+
+// R9 (S8): each chat keeps its own draft and its own reply in progress.
+#[test]
+fn each_chat_keeps_its_own_draft_and_sending_empties_only_the_open_one() {
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), chat(BEN, "Ben", 0)]);
+    type_draft(&mut m, "meant for ana");
+    m.select_chat(1);
+    assert_eq!(m.selected_jid(), Some(BEN));
+    assert_eq!(
+        m.composer().text(),
+        "",
+        "Ana's draft never shows in Ben's chat"
+    );
+    type_draft(&mut m, "for ben");
+    m.select_chat(0);
+    assert_eq!(m.composer().text(), "meant for ana");
+    assert_eq!(m.composer().caret(), "meant for ana".len());
+    m.select_chat(1);
+    assert_eq!(m.composer().text(), "for ben");
+    assert_eq!(
+        m.send(),
+        Some(ClientFrame::send(BEN, "for ben", "t-1")),
+        "only the open chat's draft is sent"
+    );
+    assert!(m.composer().is_empty());
+    m.select_chat(0);
+    assert_eq!(
+        m.composer().text(),
+        "meant for ana",
+        "Ana's draft is untouched"
+    );
+}
+
+#[test]
+fn opening_a_chat_from_outside_the_list_shows_its_own_draft() {
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), chat(BEN, "Ben", 0)]);
+    type_draft(&mut m, "meant for ana");
+    m.open_jid("15550009999@s.whatsapp.net");
+    assert_eq!(m.composer().text(), "", "a new chat starts empty");
+    m.open_jid(ANA_PN);
+    assert_eq!(m.composer().text(), "meant for ana");
+}
+
+#[test]
+fn each_chat_keeps_its_own_reply_in_progress() {
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), chat(BEN, "Ben", 0)]);
+    m.open_selected();
+    m.apply(&messages_frame(ANA_PN, vec![message("M1", false)]));
+    assert!(m.select_message(0));
+    assert!(m.reply_to_selected());
+    type_draft(&mut m, "yes");
+    m.select_chat(1);
+    assert_eq!(m.composer().reply_to(), None, "Ben's draft quotes nothing");
+    m.select_chat(0);
+    assert_eq!(m.composer().reply_to(), Some("M1"));
+    assert_eq!(
+        m.send(),
+        Some(ClientFrame::send_reply(ANA_PN, "yes", "t-1", "M1"))
+    );
+}
+
+#[test]
+fn a_draft_follows_its_chat_when_the_chat_is_renamed_to_its_lid() {
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), chat(BEN, "Ben", 0)]);
+    type_draft(&mut m, "meant for ana");
+    m.select_chat(1);
+    let mut ana = chat(ANA_LID, "Ana", 0);
+    ana.aliases = vec![ANA_PN.to_owned()];
+    m.apply(&chats_frame(vec![ana, chat(BEN, "Ben", 0)]));
+    assert_eq!(m.selected_jid(), Some(BEN));
+    assert_eq!(m.composer().text(), "");
+    m.open_jid(ANA_LID);
+    assert_eq!(
+        m.composer().text(),
+        "meant for ana",
+        "the draft moved with Ana"
+    );
+}
+
+#[test]
+fn a_draft_merged_into_a_chat_with_its_own_draft_keeps_both_texts() {
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), chat(ANA_LID, "Ana", 0)]);
+    type_draft(&mut m, "one");
+    m.select_chat(1);
+    type_draft(&mut m, "two");
+    m.adopt(ANA_PN, ANA_LID);
+    assert_eq!(m.selected_jid(), Some(ANA_LID));
+    assert_eq!(
+        m.composer().text(),
+        "two\none",
+        "no draft is lost in a merge"
+    );
+}
+
+#[test]
+fn choosing_another_chat_after_a_merge_never_carries_the_vanished_draft_there() {
+    let mut m = model(vec![chat(ANA_PN, "Ana", 0), chat(BEN, "Ben", 0)]);
+    m.set_open(true);
+    type_draft(&mut m, "for Ana only");
+    m.apply(&chats_frame(vec![chat(BEN, "Ben", 0)]));
+    assert_eq!(
+        m.composer().text(),
+        "for Ana only",
+        "the vanished chat keeps it"
+    );
+    m.select_chat(0);
+    assert_eq!(m.selected_jid(), Some(BEN));
+    assert_eq!(m.composer().text(), "");
+    assert_eq!(m.send(), None, "nothing is sent to Ben");
+    // The daemon later names the chat Ana's number became: her draft is there.
+    let mut ana = chat(ANA_LID, "Ana", 0);
+    ana.aliases = vec![ANA_PN.to_owned()];
+    m.apply(&chats_frame(vec![ana, chat(BEN, "Ben", 0)]));
+    m.open_jid(ANA_LID);
+    assert_eq!(m.composer().text(), "for Ana only");
+}

@@ -2639,3 +2639,54 @@ fn a_reacted_reply_to_my_own_react_adopts_the_lid_chat() {
     assert_eq!(chat_jids(&a), vec![ADA_LID.to_owned()]);
     assert!(render(&mut a, 80, 24).conversation().contains("👍"));
 }
+
+// R9 (S8): each chat keeps its own draft; switching chats never carries one to another chat and
+// never loses one.
+#[test]
+fn switching_chats_keeps_each_chats_own_draft() {
+    let mut a = app_with(vec![chat(ADA, "Ada", 0), chat(GRACE, "Grace", 0)]);
+    a.handle_key(key(KeyCode::Enter));
+    assert_eq!(a.pane(), Pane::Compose);
+    type_text(&mut a, "meant for ada");
+    a.handle_key(key(KeyCode::Esc));
+    a.handle_key(key(KeyCode::Tab));
+    assert_eq!(a.pane(), Pane::Chats);
+    a.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(a.selected_jid(), Some(GRACE));
+    assert_eq!(a.composer(), "", "Ada's draft never shows in Grace's chat");
+    a.handle_key(key(KeyCode::Enter));
+    assert_eq!(
+        a.handle_key(key(KeyCode::Enter)),
+        None,
+        "Enter in Grace's empty composer sends nothing"
+    );
+    type_text(&mut a, "for grace");
+    a.handle_key(key(KeyCode::Esc));
+    a.handle_key(key(KeyCode::Tab));
+    a.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(a.selected_jid(), Some(ADA));
+    assert_eq!(a.composer(), "meant for ada", "Ada's draft is back");
+    assert!(
+        render(&mut a, 80, 24).text().contains("meant for ada"),
+        "and drawn in her composer"
+    );
+    a.handle_key(key(KeyCode::Char('j')));
+    a.handle_key(key(KeyCode::Enter));
+    let sent = a.handle_key(key(KeyCode::Enter));
+    assert!(
+        matches!(&sent, Some(Action::Request(ClientFrame::Send { jid, text, .. }))
+            if jid == GRACE && text == "for grace"),
+        "{sent:?}"
+    );
+    assert_eq!(a.composer(), "");
+    // A send leaves the composer for the conversation; Esc goes back to the chat list.
+    a.handle_key(key(KeyCode::Esc));
+    assert_eq!(a.pane(), Pane::Chats);
+    a.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(a.selected_jid(), Some(ADA));
+    assert_eq!(
+        a.composer(),
+        "meant for ada",
+        "a send in Grace's chat left Ada's"
+    );
+}

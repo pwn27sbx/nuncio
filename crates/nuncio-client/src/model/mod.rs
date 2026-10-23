@@ -8,10 +8,12 @@
 //!   flight, and [`chat_title`].
 //! - [`Transcript`]: the loaded conversations, my sends and their marks (sending, queued, not
 //!   sent, not confirmed), reactions, quotes, the selected message, downloads and the search.
-//! - [`Composer`]: the draft, edited by grapheme, and the message it replies to.
+//! - [`Composer`]: the draft, edited by grapheme, and the message it replies to; each chat has
+//!   its own, so switching chats never carries a draft to another chat and never loses one.
 //!
 //! The rules that span them live on [`Model`]: a draft never changes recipient (a chat that
-//! vanished keeps the draft and blocks the send until the user chooses a chat), a reply is paired
+//! vanished keeps its draft and blocks the send; choosing another chat shows that chat's own
+//! draft, and the vanished one's follows it to the chat it became), a reply is paired
 //! with the request it answers before a chat is adopted, and a resync after a reconnect keeps the
 //! selection and the sends the daemon never stored.
 
@@ -19,6 +21,7 @@ mod chats;
 mod composer;
 mod transcript;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub(crate) use chats::title_from_jid;
@@ -76,12 +79,18 @@ impl Download {
     }
 }
 
+/// The draft of a chat that has none.
+static NO_DRAFT: Composer = Composer::EMPTY;
+
 /// Everything a client shows, changed only through its methods (see the module docs).
 #[derive(Debug, Clone)]
 pub struct Model {
     chats: ChatList,
     transcript: Transcript,
-    composer: Composer,
+    /// Each chat's draft, by JID; [`Model::composer`] is the selected chat's.
+    drafts: HashMap<String, Composer>,
+    /// The draft written while no chat is selected (an empty chat list).
+    loose: Composer,
     status: Status,
     /// A one-line notice for the user (an error from the daemon, a merged chat).
     notice: Option<String>,
@@ -112,7 +121,8 @@ impl Model {
         let mut model = Self {
             chats: ChatList::default(),
             transcript: Transcript::default(),
-            composer: Composer::default(),
+            drafts: HashMap::new(),
+            loose: Composer::default(),
             status: Status {
                 daemon,
                 linked,
@@ -146,13 +156,20 @@ impl Model {
         &self.transcript
     }
 
+    /// The selected chat's draft (each chat keeps its own; empty for a chat with none).
     pub fn composer(&self) -> &Composer {
-        &self.composer
+        match self.chats.selected_jid() {
+            Some(jid) => self.drafts.get(jid).unwrap_or(&NO_DRAFT),
+            None => &self.loose,
+        }
     }
 
-    /// The draft, to edit. Sending it is [`Model::send`].
+    /// The selected chat's draft, to edit. Sending it is [`Model::send`].
     pub fn composer_mut(&mut self) -> &mut Composer {
-        &mut self.composer
+        match self.chats.selected_jid() {
+            Some(jid) => self.drafts.entry(jid.to_owned()).or_default(),
+            None => &mut self.loose,
+        }
     }
 
     pub fn status(&self) -> &Status {
@@ -272,10 +289,11 @@ impl Model {
     /// (the daemon merged it into its LID chat), the selection follows it to the chat an alias or
     /// a reply named; otherwise, while its conversation is open or with a draft written, it stays
     /// on the vanished chat (`orphan`), with the draft intact, and nothing is sent until the user
-    /// chooses a chat again: a draft never changes recipient.
+    /// chooses a chat again, which shows that chat's own draft: a draft never changes recipient.
     fn set_chats(&mut self, mut chats: Vec<Chat>) {
         self.adopt_listed(&chats);
         self.keep_pending(&mut chats);
+        let drafted = !self.composer().is_empty();
         let selected = self.chats.selected_jid().map(str::to_owned);
         let previous = self.chats.selected_chat().cloned();
         self.chats.orphan = None;
@@ -295,7 +313,7 @@ impl Model {
                     kept = Some(index);
                 }
                 // A draft never changes recipient, even from the chat list.
-                None if self.open || !self.composer.is_empty() => {
+                None if self.open || drafted => {
                     self.chats.orphan = previous;
                     self.notice = Some(MERGED_NOTICE.to_owned());
                     return;
@@ -363,6 +381,7 @@ impl Model {
             || self.chats.marking.contains(jid)
             || self.transcript.opening.as_deref() == Some(jid)
             || self.transcript.resyncing.as_deref() == Some(jid)
+            || self.drafts.get(jid).is_some_and(|draft| !draft.is_blank())
     }
 
     /// The daemon answered a request about the phone-number chat `alias` with its own reply naming
@@ -452,6 +471,12 @@ impl Model {
 
     /// Move everything keyed by the chat `alias` to `canonical`.
     fn rename_keys(&mut self, alias: &str, canonical: &str) {
+        if let Some(draft) = self.drafts.remove(alias) {
+            self.drafts
+                .entry(canonical.to_owned())
+                .or_default()
+                .absorb(draft);
+        }
         self.transcript.rename_chat(alias, canonical);
         self.chats.rename_marking(alias, canonical);
     }
@@ -575,7 +600,7 @@ impl Model {
     pub fn reply_to_selected(&mut self) -> bool {
         match self.target_id("replied to") {
             Some(id) => {
-                self.composer.set_reply_to(id);
+                self.composer_mut().set_reply_to(id);
                 true
             }
             None => false,
@@ -768,7 +793,7 @@ impl Model {
     /// or while the selected chat vanished: the draft stays and the notice asks to choose the
     /// chat again.
     pub fn send(&mut self) -> Option<ClientFrame> {
-        if self.composer.text().trim().is_empty() {
+        if self.composer().text().trim().is_empty() {
             return None;
         }
         if self.chats.orphan.is_some() {
@@ -776,11 +801,11 @@ impl Model {
             return None;
         }
         let jid = self.chats.selected_jid()?.to_owned();
-        let text = self.composer.take();
+        let text = self.composer_mut().take();
         self.sends += 1;
         let client_id = format!("{}-{}", self.client_prefix, self.sends);
         self.transcript.sending.insert(client_id.clone());
-        let reply_to = self.composer.take_reply_to();
+        let reply_to = self.composer_mut().take_reply_to();
         self.transcript
             .conversations
             .entry(jid.clone())

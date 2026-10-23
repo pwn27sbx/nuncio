@@ -46,7 +46,7 @@ against `main`, each merged on its own with the six CI checks green. Runner: `ca
 | R2 | P2 chat list and transcript | S1, S5 | delegated (session backstop) | done, Risk: item 6 (visual, checked on Omarchy) | PR, see L12 |
 | R3 | P3 composer | S1, S3, S5 | delegated (session backstop) | done, Risk: item 6 (visual); inline checks, no verifier (plan: low-medium; send path unchanged) | PR, see L13 |
 | R4 | P4 palette, search, settings, dialogs | S1, S5 | delegated (session backstop) | done, Risk: item 6 (visual); verifier passed | PR, see L16 |
-| R5 | P5 TUI parity | S1, S5 | delegated (session backstop) | pending | |
+| R5 | P5 TUI parity | S1, S5 | delegated (session backstop) | done, Risk: item 6 (visual) | PR #9, merged `02e0060` |
 | R6 | P6 polish and proof (folds into R4/R5 if small) | S1 | delegated (session backstop) | done, Risk: item 6 (window wiring and visuals only on Omarchy); verifier passed | PR, see L24 |
 | R7 | "New message" in the rail (after R1) | S6 | delegated (session backstop) | done, Risk: item 6 (visual); verifier passed after the S8 fix | PR, see L19 |
 | R8 | Chat filter by name in the list header (after R4) | S7 | delegated (session backstop) | done, Risk: item 6 (window wiring only runs on Omarchy); verifier passed | PR, see L22 |
@@ -179,3 +179,5 @@ writer with a clean context writes each phase; an independent verifier checks ea
   the composer height change is not animated (§4.4 allows it); focus after Escape closes the
   message search still goes nowhere (plan silent). Remaining: the On Omarchy checklist, F1–F8.
 - **L25** (2026-10-23): PRs #11 (R9) and #12 (R8) merged on green.
+- **L26** (2026-10-23): PR #13 (R6) merged on green; the redesign is complete on `main`. Report and
+  on-screen checks for the home machine: `odd/handoff-redesign-omarchy.md`.

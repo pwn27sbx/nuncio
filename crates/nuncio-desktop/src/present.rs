@@ -176,6 +176,29 @@ pub struct ComposerView {
     pub replying: Option<String>,
     /// Why nothing can be sent now (the open chat vanished: it was merged).
     pub blocked: Option<String>,
+    /// The Send button, beside the draft.
+    pub send: SendButton,
+}
+
+/// The composer's Send button (plan §6.4): shown only when there is text to send, so a screen
+/// never has two filled buttons, and saying `Sending…`, not pressable, while a send of the open
+/// chat waits for the daemon and nothing new is typed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendButton {
+    Hidden,
+    Send,
+    Sending,
+}
+
+impl SendButton {
+    /// The button's label, when it is shown.
+    pub fn label(self) -> Option<&'static str> {
+        match self {
+            Self::Hidden => None,
+            Self::Send => Some("Send"),
+            Self::Sending => Some("Sending…"),
+        }
+    }
 }
 
 /// The in-chat search's results.
@@ -848,7 +871,23 @@ pub fn composer_view(model: &Model) -> ComposerView {
             None => "Replying to a message".to_owned(),
         });
     let blocked = model.chat_list().orphan().map(|_| MERGED_NOTICE.to_owned());
-    ComposerView { replying, blocked }
+    // A blank draft sends nothing ([`Model::send`]), so it gets no button either.
+    let send = if !model.composer().text().trim().is_empty() {
+        SendButton::Send
+    } else if model
+        .loaded()
+        .iter()
+        .any(|message| model.transcript().is_sending(message))
+    {
+        SendButton::Sending
+    } else {
+        SendButton::Hidden
+    };
+    ComposerView {
+        replying,
+        blocked,
+        send,
+    }
 }
 
 /// The search's results as one line each (`HH:MM  text`), while the search is open.

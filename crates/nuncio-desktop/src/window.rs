@@ -19,8 +19,8 @@
 //!   Shift+O opens it with the desktop's opener, Enter shows a picture in full (on any other
 //!   message it opens the menu), Menu or Shift+F10 opens the message's menu, Escape goes to the
 //!   composer (on a window narrow enough for one pane, back to the list);
-//! - composer: Enter sends, Shift+Enter starts a new line, Escape cancels the reply, else goes to
-//!   the last message;
+//! - composer: Enter (or Ctrl+Enter) sends, Alt+Enter (or Shift+Enter) starts a new line, Escape
+//!   cancels the reply, else goes to the last message;
 //! - Ctrl+F searches the open chat; Escape closes the search; Ctrl+Q quits (the app's
 //!   `app.quit`, also in the menu);
 //! - F1 or Ctrl+K opens the command palette ([`crate::palette`]): type to filter, Up/Down choose,
@@ -128,6 +128,8 @@ struct Inner {
     reply_bar: gtk::Box,
     reply_label: gtk::Label,
     composer: gtk::TextView,
+    composer_scroll: gtk::ScrolledWindow,
+    send_button: gtk::Button,
     /// What is drawn now, to change only what changed.
     /// The chat rows drawn, each with its position in the model's chat list.
     shown_chats: RefCell<Vec<(usize, ChatRow)>>,
@@ -490,57 +492,59 @@ impl Ui {
             .build();
 
         let blocked = adw::Banner::new("");
+        // The composer (plan §6.4): a bar docked under the transcript, a 1 px line above it that
+        // turns accent while the composer has the focus. A reply strip above the field, the
+        // field growing to six lines, and Send at the right only while there is text.
         let reply_label = gtk::Label::builder()
             .xalign(0.0)
             .hexpand(true)
             .ellipsize(gtk::pango::EllipsizeMode::End)
             .build();
-        reply_label.add_css_class("nuncio-quote");
+        reply_label.add_css_class("nuncio-reply-quote");
         let cancel_reply = gtk::Button::builder()
             .icon_name("window-close-symbolic")
             .tooltip_text("Cancel the reply (Escape)")
+            .valign(gtk::Align::Center)
             .build();
         cancel_reply.add_css_class("flat");
+        cancel_reply.add_css_class("nuncio-icon-button");
         cancel_reply.update_property(&[Property::Label("Cancel the reply")]);
-        let reply_bar = gtk::Box::new(gtk::Orientation::Horizontal, 6);
+        let reply_bar = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        reply_bar.add_css_class("nuncio-reply-strip");
         reply_bar.append(&reply_label);
         reply_bar.append(&cancel_reply);
         reply_bar.set_visible(false);
-        reply_bar.set_margin_start(12);
-        reply_bar.set_margin_end(6);
 
         let composer = gtk::TextView::builder()
             .wrap_mode(gtk::WrapMode::WordChar)
             .accepts_tab(false)
-            .top_margin(8)
-            .bottom_margin(8)
-            .left_margin(10)
-            .right_margin(10)
+            .top_margin(style::COMPOSER_PAD)
+            .bottom_margin(style::COMPOSER_PAD)
+            .left_margin(8)
+            .right_margin(8)
             .build();
-        composer.add_css_class("nuncio-composer");
         composer.update_property(&[Property::Label("Message")]);
         let composer_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(true)
-            .max_content_height(160)
+            .max_content_height(style::composer_max_height(0))
             .hexpand(true)
+            .valign(gtk::Align::Center)
             .child(&composer)
             .build();
         let send_button = gtk::Button::builder()
             .label("Send")
-            .tooltip_text("Send (Enter; Shift+Enter starts a new line)")
-            .valign(gtk::Align::End)
+            .tooltip_text(SEND_TOOLTIP)
+            .valign(gtk::Align::Center)
+            .visible(false)
             .build();
-        send_button.add_css_class("suggested-action");
-        let composer_row = gtk::Box::new(gtk::Orientation::Horizontal, 6);
-        composer_row.set_margin_start(6);
-        composer_row.set_margin_end(6);
-        composer_row.set_margin_top(6);
-        composer_row.set_margin_bottom(6);
+        send_button.add_css_class("nuncio-send");
+        let composer_row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        composer_row.add_css_class("nuncio-composer-row");
         composer_row.append(&composer_scroll);
         composer_row.append(&send_button);
         let bottom = gtk::Box::new(gtk::Orientation::Vertical, 0);
-        bottom.append(&blocked);
+        bottom.add_css_class("nuncio-composer");
         bottom.append(&reply_bar);
         bottom.append(&composer_row);
 
@@ -554,6 +558,7 @@ impl Ui {
         content_view.add_top_bar(&strip);
         content_view.add_top_bar(&search_bar);
         content_view.set_content(Some(&content));
+        content_view.add_bottom_bar(&blocked);
         content_view.add_bottom_bar(&bottom);
 
         // A draggable seam between each two panes, drawn as a 1 px line; the panes fill the
@@ -621,6 +626,8 @@ impl Ui {
             reply_bar,
             reply_label,
             composer,
+            composer_scroll,
+            send_button: send_button.clone(),
             shown_chats: RefCell::new(Vec::new()),
             shown_bubbles: RefCell::new(Vec::new()),
             shown_results: RefCell::new(Vec::new()),
@@ -1583,14 +1590,12 @@ impl Ui {
         let keys = gtk::EventControllerKey::new();
         keys.set_propagation_phase(gtk::PropagationPhase::Capture);
         keys.connect_key_pressed({
-            let f = self.with(|ui, (key, state): (gdk::Key, gdk::ModifierType)| {
-                ui.composer_key(key, state)
-            });
+            let weak = self.weak();
             move |_, key, _, state| {
-                if is_enter(key) && !state.contains(gdk::ModifierType::SHIFT_MASK)
-                    || key == gdk::Key::Escape
-                {
-                    f((key, state));
+                let handled = weak
+                    .upgrade()
+                    .is_some_and(|inner| Ui(inner).composer_press(key, state));
+                if handled {
                     glib::Propagation::Stop
                 } else {
                     glib::Propagation::Proceed
@@ -1720,27 +1725,74 @@ impl Ui {
         }
     }
 
-    fn composer_key(&self, key: gdk::Key, _state: gdk::ModifierType) {
-        if key == gdk::Key::Escape {
-            let replying = self
-                .0
-                .controller
-                .borrow()
-                .model()
-                .composer()
-                .reply_to()
-                .is_some();
-            if replying {
-                self.0.controller.borrow_mut().cancel_reply();
-                self.render();
-            } else if let Some(row) = last_row(&self.0.transcript) {
-                row.grab_focus();
-            } else {
-                self.go_back();
+    /// A key pressed in the composer, as pressing it there does: true when the composer acted on
+    /// it (Enter and Ctrl+Enter send, Alt+Enter or Shift+Enter start a line, Escape cancels the
+    /// reply or leaves), false when GTK's text view takes it.
+    pub fn composer_press(&self, key: gdk::Key, state: gdk::ModifierType) -> bool {
+        let Some(action) = composer_key_action(key, state) else {
+            return false;
+        };
+        match action {
+            ComposerKey::Send => self.send(),
+            ComposerKey::Newline => self.0.composer.buffer().insert_at_cursor("\n"),
+            ComposerKey::Escape => {
+                let replying = self
+                    .0
+                    .controller
+                    .borrow()
+                    .model()
+                    .composer()
+                    .reply_to()
+                    .is_some();
+                if replying {
+                    self.0.controller.borrow_mut().cancel_reply();
+                    self.render();
+                } else if let Some(row) = last_row(&self.0.transcript) {
+                    row.grab_focus();
+                } else {
+                    self.go_back();
+                }
             }
-        } else {
-            self.send();
         }
+        true
+    }
+
+    /// The Send button's label and whether it can be pressed, or `None` while it is hidden
+    /// (tests).
+    pub fn send_button(&self) -> Option<(String, bool)> {
+        let button = &self.0.send_button;
+        button.get_visible().then(|| {
+            (
+                button.label().unwrap_or_default().to_string(),
+                button.get_sensitive(),
+            )
+        })
+    }
+
+    /// The Send button's tooltip (tests).
+    pub fn send_tooltip(&self) -> String {
+        self.0
+            .send_button
+            .tooltip_text()
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// The reply strip's quoted message, while it is shown (tests).
+    pub fn reply_strip(&self) -> Option<String> {
+        self.0
+            .reply_bar
+            .get_visible()
+            .then(|| self.0.reply_label.text().to_string())
+    }
+
+    /// The composer field's tallest height and the height of one of its lines, in pixels
+    /// (tests).
+    pub fn composer_height_cap(&self) -> (i32, i32) {
+        (
+            self.0.composer_scroll.max_content_height(),
+            composer_line_height(&self.0.composer),
+        )
     }
 
     /// The focused message's position in the conversation.
@@ -2129,6 +2181,21 @@ impl Ui {
             composer.replying.as_deref().unwrap_or_default(),
         )]);
         inner
+            .send_button
+            .set_visible(composer.send.label().is_some());
+        if let Some(label) = composer.send.label() {
+            inner.send_button.set_label(label);
+        }
+        inner
+            .send_button
+            .set_sensitive(composer.send == present::SendButton::Send);
+        // Six lines of the font in use, then the field scrolls; measured here, so a font switch
+        // is followed on the next render.
+        let cap = style::composer_max_height(composer_line_height(&inner.composer));
+        if inner.composer_scroll.max_content_height() != cap {
+            inner.composer_scroll.set_max_content_height(cap);
+        }
+        inner
             .blocked
             .set_title(composer.blocked.as_deref().unwrap_or_default());
         inner.blocked.set_revealed(composer.blocked.is_some());
@@ -2418,6 +2485,36 @@ fn seam(start: &impl IsA<gtk::Widget>, end: &impl IsA<gtk::Widget>, width: i32) 
         .build();
     paned.set_wide_handle(false);
     paned
+}
+
+/// The Send button's tooltip: its keys (plan §7).
+const SEND_TOOLTIP: &str = "Send (Enter; Alt+Enter starts a new line)";
+
+/// What a key does in the composer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComposerKey {
+    Send,
+    Newline,
+    Escape,
+}
+
+/// The composer's keys (plan §7): Enter sends and Ctrl+Enter too, Alt+Enter starts a new line
+/// (Shift+Enter as well, as before), Escape cancels the reply; any other key is the text view's.
+fn composer_key_action(key: gdk::Key, state: gdk::ModifierType) -> Option<ComposerKey> {
+    if key == gdk::Key::Escape {
+        Some(ComposerKey::Escape)
+    } else if !is_enter(key) {
+        None
+    } else if state.intersects(gdk::ModifierType::ALT_MASK | gdk::ModifierType::SHIFT_MASK) {
+        Some(ComposerKey::Newline)
+    } else {
+        Some(ComposerKey::Send)
+    }
+}
+
+/// The height of one line of the composer's font, in pixels.
+fn composer_line_height(composer: &gtk::TextView) -> i32 {
+    composer.create_pango_layout(Some("X")).pixel_size().1
 }
 
 fn is_enter(key: gdk::Key) -> bool {
@@ -3053,4 +3150,38 @@ fn find_picture(widget: &gtk::Widget) -> Option<gtk::Picture> {
         child = current.next_sibling();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ComposerKey, composer_key_action};
+    use gtk::gdk::{Key, ModifierType};
+
+    #[test]
+    fn enter_and_ctrl_enter_send_alt_enter_starts_a_line_escape_cancels() {
+        let none = ModifierType::empty();
+        for enter in [Key::Return, Key::KP_Enter, Key::ISO_Enter] {
+            assert_eq!(composer_key_action(enter, none), Some(ComposerKey::Send));
+            assert_eq!(
+                composer_key_action(enter, ModifierType::CONTROL_MASK),
+                Some(ComposerKey::Send),
+                "Ctrl+Enter is an alias"
+            );
+            assert_eq!(
+                composer_key_action(enter, ModifierType::ALT_MASK),
+                Some(ComposerKey::Newline)
+            );
+            assert_eq!(
+                composer_key_action(enter, ModifierType::SHIFT_MASK),
+                Some(ComposerKey::Newline),
+                "Shift+Enter still starts a line"
+            );
+        }
+        assert_eq!(
+            composer_key_action(Key::Escape, none),
+            Some(ComposerKey::Escape)
+        );
+        assert_eq!(composer_key_action(Key::a, none), None, "typing is GTK's");
+        assert_eq!(composer_key_action(Key::Tab, none), None);
+    }
 }

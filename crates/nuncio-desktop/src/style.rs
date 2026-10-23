@@ -17,6 +17,19 @@ pub const RAIL_COMPACT_WIDTH: i32 = 48;
 pub const LIST_WIDTH: i32 = 360;
 /// The height of a pane header.
 pub const HEADER_HEIGHT: u32 = 44;
+/// The composer bar's height with one line (plan §4.3).
+pub const COMPOSER_MIN_HEIGHT: u32 = 48;
+/// The composer grows to this many lines, then scrolls (plan §6.4).
+pub const COMPOSER_LINES: i32 = 6;
+/// The padding above and below the composer's text, inside its field.
+pub const COMPOSER_PAD: i32 = 8;
+
+/// The composer field's tallest height for a font whose lines are `line` pixels tall: six lines
+/// and the padding; past that the field scrolls.
+pub fn composer_max_height(line: i32) -> i32 {
+    COMPOSER_LINES * line.max(1) + 2 * COMPOSER_PAD
+}
+
 /// From this tile width up, three panes.
 pub const THREE_PANES_FROM: i32 = 1100;
 /// From this tile width up (and below [`THREE_PANES_FROM`]), the rail is an icon strip; below it,
@@ -123,6 +136,44 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
            min-height: 6px;\n  \
            background-color: {accent};\n\
          }}\n\
+         .{root} .nuncio-composer {{\n  \
+           min-height: {composer}px;\n  \
+           background-color: {surface};\n  \
+           border-top: 1px solid {border};\n  \
+           box-shadow: none;\n\
+         }}\n\
+         .{root} .nuncio-composer:focus-within {{ border-top-color: {accent}; }}\n\
+         .{root} .nuncio-composer-row {{ padding: 0 12px 0 4px; }}\n\
+         .{root} .nuncio-composer textview,\n\
+         .{root} .nuncio-composer textview > text {{\n  \
+           background-color: transparent;\n  \
+           color: {text};\n  \
+           font-size: 13px;\n\
+         }}\n\
+         .{root} button.nuncio-send {{\n  \
+           min-height: 32px;\n  \
+           padding: 0 12px;\n  \
+           background-color: {accent};\n  \
+           background-image: none;\n  \
+           color: {accent_on};\n  \
+           font-size: 12px;\n  \
+           font-weight: 600;\n  \
+           border: none;\n  \
+           box-shadow: none;\n\
+         }}\n\
+         .{root} .nuncio-reply-strip {{\n  \
+           padding: 0 4px 0 12px;\n  \
+           border-bottom: 1px solid {border};\n\
+         }}\n\
+         .{root} .nuncio-reply-quote {{ font-size: 11px; color: {muted}; }}\n\
+         .{root} button.nuncio-icon-button {{\n  \
+           min-width: 28px;\n  \
+           min-height: 28px;\n  \
+           padding: 0;\n  \
+           background-color: transparent;\n  \
+           box-shadow: none;\n\
+         }}\n\
+         .{root} button.nuncio-icon-button:hover {{ background-color: {hover}; }}\n\
          .{root} .nuncio-strip {{\n  \
            padding: 6px 16px;\n  \
            color: {warning};\n  \
@@ -139,6 +190,7 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
         accent_on = palette.accent_on().to_hex(),
         warning = palette.warning().to_hex(),
         header = HEADER_HEIGHT,
+        composer = COMPOSER_MIN_HEIGHT,
     ) + &list_and_transcript_css(palette)
 }
 
@@ -265,7 +317,10 @@ fn list_and_transcript_css(palette: &Palette) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Layout, THREE_PANES_FROM, TWO_PANES_FROM, breakpoints, layout_css, layout_for};
+    use super::{
+        COMPOSER_LINES, COMPOSER_PAD, Layout, THREE_PANES_FROM, TWO_PANES_FROM, breakpoints,
+        composer_max_height, layout_css, layout_for,
+    };
     use crate::{Look, ROOT_CLASS, WINDOW_CLASS, css_for};
     use nuncio_client::{Palette, Rgb};
 
@@ -564,5 +619,76 @@ mod tests {
         assert_eq!(layout_for(max(&compact) + 1), Layout::ThreePanes);
         assert_eq!(layout_for(max(&single)), Layout::SinglePane);
         assert_eq!(layout_for(max(&single) + 1), Layout::CompactRail);
+    }
+
+    #[test]
+    fn the_composer_grows_to_six_lines_then_scrolls() {
+        assert_eq!(COMPOSER_LINES, 6);
+        for line in [15, 17, 20] {
+            let max = composer_max_height(line);
+            assert_eq!(
+                max,
+                6 * line + 2 * COMPOSER_PAD,
+                "six lines and the padding"
+            );
+            assert!(max < 7 * line + 2 * COMPOSER_PAD, "a seventh line scrolls");
+        }
+        assert_eq!(
+            composer_max_height(0),
+            6 + 2 * COMPOSER_PAD,
+            "no font measured yet: at least a pixel a line"
+        );
+    }
+
+    #[test]
+    fn the_composer_is_a_48_px_bar_with_a_line_that_turns_accent_on_focus() {
+        let palette = gruvbox();
+        let css = layout_css(&palette, 0);
+        let root = format!(".{ROOT_CLASS}");
+        let bar = rule(&css, &format!("{root} .nuncio-composer"));
+        assert!(bar.contains("min-height: 48px;"), "{bar}");
+        assert!(
+            bar.contains(&format!(
+                "border-top: 1px solid {};",
+                palette.border().to_hex()
+            )),
+            "{bar}"
+        );
+        let focused = rule(&css, &format!("{root} .nuncio-composer:focus-within"));
+        assert!(
+            focused.contains(&format!("border-top-color: {};", palette.accent().to_hex())),
+            "{focused}"
+        );
+        let send = rule(&css, &format!("{root} button.nuncio-send"));
+        for declaration in [
+            "min-height: 32px;".to_owned(),
+            format!("background-color: {};", palette.accent().to_hex()),
+            format!("color: {};", palette.accent_on().to_hex()),
+            "font-size: 12px;".to_owned(),
+            "font-weight: 600;".to_owned(),
+        ] {
+            assert!(send.contains(&declaration), "{declaration} in {send}");
+        }
+        assert!(
+            !send.contains("border-radius"),
+            "the radius is Hyprland's: {send}"
+        );
+        let strip = rule(&css, &format!("{root} .nuncio-reply-strip"));
+        assert!(
+            strip.contains(&format!(
+                "border-bottom: 1px solid {};",
+                palette.border().to_hex()
+            )),
+            "{strip}"
+        );
+        let quote = rule(&css, &format!("{root} .nuncio-reply-quote"));
+        assert!(quote.contains("font-size: 11px;"), "{quote}");
+        assert!(
+            quote.contains(&format!("color: {};", palette.text_muted().to_hex())),
+            "{quote}"
+        );
+        let close = rule(&css, &format!("{root} button.nuncio-icon-button"));
+        assert!(close.contains("min-width: 28px;"), "{close}");
+        assert!(close.contains("min-height: 28px;"), "{close}");
     }
 }

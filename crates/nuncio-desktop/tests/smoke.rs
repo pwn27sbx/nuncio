@@ -7,6 +7,7 @@
 //! drives is covered by the unit tests.
 
 use adw::prelude::*;
+use gtk::gdk::{Key, ModifierType};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -209,6 +210,7 @@ fn main() {
     connects_and_loads_the_chats_with_no_ui_handle_kept(&daemon, "a fake daemon");
     notifications_and_the_open_chat_action();
     a_link_fills_the_composer_and_sends_nothing();
+    the_composer_keys_send_button_and_reply_strip();
     closing_in_background_mode_hides_and_keeps_the_state_and_worker(&daemon);
     the_palette_opens_on_f1_and_jumps_to_a_chat();
     the_settings_write_the_file_and_apply_at_once();
@@ -1121,4 +1123,114 @@ fn serve(stream: UnixStream) {
             return;
         }
     }
+}
+
+/// The composer (plan §6.4, §7): Send shows only with text and says `Sending…` while a send
+/// waits; Enter and Ctrl+Enter send, Alt+Enter starts a line, Escape cancels a reply, whose strip
+/// shows the quoted message; the field grows to six lines, then scrolls.
+fn the_composer_keys_send_button_and_reply_strip() {
+    let ui = listed();
+    ui.open_chat(0);
+    ui.take_undelivered();
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::messages(ANA, 200),
+        result: Ok(DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: ANA.to_owned(),
+            messages: vec![message("M1", "coffee?", false)],
+        }),
+    });
+    ui.take_undelivered();
+
+    check(ui.send_button().is_none(), "no Send button with no text");
+    ui.type_draft("   \n ");
+    check(
+        ui.send_button().is_none(),
+        "no Send button with only spaces",
+    );
+    ui.type_draft("hi");
+    check(
+        ui.send_button() == Some(("Send".to_owned(), true)),
+        "Send shows with text",
+    );
+    check(
+        ui.send_tooltip().contains("Enter") && !ui.send_tooltip().contains("Ctrl"),
+        "the tooltip names Enter",
+    );
+    let (cap, line) = ui.composer_height_cap();
+    check(
+        line > 0 && cap == nuncio_desktop::style::composer_max_height(line),
+        "the field stops growing at six lines",
+    );
+
+    check(
+        ui.composer_press(Key::Return, ModifierType::ALT_MASK),
+        "Alt+Enter is the composer's",
+    );
+    check(ui.draft() == "hi\n", "Alt+Enter starts a new line");
+    check(ui.take_undelivered().is_empty(), "Alt+Enter sends nothing");
+
+    check(
+        ui.composer_press(Key::Return, ModifierType::empty()),
+        "Enter is the composer's",
+    );
+    let sent = ui.take_undelivered();
+    let Some(Command::Send(request)) = sent.first().cloned() else {
+        check(false, "Enter sends");
+        return;
+    };
+    check(
+        matches!(&request, ClientFrame::Send { text, .. } if text == "hi\n") && sent.len() == 1,
+        "Enter sends the draft once",
+    );
+    check(ui.draft().is_empty(), "the composer empties after Enter");
+    check(
+        ui.send_button() == Some(("Sending…".to_owned(), false)),
+        "the button says Sending… and cannot be pressed while the send waits",
+    );
+    let ClientFrame::Send { client_id, .. } = &request else {
+        unreachable!("matched above")
+    };
+    ui.incoming(Incoming::Reply {
+        request: request.clone(),
+        result: Ok(DaemonFrame::Sent {
+            v: PROTOCOL_VERSION,
+            client_id: client_id.clone(),
+            state: nuncio_client::wire::SendState::Sent,
+            id: Some("3EB0".to_owned()),
+            timestamp: Some("2026-10-20T10:01:00Z".to_owned()),
+        }),
+    });
+    ui.take_undelivered();
+    check(ui.send_button().is_none(), "answered: no button again");
+
+    ui.type_draft("again");
+    check(
+        ui.composer_press(Key::KP_Enter, ModifierType::CONTROL_MASK),
+        "Ctrl+Enter is the composer's",
+    );
+    check(
+        matches!(ui.take_undelivered().as_slice(), [Command::Send(ClientFrame::Send { text, .. })] if text == "again"),
+        "Ctrl+Enter sends too",
+    );
+
+    check(ui.reply_strip().is_none(), "no reply strip before a reply");
+    ui.run_palette_action(&Action::Reply(Target {
+        jid: ANA.to_owned(),
+        id: "M1".to_owned(),
+        client_id: None,
+    }));
+    check(
+        ui.reply_strip().as_deref() == Some("Replying to: coffee?"),
+        "the reply strip quotes the message",
+    );
+    check(
+        ui.composer_press(Key::Escape, ModifierType::empty()),
+        "Escape is the composer's",
+    );
+    check(ui.reply_strip().is_none(), "Escape cancels the reply");
+    check(
+        ui.controller().model().composer().reply_to().is_none(),
+        "the model no longer replies",
+    );
 }

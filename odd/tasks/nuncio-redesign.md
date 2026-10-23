@@ -47,7 +47,7 @@ against `main`, each merged on its own with the six CI checks green. Runner: `ca
 | R3 | P3 composer | S1, S3, S5 | delegated (session backstop) | done, Risk: item 6 (visual); inline checks, no verifier (plan: low-medium; send path unchanged) | PR, see L13 |
 | R4 | P4 palette, search, settings, dialogs | S1, S5 | delegated (session backstop) | done, Risk: item 6 (visual); verifier passed | PR, see L16 |
 | R5 | P5 TUI parity | S1, S5 | delegated (session backstop) | pending | |
-| R6 | P6 polish and proof (folds into R4/R5 if small) | S1 | delegated (session backstop) | pending | |
+| R6 | P6 polish and proof (folds into R4/R5 if small) | S1 | delegated (session backstop) | done, Risk: item 6 (window wiring and visuals only on Omarchy); verifier passed | PR, see L24 |
 | R7 | "New message" in the rail (after R1) | S6 | delegated (session backstop) | done, Risk: item 6 (visual); verifier passed after the S8 fix | PR, see L19 |
 | R8 | Chat filter by name in the list header (after R4) | S7 | delegated (session backstop) | done, Risk: item 6 (window wiring only runs on Omarchy); verifier passed | PR, see L22 |
 | R9 | One draft per chat in the desktop app (follow-up, high priority) | S8 | delegated (session backstop) | done, Risk: item 3 (shared model, TUI too); verifier passed | PR, see L20 |
@@ -167,3 +167,15 @@ writer with a clean context writes each phase; an independent verifier checks ea
   README key table row for Escape. Moved to R6: focus goes nowhere after Escape closes the filter
   (the message search does the same at the baseline).
 - **L23** (2026-10-23): PR #10 (R7) merged after one rerun of the theme 500 ms test.
+- **L24** (2026-10-23, R6/P6): no transitions except 120 ms hover fills and the palette scrim
+  fade, all off with `gtk-enable-animations`, followed live; 1 px accent focus rings; 28 px
+  header icon buttons with hover and checked fills; accessible names on the reaction buttons
+  (the rest already had tooltips and names); the transcript at most 72 characters wide at the
+  left (`Measure` widget); focus back to the chat list after Escape closes the filter; README
+  "Design rules" and "On Omarchy" checklist. 12 CSS mutants all caught. Verifier: no blockers;
+  parent applied its high advisory: the transcript list box takes the scroll's adjustment
+  explicitly, since `Measure` is not a scrollable parent (PageUp/PageDown). For the owner on
+  Omarchy: bubbles now end at the 72-character column on a wide window (plan read literally);
+  the composer height change is not animated (§4.4 allows it); focus after Escape closes the
+  message search still goes nowhere (plan silent). Remaining: the On Omarchy checklist, F1–F8.
+- **L25** (2026-10-23): PRs #11 (R9) and #12 (R8) merged on green.

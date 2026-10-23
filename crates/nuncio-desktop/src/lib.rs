@@ -52,6 +52,9 @@ pub struct Look {
     /// Hyprland's `decoration:rounding`, in pixels, for the window corners and every element;
     /// `None` (not on Hyprland, or no answer) squares them.
     pub corner_radius: Option<u32>,
+    /// The desktop's `gtk-enable-animations` (GNOME's `enable-animations` gsetting): off, the app
+    /// has no transitions at all (design plan §4.4).
+    pub animations: bool,
 }
 
 /// Whether Omarchy is installed here: its state directory (`~/.local/state/omarchy`, the one
@@ -123,6 +126,7 @@ pub fn css_for(palette: &Palette, look: &Look) -> String {
     );
     css.push_str(&style::layout_css(palette, radius));
     css.push_str(&look_css(look));
+    css.push_str(&style::motion_css(look.animations));
     css
 }
 

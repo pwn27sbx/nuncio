@@ -147,6 +147,14 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
            box-shadow: none;\n\
          }}\n\
          .{root} button.nuncio-primary:hover {{ filter: brightness(1.08); }}\n\
+         .{root} button:focus-visible, .{root} row:focus-visible {{\n  \
+           outline: 1px solid {accent};\n  \
+           outline-offset: -1px;\n\
+         }}\n\
+         .{root} button.nuncio-primary:focus-visible, .{root} button.nuncio-send:focus-visible {{\n  \
+           outline-offset: 1px;\n\
+         }}\n\
+         .{root} row.nuncio-message:focus-visible {{ outline: none; }}\n\
          .{root} button.nuncio-filter {{\n  \
            min-height: 32px;\n  \
            padding: 0 8px;\n  \
@@ -193,19 +201,23 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
            border: none;\n  \
            box-shadow: none;\n\
          }}\n\
+         .{root} button.nuncio-send:hover {{ filter: brightness(1.08); }}\n\
          .{root} .nuncio-reply-strip {{\n  \
            padding: 0 4px 0 12px;\n  \
            border-bottom: 1px solid {border};\n\
          }}\n\
          .{root} .nuncio-reply-quote {{ font-size: 11px; color: {muted}; }}\n\
-         .{root} button.nuncio-icon-button {{\n  \
+         .{root} menubutton.nuncio-icon-button > button, .{root} button.nuncio-icon-button {{\n  \
            min-width: 28px;\n  \
            min-height: 28px;\n  \
            padding: 0;\n  \
            background-color: transparent;\n  \
            box-shadow: none;\n\
          }}\n\
-         .{root} button.nuncio-icon-button:hover {{ background-color: {hover}; }}\n\
+         .{root} menubutton.nuncio-icon-button > button:hover, .{root} button.nuncio-icon-button:hover {{\n  \
+           background-color: {hover};\n\
+         }}\n\
+         .{root} button.nuncio-icon-button:checked {{ background-color: {active}; }}\n\
          .{root} .nuncio-strip {{\n  \
            padding: 6px 16px;\n  \
            color: {warning};\n  \
@@ -227,12 +239,49 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
         + &overlays_css(palette)
 }
 
+/// How long each of the design's animations takes: at most 120 ms (plan §4.4).
+pub const MOTION_MS: u32 = 120;
+
+/// The design's motion (plan §4.4): every transition in the app is off, libadwaita's own (some
+/// 200 ms or longer) included, except the hover fill fading and the palette's scrim fading, and
+/// those only while the desktop has animations on (`animations`, its `gtk-enable-animations`).
+pub fn motion_css(animations: bool) -> String {
+    let root = ROOT_CLASS;
+    let mut css = format!(".{root}, .{root} * {{ transition: none; }}\n");
+    if animations {
+        css.push_str(&format!(
+            ".{root} .nuncio-chats > row, .{root} .nuncio-results > row,\n\
+             .{root} .nuncio-palette-list > row, .{root} button.nuncio-filter,\n\
+             .{root} button.nuncio-icon-button, .{root} menubutton.nuncio-icon-button > button,\n\
+             .{root} button.nuncio-dialog-primary {{\n  \
+               transition: background-color {MOTION_MS}ms ease-out;\n\
+             }}\n\
+             .{root} .nuncio-scrim {{ transition: opacity {MOTION_MS}ms ease-out; }}\n"
+        ));
+    }
+    css
+}
+
+/// The transcript's measure, in characters of the message text (plan §5).
+pub const TRANSCRIPT_MEASURE_CHARS: i32 = 72;
+
+/// The transcript's width in a pane `available` pixels wide, for message text whose characters
+/// are `char_width` pixels wide: [`TRANSCRIPT_MEASURE_CHARS`] characters at the left of the pane
+/// (the room past them stays empty, on the right), all of a narrower pane, and never under `min`,
+/// the least the transcript can take. No font measured yet (0) counts a pixel a character.
+pub fn transcript_width(available: i32, char_width: i32, min: i32) -> i32 {
+    available
+        .min(TRANSCRIPT_MEASURE_CHARS * char_width.max(1))
+        .max(min)
+}
+
 /// The rules for the command palette (plan §6.5), the inline search (§6.6), the settings
 /// (§6.7) and the dialogs (§6.8).
 fn overlays_css(palette: &Palette) -> String {
     let root = ROOT_CLASS;
     format!(
-        ".{root} .nuncio-scrim {{ background-color: alpha({surface}, 0.7); }}\n\
+        ".{root} .nuncio-scrim {{ background-color: alpha({surface}, 0.7); opacity: 0; }}\n\
+         .{root} .nuncio-scrim.nuncio-scrim-shown {{ opacity: 1; }}\n\
          popover.{root}.nuncio-palette > contents {{\n  \
            background-color: {chrome};\n  \
            color: {text};\n  \
@@ -467,8 +516,8 @@ fn list_and_transcript_css(palette: &Palette) -> String {
 mod tests {
     use super::{
         COMPOSER_LINES, COMPOSER_PAD, DIALOG_WIDTH, Layout, PALETTE_WIDTH, SETTINGS_WIDTH,
-        THREE_PANES_FROM, TWO_PANES_FROM, breakpoints, composer_max_height, dialog_width,
-        layout_css, layout_for, palette_width,
+        THREE_PANES_FROM, TRANSCRIPT_MEASURE_CHARS, TWO_PANES_FROM, breakpoints,
+        composer_max_height, dialog_width, layout_css, layout_for, palette_width, transcript_width,
     };
     use crate::{Look, ROOT_CLASS, WINDOW_CLASS, css_for};
     use nuncio_client::{Palette, Rgb};
@@ -1020,5 +1069,182 @@ mod tests {
         assert_eq!(dialog_width(1920), 480);
         assert_eq!(dialog_width(0), 480, "a window not laid out yet");
         assert_eq!(dialog_width(400), 368, "a 16 px gutter on a narrow window");
+    }
+
+    /// Every `transition` value in `css`.
+    fn transitions(css: &str) -> Vec<&str> {
+        css.match_indices("transition:")
+            .map(|(at, key)| {
+                let value = &css[at + key.len()..];
+                value[..value.find(';').expect("a value")].trim()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_hover_fill_and_the_scrim_fade_in_120_ms_and_nothing_else_moves() {
+        let look = Look {
+            animations: true,
+            ..Look::default()
+        };
+        let css = css_for(&gruvbox(), &look);
+        let root = format!(".{ROOT_CLASS}");
+        assert!(
+            css.contains(&format!("{root}, {root} * {{ transition: none; }}")),
+            "libadwaita's own transitions are off: {css}"
+        );
+        for (selector, transition) in [
+            ("nuncio-chats > row", "background-color 120ms ease-out"),
+            ("nuncio-results > row", "background-color 120ms ease-out"),
+            (
+                "nuncio-palette-list > row",
+                "background-color 120ms ease-out",
+            ),
+            ("button.nuncio-filter", "background-color 120ms ease-out"),
+            (
+                "button.nuncio-icon-button",
+                "background-color 120ms ease-out",
+            ),
+            ("nuncio-scrim", "opacity 120ms ease-out"),
+        ] {
+            let selector = if selector.starts_with("nuncio-") {
+                format!("{root} .{selector}")
+            } else {
+                format!("{root} {selector}")
+            };
+            let at = css
+                .find(&format!("{selector},"))
+                .or_else(|| css.find(&format!("{selector} {{ transition")))
+                .unwrap_or_else(|| panic!("{selector} has no transition: {css}"));
+            let body = &css[at..];
+            let body = &body[body.find('{').expect("a rule")..body.find('}').expect("a rule")];
+            assert!(
+                body.contains(&format!("transition: {transition};")),
+                "{selector}: {body}"
+            );
+        }
+        for value in transitions(&css) {
+            let ms = value
+                .split_whitespace()
+                .filter_map(|word| word.strip_suffix("ms"))
+                .map(|ms| ms.parse::<u32>().expect("a duration in ms"))
+                .max()
+                .unwrap_or(0);
+            assert!(ms <= 120, "{value}: at most 120 ms");
+            assert!(!value.contains("ms") || ms > 0, "{value}");
+        }
+        assert!(
+            !css.contains("transition: all") && !css.contains("animation:"),
+            "{css}"
+        );
+    }
+
+    #[test]
+    fn with_animations_off_nothing_moves() {
+        let css = css_for(&gruvbox(), &Look::default());
+        let all = transitions(&css);
+        assert!(
+            !all.is_empty(),
+            "libadwaita's transitions are turned off: {css}"
+        );
+        assert!(all.iter().all(|&t| t == "none"), "{all:?} in: {css}");
+    }
+
+    #[test]
+    fn the_scrim_is_shown_by_its_opacity_so_it_can_fade() {
+        let css = layout_css(&gruvbox(), 0);
+        let root = format!(".{ROOT_CLASS}");
+        has(
+            &css,
+            &format!("{root} .nuncio-scrim"),
+            &["opacity: 0;".to_owned()],
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-scrim.nuncio-scrim-shown"),
+            &["opacity: 1;".to_owned()],
+        );
+    }
+
+    #[test]
+    fn focus_is_a_1_px_accent_ring_never_a_glow() {
+        let palette = gruvbox();
+        let css = layout_css(&palette, 0);
+        let root = format!(".{ROOT_CLASS}");
+        let ring = format!("outline: 1px solid {};", palette.accent().to_hex());
+        assert!(
+            css.contains(&format!(
+                "{root} button:focus-visible, {root} row:focus-visible {{"
+            )),
+            "every button and row: {css}"
+        );
+        has(&css, &format!("{root} row:focus-visible"), &[ring]);
+        // On a filled accent button the ring goes outside it, where it shows.
+        has(
+            &css,
+            &format!("{root} button.nuncio-send:focus-visible"),
+            &["outline-offset: 1px;".to_owned()],
+        );
+        assert!(
+            css.contains(&format!(
+                "{root} button.nuncio-primary:focus-visible, {root} button.nuncio-send:focus-visible"
+            )),
+            "{css}"
+        );
+        // A message shows its focus on its bubble, not around the whole row.
+        has(
+            &css,
+            &format!("{root} row.nuncio-message:focus-visible"),
+            &["outline: none;".to_owned()],
+        );
+    }
+
+    #[test]
+    fn icon_buttons_fill_on_hover_and_while_checked_and_send_lightens() {
+        let palette = gruvbox();
+        let css = layout_css(&palette, 0);
+        let root = format!(".{ROOT_CLASS}");
+        has(
+            &css,
+            &format!("{root} button.nuncio-icon-button:checked"),
+            &[format!(
+                "background-color: {};",
+                palette.surface_active().to_hex()
+            )],
+        );
+        assert!(
+            css.contains(&format!(
+                "{root} menubutton.nuncio-icon-button > button, {root} button.nuncio-icon-button {{"
+            )),
+            "the menu's button is a 28 px icon button too: {css}"
+        );
+        assert!(
+            css.contains(&format!(
+                "{root} menubutton.nuncio-icon-button > button:hover, {root} button.nuncio-icon-button:hover {{"
+            )),
+            "{css}"
+        );
+        has(
+            &css,
+            &format!("{root} button.nuncio-send:hover"),
+            &["filter: brightness(1.08);".to_owned()],
+        );
+    }
+
+    #[test]
+    fn the_transcript_is_72_characters_wide_at_most() {
+        assert_eq!(TRANSCRIPT_MEASURE_CHARS, 72);
+        assert_eq!(transcript_width(1311, 8, 100), 576, "72 characters of 8 px");
+        assert_eq!(
+            transcript_width(500, 8, 100),
+            500,
+            "a narrower pane: all of it"
+        );
+        assert_eq!(
+            transcript_width(500, 8, 600),
+            600,
+            "never under what it needs"
+        );
+        assert_eq!(transcript_width(1311, 0, 0), 72, "no font measured yet");
     }
 }

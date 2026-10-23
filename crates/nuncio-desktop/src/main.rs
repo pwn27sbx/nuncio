@@ -110,6 +110,7 @@ fn main() -> glib::ExitCode {
             let palette = Palette::load_or_default(Some(&palette_file));
             let display = gtk::gdk::Display::default().expect("a display");
             apply_look(&display, |current| *current = look.look());
+            follow_animations(&display);
             apply_to_display(&display, &palette);
             follow_theme(&palette_file);
             if look.follows_font {
@@ -245,8 +246,22 @@ impl StartLook {
         Look {
             font_family: self.font_family.clone(),
             corner_radius: self.corner_radius,
+            ..Look::default()
         }
     }
+}
+
+/// Turn the app's transitions on or off with the desktop's `gtk-enable-animations` (GNOME's
+/// `enable-animations` gsetting, which GTK reads), now and on each change (design plan §4.4).
+fn follow_animations(display: &gtk::gdk::Display) {
+    let settings = gtk::Settings::for_display(display);
+    let on = settings.is_gtk_enable_animations();
+    apply_look(display, |look| look.animations = on);
+    let display = display.clone();
+    settings.connect_gtk_enable_animations_notify(move |settings| {
+        let on = settings.is_gtk_enable_animations();
+        apply_look(&display, |look| look.animations = on);
+    });
 }
 
 fn desktop_look() -> StartLook {

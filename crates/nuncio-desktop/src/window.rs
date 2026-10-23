@@ -13,8 +13,9 @@
 //! Keyboard (Tab moves between the chat list, the conversation and the composer):
 //!
 //! - chat list: Up/Down (or `j`/`k`) move, Enter opens the chat (and only opening marks it
-//!   read), Escape closes the search; the rail's All / Unread / Archived choose which chats it
-//!   lists;
+//!   read), Escape clears the name filter, else closes the search; the rail's All / Unread /
+//!   Archived choose which chats it lists, and the list header's ⌕ filters them by name as you
+//!   type (S7; Escape in its input clears it too);
 //! - conversation: Up/Down (or `j`/`k`) move between messages, `g` goes to the first and Shift+G
 //!   to the last; `r` replies, `e` reacts, Shift+R retries a send
 //!   that was not sent, `o` opens a media file (a picture's full file is shown in its bubble),
@@ -90,6 +91,10 @@ struct Inner {
     offset_minutes: i32,
     window: adw::ApplicationWindow,
     list_header: adw::HeaderBar,
+    /// The chat list's name filter (S7) is open while this (the list header's ⌕) is active.
+    chat_filter_toggle: gtk::ToggleButton,
+    /// The name filter's input: the listed chats are those whose name holds its text.
+    chat_filter_entry: gtk::SearchEntry,
     content_header: adw::HeaderBar,
     /// The window controls are wanted (`[app] title_bar`).
     title_bar: Cell<bool>,
@@ -430,6 +435,23 @@ impl Ui {
             .build();
         menu_button.update_property(&[Property::Label("Menu")]);
         list_header.pack_end(&menu_button);
+        // The chat list's name filter (S7, plan §6.6): the header's ⌕ swaps the title for a 32 px
+        // input; typing narrows the listed chats to those whose name holds the text. Client-side.
+        let chat_filter_toggle = gtk::ToggleButton::builder()
+            .icon_name("edit-find-symbolic")
+            .tooltip_text("Filter the chats by name")
+            .build();
+        chat_filter_toggle.update_property(&[Property::Label("Filter the chats by name")]);
+        list_header.pack_end(&chat_filter_toggle);
+        let chat_filter_entry = gtk::SearchEntry::builder()
+            .placeholder_text("Filter chats by name")
+            .hexpand(true)
+            .valign(gtk::Align::Center)
+            .visible(false)
+            .build();
+        chat_filter_entry.add_css_class("nuncio-search");
+        chat_filter_entry.update_property(&[Property::Label("Filter chats by name")]);
+        list_header.set_title_widget(Some(&chat_filter_entry));
         let chats = gtk::ListBox::builder()
             .selection_mode(gtk::SelectionMode::Single)
             .activate_on_single_click(true)
@@ -643,6 +665,8 @@ impl Ui {
             offset_minutes,
             window,
             list_header,
+            chat_filter_toggle,
+            chat_filter_entry,
             content_header,
             title_bar: Cell::new(title_bar),
             shortcuts,
@@ -1896,6 +1920,19 @@ impl Ui {
             });
             move |_| f(())
         });
+        // The chat list's name filter: every change narrows the list at once.
+        inner.chat_filter_toggle.connect_toggled({
+            let f = self.with(|ui, on: bool| ui.set_chat_filter_mode(on));
+            move |toggle| f(toggle.is_active())
+        });
+        inner.chat_filter_entry.connect_changed({
+            let f = self.with(|ui, (): ()| ui.render());
+            move |_| f(())
+        });
+        inner.chat_filter_entry.connect_stop_search({
+            let f = self.with(|ui, (): ()| ui.close_chat_filter());
+            move |_| f(())
+        });
         for (filter, button, _) in &inner.rail.filters {
             let filter = *filter;
             let f = self.with(move |ui, active: bool| {
@@ -2066,7 +2103,8 @@ impl Ui {
                 }
             })),
         ));
-        // The chat list's keys: `j`/`k` move as Down/Up do; Escape closes the search.
+        // The chat list's keys: `j`/`k` move as Down/Up do; Escape clears the name filter, else
+        // closes the search.
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed({
             let weak = self.weak();
@@ -2172,9 +2210,14 @@ impl Ui {
     }
 
     /// A key in the chat list: `j`/`k` move to the next or previous chat as Down/Up do (the
-    /// chat is selected, not opened); Escape closes the search. True when it was handled.
+    /// chat is selected, not opened); Escape clears the name filter, else closes the search.
+    /// True when it was handled.
     fn chat_list_key(&self, key: gdk::Key, state: gdk::ModifierType) -> bool {
         let inner = &self.0;
+        if key == gdk::Key::Escape && inner.chat_filter_toggle.is_active() {
+            self.close_chat_filter();
+            return true;
+        }
         if key == gdk::Key::Escape && inner.search_toggle.is_active() {
             self.close_search();
             return true;
@@ -2200,6 +2243,46 @@ impl Ui {
             row.grab_focus();
         }
         true
+    }
+
+    /// The name filter opens (its input takes the title's place) or closes (its text goes, and
+    /// every chat of the rail's filter is listed again).
+    fn set_chat_filter_mode(&self, on: bool) {
+        let inner = &self.0;
+        inner.list_title.set_visible(!on);
+        inner.chat_filter_entry.set_visible(on);
+        if on {
+            inner.chat_filter_entry.grab_focus();
+        } else {
+            // Its `changed` handler renders.
+            inner.chat_filter_entry.set_text("");
+        }
+    }
+
+    /// Close the chat list's name filter, as Escape in it or in the chat list does.
+    pub fn close_chat_filter(&self) {
+        self.0.chat_filter_toggle.set_active(false);
+    }
+
+    /// Whether the chat list's name filter is open (tests).
+    pub fn chat_filter_open(&self) -> bool {
+        self.0.chat_filter_toggle.is_active()
+    }
+
+    /// Open the name filter and type `name` in it, replacing what was there (tests).
+    pub fn filter_chats(&self, name: &str) {
+        self.0.chat_filter_toggle.set_active(true);
+        self.0.chat_filter_entry.set_text(name);
+    }
+
+    /// Press Escape in the name filter's input (tests).
+    pub fn stop_chat_filter(&self) {
+        self.0.chat_filter_entry.emit_stop_search();
+    }
+
+    /// Press `key` in the chat list, as its key handler gets it; true when handled (tests).
+    pub fn press_in_chat_list(&self, key: gdk::Key) -> bool {
+        self.chat_list_key(key, gdk::ModifierType::empty())
     }
 
     /// Whether the search is open (tests).
@@ -2661,7 +2744,8 @@ impl Ui {
             ))]);
         }
         let rows = present::chat_rows(model, offset, today);
-        let listed = present::listed(model, inner.filter.get(), inner.opened_from.get());
+        let name = inner.chat_filter_entry.text();
+        let listed = present::listed(model, inner.filter.get(), inner.opened_from.get(), &name);
         sync_rows(
             &inner.chats,
             &mut inner.shown_chats.borrow_mut(),
@@ -2680,7 +2764,7 @@ impl Ui {
             .and_then(|chat| listed.iter().position(|&shown| shown == chat));
         inner
             .chats_empty
-            .show(Some(present::list_empty(inner.filter.get())));
+            .show(Some(present::list_empty(inner.filter.get(), &name)));
         inner
             .transcript_empty
             .show(present::transcript_empty(model));

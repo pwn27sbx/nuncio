@@ -140,8 +140,16 @@ with a 1 px line that turns the accent colour while it has the focus. It searche
 does: every word of the query must be in the message (there is no `from:` or `is:` syntax). While
 the input is empty and focused, a line under it says `Messages of this chat holding every word`.
 Enter asks the daemon; the results show above the transcript, and choosing one closes the search
-and shows that message in the conversation. Escape (in the input, or in the chat list) closes the
-search.
+and shows that message in the conversation. Escape (in the input, or in the chat list while the
+chat filter below is closed) closes the search.
+
+The chat list has its own filter, by name (it searches no message): the chat list header's ⌕
+swaps the title for a 32 px input, and typing narrows the listed chats to those whose name (as
+the list shows it) holds the typed text anywhere, ignoring case (`an` finds `Ana` and `Joan`). It
+narrows the rail's filter shown (All, Unread or Archived), the open chat's row too; the rail's
+counts stay those of every chat. With nothing matching the list says `No matching chats`. Escape
+(in the input, or in the chat list) clears the filter and lists every chat again. It is drawn
+from the chats the app already has: nothing is asked of `nunciod`.
 
 ## Settings
 
@@ -230,7 +238,8 @@ surfaces in the live Omarchy palette's roles, toasts for notices.
   rest); from 760 px the rail is a 48 px strip of icons with tooltips; below 760 px one pane at a
   time: the list, or the open conversation, with a back button and Escape (from a message, or from
   the composer when there is nothing else for Escape to do) going back to the list.
-- **Headers (44 px):** the pane's title at its start; the chat list's header has the menu; the
+- **Headers (44 px):** the pane's title at its start; the chat list's header has the ⌕ of the
+  chat filter (see [Search](#search)) and the menu; the
   conversation's header holds only the chat's name, with the search button (see
   [Search](#search)).
 - **Corners:** every element's corners are Hyprland's `decoration:rounding` (see
@@ -298,7 +307,7 @@ Tab moves between the chat list, the conversation and the composer.
 | --- | --- | --- |
 | chat list | Up, Down, `j`, `k` | move |
 | chat list | Enter, click | open the chat (only opening marks it read) |
-| chat list | Escape | close the search |
+| chat list | Escape | clear and close the chat filter; with it closed, close the search |
 | conversation | Up, Down, `j`, `k` | move between messages |
 | conversation | `g`, Shift+G | the first, the last message |
 | conversation | `r` | reply |

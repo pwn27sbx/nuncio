@@ -3,7 +3,8 @@
 //!
 //! - It lists every chat (by [`chat_title`], as the list names it), searching the open chat, the
 //!   selected message's reply, react, retry and open (only those the message's menu would enable:
-//!   the same [`Bubble`] `can_*` rules), the settings and Quit.
+//!   the same [`Bubble`] `can_*` rules), New message (the rail's button: it asks for a phone
+//!   number), the settings and Quit.
 //! - A query keeps the commands whose title holds its characters in order, ignoring case and
 //!   spaces ([`score`]); the best match comes first, and each [`Group`]'s commands stay together
 //!   under its header (plan §6.5: groups with headers, no category in the row text).
@@ -22,6 +23,8 @@ pub enum Action {
     OpenChat(String),
     /// Search the open chat (Ctrl+F).
     Search,
+    /// Ask for a phone number and open its chat, as the rail's "New message" does.
+    NewMessage,
     /// Reply to this message.
     Reply(Target),
     /// Choose a reaction for this message (the picker; nothing is sent until one is chosen).
@@ -41,7 +44,7 @@ impl Action {
     pub fn group(&self) -> Group {
         match self {
             Self::Reply(_) | Self::React(_) | Self::Retry(_) | Self::OpenMedia(_) => Group::Message,
-            Self::Search | Self::Settings | Self::Quit => Group::Commands,
+            Self::Search | Self::NewMessage | Self::Settings | Self::Quit => Group::Commands,
             Self::OpenChat(_) => Group::Chats,
         }
     }
@@ -184,6 +187,8 @@ pub fn entries(model: &Model, message: Option<usize>) -> Vec<Entry> {
             Action::Search,
         ));
     }
+    // Plan §7 gives it no key.
+    entries.push(Entry::new("New message…", None, Action::NewMessage));
     entries.push(Entry::new("Settings", Some("Ctrl+,"), Action::Settings));
     entries.push(Entry::new("Quit", Some("Ctrl+Q"), Action::Quit));
     entries.extend(
@@ -305,6 +310,8 @@ pub enum Step {
     /// Show the reaction picker on this message.
     React(usize),
     Search,
+    /// Ask for a phone number (the "New message" dialog); nothing is opened or sent yet.
+    NewMessage,
     Settings,
     Quit,
     /// The message the command was chosen for is no longer in the open conversation (another
@@ -332,6 +339,7 @@ pub fn run(controller: &mut Controller, action: &Action) -> Step {
         Action::Reply(_) => Step::Reply(index),
         Action::React(_) => Step::React(index),
         Action::Search => Step::Search,
+        Action::NewMessage => Step::NewMessage,
         Action::Settings => Step::Settings,
         Action::Quit => Step::Quit,
     }

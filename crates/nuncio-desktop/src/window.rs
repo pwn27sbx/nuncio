@@ -28,7 +28,10 @@
 //!   transcript (plan §6.6, S7); Escape closes the search; Ctrl+Q quits (the app's `app.quit`, also in the menu);
 //! - F1 or Ctrl+K opens the command palette ([`crate::palette`]) over a scrim: type to filter,
 //!   Up/Down choose, Enter runs, Escape closes; Ctrl+, opens the settings
-//!   ([`crate::preferences`]).
+//!   ([`crate::preferences`]);
+//! - the rail's New message (also in the palette; no key) asks for a phone number in a small
+//!   dialog (plan §6.8): Enter opens its chat as a `whatsapp://send?phone=…` link with no text
+//!   does (an empty composer, nothing sent), Escape cancels.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -53,6 +56,9 @@ use crate::worker::{Backlog, EVENT_BACKLOG, Incoming, Settings, Worker};
 use crate::{ROOT_CLASS, WINDOW_CLASS};
 use nuncio_client::TitleBar;
 use nuncio_client::config::App;
+
+/// The rail's one filled button: its label, its accessible name and its tooltip (S6).
+const NEW_MESSAGE: &str = "New message";
 
 /// The window and the state behind it. Cheap to clone. The window itself keeps the state alive
 /// until it is closed, so a caller may drop every `Ui` once the window is shown.
@@ -91,6 +97,8 @@ struct Inner {
     shortcuts: gtk::ShortcutController,
     /// The command palette while it is open.
     palette: RefCell<Option<Rc<PaletteView>>>,
+    /// The "New message" dialog while it is open.
+    new_message: RefCell<Option<Rc<NewMessageView>>>,
     /// What dims the window while the palette is open.
     scrim: gtk::Box,
     /// The configuration file the settings edit (`None`: there is none).
@@ -170,6 +178,10 @@ struct Inner {
 /// the icon strip hides or shows.
 struct Rail {
     root: gtk::Box,
+    /// New message, the one filled button.
+    primary: gtk::Button,
+    /// Its icon on the icon strip.
+    primary_icon: gtk::Image,
     filters: Vec<(Filter, gtk::ToggleButton, gtk::Label)>,
     linked_mark: gtk::Box,
     connection: gtk::Box,
@@ -203,15 +215,14 @@ impl Rail {
             row
         };
 
-        // The palette is what the one filled button opens: there is no "new message" command
-        // to give it (the plan's label waits for that feature).
+        // New message (S6): it asks for a phone number; the palette stays on F1 and Ctrl+K.
         let primary = gtk::Button::builder()
-            .child(&content("system-search-symbolic", "Commands", &mut texts))
-            .tooltip_text("Command palette (F1, Ctrl+K)")
-            .action_name("win.command-palette")
+            .child(&content("list-add-symbolic", NEW_MESSAGE, &mut texts))
+            .tooltip_text(NEW_MESSAGE)
+            .action_name("win.new-message")
             .build();
         primary.add_css_class("nuncio-primary");
-        primary.update_property(&[Property::Label("Command palette")]);
+        primary.update_property(&[Property::Label(NEW_MESSAGE)]);
 
         let root = gtk::Box::new(gtk::Orientation::Vertical, 4);
         root.add_css_class("nuncio-chrome");
@@ -266,8 +277,12 @@ impl Rail {
         connection.append(&connection_word);
         root.append(&connection);
 
+        // The first icon made is the button's.
+        let primary_icon = icons.first().cloned().unwrap_or_default();
         Self {
             root,
+            primary,
+            primary_icon,
             filters,
             linked_mark,
             connection,
@@ -632,6 +647,7 @@ impl Ui {
             title_bar: Cell::new(title_bar),
             shortcuts,
             palette: RefCell::new(None),
+            new_message: RefCell::new(None),
             scrim,
             config_path: RefCell::new(None),
             toasts,
@@ -1100,6 +1116,8 @@ impl Ui {
             view.entry.grab_focus();
             return;
         }
+        // One dialog at a time (plan §6.8).
+        self.close_new_message();
         // Only a message the user can see is chosen: the focused bubble.
         let message = self.focused_message().map(|(index, _)| index);
         let (entries, conversation) = {
@@ -1288,6 +1306,195 @@ impl Ui {
         self.0.scrim.get_visible()
     }
 
+    /// Ask for a phone number ("New message", the rail's button or the palette): a §6.8 dialog
+    /// whose Enter opens its chat ([`Ui::confirm_new_message`]) and whose Escape cancels.
+    pub fn open_new_message(&self) {
+        if let Some(view) = self.0.new_message.borrow().as_ref() {
+            view.entry.grab_focus();
+            return;
+        }
+        // One dialog at a time (plan §6.8).
+        self.close_palette();
+        let width = self.0.toasts.width();
+        let view = Rc::new(NewMessageView::new(style::dialog_width(width)));
+        view.popover.set_parent(&self.0.toasts);
+        // Centred, a little under the top edge, where the palette opens.
+        view.popover
+            .set_pointing_to(Some(&gdk::Rectangle::new(width / 2, 48, 1, 1)));
+        // Typing again clears the error.
+        view.entry.connect_changed({
+            let view = Rc::downgrade(&view);
+            move |_| {
+                if let Some(view) = view.upgrade() {
+                    view.error.set_visible(false);
+                }
+            }
+        });
+        let keys = gtk::EventControllerKey::new();
+        keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+        keys.connect_key_pressed({
+            let weak = self.weak();
+            move |_, key, _, _| {
+                if weak
+                    .upgrade()
+                    .is_some_and(|inner| Ui(inner).new_message_key(key))
+                {
+                    glib::Propagation::Stop
+                } else {
+                    glib::Propagation::Proceed
+                }
+            }
+        });
+        view.entry.add_controller(keys);
+        view.open.connect_clicked({
+            let confirm = self.with(|ui, (): ()| ui.confirm_new_message());
+            move |_| confirm(())
+        });
+        view.cancel.connect_clicked({
+            let close = self.with(|ui, (): ()| ui.close_new_message());
+            move |_| close(())
+        });
+        view.popover.connect_closed({
+            let weak = self.weak();
+            move |popover| {
+                if let Some(inner) = weak.upgrade() {
+                    let mut open = inner.new_message.borrow_mut();
+                    if open.as_ref().is_some_and(|view| &view.popover == popover) {
+                        open.take();
+                    }
+                }
+                let popover = popover.clone();
+                glib::idle_add_local_once(move || popover.unparent());
+            }
+        });
+        *self.0.new_message.borrow_mut() = Some(Rc::clone(&view));
+        view.popover.popup();
+        view.entry.grab_focus();
+    }
+
+    /// Close the "New message" dialog, if it is open; nothing is opened.
+    fn close_new_message(&self) {
+        let Some(view) = self.0.new_message.borrow_mut().take() else {
+            return;
+        };
+        view.popover.popdown();
+        // A dialog never mapped (a hidden window) is not `closed`: let it go here too.
+        let popover = view.popover.clone();
+        glib::idle_add_local_once(move || popover.unparent());
+    }
+
+    /// The number typed: its chat opens as its link with no text does
+    /// ([`Controller::new_message`]), the dialog closes and the composer takes the focus. An
+    /// invalid number opens nothing: the dialog stays open and says why.
+    fn confirm_new_message(&self) {
+        let Some(view) = self.0.new_message.borrow().clone() else {
+            return;
+        };
+        let written = view.entry.text();
+        let result = self.0.controller.borrow_mut().new_message(&written);
+        match result {
+            Ok(commands) => {
+                self.close_new_message();
+                self.show_conversation(commands);
+            }
+            Err(error) => {
+                view.error.set_text(error);
+                view.error.set_visible(true);
+                view.entry.grab_focus();
+            }
+        }
+    }
+
+    /// A key pressed in the "New message" field, as pressing it there does: true when the
+    /// dialog acted on it (Enter confirms, Escape cancels), false when it is typed.
+    pub fn new_message_key(&self, key: gdk::Key) -> bool {
+        if self.0.new_message.borrow().is_none() {
+            return false;
+        }
+        match key {
+            gdk::Key::Return | gdk::Key::KP_Enter | gdk::Key::ISO_Enter => {
+                self.confirm_new_message();
+            }
+            gdk::Key::Escape => self.close_new_message(),
+            _ => return false,
+        }
+        true
+    }
+
+    /// Whether the "New message" dialog is open (tests).
+    pub fn new_message_open(&self) -> bool {
+        self.0.new_message.borrow().is_some()
+    }
+
+    /// Type `number` into the open "New message" field, replacing what was there.
+    pub fn new_message_type(&self, number: &str) {
+        let entry = self
+            .0
+            .new_message
+            .borrow()
+            .as_ref()
+            .map(|v| v.entry.clone());
+        if let Some(entry) = entry {
+            entry.set_text(number);
+        }
+    }
+
+    /// What the open "New message" dialog says is wrong, if it says anything (tests).
+    pub fn new_message_error(&self) -> Option<String> {
+        let view = self.0.new_message.borrow().clone()?;
+        view.error
+            .get_visible()
+            .then(|| view.error.text().to_string())
+    }
+
+    /// The open "New message" dialog's width, in pixels (tests).
+    pub fn new_message_width(&self) -> i32 {
+        self.0
+            .new_message
+            .borrow()
+            .as_ref()
+            .map_or(0, |view| view.column.width_request())
+    }
+
+    /// Whether the "New message" field has the keyboard focus (tests).
+    pub fn new_message_focused(&self) -> bool {
+        let Some(view) = self.0.new_message.borrow().clone() else {
+            return false;
+        };
+        self.focused_widget().is_some_and(|widget| {
+            &widget == view.entry.upcast_ref::<gtk::Widget>() || widget.is_ancestor(&view.entry)
+        })
+    }
+
+    /// The rail's filled button: its label, its tooltip, and whether it carries an accessible
+    /// name (tests; GTK gives no way to read the name back).
+    pub fn rail_primary(&self) -> (String, Option<String>, bool) {
+        let primary = &self.0.rail.primary;
+        let label = self
+            .0
+            .rail
+            .texts
+            .first()
+            .and_then(|text| text.downcast_ref::<gtk::Label>())
+            .map(|label| label.text().to_string())
+            .unwrap_or_default();
+        (
+            label,
+            primary.tooltip_text().map(|t| t.to_string()),
+            gtk::test_accessible_has_property(primary, gtk::AccessibleProperty::Label),
+        )
+    }
+
+    /// Whether the rail's filled button shows its icon (the 48 px icon strip; tests).
+    pub fn rail_primary_icon_shown(&self) -> bool {
+        self.0.rail.primary_icon.get_visible()
+    }
+
+    /// Click the rail's filled button (tests).
+    pub fn click_rail_primary(&self) {
+        self.0.rail.primary.emit_clicked();
+    }
+
     /// Close the palette and run the command listed at `position`, once it is closed.
     fn palette_run(&self, position: usize) {
         let Some(view) = self.0.palette.borrow().clone() else {
@@ -1324,6 +1531,7 @@ impl Ui {
             Step::Search => {
                 self.start_search();
             }
+            Step::NewMessage => self.open_new_message(),
             Step::Settings => self.open_settings(),
             Step::Quit => {
                 // No application in the tests: nothing to quit.
@@ -1886,6 +2094,12 @@ impl Ui {
                 "settings",
                 &["<Control>comma"][..],
                 Box::new(self.with(|ui, (): ()| ui.open_settings())),
+            ),
+            // The rail's New message: plan §7 gives it no key.
+            (
+                "new-message",
+                &[][..],
+                Box::new(self.with(|ui, (): ()| ui.open_new_message())),
             ),
         ] {
             let action = gio::SimpleAction::new(name, None);
@@ -2691,6 +2905,77 @@ fn plain_label(text: &str) -> gtk::Label {
         .build();
     label.update_property(&[Property::Label(text)]);
     label
+}
+
+/// The "New message" dialog (plan §6.8): a 480 px `surface` panel with a 1 px border, its title,
+/// a line of body, the number field, the error (hidden until there is one), and Cancel and
+/// Open chat bottom-right, the primary as an `accent` text button.
+struct NewMessageView {
+    popover: gtk::Popover,
+    column: gtk::Box,
+    entry: gtk::Entry,
+    error: gtk::Label,
+    open: gtk::Button,
+    cancel: gtk::Button,
+}
+
+impl NewMessageView {
+    fn new(width: i32) -> Self {
+        let title = label(NEW_MESSAGE, "nuncio-title");
+        let body = label(
+            "Type a phone number with its country code. Its chat opens with an empty composer; \
+             nothing is sent.",
+            "nuncio-dialog-body",
+        );
+        body.set_wrap(true);
+        let entry = gtk::Entry::builder()
+            .placeholder_text("Phone number")
+            .input_purpose(gtk::InputPurpose::Phone)
+            .hexpand(true)
+            .build();
+        entry.add_css_class("nuncio-search");
+        entry.update_property(&[Property::Label("Phone number, with its country code")]);
+        let error = label("", "nuncio-dialog-error");
+        error.set_visible(false);
+        error.set_accessible_role(gtk::AccessibleRole::Alert);
+        let cancel = gtk::Button::with_label("Cancel");
+        cancel.add_css_class("flat");
+        let open = gtk::Button::with_label("Open chat");
+        open.add_css_class("flat");
+        open.add_css_class("nuncio-dialog-primary");
+        let actions = gtk::Box::builder()
+            .orientation(gtk::Orientation::Horizontal)
+            .spacing(8)
+            .halign(gtk::Align::End)
+            .margin_top(8)
+            .build();
+        actions.append(&cancel);
+        actions.append(&open);
+        let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+        column.set_width_request(width);
+        column.append(&title);
+        column.append(&body);
+        column.append(&entry);
+        column.append(&error);
+        column.append(&actions);
+        let popover = gtk::Popover::builder()
+            .child(&column)
+            .has_arrow(false)
+            .autohide(true)
+            .position(gtk::PositionType::Bottom)
+            .build();
+        popover.add_css_class(ROOT_CLASS);
+        popover.add_css_class("nuncio-dialog");
+        popover.update_property(&[Property::Label(NEW_MESSAGE)]);
+        Self {
+            popover,
+            column,
+            entry,
+            error,
+            open,
+            cancel,
+        }
+    }
 }
 
 /// The command palette's widgets and what it lists (plan §6.5): a panel of `width` pixels, the

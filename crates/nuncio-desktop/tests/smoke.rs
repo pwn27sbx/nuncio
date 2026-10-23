@@ -210,6 +210,7 @@ fn main() {
     connects_and_loads_the_chats_with_no_ui_handle_kept(&daemon, "a fake daemon");
     notifications_and_the_open_chat_action();
     a_link_fills_the_composer_and_sends_nothing();
+    the_rail_button_asks_for_a_number_and_opens_its_chat();
     the_composer_keys_send_button_and_reply_strip();
     closing_in_background_mode_hides_and_keeps_the_state_and_worker(&daemon);
     the_palette_opens_on_f1_and_jumps_to_a_chat();
@@ -543,6 +544,134 @@ fn a_link_fills_the_composer_and_sends_nothing() {
     ui.open_link("https://chat.whatsapp.com/AbCdEf123");
     check(ui.draft() == "hola Ben", "a group invite changes nothing");
     check(ui.take_undelivered().is_empty(), "and asks nothing");
+}
+
+/// The rail's one filled button is "New message" (S6): it asks for a phone number in a §6.8
+/// dialog; Escape cancels, an invalid number says why and opens nothing, a valid one opens its
+/// chat as a `whatsapp://send?phone=…` link with no text does: an empty, focused composer and
+/// nothing sent. The palette offers it too.
+fn the_rail_button_asks_for_a_number_and_opens_its_chat() {
+    let ui = listed();
+    let (label, tooltip, named) = ui.rail_primary();
+    check(
+        label == "New message",
+        &format!("the rail button's label: {label}"),
+    );
+    check(
+        tooltip.as_deref() == Some("New message"),
+        &format!("its tooltip, also on the icon strip: {tooltip:?}"),
+    );
+    check(named, "it has an accessible name");
+    ui.apply_layout(Layout::CompactRail);
+    check(
+        ui.rail_primary_icon_shown(),
+        "the icon strip shows its icon",
+    );
+    ui.apply_layout(Layout::ThreePanes);
+
+    check(!ui.new_message_open(), "no dialog at first");
+    ui.click_rail_primary();
+    check(ui.new_message_open(), "the button asks for a number");
+    check(ui.new_message_width() == 480, "a 480 px dialog (plan §6.8)");
+    check(ui.new_message_focused(), "the number field has the focus");
+    ui.new_message_type("+1 555 123 0003");
+    check(ui.new_message_key(Key::Escape), "Escape is the dialog's");
+    check(!ui.new_message_open(), "Escape cancels");
+    check(
+        !ui.controller().model().is_open() && ui.take_undelivered().is_empty(),
+        "and opens nothing",
+    );
+
+    ui.click_rail_primary();
+    ui.new_message_type("1555abc");
+    check(ui.new_message_key(Key::Return), "Enter is the dialog's");
+    check(
+        ui.new_message_open(),
+        "an invalid number keeps the dialog open",
+    );
+    check(
+        ui.new_message_error().as_deref() == Some("the phone number is not 7 to 15 digits"),
+        &format!("and says why: {:?}", ui.new_message_error()),
+    );
+    check(
+        !ui.controller().model().is_open() && ui.take_undelivered().is_empty(),
+        "an invalid number opens nothing and sends nothing",
+    );
+    ui.new_message_type("+1 555 123 0003");
+    check(
+        ui.new_message_error().is_none(),
+        "typing again clears the error",
+    );
+    check(!ui.new_message_key(Key::a), "a letter is typed");
+    check(ui.new_message_key(Key::Return), "Enter confirms");
+    check(!ui.new_message_open(), "a valid number closes the dialog");
+    check(
+        ui.controller().model().selected_jid() == Some("15551230003@s.whatsapp.net")
+            && ui.controller().model().is_open(),
+        "and opens that chat",
+    );
+    check(
+        ui.take_undelivered()
+            == [Command::Send(ClientFrame::messages(
+                "15551230003@s.whatsapp.net",
+                200,
+            ))],
+        "it asks for its messages and sends nothing",
+    );
+    check(ui.draft().is_empty(), "the composer is empty");
+    check(ui.composer_focused(), "and has the focus");
+
+    // S8: a draft typed in another chat never goes to the new number, even with a double Enter.
+    ui.open_chat(0);
+    ui.take_undelivered();
+    ui.type_draft("meant for ana");
+    ui.click_rail_primary();
+    ui.new_message_type("+1 555 123 0004");
+    check(ui.new_message_key(Key::Return), "Enter confirms");
+    check(
+        ui.draft().is_empty() && ui.controller().model().composer().text().is_empty(),
+        &format!(
+            "New message always opens with an empty composer: {:?}",
+            ui.draft()
+        ),
+    );
+    check(ui.composer_focused(), "the empty composer has the focus");
+    check(
+        ui.composer_press(Key::Return, ModifierType::empty()),
+        "the second Enter reaches the composer",
+    );
+    let after = ui.take_undelivered();
+    check(
+        !after
+            .iter()
+            .any(|c| matches!(c, Command::Send(ClientFrame::Send { .. }))),
+        &format!("a double Enter sends nothing: {after:?}"),
+    );
+
+    // The palette's "New message…" opens the same dialog.
+    check(ui.press("F1") && ui.palette_open(), "F1 opens the palette");
+    ui.palette_type("new message");
+    check(
+        ui.palette_selected().as_deref() == Some("New message…"),
+        "the palette lists New message",
+    );
+    ui.palette_enter();
+    iterate();
+    check(!ui.palette_open(), "the palette closes");
+    check(ui.new_message_open(), "and the dialog asks for a number");
+    ui.new_message_type("1-555-123-0002");
+    check(
+        ui.new_message_key(Key::KP_Enter),
+        "the keypad's Enter confirms too",
+    );
+    check(
+        ui.controller().model().selected_jid() == Some(BEN),
+        "a listed chat opens as itself",
+    );
+    check(
+        ui.take_undelivered() == [Command::Send(ClientFrame::messages(BEN, 200))],
+        "and nothing is sent",
+    );
 }
 
 /// A `width` x `height` gradient JPEG, as the demo's photo thumbnail (48x32) is.
@@ -920,22 +1049,22 @@ fn the_palette_opens_on_f1_and_jumps_to_a_chat() {
         &format!("groups have headers: {:?}", ui.palette_headers()),
     );
     check(
-        ui.palette_selected().as_deref() == Some("Settings"),
+        ui.palette_selected().as_deref() == Some("New message…"),
         "the first row is selected",
     );
     check(ui.palette_key(Key::Down), "Down is the palette's");
     check(
-        ui.palette_selected().as_deref() == Some("Quit"),
+        ui.palette_selected().as_deref() == Some("Settings"),
         "Down moves the selection",
     );
     check(ui.palette_key(Key::Up), "Up is the palette's");
     check(
-        ui.palette_selected().as_deref() == Some("Settings"),
+        ui.palette_selected().as_deref() == Some("New message…"),
         "Up moves it back",
     );
     check(ui.palette_key(Key::Up), "Up at the top");
     check(
-        ui.palette_selected().as_deref() == Some("Settings"),
+        ui.palette_selected().as_deref() == Some("New message…"),
         "and stays on the first row",
     );
     check(!ui.palette_key(Key::a), "a letter is typed");

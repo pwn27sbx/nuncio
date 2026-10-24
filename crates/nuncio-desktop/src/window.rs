@@ -1552,8 +1552,7 @@ impl Ui {
             return;
         };
         self.close_palette();
-        let run = self.with(move |ui, (): ()| ui.palette_step(&action));
-        glib::idle_add_local_once(move || run(()));
+        self.palette_step(&action);
     }
 
     fn palette_step(&self, action: &palette::Action) {

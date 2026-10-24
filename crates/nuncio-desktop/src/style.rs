@@ -280,7 +280,7 @@ pub fn transcript_width(available: i32, char_width: i32, min: i32) -> i32 {
 fn overlays_css(palette: &Palette) -> String {
     let root = ROOT_CLASS;
     format!(
-        ".{root} .nuncio-scrim {{ background-color: alpha({surface}, 0.7); opacity: 0; }}\n\
+        ".{root} .nuncio-scrim {{ background-color: alpha(#000000, 0.42); opacity: 0; }}\n\
          .{root} .nuncio-scrim.nuncio-scrim-shown {{ opacity: 1; }}\n\
          popover.{root}.nuncio-palette > contents {{\n  \
            background-color: {chrome};\n  \
@@ -902,19 +902,15 @@ mod tests {
     }
 
     #[test]
-    fn the_palette_is_a_560_px_chrome_panel_over_a_70_percent_scrim() {
+    fn the_palette_is_a_560_px_chrome_panel_over_a_dark_scrim() {
         let palette = gruvbox();
         let css = layout_css(&palette, 0);
         let root = format!(".{ROOT_CLASS}");
-        let (chrome, surface, border) = (
-            palette.surface_chrome().to_hex(),
-            palette.surface().to_hex(),
-            palette.border().to_hex(),
-        );
+        let (chrome, border) = (palette.surface_chrome().to_hex(), palette.border().to_hex());
         has(
             &css,
             &format!("{root} .nuncio-scrim"),
-            &[format!("background-color: alpha({surface}, 0.7);")],
+            &["background-color: alpha(#000000, 0.42);".to_owned()],
         );
         has(
             &css,
@@ -1164,6 +1160,47 @@ mod tests {
             &format!("{root} .nuncio-scrim.nuncio-scrim-shown"),
             &["opacity: 1;".to_owned()],
         );
+    }
+
+    /// The scrim must darken what is behind it on **both** surfaces: with a colour equal to
+    /// the content surface it is invisible over the conversation, which is what the first run on
+    /// a real screen showed.
+    #[test]
+    fn the_scrim_darkens_the_content_and_the_chrome() {
+        let palette = gruvbox();
+        let css = layout_css(&palette, 0);
+        let body = rule(&css, &format!(".{ROOT_CLASS} .nuncio-scrim"));
+        let start = body
+            .find("background-color: alpha(")
+            .expect("the scrim has a colour")
+            + "background-color: alpha(".len();
+        let inner = &body[start..start + body[start..].find(')').expect("closing paren")];
+        let (hex, alpha) = inner.split_once(", ").expect("alpha(#rrggbb, a)");
+        let scrim = Rgb::from_hex(hex).expect("a hex colour");
+        let alpha: f64 = alpha.parse().expect("an alpha");
+        let over = |base: Rgb| {
+            let mix =
+                |b: u8, f: u8| (f64::from(b) * (1.0 - alpha) + f64::from(f) * alpha).round() as u8;
+            Rgb::new(
+                mix(base.r, scrim.r),
+                mix(base.g, scrim.g),
+                mix(base.b, scrim.b),
+            )
+        };
+        let luminance =
+            |c: Rgb| 0.2126 * f64::from(c.r) + 0.7152 * f64::from(c.g) + 0.0722 * f64::from(c.b);
+        for (name, base) in [
+            ("content", palette.surface()),
+            ("chrome", palette.surface_chrome()),
+        ] {
+            let dimmed = over(base);
+            assert!(
+                luminance(dimmed) < luminance(base) * 0.95,
+                "the scrim must darken {name}: {} over {} at alpha {alpha}",
+                dimmed.to_hex(),
+                base.to_hex()
+            );
+        }
     }
 
     #[test]

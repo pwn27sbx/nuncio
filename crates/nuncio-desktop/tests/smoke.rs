@@ -1284,6 +1284,10 @@ fn the_search_is_inline_in_the_conversation() {
     check(ui.drawn().0 == 2, "and the chat rows stay listed");
     ui.close_search();
     check(!ui.search_open(), "Escape closes it");
+    check(
+        ui.conversation_focused(),
+        "and the focus is back in the conversation",
+    );
     check(!ui.results_shown(), "and its results go");
     check(
         ui.press("<Control>f") && ui.search_open(),

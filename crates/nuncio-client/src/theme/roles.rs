@@ -337,16 +337,22 @@ light_foreground = "#5c5f77"
         assert!(text_on_chrome >= 7.0, "text on chrome {text_on_chrome:.2}");
     }
 
-    /// The plan's `text` ≥ 7:1 on `surface_chrome` does not hold on two real Omarchy themes
-    /// with the plan's own mapping (`foreground` on `lighter_background`): Gruvbox 6.42:1,
-    /// Catppuccin Latte 6.04:1. `text` may never change (S4), so this waits for a decision.
+    /// Owner's decision (F1, 2026-10-24): `text` keeps 7:1 on the content surface and takes the
+    /// WCAG AA floor, 4.5:1, on the chrome. The plan's 7:1 on `surface_chrome` does not hold on
+    /// two real Omarchy themes with the plan's own mapping (`foreground` on
+    /// `lighter_background`): Gruvbox 6.42:1, Catppuccin Latte 6.04:1, and `text` may never
+    /// change (S4). AA is the threshold for normal text, so the chrome keeps it.
     #[test]
-    #[ignore = "open decision: Gruvbox and Latte foreground is under 7:1 on lighter_background"]
-    fn text_reaches_7_to_1_on_the_chrome_of_gruvbox_and_latte() {
+    fn text_is_7_to_1_on_the_content_and_aa_on_the_chrome() {
         for fixture in [GRUVBOX, CATPPUCCIN_LATTE] {
             let palette = parse(fixture);
-            let ratio = contrast(palette.text(), palette.surface_chrome());
-            assert!(ratio >= 7.0, "text on chrome {ratio:.2}");
+            let content = contrast(palette.text(), palette.surface());
+            assert!(content >= 7.0, "text on surface {content:.2}");
+            let chrome = contrast(palette.text(), palette.surface_chrome());
+            assert!(
+                chrome >= 4.5,
+                "text on surface_chrome {chrome:.2} is under WCAG AA"
+            );
         }
     }
 

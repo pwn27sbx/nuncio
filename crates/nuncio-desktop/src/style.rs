@@ -256,7 +256,7 @@ pub fn motion_css(animations: bool) -> String {
              .{root} button.nuncio-dialog-primary {{\n  \
                transition: background-color {MOTION_MS}ms ease-out;\n\
              }}\n\
-             .{root} .nuncio-scrim {{ transition: opacity {MOTION_MS}ms ease-out; }}\n"
+             .{root} .nuncio-panes {{ transition: opacity {MOTION_MS}ms ease-out; }}\n"
         ));
     }
     css
@@ -280,8 +280,8 @@ pub fn transcript_width(available: i32, char_width: i32, min: i32) -> i32 {
 fn overlays_css(palette: &Palette) -> String {
     let root = ROOT_CLASS;
     format!(
-        ".{root} .nuncio-scrim {{ background-color: alpha(#000000, 0.42); opacity: 0; }}\n\
-         .{root} .nuncio-scrim.nuncio-scrim-shown {{ opacity: 1; }}\n\
+        ".{root} .nuncio-under {{ background-color: #000000; }}\n\
+                 .{root} .nuncio-panes.nuncio-scrim-shown {{ opacity: 0.55; }}\n\
          popover.{root}.nuncio-palette > contents {{\n  \
            background-color: {chrome};\n  \
            color: {text};\n  \
@@ -909,8 +909,13 @@ mod tests {
         let (chrome, border) = (palette.surface_chrome().to_hex(), palette.border().to_hex());
         has(
             &css,
-            &format!("{root} .nuncio-scrim"),
-            &["background-color: alpha(#000000, 0.42);".to_owned()],
+            &format!("{root} .nuncio-under"),
+            &["background-color: #000000;".to_owned()],
+        );
+        has(
+            &css,
+            &format!("{root} .nuncio-panes.nuncio-scrim-shown"),
+            &["opacity: 0.55;".to_owned()],
         );
         has(
             &css,
@@ -1101,7 +1106,7 @@ mod tests {
                 "button.nuncio-icon-button",
                 "background-color 120ms ease-out",
             ),
-            ("nuncio-scrim", "opacity 120ms ease-out"),
+            ("nuncio-panes", "opacity 120ms ease-out"),
         ] {
             let selector = if selector.starts_with("nuncio-") {
                 format!("{root} .{selector}")
@@ -1152,13 +1157,8 @@ mod tests {
         let root = format!(".{ROOT_CLASS}");
         has(
             &css,
-            &format!("{root} .nuncio-scrim"),
-            &["opacity: 0;".to_owned()],
-        );
-        has(
-            &css,
-            &format!("{root} .nuncio-scrim.nuncio-scrim-shown"),
-            &["opacity: 1;".to_owned()],
+            &format!("{root} .nuncio-panes.nuncio-scrim-shown"),
+            &["opacity: 0.55;".to_owned()],
         );
     }
 
@@ -1169,23 +1169,19 @@ mod tests {
     fn the_scrim_darkens_the_content_and_the_chrome() {
         let palette = gruvbox();
         let css = layout_css(&palette, 0);
-        let body = rule(&css, &format!(".{ROOT_CLASS} .nuncio-scrim"));
-        let start = body
-            .find("background-color: alpha(")
-            .expect("the scrim has a colour")
-            + "background-color: alpha(".len();
-        let inner = &body[start..start + body[start..].find(')').expect("closing paren")];
-        let (hex, alpha) = inner.split_once(", ").expect("alpha(#rrggbb, a)");
-        let scrim = Rgb::from_hex(hex).expect("a hex colour");
-        let alpha: f64 = alpha.parse().expect("an alpha");
+        let body = rule(
+            &css,
+            &format!(".{ROOT_CLASS} .nuncio-panes.nuncio-scrim-shown"),
+        );
+        let start = body.find("opacity: ").expect("an opacity") + "opacity: ".len();
+        let alpha: f64 = body[start..start + body[start..].find(';').expect("a value")]
+            .parse()
+            .expect("a number");
+        // The panes are drawn at that opacity over the black backdrop, so each tone lands at
+        // `tone * alpha` over black.
         let over = |base: Rgb| {
-            let mix =
-                |b: u8, f: u8| (f64::from(b) * (1.0 - alpha) + f64::from(f) * alpha).round() as u8;
-            Rgb::new(
-                mix(base.r, scrim.r),
-                mix(base.g, scrim.g),
-                mix(base.b, scrim.b),
-            )
+            let mix = |b: u8| (f64::from(b) * alpha).round() as u8;
+            Rgb::new(mix(base.r), mix(base.g), mix(base.b))
         };
         let luminance =
             |c: Rgb| 0.2126 * f64::from(c.r) + 0.7152 * f64::from(c.g) + 0.0722 * f64::from(c.b);

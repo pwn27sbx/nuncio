@@ -336,7 +336,9 @@ fn width_of(buffer: &Buffer) -> u16 {
 }
 
 #[test]
-fn each_message_is_one_line_with_its_author_and_time_dim_then_its_text() {
+fn each_message_is_one_line_with_its_author_and_time_muted_then_its_text() {
+    let palette = Palette::default();
+    let muted = colour(palette.text_muted());
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
     for (width, height) in SIZES {
@@ -362,8 +364,8 @@ fn each_message_is_one_line_with_its_author_and_time_dim_then_its_text() {
             let time = (time..x + meta.chars().count() as u16)
                 .find(|&x| buffer[(x, y)].symbol().chars().all(|c| c.is_ascii_digit()))
                 .expect("the time");
-            assert!(buffer[(time, y)].modifier.contains(Modifier::DIM), "{meta}");
-            assert!(!buffer[(text_x, y)].modifier.contains(Modifier::DIM));
+            assert_eq!(buffer[(time, y)].fg, muted, "{meta}");
+            assert_ne!(buffer[(text_x, y)].fg, muted);
             assert!(!buffer[(text_x, y)].modifier.contains(Modifier::BOLD));
         }
     }
@@ -392,7 +394,9 @@ fn an_authors_run_has_no_blank_line_and_the_next_author_starts_after_one() {
 }
 
 #[test]
-fn each_day_starts_with_its_label_in_dim_caps_after_a_blank_line() {
+fn each_day_starts_with_its_label_in_muted_caps_after_a_blank_line() {
+    let palette = Palette::default();
+    let muted = colour(palette.text_muted());
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
     for (width, height) in SIZES {
@@ -401,7 +405,7 @@ fn each_day_starts_with_its_label_in_dim_caps_after_a_blank_line() {
         let blank = |y: u16| (sep + 1..width).all(|x| buffer[(x, y)].symbol() == " ");
         let (x, saturday) = find(&buffer, "SAT 17 OCT 2026");
         assert_eq!(saturday + 1, row_of(&buffer, "hello there"));
-        assert!(buffer[(x, saturday)].modifier.contains(Modifier::DIM));
+        assert_eq!(buffer[(x, saturday)].fg, muted);
         let sunday = row_of(&buffer, "SUN 18 OCT 2026");
         assert!(
             blank(sunday - 1),
@@ -444,7 +448,8 @@ fn senders_are_not_colour_coded() {
 }
 
 #[test]
-fn the_footer_is_one_line_of_dim_keys_with_the_pictures_protocol_on_the_right() {
+fn the_footer_is_one_line_of_muted_keys_with_the_pictures_protocol_on_the_right() {
+    let muted = colour(Palette::default().text_muted());
     for (width, height) in SIZES {
         let mut app = two_chats().with_graphics(Graphics::halfblocks());
         let buffer = draw(&mut app, width, height);
@@ -455,10 +460,10 @@ fn the_footer_is_one_line_of_dim_keys_with_the_pictures_protocol_on_the_right() 
             "one line only:\n{}",
             text(&buffer)
         );
-        // Every key is dim but the primary one.
+        // Every key is muted but the primary one.
         let (q, _) = find(&buffer, "q quit");
         assert_eq!(find(&buffer, "q quit").1, footer);
-        assert!(buffer[(q, footer)].modifier.contains(Modifier::DIM));
+        assert_eq!(buffer[(q, footer)].fg, muted);
         if width >= 120 {
             assert!(
                 row(&buffer, footer).trim_end().ends_with("half blocks"),
@@ -470,8 +475,9 @@ fn the_footer_is_one_line_of_dim_keys_with_the_pictures_protocol_on_the_right() 
 }
 
 #[test]
-fn the_help_sits_on_a_solid_surface_scrim_with_its_keys_right_aligned_and_dim() {
+fn the_help_sits_on_a_solid_surface_scrim_with_its_keys_right_aligned_and_muted() {
     let palette = Palette::default();
+    let muted = colour(palette.text_muted());
     let mut app = two_chats();
     app.handle_key(key(KeyCode::Char('?')));
     let buffer = draw(&mut app, 240, 60);
@@ -479,12 +485,12 @@ fn the_help_sits_on_a_solid_surface_scrim_with_its_keys_right_aligned_and_dim() 
     assert!(!text(&buffer).contains("Grace Hopper"), "{}", text(&buffer));
     assert_eq!(buffer[(0, 10)].bg, colour(palette.surface()));
     assert_eq!(buffer[(0, 10)].symbol(), " ");
-    // One key per row, right-aligned, dim, after what it does.
+    // One key per row, right-aligned, muted, after what it does.
     let y = row_of(&buffer, "this help");
     let shown = row(&buffer, y);
     assert!(shown.trim_end().ends_with('?'), "{shown:?}");
     let x = shown.trim_end().chars().count() as u16 - 1;
-    assert!(buffer[(x, y)].modifier.contains(Modifier::DIM));
+    assert_eq!(buffer[(x, y)].fg, muted);
     // At 80x24 every key still fits (wrapped), on the same scrim.
     let buffer = draw(&mut app, 80, 24);
     assert!(text(&buffer).contains("this help"), "{}", text(&buffer));
@@ -493,20 +499,21 @@ fn the_help_sits_on_a_solid_surface_scrim_with_its_keys_right_aligned_and_dim() 
 }
 
 #[test]
-fn empty_states_are_one_dim_line_with_the_key_hint() {
+fn empty_states_are_one_muted_line_with_the_key_hint() {
+    let muted = colour(Palette::default().text_muted());
     // No chats: the list says so, the conversation too.
     let mut app = app_with(Vec::new());
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
         let (x, y) = find(&buffer, "No chats yet");
-        assert!(buffer[(x, y)].modifier.contains(Modifier::DIM));
+        assert_eq!(buffer[(x, y)].fg, muted);
     }
     // A chat with no messages.
     let mut app = two_chats();
     open(&mut app, ADA, Vec::new());
     let buffer = draw(&mut app, 80, 24);
     let (x, y) = find(&buffer, "No messages yet · i to write");
-    assert!(buffer[(x, y)].modifier.contains(Modifier::DIM));
+    assert_eq!(buffer[(x, y)].fg, muted);
 }
 
 #[test]
@@ -555,6 +562,7 @@ fn a_reply_shows_its_quote_between_its_header_and_its_text_inside_an_authors_run
 
 #[test]
 fn with_no_chats_the_focused_conversation_still_shows_a_bold_title() {
+    let muted = colour(Palette::default().text_muted());
     let mut app = app_with(Vec::new());
     app.handle_key(key(KeyCode::Tab));
     assert_eq!(app.pane(), Pane::Messages);
@@ -562,13 +570,13 @@ fn with_no_chats_the_focused_conversation_still_shows_a_bold_title() {
     let (x, y) = find(&buffer, "Conversation");
     assert_eq!(y, 1, "on the header rule:\n{}", text(&buffer));
     assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
-    assert!(!buffer[(x, y)].modifier.contains(Modifier::DIM));
+    assert_ne!(buffer[(x, y)].fg, muted);
     let (x, y) = find(&buffer, "Chats (0)");
-    assert!(buffer[(x, y)].modifier.contains(Modifier::DIM));
+    assert_eq!(buffer[(x, y)].fg, muted);
     app.handle_key(key(KeyCode::Tab));
     let buffer = draw(&mut app, 80, 24);
     let (x, y) = find(&buffer, "Conversation");
-    assert!(buffer[(x, y)].modifier.contains(Modifier::DIM), "unfocused");
+    assert_eq!(buffer[(x, y)].fg, muted, "unfocused");
 }
 
 #[test]
@@ -591,4 +599,64 @@ fn the_selected_messages_reactions_row_is_on_the_active_surface_too() {
         "{}",
         text(&buffer)
     );
+}
+
+/// WCAG 2.1 relative luminance: the same formula as `nuncio_client`'s `theme::roles`, private
+/// there, so the test repeats it instead of widening the public API for a test.
+fn relative_luminance(rgb: nuncio_client::Rgb) -> f64 {
+    fn channel(value: u8) -> f64 {
+        let value = f64::from(value) / 255.0;
+        if value <= 0.039_28 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b)
+}
+
+fn contrast_ratio(a: nuncio_client::Rgb, b: nuncio_client::Rgb) -> f64 {
+    let (a, b) = (relative_luminance(a), relative_luminance(b));
+    let (light, dark) = if a >= b { (a, b) } else { (b, a) };
+    (light + 0.05) / (dark + 0.05)
+}
+
+#[test]
+fn meta_is_the_muted_role_and_no_text_is_dimmed() {
+    let palette = Palette::default();
+    // The role keeps its own promise on both surfaces the TUI paints (R3).
+    assert!(contrast_ratio(palette.text_muted(), palette.surface()) >= 4.5);
+    assert!(contrast_ratio(palette.text_muted(), palette.surface_chrome()) >= 4.5);
+    let muted = colour(palette.text_muted());
+    // `Modifier::DIM` is emulator-defined, so nothing may depend on it (R3).
+    for (width, height) in SIZES {
+        for (name, buffer) in screens(width, height) {
+            for y in 0..height {
+                for x in 0..width {
+                    let cell = &buffer[(x, y)];
+                    assert!(
+                        !cell.modifier.contains(Modifier::DIM),
+                        "{name} at {width}x{height}: {:?} at ({x}, {y}) is dimmed:\n{}",
+                        cell.symbol(),
+                        text(&buffer)
+                    );
+                }
+            }
+        }
+    }
+    // Meta is that role: a message's time, the day label, a footer key and an empty state.
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    app.handle_key(key(KeyCode::Esc));
+    let buffer = draw(&mut app, 80, 24);
+    let (x, y) = find(&buffer, "17:01");
+    assert_eq!(buffer[(x, y)].fg, muted, "a message's time");
+    let (x, y) = find(&buffer, "SAT 17 OCT 2026");
+    assert_eq!(buffer[(x, y)].fg, muted, "the day label");
+    let (x, y) = find(&buffer, "? help");
+    assert_eq!(buffer[(x, y)].fg, muted, "a footer key");
+    let mut app = app_with(Vec::new());
+    let buffer = draw(&mut app, 80, 24);
+    let (x, y) = find(&buffer, "No chats yet");
+    assert_eq!(buffer[(x, y)].fg, muted, "an empty state");
 }

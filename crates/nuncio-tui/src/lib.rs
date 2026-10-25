@@ -1722,11 +1722,11 @@ impl App {
         (lines, selected, owners, boxes)
     }
 
-    /// Meta text: the text role, dim (plan §9.3).
+    /// Meta text: the `text_muted` role, the only tone with a 4.5:1 floor on both surfaces.
+    /// `Modifier::DIM` is not used for text: the terminal decides how much it dims, so the
+    /// contrast could not be held by a test (design plan §9.3, R3).
     fn muted(&self) -> Style {
-        Style::default()
-            .fg(rgb(self.palette.text()))
-            .add_modifier(Modifier::DIM)
+        Style::default().fg(rgb(self.palette.text_muted()))
     }
 
     /// The one-cell lines: the header rule, the line between the panes, the composer rule.
@@ -2025,7 +2025,7 @@ fn chat_item(
 ) -> ListItem<'static> {
     let accent = Style::default().fg(rgb(palette.accent()));
     let text = Style::default().fg(rgb(palette.text()));
-    let dim = text.add_modifier(Modifier::DIM);
+    let dim = Style::default().fg(rgb(palette.text_muted()));
     let bar = || {
         if selected {
             Span::styled("▌", accent)

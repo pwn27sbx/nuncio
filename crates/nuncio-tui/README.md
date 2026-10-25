@@ -64,7 +64,7 @@ nuncio-tui [--image <png>]
   roles: the list on `surface_chrome`, the conversation on `surface`, the selected chat on
   `surface_active`. The accent marks only the unread dot `●`, the selection bar `▌` and the one
   primary key in the footer (`Enter`, or `1-6` in the reaction picker); names are bold, times
-  and other meta are dim, and senders are never colour-coded. The colours are sent as 24-bit
+  and other meta use the `text_muted` role, and senders are never colour-coded. The colours are sent as 24-bit
   RGB, as before.
 - **Chat list** (left): an unread chat has the dot `●` before its name; the selected one has the
   bar `▌` down both its rows. Then the name and unread count `(n)`, then `★` pinned, `⊘` muted, `▤` archived in
@@ -83,8 +83,8 @@ nuncio-tui [--image <png>]
   be read, times are UTC and the footer says so.
 - **Conversation** (right): the selected chat, newest message at the bottom. Before a chat is
   opened it shows the chat's last message only. One line per message: the author in bold and
-  the time dim, then the text (a message's further lines get rows of their own). Each day starts
-  with its local date in dim caps (`SUN 18 OCT 2026`) after a blank line; the messages of one
+  the time muted, then the text (a message's further lines get rows of their own). Each day starts
+  with its local date in muted caps (`SUN 18 OCT 2026`) after a blank line; the messages of one
   author follow each other with no blank line, and the next author starts after one. With no
   message it says `No messages yet · i to write`, with no chats `No chats yet` (its title is
   then `Conversation`, so the focus still shows).
@@ -112,15 +112,15 @@ nuncio-tui [--image <png>]
   message state. A connection that dies silently still counts as linked for up to 3 minutes,
   until its keepalive fails, so a send in that window shows `not confirmed` rather than `queued`.
 - **Focus**: one pane has the keys at a time, the chat list or the conversation (the composer
-  counts as the conversation); its title on the header rule is bold, the other's dim. `Tab`
+  counts as the conversation); its title on the header rule is bold, the other's muted. `Tab`
   switches between them.
-- **Footer**: always one line of hints, dim, with the focused pane's primary key in the accent
+- **Footer**: always one line of hints, muted, with the focused pane's primary key in the accent
   and, when pictures are drawn and there is room, their protocol (`kitty`, `half blocks`, ...) on
   the right. Outside the composer it starts with
   `? help · Tab switch pane · Enter open · / search · q quit` (`Enter write` in the conversation)
   and adds the focused pane's keys after it; in the composer, where `q` and `/` are text, it says
   how to send and `Esc conversation · Ctrl-C quit`. `?` shows every key, grouped by context, on
-  a panel over a solid `surface` scrim: one key per row, right-aligned and dim, when the terminal
+  a panel over a solid `surface` scrim: one key per row, right-aligned and muted, when the terminal
   is tall enough, else each context's keys on one wrapped line.
 - **Selected message**: in the conversation, `k`/`↑` select a message (marked with the bar `▌`, the newest first,
   then older) and `j`/`↓` a newer one; `r` replies to it, `e` reacts, `R`

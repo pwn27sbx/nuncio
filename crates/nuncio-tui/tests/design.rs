@@ -796,6 +796,25 @@ fn the_composer_says_what_enter_does_and_marks_its_rule_when_focused() {
     let rule = row_of(&buffer, "Enter sends");
     assert_eq!(buffer[(33, rule)].symbol(), "▌");
     assert_eq!(buffer[(33, rule)].fg, accent);
+    // The hint ends in the pane's last column: the fill reached it, not a column short.
+    let hint = "Enter sends · Alt-Enter newline ";
+    let (x, _) = find(&buffer, hint.trim_end());
+    assert_eq!(usize::from(x) + hint.chars().count(), 80);
+
+    // The same rule with a reply's quote: the fill still reaches the hint.
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('k')));
+    app.handle_key(key(KeyCode::Char('r')));
+    // Wide enough for the quote and the hint: the rule still reaches the last column.
+    let buffer = draw(&mut app, 240, 24);
+    let rule = row_of(&buffer, "Enter sends");
+    assert!(
+        row(&buffer, rule).contains("replying to:"),
+        "{}",
+        text(&buffer)
+    );
+    let (x, _) = find(&buffer, hint.trim_end());
+    assert_eq!(usize::from(x) + hint.chars().count(), 240);
 }
 
 #[test]

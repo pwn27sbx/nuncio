@@ -1469,9 +1469,14 @@ impl App {
                 used += 2 + display_width(&quoted);
                 spans.push(Span::styled(quoted, self.muted()));
             }
-            // What Enter does here, where it does it, while there is something to send.
-            let sends = if draft.is_some() && self.pane == Pane::Compose {
-                "Enter sends · Alt-Enter newline "
+            // What Enter does here, where it does it, while there is something to send and the
+            // room exists: a reply's quote can take the whole rule at a narrow width.
+            let candidate = "Enter sends · Alt-Enter newline ";
+            let sends = if draft.is_some()
+                && self.pane == Pane::Compose
+                && used + display_width(candidate) < width
+            {
+                candidate
             } else {
                 ""
             };

@@ -731,6 +731,13 @@ fn the_archived_filter_lists_the_archived_chat() {
     let shown = text(&buffer);
     assert!(shown.contains("Chats · Archived (1)"), "{shown}");
     assert!(shown.contains("Grace Hopper"), "{shown}");
-    assert!(!shown.contains("Ada Lovelace │"), "{shown}");
+    let right = split(&buffer);
+    let rows: Vec<String> = (2..22)
+        .map(|y| (0..right).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect();
+    assert!(
+        rows.iter().all(|row| !row.contains("Ada Lovelace")),
+        "the unarchived chat is not listed:\n{shown}"
+    );
     assert_eq!(app.selected(), 1, "the archived chat is the only one");
 }

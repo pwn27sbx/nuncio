@@ -334,11 +334,12 @@ fn a_partially_visible_picture_is_cut_at_the_top_and_at_the_bottom() {
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
     let bottom_cut = draw(&mut app, 80, 24);
-    // The day label, eight rows, the caption line: 9 picture rows fit before the composer.
-    assert_eq!(row_of(&bottom_cut, "before line 0"), Some(3));
+    // The start marker costs one row: 8 picture rows fit before the composer.
+    assert_eq!(row_of(&bottom_cut, "Beginning of conversation"), Some(2));
+    assert_eq!(row_of(&bottom_cut, "before line 0"), Some(4));
     assert_eq!(
         rows_in(&bottom_cut, RED),
-        (12..21).collect::<Vec<_>>(),
+        (13..21).collect::<Vec<_>>(),
         "{}",
         screen(&bottom_cut)
     );

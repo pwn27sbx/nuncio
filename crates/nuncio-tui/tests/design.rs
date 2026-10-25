@@ -532,13 +532,16 @@ fn empty_states_are_one_muted_line_with_the_key_hint() {
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
         let (x, y) = find(&buffer, "No chats yet");
+        assert!(row(&buffer, y).contains("nuncio link"), "{}", text(&buffer));
+        assert_eq!(buffer[(x, y)].fg, muted);
+        let (x, y) = find(&buffer, "No chat open");
         assert_eq!(buffer[(x, y)].fg, muted);
     }
     // A chat with no messages.
     let mut app = two_chats();
     open(&mut app, ADA, Vec::new());
     let buffer = draw(&mut app, 80, 24);
-    let (x, y) = find(&buffer, "No messages yet · i to write");
+    let (x, y) = find(&buffer, "No messages yet · i writes the first one");
     assert_eq!(buffer[(x, y)].fg, muted);
 }
 
@@ -728,4 +731,70 @@ fn only_the_pane_with_the_keys_paints_the_active_surface() {
     let buffer = draw(&mut app, 80, 24);
     assert!(list_filled(&buffer), "{}", text(&buffer));
     assert!(!conversation_filled(&buffer), "{}", text(&buffer));
+}
+
+#[test]
+fn the_transcript_opens_with_its_start_marker() {
+    let muted = colour(Palette::default().text_muted());
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    let buffer = draw(&mut app, 80, 24);
+    let (x, y) = find(&buffer, "Beginning of conversation");
+    assert_eq!(buffer[(x, y)].fg, muted);
+    assert!(
+        y < row_of(&buffer, "hello there"),
+        "above the first message:\n{}",
+        text(&buffer)
+    );
+}
+
+#[test]
+fn the_scroll_gutter_says_what_is_hidden() {
+    let mut app = two_chats();
+    let mut many = conversation();
+    for n in 0..30 {
+        many.push(message(
+            &format!("N{n}"),
+            &format!("line {n}"),
+            false,
+            "2026-10-18T10:00:00Z",
+        ));
+    }
+    open(&mut app, ADA, many);
+    // It opens at the newest message, so there is more above.
+    let buffer = draw(&mut app, 80, 24);
+    let shown = text(&buffer);
+    assert!(shown.contains("▲"), "more above:\n{shown}");
+    // At the oldest, the gutter points the other way and the start marker is on screen.
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('g')));
+    let buffer = draw(&mut app, 80, 24);
+    let shown = text(&buffer);
+    assert!(shown.contains("▼"), "more below:\n{shown}");
+    assert!(!shown.contains("▲"), "nothing above:\n{shown}");
+    assert!(shown.contains("Beginning of conversation"), "{shown}");
+}
+
+#[test]
+fn the_composer_says_what_enter_does_and_marks_its_rule_when_focused() {
+    let palette = Palette::default();
+    let muted = colour(palette.text_muted());
+    let accent = colour(palette.accent());
+    let mut app = two_chats();
+    // With nothing to send, the placeholder says how to write at all.
+    let buffer = draw(&mut app, 80, 24);
+    let (x, y) = find(&buffer, "i or Enter to write");
+    assert_eq!(buffer[(x, y)].fg, muted);
+    assert!(!text(&buffer).contains("Enter sends"));
+
+    // With a draft, the rule says what Enter does and starts with the accent bar.
+    open(&mut app, ADA, conversation());
+    app.handle_key(key(KeyCode::Char('h')));
+    app.handle_key(key(KeyCode::Char('i')));
+    let buffer = draw(&mut app, 80, 24);
+    let shown = text(&buffer);
+    assert!(shown.contains("Enter sends · Alt-Enter newline"), "{shown}");
+    let rule = row_of(&buffer, "Enter sends");
+    assert_eq!(buffer[(33, rule)].symbol(), "▌");
+    assert_eq!(buffer[(33, rule)].fg, accent);
 }

@@ -58,10 +58,10 @@ Runners: `cargo test -p nuncio-tui`, `cargo test --workspace`, `cargo fmt --chec
 | W4 | S3 R4: row time column, inline markers, badge | inline | done: two fixed rows — name + inline markers + a five-column time slot; preview + a four-column badge `●n`/`●99+`; a narrow list drops the time, then the markers, before cutting the name under six columns. Updated `design.rs` (accent set, badge drawn), `keys.rs` (markers follow the name), `render.rs`, `app.rs`; README's chat-list section rewritten | this commit |
 | W5 | S3 R5: one selection fill, unfocused keeps `▌` | inline | done with W6: the list fills only while it has the keys, the conversation (composer included) the same, overlays exempt; `design.rs` scans both panes | this commit |
 | W6 | S3 R6: breakpoints, single pane, cleared hit-test rects | inline | done: 40 % at 100+ columns, a fixed 32 from 60 to 99, one pane under 60 with `· Tab` on its rule; the map is reset every frame so a hidden pane takes no click. Tests pin 48/32/32 and no split at 59, and a click on the hidden list. README's focus and widths sections | this commit |
-| W7 | S3 R7: transcript start marker, scroll gutter, empty hint, `· sending` at 40 | inline | pending | — |
-| W8 | S3 R7/Q4: composer placeholder, `Enter sends`, accent bar | inline | pending | — |
+| W7 | S3 R7: transcript start marker, scroll gutter, empty hint, `· sending` at 40 | inline | done with W8/W10: the marker opens the transcript (no blank under it), `▲`/`▼` in the free right column, `No messages yet · i writes the first one`, `No chat open · Tab switches panes`, `No chats yet · nuncio link` | this commit |
+| W8 | S3 R7/Q4: composer placeholder, `Enter sends`, accent bar | inline | done: `i or Enter to write` when empty, the accent `▌` on the rule when focused, `Enter sends · Alt-Enter newline` on the rule's right when there is a draft; `?` and the README say the same | this commit |
 | W9 | S3 R8: overlay width rule, right-aligned keys, picker < 52 | inline | pending | — |
-| W10 | S3 R7: state copy (list, transcript, offline, archived-only) | inline | pending | — |
+| W10 | S3 R7: state copy (list, transcript, offline, archived-only) | inline | done for the list, the empty transcript and the no-chat pane; the offline and stop-reason copy came with W3, and an archived-only list already sections rather than empties, so it keeps the chat list as it was | this commit |
 | W11 | S3 Q3: `Filter` in `nuncio-client`, active-filter tag, `[`/`]` | inline | pending | — |
 
 ## Log

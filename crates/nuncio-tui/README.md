@@ -85,15 +85,21 @@ nuncio-tui [--image <png>]
   the time muted, then the text (a message's further lines get rows of their own). Each day starts
   with its local date in muted caps (`SUN 18 OCT 2026`) after a blank line; the messages of one
   author follow each other with no blank line, and the next author starts after one. With no
-  message it says `No messages yet · i to write`, with no chats `No chats yet` (its title is
-  then `Conversation`, so the focus still shows).
+  message it says `No messages yet · i writes the first one`, with no chats `No chats yet`
+  (its title is then `Conversation`, so the focus still shows). The transcript opens with a
+  muted `Beginning of conversation` line, which is what you see when the top is on screen; when
+  there is more above or below, the free column on the right says so with `▲` or `▼`. With no
+  chat at all it says `No chat open · Tab switches panes`; an empty list says
+  `No chats yet · nuncio link`.
 - **Read**: opening a chat that has unread messages marks it read, here and on WhatsApp too, as
   the official clients do: your other devices clear it and the sender sees blue ticks, unless read
   receipts are off in WhatsApp's privacy settings (then only your own devices clear it). A new
   message arriving in the open chat is marked read the same way. The unread counts clear when the
   daemon answers; if it refuses (offline, not linked, ...) the footer shows why, the chat stays
   unread, and nothing retries on its own: opening the chat again does.
-- **Composer**: the last rows of the conversation. `Enter` sends; `Alt-Enter` or `Ctrl-J` starts a
+- **Composer**: the last rows of the conversation, under its own rule: with nothing to send the
+  rule is plain and the row says `i or Enter to write`; with the keys in it the rule starts with
+  the accent bar, and with a draft it ends with `Enter sends · Alt-Enter newline`. `Enter` sends; `Alt-Enter` or `Ctrl-J` starts a
   new line (use `Ctrl-J` where the terminal keeps `Alt-Enter`, as macOS terminals do unless
   Option is set to act as Alt), and the message is sent with its line breaks. `←`/`→` move the
   cursor one character (a whole emoji sequence or accented letter is one step), `Home`/`End` to

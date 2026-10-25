@@ -1263,7 +1263,7 @@ impl App {
             .collect();
         if items.is_empty() {
             frame.render_widget(
-                Paragraph::new(Span::styled("   No chats yet · ? for keys", self.muted())),
+                Paragraph::new(Span::styled("   No chats yet · nuncio link", self.muted())),
                 rows,
             );
         }
@@ -1347,15 +1347,33 @@ impl App {
             let width = usize::from(area.width);
             let mut spans = Vec::new();
             let mut used = 0;
+            // The pane with the keys marks the composer's rule with the accent bar.
+            if self.pane == Pane::Compose {
+                spans.push(Span::styled(
+                    "▌",
+                    Style::default().fg(rgb(self.palette.accent())),
+                ));
+                used += 1;
+            }
             if let Some(quoted) = quoted {
-                spans.push(Span::styled("── ", self.line_style()));
-                used += 3 + display_width(&quoted);
+                spans.push(Span::styled("─ ", self.line_style()));
+                used += 2 + display_width(&quoted) + 1;
                 spans.push(Span::styled(quoted, self.muted()));
             }
+            // What Enter does here, where it does it, while there is something to send.
+            let sends = if draft.is_some() && self.pane == Pane::Compose {
+                "Enter sends · Alt-Enter newline "
+            } else {
+                ""
+            };
+            let sends_width = display_width(sends);
             spans.push(Span::styled(
-                "─".repeat(width.saturating_sub(used)),
+                "─".repeat(width.saturating_sub(used + sends_width)),
                 self.line_style(),
             ));
+            if !sends.is_empty() {
+                spans.push(Span::styled(sends, self.muted()));
+            }
             frame.render_widget(
                 Paragraph::new(Line::from(spans)),
                 Rect {
@@ -1393,7 +1411,7 @@ impl App {
             return;
         }
         let Some((rows, (row, column))) = draft else {
-            let hint = Line::from(Span::styled("  Enter to write a message", self.muted()));
+            let hint = Line::from(Span::styled("  i or Enter to write", self.muted()));
             frame.render_widget(Paragraph::new(hint), area);
             return;
         };
@@ -1429,6 +1447,18 @@ impl App {
             images.resized(area.width);
             let background = self.palette.surface();
             images.backdrop([background.r, background.g, background.b]);
+        }
+        // Nothing to read is still a place: it says so and how to get out (R7).
+        if self.model.selected_chat().is_none() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "No chat open · Tab switches panes",
+                    self.muted(),
+                )),
+                area,
+            );
+            self.map.message_area = area;
+            return;
         }
         let (lines, selected, owners, boxes) = self.conversation_lines(area.width);
         let visible = usize::from(area.height);
@@ -1509,6 +1539,17 @@ impl App {
                     frame.buffer_mut().set_style(row, active);
                 }
             }
+        }
+        // The scroll gutter: the free last column says whether there is more above or below.
+        let gutter = area.right().saturating_sub(1);
+        let muted = self.muted();
+        if top > self.scroll {
+            frame.buffer_mut().set_string(gutter, area.y, "▲", muted);
+        }
+        if self.scroll > 0 {
+            frame
+                .buffer_mut()
+                .set_string(gutter, area.y + area.height - 1, "▼", muted);
         }
         self.draw_pictures(frame, area, &boxes, &heights, first_row);
     }
@@ -1697,7 +1738,7 @@ impl App {
         if messages.is_empty() {
             return (
                 vec![Line::from(Span::styled(
-                    "No messages yet · i to write",
+                    "No messages yet · i writes the first one",
                     self.muted(),
                 ))],
                 None,
@@ -1707,8 +1748,14 @@ impl App {
         }
         let body = Style::default().fg(rgb(self.palette.text()));
         let name = body.add_modifier(Modifier::BOLD);
-        let mut lines = Vec::with_capacity(messages.len() * 2);
-        let mut owners = Vec::with_capacity(messages.len() * 2);
+        let mut lines = Vec::with_capacity(messages.len() * 2 + 1);
+        // The top of the conversation is a place too: it says so when it is on screen, which
+        // is where a short transcript leaves the eye with nothing to hold on to (R7).
+        lines.push(Line::from(Span::styled(
+            "Beginning of conversation",
+            self.muted(),
+        )));
+        let mut owners = Vec::with_capacity(messages.len() * 2 + 1);
         let mut selected = None;
         let mut boxes = Vec::new();
         // The day whose label was drawn last, and the author of the message before.
@@ -1721,7 +1768,8 @@ impl App {
             // A message with no readable time (a send not answered yet) stays in its day.
             match local_day(message, self.utc_offset).filter(|day| labelled != Some(*day)) {
                 Some(day) => {
-                    if !lines.is_empty() {
+                    // A blank line before a day, except right under the start marker.
+                    if lines.len() > 1 {
                         lines.push(Line::default());
                     }
                     lines.push(Line::from(Span::styled(day_label(day), self.muted())));

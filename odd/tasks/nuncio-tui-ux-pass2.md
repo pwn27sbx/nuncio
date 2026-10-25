@@ -55,7 +55,7 @@ Runners: `cargo test -p nuncio-tui`, `cargo test --workspace`, `cargo fmt --chec
 | W1 | S3 R3: `text_muted` for meta and placeholders, no `DIM` | inline | done: RED (DIM found on every screen) → GREEN; the test scans both sizes for `Modifier::DIM`, holds the role's 4.5:1 on both surfaces and checks a time, the day label, a footer key and an empty state; review approved with 7 informational findings, folded into W2/W3 | 8f05077 |
 | W2 | S3 R1: header brand + accent unread, `FIXTURE DATA` case, version into `?` | inline | done with W3 (one unit: moving the state between the two chrome lines cannot be split without a red tree). Header = `nuncio` + `N unread` accent (only when > 0) or `FIXTURE DATA`; the daemon build, the session and the picture protocol now head the `?` panel | this commit |
 | W3 | S3 R2: footer budget/priority, notice keeps primary + `?`, state right | inline | done: ordered hints per pane, tail dropped by budget, no repeated key, state (`linked`/`reconnecting…`/`offline`/`not linked`/`unknown`/`no daemon`) right-aligned in `warning` unless linked; a notice takes the left side. Updated `design.rs`, `keys.rs`, `render.rs`, `app.rs`, `images.rs` and `stop_reason.rs` | this commit |
-| W4 | S3 R4: row time column, inline markers, badge | inline | pending | — |
+| W4 | S3 R4: row time column, inline markers, badge | inline | done: two fixed rows — name + inline markers + a five-column time slot; preview + a four-column badge `●n`/`●99+`; a narrow list drops the time, then the markers, before cutting the name under six columns. Updated `design.rs` (accent set, badge drawn), `keys.rs` (markers follow the name), `render.rs`, `app.rs`; README's chat-list section rewritten | this commit |
 | W5 | S3 R5: one selection fill, unfocused keeps `▌` | inline | pending | — |
 | W6 | S3 R6: breakpoints, single pane, cleared hit-test rects | inline | pending | — |
 | W7 | S3 R7: transcript start marker, scroll gutter, empty hint, `· sending` at 40 | inline | pending | — |
@@ -85,6 +85,10 @@ Runners: `cargo test -p nuncio-tui`, `cargo test --workspace`, `cargo fmt --chec
 - L6 (decision, 2026-10-25) `.atl/` (the agent skill registry) is now ignored: it is generated
   tooling state, and its presence forced an untracked-selection step in every review preflight.
   Its own commit, `7bc9aa4`.
+- L8 (evidence, 2026-10-25) The W2/W3 review approved with 8 informational findings; two were
+  behavioural and fixed in `68c8dd4`: the state's right slot lost text at 80 columns while five
+  hints stayed, and `j/k select` had left the selected-message hints. The footer now drops the
+  optional keys, then `? all keys`, then the primary, and only then cuts the state.
 - L7 (decision, 2026-10-25) W2 and W3 are one commit: the session state has to leave the header
   in the same change that gives it a home in the footer, or the tree is red between them (the
   cold audit's B1). Order after that: W4, W5, W6, W7, W8, W9, W10, W11.

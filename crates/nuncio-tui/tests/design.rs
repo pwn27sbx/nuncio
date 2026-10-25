@@ -264,6 +264,16 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
                         header.push_str(cell.symbol());
                         continue;
                     }
+                    // The chat row's badge is `●` plus its count, on the row below the name.
+                    if cell.symbol().chars().all(|c| c.is_ascii_digit()) && x > 0 {
+                        let left = &buffer[(x - 1, y)];
+                        let run = left.symbol() == "●"
+                            || (left.fg == accent
+                                && left.symbol().chars().all(|c| c.is_ascii_digit()));
+                        if run {
+                            continue;
+                        }
+                    }
                     assert!(
                         ["●", "▌"].contains(&cell.symbol()) && cell.bg != accent,
                         "{name} at {width}x{height}: {:?} at ({x}, {y}) is in the accent:\n{}",
@@ -278,23 +288,22 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
             assert_eq!(header, "2 unread", "{name} at {width}x{height}");
         }
     }
-    // And they are drawn: the unread chat's dot and the selected chat's bar.
+    // And they are drawn: one unread badge, and the bar down the selected chat's two rows.
     let buffer = draw(&mut two_chats(), 80, 24);
-    let (x, y) = find(&buffer, "Ada Lovelace (2)");
-    let row: Vec<_> = (0..x).map(|x| buffer[(x, y)].clone()).collect();
-    assert!(
-        row.iter().any(|c| c.symbol() == "●" && c.fg == accent),
-        "the unread dot:\n{}",
-        text(&buffer)
-    );
-    assert!(
-        row.iter().any(|c| c.symbol() == "▌" && c.fg == accent),
-        "the selection bar:\n{}",
-        text(&buffer)
-    );
-    // A read chat has no dot.
-    let (x, y) = find(&buffer, "Grace Hopper");
-    assert!((0..x).all(|x| buffer[(x, y)].symbol() != "●"));
+    let split = separator(&buffer);
+    let count = |symbol: &str| {
+        let mut found = 0;
+        for y in 2..22 {
+            for x in 0..split {
+                if buffer[(x, y)].symbol() == symbol && buffer[(x, y)].fg == accent {
+                    found += 1;
+                }
+            }
+        }
+        found
+    };
+    assert_eq!(count("●"), 1, "one unread badge:\n{}", text(&buffer));
+    assert_eq!(count("▌"), 2, "the bar on both rows:\n{}", text(&buffer));
 }
 
 #[test]

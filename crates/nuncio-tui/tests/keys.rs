@@ -537,7 +537,7 @@ fn the_mouse_does_nothing_while_the_help_is_open() {
 // --- chat markers ------------------------------------------------------------------------
 
 #[test]
-fn chat_markers_sit_in_one_fixed_column_after_the_name() {
+fn chat_markers_follow_the_name_in_their_own_order() {
     let family = "👨‍👩‍👧‍👦";
     let mut pinned = chat(ADA, &format!("{family} Family group with a long name"));
     pinned.pinned = true;
@@ -552,61 +552,29 @@ fn chat_markers_sit_in_one_fixed_column_after_the_name() {
         let mut app = app_with(vec![pinned.clone(), muted.clone(), archived.clone()]);
         let screen = render(&mut app, width, height);
         let right = split(&screen);
-        let mut columns: Vec<(&str, u16, u16)> = Vec::new();
-        for y in 2..height - 2 {
-            for x in 0..right {
-                let symbol = screen[(x, y)].symbol();
-                if matches!(symbol, "★" | "⊘" | "▤") {
-                    columns.push((
-                        if symbol == "★" {
-                            "pin"
-                        } else if symbol == "⊘" {
-                            "mute"
-                        } else {
-                            "archive"
-                        },
-                        x,
-                        y,
-                    ));
-                }
-            }
-        }
+        let rows: Vec<String> = (2..height - 2)
+            .map(|y| (0..right).map(|x| screen[(x, y)].symbol()).collect())
+            .collect();
         let shown = text(&screen);
-        let at = |what: &str| -> Vec<u16> {
-            columns
-                .iter()
-                .filter(|(w, _, _)| *w == what)
-                .map(|(_, x, _)| *x)
-                .collect()
+        let row = |needle: &str| -> String {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle:?} row at {width}x{height}:\n{shown}"))
+                .clone()
         };
-        let pins = at("pin");
-        let mutes = at("mute");
-        let archives = at("archive");
-        assert_eq!(pins.len(), 2, "{width}x{height}:\n{shown}");
-        assert_eq!(mutes.len(), 2, "{width}x{height}:\n{shown}");
-        assert_eq!(archives.len(), 1, "{width}x{height}:\n{shown}");
-        assert!(pins.iter().all(|&x| x == pins[0]), "one ★ column:\n{shown}");
-        assert!(
-            mutes.iter().all(|&x| x == mutes[0]),
-            "one ⊘ column:\n{shown}"
-        );
-        // Each marker has a space between it and the next, and the last ends by the border.
-        assert_eq!(mutes[0], pins[0] + 2, "{shown}");
-        assert_eq!(archives[0], mutes[0] + 2, "{shown}");
-        assert_eq!(
-            archives[0],
-            right - 1,
-            "the column ends at the border:\n{shown}"
-        );
-        // Every name row has a blank cell before the marker column: the name never touches it.
-        for (_, _, y) in &columns {
-            assert_eq!(screen[(pins[0] - 1, *y)].symbol(), " ", "row {y}:\n{shown}");
-        }
-        // The names come first.
-        let (name_x, name_y) = find(&screen, "Bo");
-        assert!(name_x < pins[0]);
-        assert!(columns.iter().any(|(_, _, y)| *y == name_y));
-        assert!(shown.contains("(3)"), "the unread badge stays:\n{shown}");
+        // Only the markers the chat has, right after its name.
+        let run =
+            |row: &str| -> String { row.chars().filter(|c| "★⊘▤".contains(*c)).collect() };
+        assert_eq!(run(&row("Family")), "★", "{width}x{height}:\n{shown}");
+        assert_eq!(run(&row("Bo")), "★⊘▤", "{width}x{height}:\n{shown}");
+        // The muted chat is the only row with a ⊘ and nothing else.
+        let muted = rows
+            .iter()
+            .find(|row| row.contains('⊘'))
+            .unwrap_or_else(|| panic!("no muted row:\n{shown}"));
+        assert_eq!(run(muted), "⊘", "{width}x{height}:\n{shown}");
+        // On the name row, never on the preview row.
+        assert!(!row("(no messages)").contains('★'), "{width}x{height}");
     }
 }
 

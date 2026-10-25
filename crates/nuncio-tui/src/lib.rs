@@ -1077,7 +1077,7 @@ impl App {
                 parts.push(all_keys.clone());
             }
             let spans = footer_spans(&parts, gap);
-            if line_width(&spans) + 1 + width_of(&state) <= width {
+            if line_width(&spans) + 1 + display_width(&state) <= width {
                 break;
             }
             if extras.pop().is_some() {
@@ -1093,7 +1093,7 @@ impl App {
                 continue;
             }
             // A notice on its own can still be too long: it is the only part that may be cut.
-            let room = width.saturating_sub(2 + width_of(&state));
+            let room = width.saturating_sub(2 + display_width(&state));
             if let Some((text, _)) = head.first_mut().and_then(|part| part.first_mut()) {
                 *text = fit(text, room);
             }
@@ -1960,7 +1960,6 @@ fn snippet(message: &Message) -> String {
     }
 }
 
-/// `text` cut to at most `width` terminal columns, ending in `…` when it was cut.
 /// The footer's parts joined with ` · `, each part one or more spans.
 fn footer_spans(parts: &[Vec<(String, Style)>], gap: Style) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
@@ -1975,17 +1974,14 @@ fn footer_spans(parts: &[Vec<(String, Style)>], gap: Style) -> Vec<Span<'static>
     spans
 }
 
-fn line_width(spans: &[Span<'static>]) -> usize {
+fn line_width(spans: &[Span<'_>]) -> usize {
     spans
         .iter()
         .map(|span| display_width(&span.content))
         .sum::<usize>()
 }
 
-fn width_of(text: &str) -> usize {
-    display_width(text)
-}
-
+/// `text` cut to at most `width` terminal columns, ending in `…` when it was cut.
 fn fit(text: &str, width: usize) -> String {
     if display_width(text) <= width {
         return text.to_owned();
@@ -2120,18 +2116,19 @@ fn local_hhmm(message: &Message, offset: time::UtcOffset) -> String {
     format!("{:02}:{:02}", local / 60, local % 60)
 }
 
-/// The marker column at the end of a chat's name row: a space, then `★ ⊘ ▤` with a space between
-/// them, a missing marker left blank, so every marker sits in the same column on every row.
-const MARKERS: usize = 6;
-/// Below this many columns for the name, the markers give up their column: only the ones a chat
-/// has are drawn, right after the name, so a very narrow list still shows who the chat is.
+/// The fewest columns a chat's name keeps before the row gives up its time and markers.
 const NARROW_NAME: usize = 6;
+/// The badge's fixed width on a chat row's second line: `● 3`, `●12`, `●99+`.
+const BADGE: usize = 4;
+/// The unread badge's dot.
+const BULLET: &str = "●";
 
-/// A chat in the list, after a three-column gutter: the selection bar `▌` (both rows, when it is
-/// the highlighted chat), the unread dot `●`, a space. Then its name in bold and its unread count,
-/// padded to the marker column, then its markers; under it, its last message cut to `width`
-/// columns with `…` so the ` · HH:MM` after it is always whole. The name is cut first, so the
-/// count and the markers always show. Only the bar and the dot are in the accent (plan §9.2).
+/// A chat in the list, after a three-column gutter. Row one: the selection bar `▌` (both rows,
+/// when it is the highlighted chat), a space, the name in bold, the markers the chat has right
+/// after it, and the time in its own five-column slot at the right edge. Row two: its last
+/// message cut to `width` columns with `…`, then the unread badge right-aligned in four columns.
+/// The name is cut first, so the time, the markers and the badge always show. Only the bar and
+/// the badge are in the accent (plan §9.2, R4).
 fn chat_item(
     chat: &Chat,
     palette: &Palette,
@@ -2149,71 +2146,90 @@ fn chat_item(
             Span::raw(" ")
         }
     };
-    let badge = (chat.unread > 0).then(|| format!(" ({})", chat.unread));
-    let badge_width = badge.as_deref().map_or(0, display_width);
-    let column = width.saturating_sub(MARKERS).saturating_sub(badge_width) >= NARROW_NAME;
-    let markers = if column {
-        format!(
-            " {} {} {}",
-            if chat.pinned { PINNED } else { ' ' },
-            if chat.muted { MUTED } else { ' ' },
-            if chat.archived { ARCHIVED } else { ' ' }
-        )
-    } else {
-        let shown: String = [
-            (chat.pinned, PINNED),
-            (chat.muted, MUTED),
-            (chat.archived, ARCHIVED),
-        ]
-        .iter()
-        .filter_map(|&(on, marker)| on.then_some(marker))
-        .collect();
-        if shown.is_empty() {
-            shown
-        } else {
-            format!(" {shown}")
-        }
+    // The badge keeps four columns: `● 3`, `●12`, `●99+`, or blank.
+    let badge = match chat.unread {
+        0 => String::new(),
+        n if n > 99 => format!("{BULLET}99+"),
+        n => format!("{BULLET}{n}"),
     };
-    let markers_width = display_width(&markers);
-    let room = width
-        .saturating_sub(markers_width)
-        .saturating_sub(badge_width);
-    let name = fit(&plain(&chat_title(chat)), room);
+    // The markers follow the name, only the ones the chat has.
+    let markers: String = [
+        (chat.pinned, PINNED),
+        (chat.muted, MUTED),
+        (chat.archived, ARCHIVED),
+    ]
+    .iter()
+    .filter_map(|&(on, marker)| on.then_some(marker))
+    .collect();
+    let markers = if markers.is_empty() {
+        markers
+    } else {
+        format!(" {markers}")
+    };
+    // The time is its own column at the right edge of the first row.
+    let time = chat
+        .last_message
+        .as_ref()
+        .map_or_else(String::new, |message| local_hhmm(message, offset));
+    // A narrow list gives up the time first, then the markers, before it cuts the name to
+    // nothing: something of the chat's name has to stay readable.
+    let mut time = time;
+    let mut markers = markers;
+    let mut time_width = display_width(&time);
+    let mut gap = usize::from(time_width != 0);
+    let mut named = width.saturating_sub(2 + display_width(&markers) + gap + time_width);
+    if named < NARROW_NAME {
+        time.clear();
+        time_width = 0;
+        gap = 0;
+        named = width.saturating_sub(2 + display_width(&markers));
+    }
+    if named < NARROW_NAME {
+        markers.clear();
+        named = width.saturating_sub(2);
+    }
+    let name = fit(&plain(&chat_title(chat)), named);
     let mut title = vec![
         bar(),
-        if chat.unread > 0 {
-            Span::styled("●", accent)
-        } else {
-            Span::raw(" ")
-        },
         Span::raw(" "),
         Span::styled(name.clone(), text.add_modifier(Modifier::BOLD)),
     ];
-    let mut used = display_width(&name);
-    if let Some(badge) = badge {
-        used += display_width(&badge);
-        title.push(Span::raw(" "));
-        title.push(Span::styled(badge.trim_start().to_owned(), muted));
+    if !markers.is_empty() {
+        title.push(Span::styled(markers.clone(), muted));
     }
-    let pad = width.saturating_sub(markers_width).saturating_sub(used);
-    title.push(Span::raw(" ".repeat(pad)));
-    title.push(Span::styled(markers, muted));
+    let used = 2 + display_width(&name) + display_width(&markers);
+    title.push(Span::raw(
+        " ".repeat(width.saturating_sub(used + gap + time_width)),
+    ));
+    if time_width > 0 {
+        title.push(Span::styled(time, muted));
+    }
 
     // A message with no text (a non-text kind) shows its kind instead of an empty row.
     let detail = match chat.last_message.as_ref() {
         Some(message) => {
             let text = message.text.lines().next().unwrap_or_default();
-            let text = plain(if text.is_empty() { &message.kind } else { text });
-            let time = format!(" · {}", local_hhmm(message, offset));
-            fit(&text, width.saturating_sub(display_width(&time))) + &time
+            plain(if text.is_empty() { &message.kind } else { text })
         }
         None => "(no messages)".to_owned(),
     };
+    let badge_width = BADGE;
+    let detail = fit(&detail, width.saturating_sub(3 + badge_width));
+    let pad = width.saturating_sub(3 + display_width(&detail) + badge_width);
+    let mut second = vec![
+        bar(),
+        Span::raw("  "),
+        Span::styled(detail, muted),
+        Span::raw(" ".repeat(pad)),
+    ];
+    if badge.is_empty() {
+        second.push(Span::raw(" ".repeat(badge_width)));
+    } else {
+        second.push(Span::raw(" ".repeat(badge_width - display_width(&badge))));
+        second.push(Span::styled(badge, accent));
+    }
 
-    ListItem::new(vec![
-        Line::from(title),
-        Line::from(vec![bar(), Span::raw("  "), Span::styled(detail, muted)]),
-    ])
+    ListItem::new(vec![Line::from(title), Line::from(second)])
 }
 
 #[cfg(test)]

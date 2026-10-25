@@ -189,7 +189,8 @@ fn a_conversation_renders_at_eighty_by_twenty_four_and_at_two_forty_by_sixty() {
         );
         let screen = render(&mut app, width, height).text();
         for needle in [
-            "Ada Lovelace (2)",
+            "Ada Lovelace",
+            "●2",
             "Grace Hopper",
             "Are we still on?",
             "Yes, see you at 18:00",
@@ -508,7 +509,8 @@ fn unread_message_connection_and_focus_events_update_the_model() {
     });
     assert_eq!(app.chats()[1].unread, 7);
     let screen = render(&mut app, 80, 24).text();
-    assert!(screen.contains("Grace Hopper (7)"), "{screen}");
+    assert!(screen.contains("Grace Hopper"), "{screen}");
+    assert!(screen.contains("●7"), "the unread badge: {screen}");
     assert!(screen.contains("9 unread"), "{screen}");
 
     // A new message in the open chat appears at the bottom; one in another chat updates its
@@ -1245,7 +1247,13 @@ fn message_times_are_shown_in_the_local_time_zone() {
     ada.last_message = Some(at("A2", "late", true, "2026-10-20T03:10:00Z"));
     let mut app = app_with(vec![ada, chat(GRACE, "Grace Hopper", 0)]).with_utc_offset(offset);
     let screen = render(&mut app, 80, 24);
-    assert!(screen.chats().contains("late · 22:10"), "{}", screen.text());
+    let chats = screen.chats();
+    assert!(
+        chats.contains("22:10"),
+        "the time column: {}",
+        screen.text()
+    );
+    assert!(chats.contains("late"), "the preview: {}", screen.text());
     open_first(
         &mut app,
         ADA,
@@ -1285,7 +1293,7 @@ fn a_long_preview_is_cut_with_an_ellipsis_and_its_time_stays_whole() {
         let mut app = app_with(vec![ascii, wide, short]);
         let screen = render(&mut app, width, height);
         let chats = screen.chats();
-        for (start, end) in [("Is this", "… · 17:36"), ("漢", "… · 17:37")] {
+        for (start, end, time) in [("Is this", "…", "17:36"), ("漢", "…", "17:37")] {
             let row = chats
                 .lines()
                 .find(|l| l.contains(start))
@@ -1294,8 +1302,11 @@ fn a_long_preview_is_cut_with_an_ellipsis_and_its_time_stays_whole() {
                 row.trim_end_matches([' ', '│', '┃']).ends_with(end),
                 "{start:?} at {width}x{height}: {row:?}"
             );
+            // Its time is whole, in the name row's own column.
+            assert!(chats.contains(time), "the {start:?} time: {chats}");
         }
-        assert!(chats.contains("See you · 17:38"), "{chats}");
+        assert!(chats.contains("See you"), "{chats}");
+        assert!(chats.contains("17:38"), "{chats}");
         assert!(!chats.contains("See you…"), "{chats}");
     }
 }
@@ -1493,8 +1504,8 @@ fn opening_an_unread_chat_sends_one_mark_read_and_marked_read_clears_the_counts(
         assert_eq!(app.chats()[1].unread, 3, "other chats keep theirs");
         let screen = render(&mut app, 80, 24).text();
         assert!(screen.contains("3 unread"), "{screen}");
-        assert!(!screen.contains("Ada Lovelace (2)"), "{screen}");
-        assert!(screen.contains("Grace Hopper (3)"), "{screen}");
+        assert!(!screen.contains("●2"), "{screen}");
+        assert!(screen.contains("●3"), "{screen}");
     }
 }
 

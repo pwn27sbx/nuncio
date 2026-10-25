@@ -66,18 +66,17 @@ nuncio-tui [--image <png>]
   primary key in the footer (`Enter`, or `1-6` in the reaction picker); names are bold, times
   and other meta use the `text_muted` role, and senders are never colour-coded. The colours are sent as 24-bit
   RGB, as before.
-- **Chat list** (left): an unread chat has the dot `●` before its name; the selected one has the
-  bar `▌` down both its rows. Then the name and unread count `(n)`, then `★` pinned, `⊘` muted, `▤` archived in
-  a fixed column at the end of the row (one cell apart, a missing marker left blank), so the
-  markers line up whatever the name; a name too long is cut with `…` before the column. In a list
-  too narrow for that column (under six columns left for the name), only a chat's own markers are
-  drawn, right after its name.
+- **Chat list** (left): two fixed rows per chat, the selected one with the bar `▌` down both.
+  Row one: the name in bold, then only the markers it has — `★` pinned, `⊘` muted, `▤` archived,
+  in that order, right after the name — and the time in its own five-column slot at the right
+  edge, so times line up down the list whatever the names. Row two: the last message, cut with
+  `…` (by display width, so wide characters count as two columns), and the unread badge
+  right-aligned in four columns — `●3`, `●12`, `●99+`, or nothing when it is read. A narrow list
+  gives up the time first, then the markers, before it cuts the name below six columns.
   Archived chats are kept in the list, sectioned after every other chat. A pin, archive or mute
   made on the phone (`event_chat`) updates the markers at once and sorts the list again as the
   daemon's `chats` lists it (newest message first, the same time by JID, archived last), keeping
-  the selection on the same chat. Under the name, the
-  last message and its time; a preview too long for the pane is cut with `…` (by display width,
-  so wide characters count as two columns) and the ` · HH:MM` after it is always whole.
+  the selection on the same chat.
 - **Times** are local: the time zone offset is read once at startup (so a message from the other
   side of a daylight-saving change shows an hour off until the next start). If the offset cannot
   be read, times are UTC and the footer says so.

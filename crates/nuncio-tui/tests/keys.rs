@@ -615,3 +615,24 @@ fn the_conversation_scrolls_back_to_the_newest_after_a_send_or_another_chat() {
         "the send is on screen:\n{shown}"
     );
 }
+
+#[test]
+fn in_a_single_pane_the_hidden_pane_takes_no_clicks() {
+    let mut app = two_chats();
+    let screen = render(&mut app, 80, 24);
+    let (x, y) = find(&screen, "Grace Hopper");
+    let _ = click(&mut app, (x, y + 1));
+    assert_eq!(
+        app.selected(),
+        1,
+        "a click opens the second chat at 80 columns"
+    );
+    // Leave the composer for the conversation, then shrink to one pane.
+    app.handle_key(key(KeyCode::Esc));
+    let _ = render(&mut app, 40, 12);
+    assert_eq!(app.pane(), Pane::Messages);
+    // The left half is where the chat list would be: it is not drawn, so it takes nothing.
+    assert_eq!(click(&mut app, (3, 4)), None);
+    assert_eq!(app.selected(), 1, "the hidden list took no click");
+    assert_eq!(app.pane(), Pane::Messages);
+}

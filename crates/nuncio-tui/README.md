@@ -111,8 +111,13 @@ nuncio-tui [--image <png>]
   message state. A connection that dies silently still counts as linked for up to 3 minutes,
   until its keepalive fails, so a send in that window shows `not confirmed` rather than `queued`.
 - **Focus**: one pane has the keys at a time, the chat list or the conversation (the composer
-  counts as the conversation); its title on the header rule is bold, the other's muted. `Tab`
-  switches between them.
+  counts as the conversation); its title on the header rule is bold, the other's muted, and only
+  the pane with the keys fills its selection on `surface_active` — the other keeps the `▌` bar,
+  so the screen never shows two "selected" things. `Tab` switches between them.
+- **Widths**: at 100 columns and up the chat list takes 40 % of the screen; from 60 to 99 it is
+  a fixed 32 columns; under 60 only the focused pane is drawn, filling the width, and its rule
+  says `· Tab` so the other pane is one key away. The mouse map is rebuilt on every draw, so a
+  click can never land on a pane that is not on screen.
 - **Status line**: the header is only the app's name plus one right-aligned datum, the unread
   count in the accent when there is one (`3 unread`), or `FIXTURE DATA` with no daemon. The
   daemon's build, the session and the picture protocol are in `?`.

@@ -135,6 +135,12 @@ const MUTED: char = '⊘';
 /// Marks an archived chat.
 const ARCHIVED: char = '▤';
 
+/// At or above this width the chat list takes 40 % of the screen (R6).
+const WIDE: u16 = 100;
+/// Between this width and `WIDE` the chat list is a fixed 32 columns.
+const LIST: u16 = 32;
+/// Below this width only the focused pane is drawn, and `Tab` swaps it (R6).
+const NARROW: u16 = 60;
 /// How many lines PageUp/PageDown scroll.
 const PAGE: usize = 10;
 /// The reactions the picker offers (the shared set), on keys `1`..`6`; `x` removes mine.
@@ -248,7 +254,10 @@ pub struct App {
     search_list: ListState,
     /// The inline pictures, when the terminal draws them.
     images: Option<images::Images>,
-    /// The pictures' protocol name, shown on the right of the footer.
+    /// True on the last draw when only one pane fits (under `NARROW` columns): the rule says
+    /// so and `Tab` is the only way to the other one.
+    narrow: bool,
+    /// The pictures' protocol name, shown in `?`.
     protocol: Option<&'static str>,
     utc_offset: time::UtcOffset,
     /// Where things were on the last drawn screen, for the mouse.
@@ -280,6 +289,7 @@ impl App {
             picking: false,
             search_list: ListState::default(),
             images: None,
+            narrow: false,
             protocol: None,
             utc_offset: time::UtcOffset::UTC,
             map: ScreenMap::default(),
@@ -752,17 +762,33 @@ impl App {
         .areas(frame.area());
 
         self.draw_header(frame, header);
-        let [chats, line, messages] = Layout::horizontal([
-            Constraint::Percentage(40),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .areas(body);
-        self.draw_separator(frame, line);
-        self.draw_chats(frame, chats);
-        // The line between the panes is part of the chat pane for the mouse.
-        self.map.chats = chats.union(line);
-        self.draw_messages(frame, messages);
+        // What the mouse can hit is rebuilt every frame: a pane that is not drawn must not keep
+        // last frame's rectangles (a click in a hidden pane would land on the visible one).
+        self.map.chats = Rect::default();
+        self.map.conversation = Rect::default();
+        self.map.message_area = Rect::default();
+        self.map.composer = Rect::default();
+        self.narrow = body.width < NARROW;
+        if self.narrow {
+            if self.pane == Pane::Chats {
+                self.draw_chats(frame, body);
+            } else {
+                self.draw_messages(frame, body);
+            }
+        } else {
+            let list = if body.width >= WIDE {
+                Constraint::Percentage(40)
+            } else {
+                Constraint::Length(LIST)
+            };
+            let [chats, line, messages] =
+                Layout::horizontal([list, Constraint::Length(1), Constraint::Min(0)]).areas(body);
+            self.draw_separator(frame, line);
+            self.draw_chats(frame, chats);
+            // The line between the panes is part of the chat pane for the mouse.
+            self.map.chats = chats.union(line);
+            self.draw_messages(frame, messages);
+        }
         self.draw_footer(frame, footer);
         if self.help {
             self.draw_help(frame, body);
@@ -1213,12 +1239,11 @@ impl App {
         );
         let [rule, rows] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-        self.draw_rule_title(
-            frame,
-            rule,
-            format!("Chats ({})", self.chats().len()),
-            self.pane == Pane::Chats,
-        );
+        let mut title = format!("Chats ({})", self.chats().len());
+        if self.narrow {
+            title.push_str(" · Tab");
+        }
+        self.draw_rule_title(frame, rule, title, self.pane == Pane::Chats);
         // Less the gutter: the bar, the dot and a space.
         let width = usize::from(area.width.saturating_sub(3));
         let highlighted = self.model.chat_list().highlighted();
@@ -1242,8 +1267,13 @@ impl App {
                 rows,
             );
         }
-        let list = List::new(items)
-            .highlight_style(Style::default().bg(rgb(self.palette.surface_active())));
+        // Only the pane with the keys fills its selection; the other keeps the bar (R5).
+        let filled = self.pane == Pane::Chats;
+        let list = List::new(items).highlight_style(if filled {
+            Style::default().bg(rgb(self.palette.surface_active()))
+        } else {
+            Style::default()
+        });
         self.list.select(highlighted);
         frame.render_stateful_widget(list, rows, &mut self.list);
         self.map.chat_rows = rows;
@@ -1252,12 +1282,15 @@ impl App {
     }
 
     fn draw_messages(&mut self, frame: &mut Frame, area: Rect) {
-        let title = self
+        let mut title = self
             .model
             .selected_chat()
             .map(|chat| plain(&chat_title(chat)))
             // With no chat the pane still has a title, so its focus shows.
             .unwrap_or_else(|| "Conversation".to_owned());
+        if self.narrow {
+            title.push_str(" · Tab");
+        }
         let [rule, body] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
         self.draw_rule_title(frame, rule, title, self.pane != Pane::Chats);
@@ -1459,7 +1492,12 @@ impl App {
         }
         // The selected message's rows, the whole width, on the active surface: its picture box
         // and reactions included (a picture draws its own cells over the box after this).
-        if let Some(cursor) = self.model.transcript().cursor() {
+        if let Some(cursor) = self
+            .model
+            .transcript()
+            .cursor()
+            .filter(|_| self.pane != Pane::Chats)
+        {
             let active = Style::default().bg(rgb(self.palette.surface_active()));
             for (y, owner) in self.map.message_rows.iter().enumerate() {
                 if *owner == Some(cursor) {

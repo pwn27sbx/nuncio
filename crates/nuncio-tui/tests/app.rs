@@ -257,13 +257,26 @@ fn emoji_zwj_cjk_and_rtl_text_keep_the_frame_intact() {
         let screen = render(&mut app, width, height);
         // The line between the panes and the conversation's free last column stay in their
         // columns on every body row: no wide character pushed one out.
-        let chat_right = screen.split() as u16;
+        // Under 60 columns one pane fills the screen: there is no line to hold.
+        let chat_right = if width >= 60 {
+            Some(screen.split() as u16)
+        } else {
+            None
+        };
         for y in 2..height - 2 {
-            assert!(
-                ["│", "├"].contains(&screen.cell(chat_right, y)),
-                "the line between the panes at row {y}, {width}x{height}:\n{}",
-                screen.text()
-            );
+            if let Some(chat_right) = chat_right {
+                assert!(
+                    ["│", "├"].contains(&screen.cell(chat_right, y)),
+                    "the line between the panes at row {y}, {width}x{height}:\n{}",
+                    screen.text()
+                );
+            } else {
+                assert!(
+                    !["│", "├", "┬"].contains(&screen.cell(width / 2, y)),
+                    "no line in a single pane at row {y}, {width}x{height}:\n{}",
+                    screen.text()
+                );
+            }
             assert!(
                 [" ", "─"].contains(&screen.cell(width - 1, y)),
                 "the last column at row {y}, {width}x{height}:\n{}",

@@ -698,3 +698,34 @@ fn more_than_ninety_nine_unread_messages_show_the_capped_badge() {
     assert!(shown.contains("●99+"), "the capped badge:\n{shown}");
     assert!(shown.contains("●9"), "a small count stays whole:\n{shown}");
 }
+
+#[test]
+fn only_the_pane_with_the_keys_paints_the_active_surface() {
+    let palette = Palette::default();
+    let chrome = colour(palette.surface_chrome());
+    let active = colour(palette.surface_active());
+    // The chat pane is 32 columns at 80: the line at 32, the conversation from 33.
+    let list_filled = |buffer: &Buffer| (1..32).any(|x| buffer[(x, 2)].bg == active);
+    let conversation_filled =
+        |buffer: &Buffer| (2..22).any(|y| (33..80).any(|x| buffer[(x, y)].bg == active));
+
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(app.pane(), Pane::Messages);
+    let buffer = draw(&mut app, 80, 24);
+    // The conversation has the keys: its selected message is filled, the list is not, and the
+    // bar still says which chat is selected.
+    assert!(conversation_filled(&buffer), "{}", text(&buffer));
+    assert!(!list_filled(&buffer), "{}", text(&buffer));
+    assert_eq!(buffer[(0, 2)].symbol(), "▌");
+    assert_eq!(buffer[(1, 2)].bg, chrome);
+
+    // `Tab` moves the keys to the list: the fill moves with them.
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.pane(), Pane::Chats);
+    let buffer = draw(&mut app, 80, 24);
+    assert!(list_filled(&buffer), "{}", text(&buffer));
+    assert!(!conversation_filled(&buffer), "{}", text(&buffer));
+}

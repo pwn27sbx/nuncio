@@ -104,20 +104,35 @@ fn the_layout_survives_an_odd_size() {
     let mut app = fixture_app();
     let screen = render(&mut app, 37, 11);
 
-    // 37 columns leaves the chat list too narrow for the badge, so this only asserts that
-    // both panes rendered, at the right size, without panicking.
+    // 37 columns is one pane: the list, with its rule saying how to reach the other one.
+    assert!(screen.contains("Chats (3) · Tab"), "{screen}");
+    assert!(line_with(&screen, "★").contains("Ada"), "{screen}");
     assert!(
-        screen.contains("Chats (3)"),
-        "the chat pane is still there at 37x11:\n{screen}"
+        !screen.contains("Ada Lovelace · 17:55"),
+        "the conversation is not drawn here:\n{screen}"
     );
-    assert!(
-        line_with(&screen, "★").contains("Ada"),
-        "the first chat is still listed at 37x11:\n{screen}"
-    );
-    assert!(
-        screen.contains("Ada Lovelace · 17:55"),
-        "the message pane is still there at 37x11:\n{screen}"
-    );
+    // `Tab` swaps it in, filling the width.
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let screen = render(&mut app, 37, 11);
+    assert!(screen.contains("Ada Lovelace · 17:55"), "{screen}");
+}
+
+#[test]
+fn the_chat_list_breaks_at_sixty_and_one_hundred_columns() {
+    let mut app = fixture_app();
+    let split = |screen: &str| -> Option<usize> {
+        screen
+            .lines()
+            .nth(1)
+            .and_then(|row| row.chars().position(|symbol| symbol == '┬'))
+    };
+    // Wide: 40 % of 120 columns.
+    assert_eq!(split(&render(&mut app, 120, 20)), Some(48));
+    // Middle: a fixed 32 columns, whatever the width.
+    assert_eq!(split(&render(&mut app, 80, 20)), Some(32));
+    assert_eq!(split(&render(&mut app, 61, 20)), Some(32));
+    // Narrow: no split at all, one pane on the whole width.
+    assert_eq!(split(&render(&mut app, 59, 20)), None);
 }
 
 #[test]

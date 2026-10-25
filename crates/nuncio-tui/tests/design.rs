@@ -798,3 +798,44 @@ fn the_composer_says_what_enter_does_and_marks_its_rule_when_focused() {
     assert_eq!(buffer[(33, rule)].symbol(), "▌");
     assert_eq!(buffer[(33, rule)].fg, accent);
 }
+
+#[test]
+fn the_overlays_share_one_width_rule() {
+    let chrome = colour(Palette::default().surface_chrome());
+    let mut app = two_chats();
+    app.handle_key(key(KeyCode::Char('?')));
+    let buffer = draw(&mut app, 240, 60);
+    let y = row_of(&buffer, "Keys");
+    let width = (0..240).filter(|&x| buffer[(x, y)].bg == chrome).count();
+    assert_eq!(width, 76, "the widest overlay:\n{}", text(&buffer));
+    // On a small screen the same panel is the screen minus four columns.
+    let buffer = draw(&mut app, 40, 20);
+    let y = row_of(&buffer, "Keys");
+    let width = (0..40).filter(|&x| buffer[(x, y)].bg == chrome).count();
+    assert_eq!(width, 36, "{}", text(&buffer));
+}
+
+#[test]
+fn the_reaction_picker_stacks_its_keys_when_it_is_narrow() {
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('k')));
+    app.handle_key(key(KeyCode::Char('e')));
+    // Wide: one row of pairs.
+    let buffer = draw(&mut app, 80, 24);
+    assert_eq!(
+        row_of(&buffer, "👍"),
+        row_of(&buffer, "❤"),
+        "one row of pairs:\n{}",
+        text(&buffer)
+    );
+    // Narrow: a row per reaction, so the panel still fits.
+    let buffer = draw(&mut app, 40, 20);
+    assert_ne!(
+        row_of(&buffer, "👍"),
+        row_of(&buffer, "❤"),
+        "one reaction per row:\n{}",
+        text(&buffer)
+    );
+}

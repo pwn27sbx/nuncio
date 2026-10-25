@@ -73,6 +73,10 @@ nuncio-tui [--image <png>]
   `…` (by display width, so wide characters count as two columns), and the unread badge
   right-aligned in four columns — `●3`, `●12`, `●99+`, or nothing when it is read. A narrow list
   gives up the time first, then the markers, before it cuts the name below six columns.
+  `[` and `]` cycle the list's filter — `All`, `Unread`, `Archived` — and the rule says which
+  one is on with its count (`Chats · Unread (3)`); clicking a row opens the chat it is drawn
+  for, whatever the filter. A filter that hides everything says `No chats under this filter`
+  instead of pretending the account is empty.
   Archived chats are kept in the list, sectioned after every other chat. A pin, archive or mute
   made on the phone (`event_chat`) updates the markers at once and sorts the list again as the
   daemon's `chats` lists it (newest message first, the same time by JID, archived last), keeping

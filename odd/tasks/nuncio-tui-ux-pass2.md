@@ -62,7 +62,7 @@ Runners: `cargo test -p nuncio-tui`, `cargo test --workspace`, `cargo fmt --chec
 | W8 | S3 R7/Q4: composer placeholder, `Enter sends`, accent bar | inline | done: `i or Enter to write` when empty, the accent `▌` on the rule when focused, `Enter sends · Alt-Enter newline` on the rule's right when there is a draft; `?` and the README say the same | this commit |
 | W9 | S3 R8: overlay width rule, right-aligned keys, picker < 52 | inline | pending | — |
 | W10 | S3 R7: state copy (list, transcript, offline, archived-only) | inline | done for the list, the empty transcript and the no-chat pane; the offline and stop-reason copy came with W3, and an archived-only list already sections rather than empties, so it keeps the chat list as it was | this commit |
-| W11 | S3 Q3: `Filter` in `nuncio-client`, active-filter tag, `[`/`]` | inline | pending | — |
+| W11 | S3 Q3: `Filter` in `nuncio-client`, active-filter tag, `[`/`]` | inline | done: `Filter` moved to `nuncio-client` (the desktop re-exports it, behaviour unchanged), `[`/`]` cycle All/Unread/Archived, the rule shows `Chats · Unread (3)`, the mouse maps a drawn row to its model chat through `map.chat_indices`, navigation and frames keep the selection inside the filter, and an empty filter says so. The tag is drawn in the rule's own style, not the accent: the rule title is one span, and painting part of it would need a second style channel for one word (recorded as a deviation from Q6) | this commit |
 
 ## Log
 

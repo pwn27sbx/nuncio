@@ -766,34 +766,7 @@ fn picture_view(model: &Model, message: &Message) -> Option<PictureView> {
     })
 }
 
-/// A filter of the rail (plan §5): which chats the list shows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Filter {
-    All,
-    Unread,
-    Archived,
-}
-
-impl Filter {
-    /// The rail's filters, in its order.
-    pub const EACH: [Self; 3] = [Self::All, Self::Unread, Self::Archived];
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::All => "All",
-            Self::Unread => "Unread",
-            Self::Archived => "Archived",
-        }
-    }
-
-    fn keeps(self, chat: &Chat) -> bool {
-        match self {
-            Self::All => true,
-            Self::Unread => chat.unread > 0,
-            Self::Archived => chat.archived,
-        }
-    }
-}
+pub use nuncio_client::model::Filter;
 
 /// The positions in the model's chat list of the chats `filter` shows, in the list's order.
 /// `opened_from` is the filter the open conversation was opened from in the list: while that

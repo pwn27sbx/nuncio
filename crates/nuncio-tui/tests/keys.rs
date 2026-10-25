@@ -636,3 +636,37 @@ fn in_a_single_pane_the_hidden_pane_takes_no_clicks() {
     assert_eq!(app.selected(), 1, "the hidden list took no click");
     assert_eq!(app.pane(), Pane::Messages);
 }
+
+#[test]
+fn the_chat_list_filters_to_unread_and_archived() {
+    // Ada has 2 unread, Grace none, nobody archived.
+    let mut ada = chat(ADA, "Ada Lovelace");
+    ada.unread = 2;
+    let mut app = app_with(vec![ada, chat(GRACE, "Grace Hopper")]);
+    let buffer = render(&mut app, 80, 24);
+    assert!(text(&buffer).contains("Chats (2)"), "{}", text(&buffer));
+
+    app.handle_key(key(KeyCode::Char(']')));
+    let buffer = render(&mut app, 80, 24);
+    let shown = text(&buffer);
+    assert!(shown.contains("Chats · Unread (1)"), "{shown}");
+    assert!(shown.contains("Ada Lovelace"), "{shown}");
+    assert!(!shown.contains("Grace Hopper"), "{shown}");
+
+    // A click on the row under the filter opens the chat it is drawn for.
+    let (x, y) = find(&buffer, "Ada Lovelace");
+    let _ = click(&mut app, (x, y + 1));
+    assert_eq!(app.selected(), 0);
+
+    // Nothing is archived: the list says why it is empty instead of pretending there are none.
+    app.handle_key(key(KeyCode::Char(']')));
+    let shown = text(&render(&mut app, 80, 24));
+    assert!(shown.contains("Chats · Archived (0)"), "{shown}");
+    assert!(shown.contains("No chats under this filter"), "{shown}");
+
+    // Back around to All.
+    app.handle_key(key(KeyCode::Char(']')));
+    assert!(text(&render(&mut app, 80, 24)).contains("Chats (2)"));
+    app.handle_key(key(KeyCode::Char('[')));
+    assert!(text(&render(&mut app, 80, 24)).contains("Chats · Archived (0)"));
+}

@@ -12,7 +12,7 @@
 
 use std::path::PathBuf;
 
-use nuncio_client::model::{Effect, Model, chat_title, is_picture, quoted};
+use nuncio_client::model::{Effect, Filter, Model, chat_title, is_picture, quoted};
 use nuncio_client::wire::{MessageState, Session};
 use nuncio_client::{Chat, ClientFrame, DaemonFrame, Message, Palette, Rgb, Snapshot};
 use ratatui::Frame;
@@ -77,6 +77,9 @@ pub struct ScreenMap {
     pub chat_offset: usize,
     /// How many chats are listed.
     pub chat_count: usize,
+    /// The model index of every chat row drawn, in order: a filter shows a subset, and a click
+    /// has to land on the chat it is drawn for, not on its position on screen.
+    pub chat_indices: Vec<usize>,
     /// The conversation pane, its header rule included (the composer is inside it).
     pub conversation: Rect,
     /// The rows the conversation's messages are drawn in.
@@ -108,7 +111,7 @@ pub fn hit_test(map: &ScreenMap, column: u16, row: u16) -> Option<Target> {
     if inside(map.chats) {
         let index = inside(map.chat_rows)
             .then(|| map.chat_offset + usize::from((row - map.chat_rows.y) / CHAT_ROWS))
-            .filter(|&index| index < map.chat_count);
+            .and_then(|row_index| map.chat_indices.get(row_index).copied());
         return Some(Target::Chats(index));
     }
     if inside(map.composer) {
@@ -162,6 +165,7 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
                 "open the chat and write (marks it read on WhatsApp)",
             ),
             ("l →", "open it to read"),
+            ("[ ]", "filter: All, Unread, Archived"),
             ("Tab", "focus the conversation"),
             ("/", "search the selected chat"),
             ("q Esc", "quit"),
@@ -254,6 +258,8 @@ pub struct App {
     search_list: ListState,
     /// The inline pictures, when the terminal draws them.
     images: Option<images::Images>,
+    /// Which chats the list shows (R6/Q3): All, Unread or Archived, cycled with `[`/`]`.
+    filter: Filter,
     /// True on the last draw when only one pane fits (under `NARROW` columns): the rule says
     /// so and `Tab` is the only way to the other one.
     narrow: bool,
@@ -289,6 +295,7 @@ impl App {
             picking: false,
             search_list: ListState::default(),
             images: None,
+            filter: Filter::All,
             narrow: false,
             protocol: None,
             utc_offset: time::UtcOffset::UTC,
@@ -426,12 +433,14 @@ impl App {
     /// Select the next chat, stopping at the last one.
     pub fn select_next(&mut self) {
         self.model.select_next_chat();
+        self.ensure_selected_listed();
         self.sync();
     }
 
     /// Select the previous chat, stopping at the first one.
     pub fn select_previous(&mut self) {
         self.model.select_previous_chat();
+        self.ensure_selected_listed();
         self.sync();
     }
 
@@ -440,6 +449,52 @@ impl App {
             Pane::Chats => Pane::Messages,
             Pane::Messages | Pane::Compose => Pane::Chats,
         });
+    }
+
+    /// The model indices of the chats the list shows, in its order, under the current filter.
+    pub fn listed(&self) -> Vec<usize> {
+        self.model
+            .chat_list()
+            .chats()
+            .iter()
+            .enumerate()
+            .filter(|(_, chat)| self.filter.keeps(chat))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Cycle the chat list's filter with `[`/`]` and land the selection on a chat it shows.
+    pub fn cycle_filter(&mut self, next: bool) {
+        let at = Filter::EACH
+            .iter()
+            .position(|filter| *filter == self.filter)
+            .unwrap_or(0);
+        let len = Filter::EACH.len();
+        self.filter = Filter::EACH[if next {
+            (at + 1) % len
+        } else {
+            (at + len - 1) % len
+        }];
+        self.ensure_selected_listed();
+    }
+
+    /// Keep the selection on a chat the filter shows, moving forward from where it was.
+    fn ensure_selected_listed(&mut self) {
+        // Unfiltered, the model already keeps the selection on a chat; only a filter can hide it.
+        if self.filter == Filter::All || self.model.chat_list().chats().is_empty() {
+            return;
+        }
+        if self.listed().contains(&self.selected()) {
+            return;
+        }
+        let count = self.model.chat_list().chats().len();
+        for _ in 0..count {
+            self.model.select_next_chat();
+            if self.listed().contains(&self.selected()) {
+                return;
+            }
+        }
+        self.model.select_chat(0);
     }
 
     /// Focus `pane`; outside the chat list the selected chat's conversation is open.
@@ -481,6 +536,9 @@ impl App {
     }
 
     fn applied(&mut self, frame: &DaemonFrame, effect: Option<Effect>) -> Option<Action> {
+        // A frame can move a chat out of the filter (it was read, archived): the selection has to
+        // land somewhere it can still see.
+        self.ensure_selected_listed();
         self.sync();
         if matches!(frame, DaemonFrame::EventFocus { .. }) && effect.is_some() {
             self.help = false;
@@ -612,6 +670,8 @@ impl App {
             (Pane::Chats, KeyCode::Char('k') | KeyCode::Up) => self.select_previous(),
             (Pane::Chats, KeyCode::Enter) => return self.open_to_write(),
             (Pane::Chats, KeyCode::Char('l') | KeyCode::Right) => return self.open_selected(),
+            (_, KeyCode::Char('[')) => self.cycle_filter(false),
+            (_, KeyCode::Char(']')) => self.cycle_filter(true),
             (Pane::Messages, KeyCode::Char('k') | KeyCode::Up) => {
                 self.reveal |= self.model.select_older();
             }
@@ -842,6 +902,12 @@ impl App {
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
+    /// The width every overlay takes: four columns narrower than the screen, and never wider
+    /// than 76 (R8).
+    fn overlay_width(area: Rect) -> u16 {
+        area.width.saturating_sub(4).min(76)
+    }
+
     /// A panel over `area` hidden behind a solid `surface` scrim (a terminal has no alpha): the
     /// centred panel is the chrome, its content inset by one column on each side.
     fn panel(&self, frame: &mut Frame, area: Rect, scrim: bool, width: u16, height: u16) -> Rect {
@@ -870,22 +936,36 @@ impl App {
     }
 
     fn draw_picker(&self, frame: &mut Frame, area: Rect) {
-        let mut spans = Vec::new();
-        for (n, emoji) in REACTIONS.iter().enumerate() {
-            spans.push(Span::styled(format!(" {} ", n + 1), self.muted()));
-            spans.push(Span::raw(plain(emoji)));
+        let width = Self::overlay_width(area);
+        // Six `n emoji` pairs plus `x` need 52 columns; below that each takes its own row, keys
+        // right-aligned like every other overlay (R8).
+        let one_row = width >= 52;
+        let mut lines = vec![self.panel_title("React"), Line::default()];
+        if one_row {
+            let mut spans = Vec::new();
+            for (n, emoji) in REACTIONS.iter().enumerate() {
+                spans.push(Span::styled(format!(" {} ", n + 1), self.muted()));
+                spans.push(Span::raw(plain(emoji)));
+            }
+            spans.push(Span::styled("  x remove mine", self.muted()));
+            lines.push(Line::from(spans));
+        } else {
+            let inner = usize::from(width.saturating_sub(2));
+            for (n, emoji) in REACTIONS.iter().enumerate() {
+                let emoji = plain(emoji);
+                let pad = inner.saturating_sub(display_width(&emoji) + 2).max(1);
+                lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(emoji, Style::default().fg(rgb(self.palette.text()))),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(format!("{} ", n + 1), self.muted()),
+                ]));
+            }
+            lines.push(Line::from(Span::styled(" x  remove mine ", self.muted())));
         }
-        spans.push(Span::styled("  x remove mine", self.muted()));
-        let inner = self.panel(frame, area, false, 48, 3);
-        frame.render_widget(
-            Paragraph::new(vec![
-                self.panel_title("React"),
-                Line::default(),
-                Line::from(spans),
-            ])
-            .wrap(Wrap { trim: false }),
-            inner,
-        );
+        let height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+        let inner = self.panel(frame, area, false, width, height);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 
     fn panel_title(&self, title: &str) -> Line<'static> {
@@ -906,7 +986,7 @@ impl App {
             Span::raw(" "),
         ]);
         let active = Style::default().bg(rgb(self.palette.surface_active()));
-        let inner = self.panel(frame, area, true, 72, area.height);
+        let inner = self.panel(frame, area, true, Self::overlay_width(area), area.height);
         let Some(search) = self.model.transcript().search() else {
             return;
         };
@@ -1026,6 +1106,7 @@ impl App {
                 vec![
                     ("j/k", "move"),
                     ("/", "search"),
+                    ("[ ]", "filter"),
                     ("i", "write"),
                     ("l", "read"),
                     ("Tab", "pane"),
@@ -1171,7 +1252,7 @@ impl App {
                 (*context, keys)
             })
             .collect();
-        let width = area.width.min(76);
+        let width = Self::overlay_width(area);
         let inner_width = usize::from(width.saturating_sub(2));
         let tall: usize = 2 + contexts
             .iter()
@@ -1239,7 +1320,18 @@ impl App {
         );
         let [rule, rows] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-        let mut title = format!("Chats ({})", self.chats().len());
+        let mut title = if self.filter == Filter::All {
+            format!("Chats ({})", self.chats().len())
+        } else {
+            format!(
+                "Chats · {} ({})",
+                self.filter.name(),
+                self.chats()
+                    .iter()
+                    .filter(|chat| self.filter.keeps(chat))
+                    .count()
+            )
+        };
         if self.narrow {
             title.push_str(" · Tab");
         }
@@ -1247,11 +1339,11 @@ impl App {
         // Less the gutter: the bar, the dot and a space.
         let width = usize::from(area.width.saturating_sub(3));
         let highlighted = self.model.chat_list().highlighted();
-        let items: Vec<ListItem> = self
-            .chats()
+        let listed = self.listed();
+        let items: Vec<ListItem> = listed
             .iter()
-            .enumerate()
-            .map(|(index, chat)| {
+            .map(|&index| {
+                let chat = &self.chats()[index];
                 chat_item(
                     chat,
                     &self.palette,
@@ -1262,10 +1354,13 @@ impl App {
             })
             .collect();
         if items.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Span::styled("   No chats yet · nuncio link", self.muted())),
-                rows,
-            );
+            // An empty list and a filter that hides everything are two different things.
+            let hint = if self.chats().is_empty() {
+                "   No chats yet · nuncio link"
+            } else {
+                "   No chats under this filter · [ ]"
+            };
+            frame.render_widget(Paragraph::new(Span::styled(hint, self.muted())), rows);
         }
         // Only the pane with the keys fills its selection; the other keeps the bar (R5).
         let filled = self.pane == Pane::Chats;
@@ -1274,11 +1369,14 @@ impl App {
         } else {
             Style::default()
         });
-        self.list.select(highlighted);
+        // The list's state is the position on screen, not the model's index.
+        let position = highlighted.and_then(|index| listed.iter().position(|&i| i == index));
+        self.list.select(position);
         frame.render_stateful_widget(list, rows, &mut self.list);
         self.map.chat_rows = rows;
         self.map.chat_offset = self.list.offset();
-        self.map.chat_count = self.chats().len();
+        self.map.chat_count = listed.len();
+        self.map.chat_indices = listed;
     }
 
     fn draw_messages(&mut self, frame: &mut Frame, area: Rect) {
@@ -2353,6 +2451,7 @@ mod tests {
             chat_rows: Rect::new(1, 2, 30, 20),
             chat_offset: 1,
             chat_count: 3,
+            chat_indices: vec![0, 1, 2],
             conversation: Rect::new(32, 1, 48, 22),
             message_area: Rect::new(33, 2, 46, 18),
             message_rows,

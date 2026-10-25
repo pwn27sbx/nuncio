@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub(crate) use chats::title_from_jid;
-pub use chats::{ChatList, MERGED_NOTICE, chat_title, is_alias_pair, sort_as_daemon};
+pub use chats::{ChatList, Filter, MERGED_NOTICE, chat_title, is_alias_pair, sort_as_daemon};
 pub use composer::Composer;
 pub use transcript::{Search, Transcript, is_picture, quoted};
 

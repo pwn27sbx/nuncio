@@ -90,6 +90,11 @@ Runners: `cargo test -p nuncio-tui`, `cargo test --workspace`, `cargo fmt --chec
   `ce75f72` (start marker, gutter, composer rule and copy), `a0e6159` (overlay width, filters,
   the `Filter` move to `nuncio-client`) and `6401ee0` (filtered navigation). `cargo test
   --workspace` and `clippy -D warnings` are green after each; the branch is pushed.
+- L11 (evidence, 2026-10-25) The final native review of the four closing commits approved with
+  two BLOCKERs refuted (the composer consumes `[`/`]` only after its own key handler, and the
+  start marker's owner entry is padded by the first `owners.resize`), and three warnings fixed
+  here: the composer rule counted a column it never drew when quoting a reply, the Archived
+  filter had no positive case, and the exact 60/100-column breakpoints were unasserted.
 - L10 (deviation, 2026-10-25) Q6's accent on the active filter is not implemented: the rule
   title is drawn as one span, and splitting it for one word would add a second style channel
   to the pane rule. The accent keeps the badge, the selection bar, the header count, the

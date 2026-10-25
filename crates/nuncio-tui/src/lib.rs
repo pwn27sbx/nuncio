@@ -1466,7 +1466,7 @@ impl App {
             }
             if let Some(quoted) = quoted {
                 spans.push(Span::styled("─ ", self.line_style()));
-                used += 2 + display_width(&quoted) + 1;
+                used += 2 + display_width(&quoted);
                 spans.push(Span::styled(quoted, self.muted()));
             }
             // What Enter does here, where it does it, while there is something to send.

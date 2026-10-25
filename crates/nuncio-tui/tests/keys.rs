@@ -658,7 +658,7 @@ fn the_chat_list_filters_to_unread_and_archived() {
     let _ = click(&mut app, (x, y + 1));
     assert_eq!(app.selected(), 0);
 
-    // Nothing is archived: the list says why it is empty instead of pretending there are none.
+    // Nobody archived: the list says why it is empty instead of pretending there are none.
     app.handle_key(key(KeyCode::Char(']')));
     let shown = text(&render(&mut app, 80, 24));
     assert!(shown.contains("Chats · Archived (0)"), "{shown}");
@@ -714,4 +714,23 @@ fn a_filter_that_hides_everything_selects_no_hidden_chat() {
     assert_eq!(app.selected(), 1);
     let shown = text(&render(&mut app, 80, 24));
     assert!(shown.contains("No chats under this filter"), "{shown}");
+}
+
+#[test]
+fn the_archived_filter_lists_the_archived_chat() {
+    let mut ada = chat(ADA, "Ada Lovelace");
+    ada.unread = 2;
+    let mut old = chat(GRACE, "Grace Hopper");
+    old.archived = true;
+    let mut app = app_with(vec![ada, old]);
+    // All lists both; Archived lists only the archived one, and it is selectable.
+    assert!(text(&render(&mut app, 80, 24)).contains("Chats (2)"));
+    app.handle_key(key(KeyCode::Char(']')));
+    app.handle_key(key(KeyCode::Char(']')));
+    let buffer = render(&mut app, 80, 24);
+    let shown = text(&buffer);
+    assert!(shown.contains("Chats · Archived (1)"), "{shown}");
+    assert!(shown.contains("Grace Hopper"), "{shown}");
+    assert!(!shown.contains("Ada Lovelace │"), "{shown}");
+    assert_eq!(app.selected(), 1, "the archived chat is the only one");
 }

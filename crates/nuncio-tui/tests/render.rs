@@ -126,11 +126,13 @@ fn the_chat_list_breaks_at_sixty_and_one_hundred_columns() {
             .nth(1)
             .and_then(|row| row.chars().position(|symbol| symbol == '┬'))
     };
-    // Wide: 40 % of 120 columns.
+    // Wide: 40 % of 120 columns, and exactly at the breakpoint too.
     assert_eq!(split(&render(&mut app, 120, 20)), Some(48));
-    // Middle: a fixed 32 columns, whatever the width.
+    assert_eq!(split(&render(&mut app, 100, 20)), Some(40));
+    // Middle: a fixed 32 columns, whatever the width, the breakpoint included.
+    assert_eq!(split(&render(&mut app, 99, 20)), Some(32));
     assert_eq!(split(&render(&mut app, 80, 20)), Some(32));
-    assert_eq!(split(&render(&mut app, 61, 20)), Some(32));
+    assert_eq!(split(&render(&mut app, 60, 20)), Some(32));
     // Narrow: no split at all, one pane on the whole width.
     assert_eq!(split(&render(&mut app, 59, 20)), None);
 }

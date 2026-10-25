@@ -2237,7 +2237,9 @@ impl Ui {
             return true;
         }
         if key == gdk::Key::Escape && inner.search_toggle.is_active() {
-            self.close_search();
+            // Escape in the list closes the search and keeps the focus in the list: only the
+            // search's own Escape sends the focus back to the conversation.
+            inner.search_toggle.set_active(false);
             return true;
         }
         let step = match list_key_action(key, state) {
@@ -2353,9 +2355,19 @@ impl Ui {
         self.0.search_toggle.is_active()
     }
 
-    /// Close the search, as Escape in it does.
+    /// Close the search, as Escape in it does, and leave the focus in the conversation so the
+    /// next key acts on it (owner's decision, 2026-10-24).
     pub fn close_search(&self) {
         self.0.search_toggle.set_active(false);
+        self.0.transcript.grab_focus();
+    }
+
+    /// Whether the conversation holds the focus (tests): the list itself or one of its rows.
+    pub fn conversation_focused(&self) -> bool {
+        self.focused_widget().is_some_and(|widget| {
+            &widget == self.0.transcript.upcast_ref::<gtk::Widget>()
+                || widget.is_ancestor(&self.0.transcript)
+        })
     }
 
     /// Type `query` into the open search, replacing what was there (tests).

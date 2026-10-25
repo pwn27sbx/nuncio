@@ -85,6 +85,15 @@ Runners: `cargo test -p nuncio-tui`, `cargo test --workspace`, `cargo fmt --chec
 - L6 (decision, 2026-10-25) `.atl/` (the agent skill registry) is now ignored: it is generated
   tooling state, and its presence forced an untracked-selection step in every review preflight.
   Its own commit, `7bc9aa4`.
+- L9 (evidence, 2026-10-25) W5-W11 landed in four commits, each with the design tests
+  updated and the README/docs in the same change: `47d8909` (selection fill + breakpoints),
+  `ce75f72` (start marker, gutter, composer rule and copy), `a0e6159` (overlay width, filters,
+  the `Filter` move to `nuncio-client`) and `6401ee0` (filtered navigation). `cargo test
+  --workspace` and `clippy -D warnings` are green after each; the branch is pushed.
+- L10 (deviation, 2026-10-25) Q6's accent on the active filter is not implemented: the rule
+  title is drawn as one span, and splitting it for one word would add a second style channel
+  to the pane rule. The accent keeps the badge, the selection bar, the header count, the
+  focused composer rule and the footer's primary key.
 - L8 (evidence, 2026-10-25) The W2/W3 review approved with 8 informational findings; two were
   behavioural and fixed in `68c8dd4`: the state's right slot lost text at 80 columns while five
   hints stayed, and `j/k select` had left the selected-message hints. The footer now drops the

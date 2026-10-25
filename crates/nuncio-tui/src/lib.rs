@@ -75,7 +75,6 @@ pub struct ScreenMap {
     pub chat_rows: Rect,
     /// The list's scroll: the index of the chat on its first row.
     pub chat_offset: usize,
-    /// How many chats are listed.
     /// The model index of every chat row drawn, in order: a filter shows a subset, and a click
     /// has to land on the chat it is drawn for, not on its position on screen.
     pub chat_indices: Vec<usize>,
@@ -1340,11 +1339,11 @@ impl App {
         );
         let [rule, rows] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-        let listed_now = self.listed();
+        let listed = self.listed();
         let mut title = if self.filter == Filter::All {
             format!("Chats ({})", self.chats().len())
         } else {
-            format!("Chats · {} ({})", self.filter.name(), listed_now.len())
+            format!("Chats · {} ({})", self.filter.name(), listed.len())
         };
         if self.narrow {
             title.push_str(" · Tab");
@@ -1353,7 +1352,6 @@ impl App {
         // Less the gutter: the bar, the dot and a space.
         let width = usize::from(area.width.saturating_sub(3));
         let highlighted = self.model.chat_list().highlighted();
-        let listed = listed_now;
         let items: Vec<ListItem> = listed
             .iter()
             .map(|&index| {

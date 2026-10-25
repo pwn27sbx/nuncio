@@ -11,3 +11,4 @@ Cargo.lock.bak
 # local build + spike scratch
 /.local/
 *.log
+/.atl/

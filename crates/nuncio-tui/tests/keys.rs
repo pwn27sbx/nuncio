@@ -670,3 +670,48 @@ fn the_chat_list_filters_to_unread_and_archived() {
     app.handle_key(key(KeyCode::Char('[')));
     assert!(text(&render(&mut app, 80, 24)).contains("Chats · Archived (0)"));
 }
+
+#[test]
+fn the_filter_walks_up_and_down_without_landing_on_a_hidden_chat() {
+    // In the model: B unread, A read, C unread.
+    let mut b = chat("1@s.whatsapp.net", "Bea");
+    b.unread = 1;
+    let a = chat("2@s.whatsapp.net", "Ann");
+    let mut c = chat("3@s.whatsapp.net", "Cyd");
+    c.unread = 1;
+    let mut app = app_with(vec![b, a, c]);
+    app.handle_key(key(KeyCode::Char(']')));
+    let shown = text(&render(&mut app, 80, 24));
+    assert!(shown.contains("Chats · Unread (2)"), "{shown}");
+
+    // `j` from the first unread (B) goes to the next unread (C), not through the read one.
+    app.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(app.selected(), 2, "{shown}");
+    // `k` comes back to B, not stuck on C.
+    app.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(app.selected(), 0);
+    app.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(app.selected(), 0, "it stops at the first listed chat");
+}
+
+#[test]
+fn a_filter_that_hides_everything_selects_no_hidden_chat() {
+    // A read, B unread, C read: under Unread only B is listed.
+    let a = chat("1@s.whatsapp.net", "Ann");
+    let mut b = chat("2@s.whatsapp.net", "Bea");
+    b.unread = 1;
+    let c = chat("3@s.whatsapp.net", "Cyd");
+    let mut app = app_with(vec![a, b, c]);
+    // Start on C, then filter to Unread.
+    app.handle_key(key(KeyCode::Char('j')));
+    app.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(app.selected(), 2);
+    app.handle_key(key(KeyCode::Char(']')));
+    assert_eq!(app.selected(), 1, "the only listed chat, not index 0");
+
+    // Archived lists nothing here: the selection stays, nothing hidden is chosen.
+    app.handle_key(key(KeyCode::Char(']')));
+    assert_eq!(app.selected(), 1);
+    let shown = text(&render(&mut app, 80, 24));
+    assert!(shown.contains("No chats under this filter"), "{shown}");
+}

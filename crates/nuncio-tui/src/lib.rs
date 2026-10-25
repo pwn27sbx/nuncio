@@ -76,7 +76,6 @@ pub struct ScreenMap {
     /// The list's scroll: the index of the chat on its first row.
     pub chat_offset: usize,
     /// How many chats are listed.
-    pub chat_count: usize,
     /// The model index of every chat row drawn, in order: a filter shows a subset, and a click
     /// has to land on the chat it is drawn for, not on its position on screen.
     pub chat_indices: Vec<usize>,
@@ -432,15 +431,33 @@ impl App {
 
     /// Select the next chat, stopping at the last one.
     pub fn select_next(&mut self) {
-        self.model.select_next_chat();
-        self.ensure_selected_listed();
+        // Walk the list the filter shows, not the model's whole one: otherwise a step lands on a
+        // hidden chat and the selection appears not to move.
+        let listed = self.listed();
+        if listed.is_empty() {
+            return;
+        }
+        let at = listed
+            .iter()
+            .position(|&index| index == self.selected())
+            .unwrap_or(0);
+        let next = listed[(at + 1).min(listed.len() - 1)];
+        self.model.select_chat(next);
         self.sync();
     }
 
     /// Select the previous chat, stopping at the first one.
     pub fn select_previous(&mut self) {
-        self.model.select_previous_chat();
-        self.ensure_selected_listed();
+        let listed = self.listed();
+        if listed.is_empty() {
+            return;
+        }
+        let at = listed
+            .iter()
+            .position(|&index| index == self.selected())
+            .unwrap_or(0);
+        let previous = listed[at.saturating_sub(1)];
+        self.model.select_chat(previous);
         self.sync();
     }
 
@@ -478,23 +495,26 @@ impl App {
         self.ensure_selected_listed();
     }
 
-    /// Keep the selection on a chat the filter shows, moving forward from where it was.
+    /// Keep the selection on a chat the filter shows: the nearest one at or after it, else the
+    /// last one before it. A filter that hides everything leaves the selection where it is and
+    /// the pane says so, so no hidden chat is ever selected.
     fn ensure_selected_listed(&mut self) {
         // Unfiltered, the model already keeps the selection on a chat; only a filter can hide it.
         if self.filter == Filter::All || self.model.chat_list().chats().is_empty() {
             return;
         }
-        if self.listed().contains(&self.selected()) {
+        let listed = self.listed();
+        if listed.is_empty() || listed.contains(&self.selected()) {
             return;
         }
-        let count = self.model.chat_list().chats().len();
-        for _ in 0..count {
-            self.model.select_next_chat();
-            if self.listed().contains(&self.selected()) {
-                return;
-            }
+        let target = listed
+            .iter()
+            .find(|&&index| index >= self.selected())
+            .or_else(|| listed.last())
+            .copied();
+        if let Some(target) = target {
+            self.model.select_chat(target);
         }
-        self.model.select_chat(0);
     }
 
     /// Focus `pane`; outside the chat list the selected chat's conversation is open.
@@ -1320,17 +1340,11 @@ impl App {
         );
         let [rule, rows] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        let listed_now = self.listed();
         let mut title = if self.filter == Filter::All {
             format!("Chats ({})", self.chats().len())
         } else {
-            format!(
-                "Chats · {} ({})",
-                self.filter.name(),
-                self.chats()
-                    .iter()
-                    .filter(|chat| self.filter.keeps(chat))
-                    .count()
-            )
+            format!("Chats · {} ({})", self.filter.name(), listed_now.len())
         };
         if self.narrow {
             title.push_str(" · Tab");
@@ -1339,7 +1353,7 @@ impl App {
         // Less the gutter: the bar, the dot and a space.
         let width = usize::from(area.width.saturating_sub(3));
         let highlighted = self.model.chat_list().highlighted();
-        let listed = self.listed();
+        let listed = listed_now;
         let items: Vec<ListItem> = listed
             .iter()
             .map(|&index| {
@@ -1375,7 +1389,6 @@ impl App {
         frame.render_stateful_widget(list, rows, &mut self.list);
         self.map.chat_rows = rows;
         self.map.chat_offset = self.list.offset();
-        self.map.chat_count = listed.len();
         self.map.chat_indices = listed;
     }
 
@@ -2450,7 +2463,6 @@ mod tests {
             chats: Rect::new(0, 1, 32, 22),
             chat_rows: Rect::new(1, 2, 30, 20),
             chat_offset: 1,
-            chat_count: 3,
             chat_indices: vec![0, 1, 2],
             conversation: Rect::new(32, 1, 48, 22),
             message_area: Rect::new(33, 2, 46, 18),

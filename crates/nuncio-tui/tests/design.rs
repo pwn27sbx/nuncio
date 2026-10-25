@@ -693,8 +693,7 @@ fn meta_is_the_muted_role_and_no_text_is_dimmed() {
 
 #[test]
 fn more_than_ninety_nine_unread_messages_show_the_capped_badge() {
-    let mut busy = chat(ADA, "Ada Lovelace", 120);
-    busy.unread = 120;
+    let busy = chat(ADA, "Ada Lovelace", 120);
     let mut app = app_with(vec![busy, chat(GRACE, "Grace Hopper", 9)]);
     let buffer = draw(&mut app, 80, 24);
     let shown = text(&buffer);

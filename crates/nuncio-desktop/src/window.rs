@@ -114,8 +114,9 @@ struct Inner {
     palette: RefCell<Option<Rc<PaletteView>>>,
     /// The "New message" dialog while it is open.
     new_message: RefCell<Option<Rc<NewMessageView>>>,
-    /// What dims the window while the palette is open.
-    scrim: gtk::Box,
+    /// What dims the panes while the palette is open: the panes themselves, by opacity over a
+    /// black backdrop. An overlay above them did not cover the conversation (measured).
+    dim: gtk::Widget,
     /// The configuration file the settings edit (`None`: there is none).
     config_path: RefCell<Option<PathBuf>>,
     toasts: adw::ToastOverlay,
@@ -644,19 +645,18 @@ impl Ui {
         // window, with no outer margin.
         let lists = seam(&list_view, &content_view, LIST_WIDTH);
         let panes = seam(&rail.root, &lists, RAIL_WIDTH);
-        // The palette's scrim (plan §6.5): the window dimmed behind it while it is open; the
-        // palette's own grab takes the clicks. It is shown by its opacity, so it can fade.
-        let scrim = gtk::Box::builder()
-            .hexpand(true)
-            .vexpand(true)
-            .can_target(false)
-            .build();
-        scrim.add_css_class("nuncio-scrim");
-        let dimmed = gtk::Overlay::builder().child(&panes).build();
-        dimmed.add_overlay(&scrim);
+        // The palette's scrim (plan §6.5): while it is open the panes are dimmed as a whole by
+        // their own opacity over a black backdrop. The palette lives in its own surface, so it
+        // stays bright. An overlay above the panes left the conversation undimmed on screen
+        // (2026-10-23): this dims every pane the same way.
+        panes.add_css_class("nuncio-panes");
+        let dim: gtk::Widget = panes.clone().upcast();
+        let under = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        under.add_css_class("nuncio-under");
+        under.append(&panes);
         let toasts = adw::ToastOverlay::new();
         toasts.add_css_class(ROOT_CLASS);
-        toasts.set_child(Some(&dimmed));
+        toasts.set_child(Some(&under));
         window.set_content(Some(&toasts));
 
         let shortcuts = gtk::ShortcutController::new();
@@ -691,7 +691,7 @@ impl Ui {
             shortcuts,
             palette: RefCell::new(None),
             new_message: RefCell::new(None),
-            scrim,
+            dim,
             config_path: RefCell::new(None),
             toasts,
             panes,
@@ -1223,7 +1223,7 @@ impl Ui {
                     let mut open = inner.palette.borrow_mut();
                     if open.as_ref().is_some_and(|view| &view.popover == popover) {
                         open.take();
-                        inner.scrim.remove_css_class(SCRIM_SHOWN);
+                        inner.dim.remove_css_class(SCRIM_SHOWN);
                     }
                 }
                 let popover = popover.clone();
@@ -1233,7 +1233,7 @@ impl Ui {
 
         view.filter("");
         *self.0.palette.borrow_mut() = Some(Rc::clone(&view));
-        self.0.scrim.add_css_class(SCRIM_SHOWN);
+        self.0.dim.add_css_class(SCRIM_SHOWN);
         view.popover.popup();
         view.entry.grab_focus();
     }
@@ -1248,7 +1248,7 @@ impl Ui {
         let Some(view) = self.0.palette.borrow_mut().take() else {
             return;
         };
-        self.0.scrim.remove_css_class(SCRIM_SHOWN);
+        self.0.dim.remove_css_class(SCRIM_SHOWN);
         view.popover.popdown();
         // A palette never mapped (a hidden window) is not `closed`: let it go here too.
         let popover = view.popover.clone();
@@ -1346,7 +1346,7 @@ impl Ui {
 
     /// Whether the window is dimmed behind the palette (tests).
     pub fn palette_scrim_shown(&self) -> bool {
-        self.0.scrim.has_css_class(SCRIM_SHOWN)
+        self.0.dim.has_css_class(SCRIM_SHOWN)
     }
 
     /// Ask for a phone number ("New message", the rail's button or the palette): a §6.8 dialog

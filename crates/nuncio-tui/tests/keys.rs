@@ -339,29 +339,31 @@ fn q_and_slash_are_text_in_the_composer_and_ctrl_c_quits_anywhere() {
 }
 
 #[test]
-fn the_footer_always_starts_with_the_same_hint_and_adds_the_panes_keys() {
-    let base = "? help · Tab switch pane · Enter open · / search · q quit";
+fn the_footer_offers_the_panes_keys_and_drops_the_tail_before_the_primary_one() {
     let mut app = two_chats();
     for (width, height) in [(80, 24), (240, 60)] {
         let screen = render(&mut app, width, height);
         let footer = row(&screen, height - 1);
-        assert!(footer.trim_start().starts_with(base), "{footer:?}");
+        assert!(footer.trim_start().starts_with("Enter open"), "{footer:?}");
+        assert!(footer.contains("? all keys"), "{footer:?}");
+        assert!(footer.trim_end().ends_with("linked"), "{footer:?}");
     }
     let footer = row(&render(&mut app, 240, 60), 59);
-    assert!(
-        footer.contains("j/k move"),
-        "the list's keys after it: {footer:?}"
-    );
+    assert!(footer.contains("/ search"), "the list's keys: {footer:?}");
+    // Narrow: the tail drops, the primary key and `? all keys` stay, the state never moves.
+    let footer = row(&render(&mut app, 40, 12), 11);
+    assert!(footer.contains("Enter open"), "{footer:?}");
+    assert!(footer.contains("? all keys"), "{footer:?}");
+    assert!(!footer.contains("j/k"), "{footer:?}");
+    assert!(footer.trim_end().ends_with("linked"), "{footer:?}");
+    assert_eq!(footer.matches("Enter").count(), 1, "{footer:?}");
 
+    // The conversation's keys replace the list's.
     app.handle_key(key(KeyCode::Tab));
     let footer = row(&render(&mut app, 240, 60), 59);
-    assert!(
-        footer
-            .trim_start()
-            .starts_with("? help · Tab switch pane · Enter write · / search · q quit"),
-        "{footer:?}"
-    );
+    assert!(footer.contains("Enter write"), "{footer:?}");
     assert!(footer.contains("j/k select"), "{footer:?}");
+    assert!(!footer.contains("q quit"), "{footer:?}");
     // With a message selected, the message keys follow.
     let mut app = two_chats();
     open_ada(&mut app, three());

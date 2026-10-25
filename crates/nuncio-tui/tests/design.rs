@@ -248,6 +248,7 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
         for (name, buffer) in screens(width, height) {
             let footer = height - 1;
             let mut hint = String::new();
+            let mut header = String::new();
             for y in 0..height {
                 for x in 0..width {
                     let cell = &buffer[(x, y)];
@@ -256,6 +257,11 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
                     }
                     if y == footer {
                         hint.push_str(cell.symbol());
+                        continue;
+                    }
+                    // The header's unread count is the other accent text (Q6).
+                    if y == 0 {
+                        header.push_str(cell.symbol());
                         continue;
                     }
                     assert!(
@@ -269,6 +275,7 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
             // The footer's accent is one key, the primary one where the focus is.
             let primary = if name == "picker" { "1-6" } else { "Enter" };
             assert_eq!(hint, primary, "{name} at {width}x{height}");
+            assert_eq!(header, "2 unread", "{name} at {width}x{height}");
         }
     }
     // And they are drawn: the unread chat's dot and the selected chat's bar.
@@ -365,7 +372,7 @@ fn each_message_is_one_line_with_its_author_and_time_muted_then_its_text() {
                 .find(|&x| buffer[(x, y)].symbol().chars().all(|c| c.is_ascii_digit()))
                 .expect("the time");
             assert_eq!(buffer[(time, y)].fg, muted, "{meta}");
-            assert_ne!(buffer[(text_x, y)].fg, muted);
+            assert_eq!(buffer[(text_x, y)].fg, colour(palette.text()));
             assert!(!buffer[(text_x, y)].modifier.contains(Modifier::BOLD));
         }
     }
@@ -448,30 +455,38 @@ fn senders_are_not_colour_coded() {
 }
 
 #[test]
-fn the_footer_is_one_line_of_muted_keys_with_the_pictures_protocol_on_the_right() {
+fn the_footer_is_one_line_of_muted_keys_with_the_session_state_on_the_right() {
     let muted = colour(Palette::default().text_muted());
     for (width, height) in SIZES {
         let mut app = two_chats().with_graphics(Graphics::halfblocks());
         let buffer = draw(&mut app, width, height);
         let footer = height - 1;
-        assert!(row(&buffer, footer).contains("q quit"), "{}", text(&buffer));
+        let shown = row(&buffer, footer);
+        assert!(shown.trim_end().ends_with("linked"), "{shown:?}");
         assert!(
-            !row(&buffer, footer - 1).contains("help"),
+            !row(&buffer, footer - 1).contains("all keys"),
             "one line only:\n{}",
             text(&buffer)
         );
         // Every key is muted but the primary one.
-        let (q, _) = find(&buffer, "q quit");
-        assert_eq!(find(&buffer, "q quit").1, footer);
-        assert_eq!(buffer[(q, footer)].fg, muted);
-        if width >= 120 {
-            assert!(
-                row(&buffer, footer).trim_end().ends_with("half blocks"),
-                "the protocol on the right:\n{}",
-                text(&buffer)
-            );
+        let (x, _) = find(&buffer, "? all keys");
+        assert_eq!(find(&buffer, "? all keys").1, footer);
+        assert_eq!(buffer[(x, footer)].fg, muted);
+        // The old dump is gone: no key twice, and the picture protocol is not a footer datum.
+        for gone in ["q quit", "Ctrl-C quit", "Tab switch pane", "pictures:"] {
+            assert!(!shown.contains(gone), "{gone:?} in {shown:?}");
         }
     }
+    // The protocol and the version moved into `?`.
+    let mut app = two_chats().with_graphics(Graphics::halfblocks());
+    app.handle_key(key(KeyCode::Char('?')));
+    let buffer = draw(&mut app, 240, 60);
+    assert!(
+        text(&buffer).contains("pictures: half blocks"),
+        "{}",
+        text(&buffer)
+    );
+    assert!(text(&buffer).contains("nunciod/"), "{}", text(&buffer));
 }
 
 #[test]
@@ -624,9 +639,10 @@ fn contrast_ratio(a: nuncio_client::Rgb, b: nuncio_client::Rgb) -> f64 {
 #[test]
 fn meta_is_the_muted_role_and_no_text_is_dimmed() {
     let palette = Palette::default();
-    // The role keeps its own promise on both surfaces the TUI paints (R3).
-    assert!(contrast_ratio(palette.text_muted(), palette.surface()) >= 4.5);
-    assert!(contrast_ratio(palette.text_muted(), palette.surface_chrome()) >= 4.5);
+    // The role keeps its own promise on both surfaces the TUI paints (R3). WCAG AA is 4.5:1.
+    const AA: f64 = 4.5;
+    assert!(contrast_ratio(palette.text_muted(), palette.surface()) >= AA);
+    assert!(contrast_ratio(palette.text_muted(), palette.surface_chrome()) >= AA);
     let muted = colour(palette.text_muted());
     // `Modifier::DIM` is emulator-defined, so nothing may depend on it (R3).
     for (width, height) in SIZES {
@@ -653,7 +669,7 @@ fn meta_is_the_muted_role_and_no_text_is_dimmed() {
     assert_eq!(buffer[(x, y)].fg, muted, "a message's time");
     let (x, y) = find(&buffer, "SAT 17 OCT 2026");
     assert_eq!(buffer[(x, y)].fg, muted, "the day label");
-    let (x, y) = find(&buffer, "? help");
+    let (x, y) = find(&buffer, "? all keys");
     assert_eq!(buffer[(x, y)].fg, muted, "a footer key");
     let mut app = app_with(Vec::new());
     let buffer = draw(&mut app, 80, 24);

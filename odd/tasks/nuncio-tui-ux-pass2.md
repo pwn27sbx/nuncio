@@ -16,9 +16,11 @@ Runners: `cargo test -p nuncio-tui`, `cargo test --workspace`, `cargo fmt --chec
   (v3, audited twice). Its §3.3 rules are repeated here because they are the executable
   contract; its §2 holds the defect evidence with `lib.rs` line anchors.
   - R1 One status line only, in the footer's right slot; the header carries no telemetry.
-  - R2 Footer: notice (if any), primary in the accent and `? all keys` always fit; extra keys
-    are added while they fit and drop from the tail in priority order; no key twice; the line
-    never exceeds the width (four context keys at most at 80 columns).
+  - R2 Footer: a notice, when there is one, takes the left side (it answers something the owner
+    just did); then the primary key in the accent and `? all keys`; extra keys are added while
+    they fit and drop from the tail in priority order; no key twice; the line never exceeds the
+    width (four context keys at most at 80 columns). With a notice that fills the line, the key
+    hints are the ones that give way, never the state on the right.
   - R3 Meta and placeholders use `text_muted()`; no text style in the TUI carries `Modifier::DIM`;
     `text_faint` stays unused (no contrast floor).
   - R4 Chat row columns fixed: name, inline markers when present, 5-column time, 4-column
@@ -50,9 +52,9 @@ Runners: `cargo test -p nuncio-tui`, `cargo test --workspace`, `cargo fmt --chec
 
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
-| W1 | S3 R3: `text_muted` for meta and placeholders, no `DIM` | inline | pending | — |
-| W2 | S3 R1: header brand + accent unread, `FIXTURE DATA` case, version into `?` | inline | pending | — |
-| W3 | S3 R2: footer budget/priority, notice keeps primary + `?`, state right | inline | pending | — |
+| W1 | S3 R3: `text_muted` for meta and placeholders, no `DIM` | inline | done: RED (DIM found on every screen) → GREEN; the test scans both sizes for `Modifier::DIM`, holds the role's 4.5:1 on both surfaces and checks a time, the day label, a footer key and an empty state; review approved with 7 informational findings, folded into W2/W3 | 8f05077 |
+| W2 | S3 R1: header brand + accent unread, `FIXTURE DATA` case, version into `?` | inline | done with W3 (one unit: moving the state between the two chrome lines cannot be split without a red tree). Header = `nuncio` + `N unread` accent (only when > 0) or `FIXTURE DATA`; the daemon build, the session and the picture protocol now head the `?` panel | this commit |
+| W3 | S3 R2: footer budget/priority, notice keeps primary + `?`, state right | inline | done: ordered hints per pane, tail dropped by budget, no repeated key, state (`linked`/`reconnecting…`/`offline`/`not linked`/`unknown`/`no daemon`) right-aligned in `warning` unless linked; a notice takes the left side. Updated `design.rs`, `keys.rs`, `render.rs`, `app.rs`, `images.rs` and `stop_reason.rs` | this commit |
 | W4 | S3 R4: row time column, inline markers, badge | inline | pending | — |
 | W5 | S3 R5: one selection fill, unfocused keeps `▌` | inline | pending | — |
 | W6 | S3 R6: breakpoints, single pane, cleared hit-test rects | inline | pending | — |
@@ -75,3 +77,14 @@ Runners: `cargo test -p nuncio-tui`, `cargo test --workspace`, `cargo fmt --chec
   §9 and the audit transcripts.
 - L4 Implemented starting on the feature branch; the untracked `.atl/` directory is not ours
   and stays untouched.
+- L5 (evidence, 2026-10-25) W1 review: granted by the owner, two lenses (readability,
+  reliability), result approved, 7 informational findings: the `dim` local, a weak assertion on
+  the message text colour, the unnamed 4.5 constant, the copied contrast math, the ledger still
+  saying pending and the scope sentence not covering `.gitignore`/`docs`. All fixed in W2/W3
+  except the contrast-copy (kept, with its reason in the test) — 213 changed lines.
+- L6 (decision, 2026-10-25) `.atl/` (the agent skill registry) is now ignored: it is generated
+  tooling state, and its presence forced an untracked-selection step in every review preflight.
+  Its own commit, `7bc9aa4`.
+- L7 (decision, 2026-10-25) W2 and W3 are one commit: the session state has to leave the header
+  in the same change that gives it a home in the footer, or the tree is red between them (the
+  cold audit's B1). Order after that: W4, W5, W6, W7, W8, W9, W10, W11.

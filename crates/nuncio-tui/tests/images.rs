@@ -957,7 +957,10 @@ fn frames_with_pictures_stay_intact_at_eighty_by_twenty_four_and_two_forty_by_si
             let rows: Vec<&str> = text.lines().collect();
             assert_eq!(rows.len(), usize::from(height));
             assert!(rows[0].starts_with("nuncio"), "{text}");
-            assert!(rows[usize::from(height) - 1].contains("? help"), "{text}");
+            assert!(
+                rows[usize::from(height) - 1].contains("? all keys"),
+                "{text}"
+            );
             // On every body row the line between the panes stays in its column and the
             // conversation's last column stays free: no picture spilled over either.
             let split = (0..width)

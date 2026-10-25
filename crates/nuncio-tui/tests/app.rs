@@ -195,7 +195,7 @@ fn a_conversation_renders_at_eighty_by_twenty_four_and_at_two_forty_by_sixty() {
             "Yes, see you at 18:00",
             "you · 17:02",
             "Ada Lovelace · 17:01",
-            "? help",
+            "? all keys",
         ] {
             assert!(
                 screen.contains(needle),
@@ -1545,12 +1545,15 @@ fn the_daemon_driver_marks_an_opened_chat_read_and_a_refusal_keeps_the_count() {
             );
             assert!(screen.contains("2 unread"), "{screen}");
             assert!(
-                footer.contains("the WhatsApp session is offline, so the chat was not marked read"),
+                footer.contains("the WhatsApp session is offline"),
                 "{footer}"
             );
         } else {
             assert_eq!(app.chats()[0].unread, 0);
-            assert!(screen.contains("0 unread"), "{screen}");
+            assert!(
+                !screen.contains("unread"),
+                "a zero unread count is not printed at all:\n{screen}"
+            );
             assert!(!footer.contains("not marked read"), "{footer}");
         }
         // Nothing more happens on its own: no retry.

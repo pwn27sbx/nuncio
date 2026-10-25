@@ -6,8 +6,8 @@ events. With no daemon it still starts, shows `proto/fixtures/chats_response.jso
 `FIXTURE DATA`; a send then shows as not sent.
 
 If the daemon goes away later (it restarted, a read hit the 5 s bound, a send's answer the 25 s
-one), the header says
-`reconnecting…` instead of the session and the footer says `daemon connection lost: …`. The TUI
+one), the footer's right slot says
+`reconnecting…` instead of the session and its left side says `daemon connection lost: …`. The TUI
 tries again after 0.5 s, doubling up to every 5 s; once back it says `reconnected to nunciod`,
 says hello and subscribes again, and reloads the status, the chat list and the selected chat's
 messages, keeping the draft, the selected chat and message and the open pane. A send made while
@@ -15,7 +15,7 @@ disconnected is shown as `not sent` and the footer says `not connected to nuncio
 retries it by itself. `R` does, once reconnected: nunciod never got it, so `R` sends it once
 under the same client_id instead of asking nunciod to retry a send it does not have.
 
-After the session the header names why it is not connected when the daemon says so
+After the session the footer's right slot names why it is not connected when the daemon says so
 (`stop_reason`, `proto/wire.md`), in fixed text: a WhatsApp stop (`offline · WhatsApp temporarily
 banned this account`, …), `offline · keyring locked: unlock it to connect` while the keyring is
 locked, or `offline · the stored key does not open this device: see SECURITY.md` when the stored
@@ -114,14 +114,20 @@ nuncio-tui [--image <png>]
 - **Focus**: one pane has the keys at a time, the chat list or the conversation (the composer
   counts as the conversation); its title on the header rule is bold, the other's muted. `Tab`
   switches between them.
-- **Footer**: always one line of hints, muted, with the focused pane's primary key in the accent
-  and, when pictures are drawn and there is room, their protocol (`kitty`, `half blocks`, ...) on
-  the right. Outside the composer it starts with
-  `? help · Tab switch pane · Enter open · / search · q quit` (`Enter write` in the conversation)
-  and adds the focused pane's keys after it; in the composer, where `q` and `/` are text, it says
-  how to send and `Esc conversation · Ctrl-C quit`. `?` shows every key, grouped by context, on
-  a panel over a solid `surface` scrim: one key per row, right-aligned and muted, when the terminal
-  is tall enough, else each context's keys on one wrapped line.
+- **Status line**: the header is only the app's name plus one right-aligned datum, the unread
+  count in the accent when there is one (`3 unread`), or `FIXTURE DATA` with no daemon. The
+  daemon's build, the session and the picture protocol are in `?`.
+- **Footer**: one line. Its right slot is the session state — `linked`, `reconnecting…`,
+  `offline`, `not linked`, `unknown`, `no daemon` — in the warning tone whenever it is not
+  `linked`, with the stop reason after it when there is one. Its left side is the focused pane's
+  primary key in the accent (`Enter open`, `Enter write`, `Enter send`, `Enter search/select`,
+  `1-6 react`), then `? all keys`, with the pane's other keys in between only while they fit: the
+  tail is dropped on a narrow terminal and no key is printed twice. A notice (an error from the
+  daemon, `not sent`, `not confirmed`) takes the left side and the key hints follow only when
+  they still fit; the state on the right is never displaced. `?` shows every key, grouped by
+  context, on a panel over a solid `surface` scrim: one key per row, right-aligned and muted,
+  when the terminal is tall enough, else each context's keys on one wrapped line, and its first
+  line carries the daemon's build, the session and the picture protocol.
 - **Selected message**: in the conversation, `k`/`↑` select a message (marked with the bar `▌`, the newest first,
   then older) and `j`/`↓` a newer one; `r` replies to it, `e` reacts, `R`
   retries a send of mine that is `not sent` or `not confirmed` (one attempt per key press, under

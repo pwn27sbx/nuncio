@@ -6,6 +6,7 @@ use nuncio_tui::{App, Pane, Source, fixture_snapshot};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Render `app` at the given size and return the screen as lines of text.
 fn render(app: &mut App, width: u16, height: u16) -> String {
@@ -88,8 +89,15 @@ fn the_fixture_chat_list_renders_at_eighty_by_twenty_four() {
         "the message pane header:\n{screen}"
     );
 
-    // The key hints.
-    assert!(screen.contains("q quit"), "the footer:\n{screen}");
+    // The footer: the primary key, the way to every other key, and the session state.
+    let footer = screen.lines().last().unwrap_or_default();
+    assert!(footer.contains("Enter open"), "the footer:\n{screen}");
+    assert!(footer.contains("? all keys"), "the footer:\n{screen}");
+    // A fixture snapshot has no daemon behind it: the footer's state slot says so.
+    assert!(
+        footer.trim_end().ends_with("no daemon"),
+        "the footer:\n{screen}"
+    );
 }
 
 #[test]
@@ -224,9 +232,19 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
     let mut app = App::new(snapshot, Source::Daemon, Palette::default());
     let screen = render(&mut app, 80, 24);
 
+    // The daemon's build and the session live in `?`, not on the header.
+    assert!(
+        !screen
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .contains("nunciod")
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+    let screen = render(&mut app, 80, 24);
     assert!(
         screen.contains("nunciod/0.1.0"),
-        "the daemon version:\n{screen}"
+        "the daemon version in the help:\n{screen}"
     );
     assert!(
         !screen.contains("FIXTURE DATA"),

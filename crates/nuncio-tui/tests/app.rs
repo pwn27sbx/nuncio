@@ -1302,8 +1302,16 @@ fn a_long_preview_is_cut_with_an_ellipsis_and_its_time_stays_whole() {
                 row.trim_end_matches([' ', '│', '┃']).ends_with(end),
                 "{start:?} at {width}x{height}: {row:?}"
             );
-            // Its time is whole, in the name row's own column.
-            assert!(chats.contains(time), "the {start:?} time: {chats}");
+            // Its time is whole, and in the name row of that same chat.
+            let rows: Vec<&str> = chats.lines().collect();
+            let preview = rows
+                .iter()
+                .position(|row| row.contains(start))
+                .unwrap_or_else(|| panic!("no {start:?} row: {chats}"));
+            assert!(
+                rows[preview - 1].contains(time),
+                "the {start:?} time is not in its name row: {chats}"
+            );
         }
         assert!(chats.contains("See you"), "{chats}");
         assert!(chats.contains("17:38"), "{chats}");

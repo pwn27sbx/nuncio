@@ -265,7 +265,9 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
                         continue;
                     }
                     // The chat row's badge is `●` plus its count, on the row below the name.
-                    if cell.symbol().chars().all(|c| c.is_ascii_digit()) && x > 0 {
+                    if (cell.symbol().chars().all(|c| c.is_ascii_digit()) || cell.symbol() == "+")
+                        && x > 0
+                    {
                         let left = &buffer[(x - 1, y)];
                         let run = left.symbol() == "●"
                             || (left.fg == accent
@@ -684,4 +686,15 @@ fn meta_is_the_muted_role_and_no_text_is_dimmed() {
     let buffer = draw(&mut app, 80, 24);
     let (x, y) = find(&buffer, "No chats yet");
     assert_eq!(buffer[(x, y)].fg, muted, "an empty state");
+}
+
+#[test]
+fn more_than_ninety_nine_unread_messages_show_the_capped_badge() {
+    let mut busy = chat(ADA, "Ada Lovelace", 120);
+    busy.unread = 120;
+    let mut app = app_with(vec![busy, chat(GRACE, "Grace Hopper", 9)]);
+    let buffer = draw(&mut app, 80, 24);
+    let shown = text(&buffer);
+    assert!(shown.contains("●99+"), "the capped badge:\n{shown}");
+    assert!(shown.contains("●9"), "a small count stays whole:\n{shown}");
 }

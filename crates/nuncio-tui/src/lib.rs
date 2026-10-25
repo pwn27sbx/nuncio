@@ -1077,7 +1077,7 @@ impl App {
                 parts.push(all_keys.clone());
             }
             let spans = footer_spans(&parts, gap);
-            if line_width(&spans) + 1 + display_width(&state) <= width {
+            if line_width(&spans) + 2 + display_width(&state) <= width {
                 break;
             }
             if extras.pop().is_some() {
@@ -1107,7 +1107,7 @@ impl App {
 
         let mut spans = footer_spans(&parts, gap);
         // One leading blank, the hints, then the state right-aligned.
-        let state = fit(&state, width.saturating_sub(1 + line_width(&spans)));
+        let state = fit(&state, width.saturating_sub(2 + line_width(&spans)));
         let pad = width.saturating_sub(1 + line_width(&spans) + display_width(&state));
         let state_style = if warn {
             Style::default().fg(rgb(self.palette.warning()))
@@ -2118,17 +2118,17 @@ fn local_hhmm(message: &Message, offset: time::UtcOffset) -> String {
 
 /// The fewest columns a chat's name keeps before the row gives up its time and markers.
 const NARROW_NAME: usize = 6;
-/// The badge's fixed width on a chat row's second line: `● 3`, `●12`, `●99+`.
+/// The badge's fixed width on a chat row's second line: `●3`, `●12`, `●99+`.
 const BADGE: usize = 4;
 /// The unread badge's dot.
 const BULLET: &str = "●";
 
-/// A chat in the list, after a three-column gutter. Row one: the selection bar `▌` (both rows,
-/// when it is the highlighted chat), a space, the name in bold, the markers the chat has right
-/// after it, and the time in its own five-column slot at the right edge. Row two: its last
-/// message cut to `width` columns with `…`, then the unread badge right-aligned in four columns.
-/// The name is cut first, so the time, the markers and the badge always show. Only the bar and
-/// the badge are in the accent (plan §9.2, R4).
+/// A chat in the list, in two rows. Row one: the selection bar `▌` (both rows, when it is the
+/// highlighted chat), a space, the name in bold, the markers the chat has right after it, and the
+/// time in its own five-column slot at the right edge. Row two: two spaces, its last message cut
+/// to `width` columns with `…`, then the unread badge right-aligned in four columns. A narrow
+/// list gives up the time first, then the markers, and only then cuts the name below six
+/// columns. Only the bar and the badge are in the accent (plan §9.2, R4).
 fn chat_item(
     chat: &Chat,
     palette: &Palette,

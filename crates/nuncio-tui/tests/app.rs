@@ -545,7 +545,8 @@ fn unread_message_connection_and_focus_events_update_the_model() {
         session: Session::Offline,
         stop_reason: None,
     });
-    assert!(render(&mut app, 80, 24).text().contains("offline"));
+    let screen = render(&mut app, 80, 24).text();
+    assert!(screen.contains("offline"), "{screen}");
 
     // Focus selects the chat and loads it.
     app.handle_key(key(KeyCode::Esc));

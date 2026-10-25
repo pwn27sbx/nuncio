@@ -941,8 +941,8 @@ impl App {
                 .add_modifier(Modifier::BOLD),
         )];
         if !right.is_empty() {
-            let right = fit(&right, width.saturating_sub(brand.len() + 1));
-            let pad = width.saturating_sub(brand.len() + display_width(&right));
+            let right = fit(&right, width.saturating_sub(display_width(brand) + 1));
+            let pad = width.saturating_sub(display_width(brand) + display_width(&right));
             spans.push(Span::raw(" ".repeat(pad)));
             spans.push(Span::styled(right, style));
         }
@@ -975,7 +975,7 @@ impl App {
     }
 
     /// The keys the footer offers where the focus is: the primary key and its verb (the key is
-    /// drawn in the accent), then the optional ones in the order they are dropped (R2).
+    /// drawn in the accent), then the optional ones, first in the list is dropped last.
     fn footer_hints(
         &self,
     ) -> (
@@ -1009,6 +1009,7 @@ impl App {
                 "Enter",
                 "write",
                 vec![
+                    ("j/k", "select"),
                     ("r", "reply"),
                     ("e", "react"),
                     ("R", "retry"),
@@ -1035,90 +1036,90 @@ impl App {
     }
 
     /// One line: a notice if there is one, the pane's primary key in the accent, the keys that
-    /// still fit, `? all keys`, and the session state on the right. Nothing is ever cut by the
-    /// terminal and no key is printed twice (R2).
+    /// still fit, `? all keys`, and the session state on the right. A part is dropped from the
+    /// tail — the optional keys first, then `? all keys`, then the primary key — so the state is
+    /// the last thing to give way, and only when the line cannot hold it (R2).
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
         let width = usize::from(area.width);
-        let (state, warn) = self.state_label();
-        let state = fit(&state, width.saturating_sub(4));
-        let state_width = display_width(&state) + 1;
-        let budget = width.saturating_sub(state_width);
-
-        // A part is one hint; it may be more than one span (the primary's key and its verb).
-        let mut parts: Vec<Vec<(String, Style)>> = Vec::new();
-        let mut used = 1;
-        let (key, verb, extras) = self.footer_hints();
-        let primary = vec![
+        let (key, verb, hints) = self.footer_hints();
+        let primary: Vec<(String, Style)> = vec![
             (
                 key.to_owned(),
                 Style::default().fg(rgb(self.palette.accent())),
             ),
             (format!(" {verb}"), self.muted()),
         ];
-        let primary_width = display_width(key) + 1 + display_width(verb);
-        let always = "? all keys";
+        let all_keys: Vec<(String, Style)> = vec![("? all keys".to_owned(), self.muted())];
+        let notice = self.model.notice();
 
-        // A notice answers something the owner just did, so it takes the left side; the hints
-        // follow only when they still fit after it.
-        if let Some(notice) = self.model.notice() {
-            let notice = fit(notice, budget.saturating_sub(used));
-            if !notice.is_empty() {
-                used += display_width(&notice) + 3;
-                parts.push(vec![(
-                    notice,
-                    Style::default().fg(rgb(self.palette.warning())),
-                )]);
+        let (state, warn) = self.state_label();
+        let gap = self.muted();
+        // What gives way, in order: the optional keys from the tail, then `? all keys`, then the
+        // primary key. The state is the last thing to give way, and only by being cut (R2).
+        let mut extras: Vec<Vec<(String, Style)>> = hints
+            .into_iter()
+            .map(|(key, what)| vec![(format!("{key} {what}"), self.muted())])
+            .collect();
+        let mut head: Vec<Vec<(String, Style)>> = Vec::new();
+        if let Some(notice) = notice {
+            head.push(vec![(
+                notice.to_owned(),
+                Style::default().fg(rgb(self.palette.warning())),
+            )]);
+        }
+        head.push(primary.clone());
+        let mut show_all_keys = true;
+        let mut parts;
+        loop {
+            parts = head.clone();
+            parts.extend(extras.iter().cloned());
+            if show_all_keys {
+                parts.push(all_keys.clone());
             }
-            if used + primary_width + 3 <= budget {
-                used += primary_width + 3;
-                parts.push(primary);
+            let spans = footer_spans(&parts, gap);
+            if line_width(&spans) + 1 + width_of(&state) <= width {
+                break;
             }
-            for (key, what) in extras {
-                let segment = format!("{key} {what}");
-                if used + display_width(&segment) + 3 > budget {
-                    break;
-                }
-                used += display_width(&segment) + 3;
-                parts.push(vec![(segment, self.muted())]);
+            if extras.pop().is_some() {
+                continue;
             }
-            if used + display_width(always) <= budget {
-                parts.push(vec![(always.to_owned(), self.muted())]);
+            if show_all_keys {
+                show_all_keys = false;
+                continue;
             }
-        } else {
-            used += primary_width + 3 + display_width(always);
-            parts.push(primary);
-            for (key, what) in extras {
-                let segment = format!("{key} {what}");
-                if used + display_width(&segment) + 3 > budget {
-                    break;
-                }
-                used += display_width(&segment) + 3;
-                parts.push(vec![(segment, self.muted())]);
+            // The notice stays; the primary key is what is left to drop.
+            if head.len() > 1 {
+                head.pop();
+                continue;
             }
-            parts.push(vec![(always.to_owned(), self.muted())]);
+            // A notice on its own can still be too long: it is the only part that may be cut.
+            let room = width.saturating_sub(2 + width_of(&state));
+            if let Some((text, _)) = head.first_mut().and_then(|part| part.first_mut()) {
+                *text = fit(text, room);
+            }
+            parts = head.clone();
+            parts.extend(extras.iter().cloned());
+            if show_all_keys {
+                parts.push(all_keys.clone());
+            }
+            break;
         }
 
-        let mut spans = vec![Span::raw(" ")];
-        for (index, part) in parts.into_iter().enumerate() {
-            if index > 0 {
-                spans.push(Span::styled(" · ", self.muted()));
-            }
-            for (text, style) in part {
-                spans.push(Span::styled(text, style));
-            }
-        }
-        let left = Line::from(spans);
-        let pad = width.saturating_sub(left.width() + state_width);
-        let mut spans = left.spans;
-        spans.push(Span::raw(" ".repeat(pad + 1)));
+        let mut spans = footer_spans(&parts, gap);
+        // One leading blank, the hints, then the state right-aligned.
+        let state = fit(&state, width.saturating_sub(1 + line_width(&spans)));
+        let pad = width.saturating_sub(1 + line_width(&spans) + display_width(&state));
         let state_style = if warn {
             Style::default().fg(rgb(self.palette.warning()))
         } else {
             self.muted()
         };
-        spans.push(Span::styled(state, state_style));
+        let mut line = vec![Span::raw(" ")];
+        line.append(&mut spans);
+        line.push(Span::raw(" ".repeat(pad)));
+        line.push(Span::styled(state, state_style));
         frame.render_widget(
-            Paragraph::new(Line::from(spans))
+            Paragraph::new(Line::from(line))
                 .style(Style::default().bg(rgb(self.palette.surface_chrome()))),
             area,
         );
@@ -1960,6 +1961,31 @@ fn snippet(message: &Message) -> String {
 }
 
 /// `text` cut to at most `width` terminal columns, ending in `…` when it was cut.
+/// The footer's parts joined with ` · `, each part one or more spans.
+fn footer_spans(parts: &[Vec<(String, Style)>], gap: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", gap));
+        }
+        for (text, style) in part {
+            spans.push(Span::styled(text.clone(), *style));
+        }
+    }
+    spans
+}
+
+fn line_width(spans: &[Span<'static>]) -> usize {
+    spans
+        .iter()
+        .map(|span| display_width(&span.content))
+        .sum::<usize>()
+}
+
+fn width_of(text: &str) -> usize {
+    display_width(text)
+}
+
 fn fit(text: &str, width: usize) -> String {
     if display_width(text) <= width {
         return text.to_owned();

@@ -815,6 +815,12 @@ fn the_composer_says_what_enter_does_and_marks_its_rule_when_focused() {
     );
     let (x, _) = find(&buffer, hint.trim_end());
     assert_eq!(usize::from(x) + hint.chars().count(), 240);
+
+    // At a narrow width the quote takes the rule, so the hint gives way instead of overflowing.
+    let buffer = draw(&mut app, 40, 20);
+    let shown = text(&buffer);
+    assert!(shown.contains("replying to:"), "{shown}");
+    assert!(!shown.contains("Enter sends"), "{shown}");
 }
 
 #[test]

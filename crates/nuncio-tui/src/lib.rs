@@ -1474,7 +1474,7 @@ impl App {
             let candidate = "Enter sends · Alt-Enter newline ";
             let sends = if draft.is_some()
                 && self.pane == Pane::Compose
-                && used + display_width(candidate) < width
+                && used + display_width(candidate) <= width
             {
                 candidate
             } else {

@@ -11,7 +11,21 @@ confirmed rather than queued.
 
 ## Run it against the demo daemon
 
-Nothing here touches WhatsApp. In two terminals:
+Nothing here touches WhatsApp. On Linux, give the demo the real runtime directory, in two
+terminals and in this order:
+
+```sh
+systemctl --user stop nunciod      # only if nuncio is installed; start it again when done
+go run ./cmd/nuncio-demo           # terminal 1, first
+cargo run -p nuncio-desktop        # terminal 2, once the demo is listening
+```
+
+Do not point the app at another `XDG_RUNTIME_DIR`: the Wayland socket lives in the real one, so
+the app would fall back to XWayland, with another window class (`nuncio-desktop`, which the hotkey
+does not match) and no Hyprland rounding (`hyprctl` is looked up there too). Start the demo
+first: an app started alone activates the real `nunciod` over D-Bus, which serves the real account.
+
+On a Mac (no Wayland, no `nunciod`), a private directory is fine:
 
 ```sh
 mkdir -m 700 -p /tmp/nuncio-demo && XDG_RUNTIME_DIR=/tmp/nuncio-demo go run ./cmd/nuncio-demo
@@ -41,7 +55,7 @@ unknown option is a usage error.
 The app id is `io.github.pwn27sbx.nuncio.Desktop`, which `GApplication` also owns as a D-Bus name.
 It is deliberately not the daemon's bus name (`io.github.pwn27sbx.nuncio`): one name has one owner.
 
-Links: `XDG_RUNTIME_DIR=/tmp/nuncio-demo cargo run -p nuncio-desktop -- 'whatsapp://send?phone=15551230001&text=hola'`
+Links: `cargo run -p nuncio-desktop -- 'whatsapp://send?phone=15551230001&text=hola'`
 opens that chat with `hola` in the composer (see [Links](#links)).
 
 ## Notifications

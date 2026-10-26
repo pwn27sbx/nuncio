@@ -1,0 +1,130 @@
+name: Release
+
+# Builds the Arch package from a tag, verifies it with the same checks as CI, and publishes it as
+# a GitHub release. The asset `nuncio-x86_64.pkg.tar.zst` keeps a name without the version, so
+# `/releases/latest/download/` always resolves to the newest one (the shape Sealwax uses and the
+# one README.md documents); the versioned name is uploaded too, because packaging/install.sh and
+# the packaging docs build that URL.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Build and verify the package
+    runs-on: ubuntu-24.04
+    # The same image as ci.yml's `arch` job, by its index digest.
+    container: archlinux:base-20261018.0.612668@sha256:52dfbd5afb23a220d5ee92dafcb4c788d96c026ed04179890c23adef4c897fa0
+    timeout-minutes: 60
+    steps:
+      - name: Install the build and check tools
+        run: |
+          sed -i -e '/^NoExtract/d' -e 's/^#\?DisableSandbox$/DisableSandbox/' /etc/pacman.conf
+          grep -q '^DisableSandbox$' /etc/pacman.conf || sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+          pacman -Sy --noconfirm archlinux-keyring
+          # `dbus` is explicit: without it check() passes while every D-Bus test skips.
+          pacman -Su --noconfirm --needed base-devel git namcap dbus \
+            gtk4 libadwaita glib2 gcc-libs glibc go rust pkgconf \
+            python desktop-file-utils
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create the build user
+        run: |
+          useradd --create-home builder
+          cp -a "$GITHUB_WORKSPACE" /home/builder/nuncio
+          chown -R builder:builder /home/builder/nuncio
+
+      - name: package-source.sh and makepkg (build, check, package)
+        run: |
+          runuser -l builder -c 'set -euo pipefail
+            cd ~/nuncio
+            packaging/package-source.sh ~/pkg
+            cd ~/pkg
+            makepkg --cleanbuild --force --noconfirm'
+
+      - name: The tag is the packaged version
+        shell: bash
+        run: |
+          version=$(sed -n '/^pkgver=/s/^pkgver=//p' /home/builder/pkg/PKGBUILD)
+          if [[ -z $version ]]; then
+            echo "the generated PKGBUILD has no pkgver" >&2
+            exit 1
+          fi
+          if [[ ${GITHUB_REF_NAME#v} != "$version" ]]; then
+            echo "tag ${GITHUB_REF_NAME} does not match the packaged version $version" >&2
+            exit 1
+          fi
+
+      - name: namcap on the PKGBUILD and the package
+        run: |
+          cd /home/builder/pkg
+          out=$(namcap PKGBUILD nuncio-*.pkg.tar.zst)
+          printf '%s\n' "$out"
+          if grep -q ' E: ' <<<"$out"; then
+            echo "namcap reported errors" >&2
+            exit 1
+          fi
+        shell: bash
+
+      - name: Install the package
+        run: pacman -U --noconfirm /home/builder/pkg/nuncio-*.pkg.tar.zst
+
+      - name: Installed files match packaging/MANIFEST
+        shell: bash
+        run: |
+          diff <(grep -vE '^[[:space:]]*(#|$)' packaging/MANIFEST | sort) \
+            <(pacman -Qlq nuncio | grep -v '/$' | sort)
+
+      - name: systemd-analyze verify and packaging/check.sh
+        run: |
+          runuser -l builder -c 'set -euo pipefail
+            export XDG_RUNTIME_DIR=$(mktemp -d)
+            systemd-analyze --user verify /usr/lib/systemd/user/nunciod.service
+            bash ~/nuncio/packaging/check.sh'
+
+      - name: Stage the release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          cd /home/builder/pkg
+          pkg=$(ls nuncio-*.pkg.tar.zst)
+          cp "$pkg" "$GITHUB_WORKSPACE/dist/$pkg"
+          # The stable name, so /releases/latest/download/ resolves for every release.
+          cp "$pkg" "$GITHUB_WORKSPACE/dist/nuncio-x86_64.pkg.tar.zst"
+          cd "$GITHUB_WORKSPACE/dist"
+          sha256sum ./*.pkg.tar.zst > SHA256SUMS
+          cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nuncio-package
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish the release
+    needs: package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: nuncio-package
+          path: dist
+
+      - name: Show what will be published
+        run: ls -la dist && cat dist/SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

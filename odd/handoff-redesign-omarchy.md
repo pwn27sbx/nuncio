@@ -107,17 +107,16 @@ export PATH=$HOME/.cargo/bin:$PATH
 hyprctl -j getoption decoration:rounding   # expect "int": 0
 ```
 
-The demo daemon, in its own terminal (nothing reaches WhatsApp; a text starting with `fail` ends
-`not sent`, so Retry can be tried; it answers each send with an invented reply):
+The demo daemon takes the **real** runtime directory (nothing reaches WhatsApp; a text starting
+with `fail` ends `not sent`, so Retry can be tried; it answers each send with an invented reply).
+Corrected 2026-10-26 after the home check: the first version of this file pointed both at
+`XDG_RUNTIME_DIR=/tmp/nuncio-demo`, which hides the Wayland socket, so the app fell back to
+XWayland (window class `nuncio-desktop`, no Hyprland rounding read). In this order:
 
 ```sh
-mkdir -m 700 -p /tmp/nuncio-demo && XDG_RUNTIME_DIR=/tmp/nuncio-demo go run ./cmd/nuncio-demo
-```
-
-The app, in another terminal:
-
-```sh
-XDG_RUNTIME_DIR=/tmp/nuncio-demo cargo run -p nuncio-desktop
+systemctl --user stop nunciod      # start it again when done
+go run ./cmd/nuncio-demo           # terminal 1, first: an app started alone activates the real nunciod
+cargo run -p nuncio-desktop        # terminal 2, once the demo is listening
 ```
 
 Rules while checking: never send from the real account; never copy `~/.local/share/nuncio`; put
@@ -134,8 +133,8 @@ Each check says what to do and what must be seen. Write the result of every one 
 Screenshots: with the app focused,
 
 ```sh
-hyprctl dispatch setfloating active
-hyprctl dispatch resizeactive exact 1920 1000      # then 960 1000, then 600 1000
+hyprctl eval 'hl.dispatch(hl.dsp.window.float({ action = "set" }))'
+hyprctl eval 'hl.dispatch(hl.dsp.window.resize({ x = 1920, y = 1000, relative = false }))'   # then 960, then 600
 grim -g "$(hyprctl -j activewindow | jq -r '"\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"')" ~/nuncio-shot-1920-gruvbox.png
 ```
 
@@ -204,7 +203,7 @@ font tests are timing-sensitive under load, rerun them alone once before calling
    the focus is in the chat list. With the filter and message search both open, the first Escape
    in the list closes the filter, the second the search.
 5. While the open chat is filtered out of the list, its conversation and composer still work.
-6. TUI (`XDG_RUNTIME_DIR=/tmp/nuncio-demo cargo run -p nuncio-tui`): type in one chat, move with
+6. TUI (`cargo run -p nuncio-tui`, against the same demo): type in one chat, move with
    j/k to another: its composer does not show the first chat's text; come back: it is there.
 
 ### 4.6 Polish (P6)

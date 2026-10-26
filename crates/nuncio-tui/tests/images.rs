@@ -334,11 +334,12 @@ fn a_partially_visible_picture_is_cut_at_the_top_and_at_the_bottom() {
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
     let bottom_cut = draw(&mut app, 80, 24);
-    // The day label, eight rows, the caption line: 9 picture rows fit before the composer.
-    assert_eq!(row_of(&bottom_cut, "before line 0"), Some(3));
+    // The start marker costs one row: 8 picture rows fit before the composer.
+    assert_eq!(row_of(&bottom_cut, "Beginning of conversation"), Some(2));
+    assert_eq!(row_of(&bottom_cut, "before line 0"), Some(4));
     assert_eq!(
         rows_in(&bottom_cut, RED),
-        (12..21).collect::<Vec<_>>(),
+        (13..21).collect::<Vec<_>>(),
         "{}",
         screen(&bottom_cut)
     );
@@ -957,7 +958,10 @@ fn frames_with_pictures_stay_intact_at_eighty_by_twenty_four_and_two_forty_by_si
             let rows: Vec<&str> = text.lines().collect();
             assert_eq!(rows.len(), usize::from(height));
             assert!(rows[0].starts_with("nuncio"), "{text}");
-            assert!(rows[usize::from(height) - 1].contains("? help"), "{text}");
+            assert!(
+                rows[usize::from(height) - 1].contains("? all keys"),
+                "{text}"
+            );
             // On every body row the line between the panes stays in its column and the
             // conversation's last column stays free: no picture spilled over either.
             let split = (0..width)

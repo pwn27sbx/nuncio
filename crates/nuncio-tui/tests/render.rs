@@ -6,6 +6,7 @@ use nuncio_tui::{App, Pane, Source, fixture_snapshot};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Render `app` at the given size and return the screen as lines of text.
 fn render(app: &mut App, width: u16, height: u16) -> String {
@@ -54,10 +55,8 @@ fn the_fixture_chat_list_renders_at_eighty_by_twenty_four() {
     let screen = render(&mut app, 80, 24);
 
     // The chat list: name, unread badge, pinned and archived markers.
-    assert!(
-        screen.contains("Ada Lovelace (2)"),
-        "the chat name and its unread badge sit together:\n{screen}"
-    );
+    assert!(screen.contains("Ada Lovelace"), "the chat name:\n{screen}");
+    assert!(screen.contains("●2"), "its unread badge:\n{screen}");
     assert!(screen.contains('★'), "the pinned marker:\n{screen}");
     assert!(screen.contains('▤'), "the archived marker:\n{screen}");
     assert!(
@@ -66,15 +65,16 @@ fn the_fixture_chat_list_renders_at_eighty_by_twenty_four() {
     );
     assert!(screen.contains("Omarchy devs"), "the group chat:\n{screen}");
     assert!(
-        screen.contains("Omarchy devs (17)"),
+        screen.contains("●17"),
         "the group chat's unread badge:\n{screen}"
     );
 
-    // The last-message snippet and its time.
+    // The last-message snippet, and its time in the row above.
     assert!(
-        screen.contains("See you at 18:00 · 17:55"),
-        "the last-message snippet and time:\n{screen}"
+        screen.contains("See you at 18:00"),
+        "the last-message snippet:\n{screen}"
     );
+    assert!(screen.contains("17:55"), "its time column:\n{screen}");
 
     // It says the data is fixture data.
     assert!(
@@ -88,8 +88,15 @@ fn the_fixture_chat_list_renders_at_eighty_by_twenty_four() {
         "the message pane header:\n{screen}"
     );
 
-    // The key hints.
-    assert!(screen.contains("q quit"), "the footer:\n{screen}");
+    // The footer: the primary key, the way to every other key, and the session state.
+    let footer = screen.lines().last().unwrap_or_default();
+    assert!(footer.contains("Enter open"), "the footer:\n{screen}");
+    assert!(footer.contains("? all keys"), "the footer:\n{screen}");
+    // A fixture snapshot has no daemon behind it: the footer's state slot says so.
+    assert!(
+        footer.trim_end().ends_with("no daemon"),
+        "the footer:\n{screen}"
+    );
 }
 
 #[test]
@@ -97,20 +104,37 @@ fn the_layout_survives_an_odd_size() {
     let mut app = fixture_app();
     let screen = render(&mut app, 37, 11);
 
-    // 37 columns leaves the chat list too narrow for the badge, so this only asserts that
-    // both panes rendered, at the right size, without panicking.
+    // 37 columns is one pane: the list, with its rule saying how to reach the other one.
+    assert!(screen.contains("Chats (3) · Tab"), "{screen}");
+    assert!(line_with(&screen, "★").contains("Ada"), "{screen}");
     assert!(
-        screen.contains("Chats (3)"),
-        "the chat pane is still there at 37x11:\n{screen}"
+        !screen.contains("Ada Lovelace · 17:55"),
+        "the conversation is not drawn here:\n{screen}"
     );
-    assert!(
-        line_with(&screen, "★").contains("Ada"),
-        "the first chat is still listed at 37x11:\n{screen}"
-    );
-    assert!(
-        screen.contains("Ada Lovelace · 17:55"),
-        "the message pane is still there at 37x11:\n{screen}"
-    );
+    // `Tab` swaps it in, filling the width.
+    app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+    let screen = render(&mut app, 37, 11);
+    assert!(screen.contains("Ada Lovelace · 17:55"), "{screen}");
+}
+
+#[test]
+fn the_chat_list_breaks_at_sixty_and_one_hundred_columns() {
+    let mut app = fixture_app();
+    let split = |screen: &str| -> Option<usize> {
+        screen
+            .lines()
+            .nth(1)
+            .and_then(|row| row.chars().position(|symbol| symbol == '┬'))
+    };
+    // Wide: 40 % of 120 columns, and exactly at the breakpoint too.
+    assert_eq!(split(&render(&mut app, 120, 20)), Some(48));
+    assert_eq!(split(&render(&mut app, 100, 20)), Some(40));
+    // Middle: a fixed 32 columns, whatever the width, the breakpoint included.
+    assert_eq!(split(&render(&mut app, 99, 20)), Some(32));
+    assert_eq!(split(&render(&mut app, 80, 20)), Some(32));
+    assert_eq!(split(&render(&mut app, 60, 20)), Some(32));
+    // Narrow: no split at all, one pane on the whole width.
+    assert_eq!(split(&render(&mut app, 59, 20)), None);
 }
 
 #[test]
@@ -224,9 +248,19 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
     let mut app = App::new(snapshot, Source::Daemon, Palette::default());
     let screen = render(&mut app, 80, 24);
 
+    // The daemon's build and the session live in `?`, not on the header.
+    assert!(
+        !screen
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .contains("nunciod")
+    );
+    app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
+    let screen = render(&mut app, 80, 24);
     assert!(
         screen.contains("nunciod/0.1.0"),
-        "the daemon version:\n{screen}"
+        "the daemon version in the help:\n{screen}"
     );
     assert!(
         !screen.contains("FIXTURE DATA"),

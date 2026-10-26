@@ -353,13 +353,14 @@ The TUI cannot use GTK, but it can obey the same rules with ratatui:
    the selected row, `accent` for the unread dot (`●`), the selection bar (`▌`) and the one primary
    hint. Nothing else is coloured.
 3. **Same type do:** if the terminal font supports bold/underline, use bold for names and subjects,
-   dim for meta. No colour-coded senders.
-4. **Same density:** one line per message (author + time in dim, then text), a day label in dim
+   the `text_muted` role for meta (amended 2026-10-25: never `SGR 2`, whose contrast the terminal
+   decides). No colour-coded senders.
+4. **Same density:** one line per message (author + time muted, then text), a day label in muted
    caps with a blank line, no blank line between messages of the same author.
 5. **Same palette overlay:** centred panel with a solid `surface` scrim (no alpha in a terminal),
-   36 px rows, keys right-aligned in dim.
-6. **Same empty states:** one line of text, dim, plus the key hint.
-7. The footer stays one line: keys in dim, protocol and state on the right, nothing else.
+   36 px rows, keys right-aligned and muted.
+6. **Same empty states:** one line of muted text, plus the key hint.
+7. The footer stays one line: keys muted, protocol and state on the right, nothing else.
 
 ---
 

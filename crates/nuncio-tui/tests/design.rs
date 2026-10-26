@@ -248,6 +248,7 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
         for (name, buffer) in screens(width, height) {
             let footer = height - 1;
             let mut hint = String::new();
+            let mut header = String::new();
             for y in 0..height {
                 for x in 0..width {
                     let cell = &buffer[(x, y)];
@@ -257,6 +258,23 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
                     if y == footer {
                         hint.push_str(cell.symbol());
                         continue;
+                    }
+                    // The header's unread count is the other accent text (Q6).
+                    if y == 0 {
+                        header.push_str(cell.symbol());
+                        continue;
+                    }
+                    // The chat row's badge is `●` plus its count, on the row below the name.
+                    if (cell.symbol().chars().all(|c| c.is_ascii_digit()) || cell.symbol() == "+")
+                        && x > 0
+                    {
+                        let left = &buffer[(x - 1, y)];
+                        let run = left.symbol() == "●"
+                            || (left.fg == accent
+                                && left.symbol().chars().all(|c| c.is_ascii_digit()));
+                        if run {
+                            continue;
+                        }
                     }
                     assert!(
                         ["●", "▌"].contains(&cell.symbol()) && cell.bg != accent,
@@ -269,25 +287,25 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
             // The footer's accent is one key, the primary one where the focus is.
             let primary = if name == "picker" { "1-6" } else { "Enter" };
             assert_eq!(hint, primary, "{name} at {width}x{height}");
+            assert_eq!(header, "2 unread", "{name} at {width}x{height}");
         }
     }
-    // And they are drawn: the unread chat's dot and the selected chat's bar.
+    // And they are drawn: one unread badge, and the bar down the selected chat's two rows.
     let buffer = draw(&mut two_chats(), 80, 24);
-    let (x, y) = find(&buffer, "Ada Lovelace (2)");
-    let row: Vec<_> = (0..x).map(|x| buffer[(x, y)].clone()).collect();
-    assert!(
-        row.iter().any(|c| c.symbol() == "●" && c.fg == accent),
-        "the unread dot:\n{}",
-        text(&buffer)
-    );
-    assert!(
-        row.iter().any(|c| c.symbol() == "▌" && c.fg == accent),
-        "the selection bar:\n{}",
-        text(&buffer)
-    );
-    // A read chat has no dot.
-    let (x, y) = find(&buffer, "Grace Hopper");
-    assert!((0..x).all(|x| buffer[(x, y)].symbol() != "●"));
+    let split = separator(&buffer);
+    let count = |symbol: &str| {
+        let mut found = 0;
+        for y in 2..22 {
+            for x in 0..split {
+                if buffer[(x, y)].symbol() == symbol && buffer[(x, y)].fg == accent {
+                    found += 1;
+                }
+            }
+        }
+        found
+    };
+    assert_eq!(count("●"), 1, "one unread badge:\n{}", text(&buffer));
+    assert_eq!(count("▌"), 2, "the bar on both rows:\n{}", text(&buffer));
 }
 
 #[test]
@@ -336,7 +354,9 @@ fn width_of(buffer: &Buffer) -> u16 {
 }
 
 #[test]
-fn each_message_is_one_line_with_its_author_and_time_dim_then_its_text() {
+fn each_message_is_one_line_with_its_author_and_time_muted_then_its_text() {
+    let palette = Palette::default();
+    let muted = colour(palette.text_muted());
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
     for (width, height) in SIZES {
@@ -362,8 +382,8 @@ fn each_message_is_one_line_with_its_author_and_time_dim_then_its_text() {
             let time = (time..x + meta.chars().count() as u16)
                 .find(|&x| buffer[(x, y)].symbol().chars().all(|c| c.is_ascii_digit()))
                 .expect("the time");
-            assert!(buffer[(time, y)].modifier.contains(Modifier::DIM), "{meta}");
-            assert!(!buffer[(text_x, y)].modifier.contains(Modifier::DIM));
+            assert_eq!(buffer[(time, y)].fg, muted, "{meta}");
+            assert_eq!(buffer[(text_x, y)].fg, colour(palette.text()));
             assert!(!buffer[(text_x, y)].modifier.contains(Modifier::BOLD));
         }
     }
@@ -392,7 +412,9 @@ fn an_authors_run_has_no_blank_line_and_the_next_author_starts_after_one() {
 }
 
 #[test]
-fn each_day_starts_with_its_label_in_dim_caps_after_a_blank_line() {
+fn each_day_starts_with_its_label_in_muted_caps_after_a_blank_line() {
+    let palette = Palette::default();
+    let muted = colour(palette.text_muted());
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
     for (width, height) in SIZES {
@@ -401,7 +423,7 @@ fn each_day_starts_with_its_label_in_dim_caps_after_a_blank_line() {
         let blank = |y: u16| (sep + 1..width).all(|x| buffer[(x, y)].symbol() == " ");
         let (x, saturday) = find(&buffer, "SAT 17 OCT 2026");
         assert_eq!(saturday + 1, row_of(&buffer, "hello there"));
-        assert!(buffer[(x, saturday)].modifier.contains(Modifier::DIM));
+        assert_eq!(buffer[(x, saturday)].fg, muted);
         let sunday = row_of(&buffer, "SUN 18 OCT 2026");
         assert!(
             blank(sunday - 1),
@@ -444,34 +466,44 @@ fn senders_are_not_colour_coded() {
 }
 
 #[test]
-fn the_footer_is_one_line_of_dim_keys_with_the_pictures_protocol_on_the_right() {
+fn the_footer_is_one_line_of_muted_keys_with_the_session_state_on_the_right() {
+    let muted = colour(Palette::default().text_muted());
     for (width, height) in SIZES {
         let mut app = two_chats().with_graphics(Graphics::halfblocks());
         let buffer = draw(&mut app, width, height);
         let footer = height - 1;
-        assert!(row(&buffer, footer).contains("q quit"), "{}", text(&buffer));
+        let shown = row(&buffer, footer);
+        assert!(shown.trim_end().ends_with("linked"), "{shown:?}");
         assert!(
-            !row(&buffer, footer - 1).contains("help"),
+            !row(&buffer, footer - 1).contains("all keys"),
             "one line only:\n{}",
             text(&buffer)
         );
-        // Every key is dim but the primary one.
-        let (q, _) = find(&buffer, "q quit");
-        assert_eq!(find(&buffer, "q quit").1, footer);
-        assert!(buffer[(q, footer)].modifier.contains(Modifier::DIM));
-        if width >= 120 {
-            assert!(
-                row(&buffer, footer).trim_end().ends_with("half blocks"),
-                "the protocol on the right:\n{}",
-                text(&buffer)
-            );
+        // Every key is muted but the primary one.
+        let (x, _) = find(&buffer, "? all keys");
+        assert_eq!(find(&buffer, "? all keys").1, footer);
+        assert_eq!(buffer[(x, footer)].fg, muted);
+        // The old dump is gone: no key twice, and the picture protocol is not a footer datum.
+        for gone in ["q quit", "Ctrl-C quit", "Tab switch pane", "pictures:"] {
+            assert!(!shown.contains(gone), "{gone:?} in {shown:?}");
         }
     }
+    // The protocol and the version moved into `?`.
+    let mut app = two_chats().with_graphics(Graphics::halfblocks());
+    app.handle_key(key(KeyCode::Char('?')));
+    let buffer = draw(&mut app, 240, 60);
+    assert!(
+        text(&buffer).contains("pictures: half blocks"),
+        "{}",
+        text(&buffer)
+    );
+    assert!(text(&buffer).contains("nunciod/"), "{}", text(&buffer));
 }
 
 #[test]
-fn the_help_sits_on_a_solid_surface_scrim_with_its_keys_right_aligned_and_dim() {
+fn the_help_sits_on_a_solid_surface_scrim_with_its_keys_right_aligned_and_muted() {
     let palette = Palette::default();
+    let muted = colour(palette.text_muted());
     let mut app = two_chats();
     app.handle_key(key(KeyCode::Char('?')));
     let buffer = draw(&mut app, 240, 60);
@@ -479,12 +511,12 @@ fn the_help_sits_on_a_solid_surface_scrim_with_its_keys_right_aligned_and_dim() 
     assert!(!text(&buffer).contains("Grace Hopper"), "{}", text(&buffer));
     assert_eq!(buffer[(0, 10)].bg, colour(palette.surface()));
     assert_eq!(buffer[(0, 10)].symbol(), " ");
-    // One key per row, right-aligned, dim, after what it does.
+    // One key per row, right-aligned, muted, after what it does.
     let y = row_of(&buffer, "this help");
     let shown = row(&buffer, y);
     assert!(shown.trim_end().ends_with('?'), "{shown:?}");
     let x = shown.trim_end().chars().count() as u16 - 1;
-    assert!(buffer[(x, y)].modifier.contains(Modifier::DIM));
+    assert_eq!(buffer[(x, y)].fg, muted);
     // At 80x24 every key still fits (wrapped), on the same scrim.
     let buffer = draw(&mut app, 80, 24);
     assert!(text(&buffer).contains("this help"), "{}", text(&buffer));
@@ -493,20 +525,24 @@ fn the_help_sits_on_a_solid_surface_scrim_with_its_keys_right_aligned_and_dim() 
 }
 
 #[test]
-fn empty_states_are_one_dim_line_with_the_key_hint() {
+fn empty_states_are_one_muted_line_with_the_key_hint() {
+    let muted = colour(Palette::default().text_muted());
     // No chats: the list says so, the conversation too.
     let mut app = app_with(Vec::new());
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
         let (x, y) = find(&buffer, "No chats yet");
-        assert!(buffer[(x, y)].modifier.contains(Modifier::DIM));
+        assert!(row(&buffer, y).contains("nuncio link"), "{}", text(&buffer));
+        assert_eq!(buffer[(x, y)].fg, muted);
+        let (x, y) = find(&buffer, "No chat open");
+        assert_eq!(buffer[(x, y)].fg, muted);
     }
     // A chat with no messages.
     let mut app = two_chats();
     open(&mut app, ADA, Vec::new());
     let buffer = draw(&mut app, 80, 24);
-    let (x, y) = find(&buffer, "No messages yet · i to write");
-    assert!(buffer[(x, y)].modifier.contains(Modifier::DIM));
+    let (x, y) = find(&buffer, "No messages yet · i writes the first one");
+    assert_eq!(buffer[(x, y)].fg, muted);
 }
 
 #[test]
@@ -555,6 +591,7 @@ fn a_reply_shows_its_quote_between_its_header_and_its_text_inside_an_authors_run
 
 #[test]
 fn with_no_chats_the_focused_conversation_still_shows_a_bold_title() {
+    let muted = colour(Palette::default().text_muted());
     let mut app = app_with(Vec::new());
     app.handle_key(key(KeyCode::Tab));
     assert_eq!(app.pane(), Pane::Messages);
@@ -562,13 +599,13 @@ fn with_no_chats_the_focused_conversation_still_shows_a_bold_title() {
     let (x, y) = find(&buffer, "Conversation");
     assert_eq!(y, 1, "on the header rule:\n{}", text(&buffer));
     assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD));
-    assert!(!buffer[(x, y)].modifier.contains(Modifier::DIM));
+    assert_ne!(buffer[(x, y)].fg, muted);
     let (x, y) = find(&buffer, "Chats (0)");
-    assert!(buffer[(x, y)].modifier.contains(Modifier::DIM));
+    assert_eq!(buffer[(x, y)].fg, muted);
     app.handle_key(key(KeyCode::Tab));
     let buffer = draw(&mut app, 80, 24);
     let (x, y) = find(&buffer, "Conversation");
-    assert!(buffer[(x, y)].modifier.contains(Modifier::DIM), "unfocused");
+    assert_eq!(buffer[(x, y)].fg, muted, "unfocused");
 }
 
 #[test]
@@ -589,6 +626,240 @@ fn the_selected_messages_reactions_row_is_on_the_active_surface_too() {
         buffer[(78, y)].bg,
         colour(Palette::default().surface_active()),
         "{}",
+        text(&buffer)
+    );
+}
+
+/// WCAG 2.1 relative luminance: the same formula as `nuncio_client`'s `theme::roles`, private
+/// there, so the test repeats it instead of widening the public API for a test.
+fn relative_luminance(rgb: nuncio_client::Rgb) -> f64 {
+    fn channel(value: u8) -> f64 {
+        let value = f64::from(value) / 255.0;
+        if value <= 0.039_28 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+    0.2126 * channel(rgb.r) + 0.7152 * channel(rgb.g) + 0.0722 * channel(rgb.b)
+}
+
+fn contrast_ratio(a: nuncio_client::Rgb, b: nuncio_client::Rgb) -> f64 {
+    let (a, b) = (relative_luminance(a), relative_luminance(b));
+    let (light, dark) = if a >= b { (a, b) } else { (b, a) };
+    (light + 0.05) / (dark + 0.05)
+}
+
+#[test]
+fn meta_is_the_muted_role_and_no_text_is_dimmed() {
+    let palette = Palette::default();
+    // The role keeps its own promise on both surfaces the TUI paints (R3). WCAG AA is 4.5:1.
+    const AA: f64 = 4.5;
+    assert!(contrast_ratio(palette.text_muted(), palette.surface()) >= AA);
+    assert!(contrast_ratio(palette.text_muted(), palette.surface_chrome()) >= AA);
+    let muted = colour(palette.text_muted());
+    // `Modifier::DIM` is emulator-defined, so nothing may depend on it (R3).
+    for (width, height) in SIZES {
+        for (name, buffer) in screens(width, height) {
+            for y in 0..height {
+                for x in 0..width {
+                    let cell = &buffer[(x, y)];
+                    assert!(
+                        !cell.modifier.contains(Modifier::DIM),
+                        "{name} at {width}x{height}: {:?} at ({x}, {y}) is dimmed:\n{}",
+                        cell.symbol(),
+                        text(&buffer)
+                    );
+                }
+            }
+        }
+    }
+    // Meta is that role: a message's time, the day label, a footer key and an empty state.
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    app.handle_key(key(KeyCode::Esc));
+    let buffer = draw(&mut app, 80, 24);
+    let (x, y) = find(&buffer, "17:01");
+    assert_eq!(buffer[(x, y)].fg, muted, "a message's time");
+    let (x, y) = find(&buffer, "SAT 17 OCT 2026");
+    assert_eq!(buffer[(x, y)].fg, muted, "the day label");
+    let (x, y) = find(&buffer, "? all keys");
+    assert_eq!(buffer[(x, y)].fg, muted, "a footer key");
+    let mut app = app_with(Vec::new());
+    let buffer = draw(&mut app, 80, 24);
+    let (x, y) = find(&buffer, "No chats yet");
+    assert_eq!(buffer[(x, y)].fg, muted, "an empty state");
+}
+
+#[test]
+fn more_than_ninety_nine_unread_messages_show_the_capped_badge() {
+    let busy = chat(ADA, "Ada Lovelace", 120);
+    let mut app = app_with(vec![busy, chat(GRACE, "Grace Hopper", 9)]);
+    let buffer = draw(&mut app, 80, 24);
+    let shown = text(&buffer);
+    assert!(shown.contains("●99+"), "the capped badge:\n{shown}");
+    assert!(shown.contains("●9"), "a small count stays whole:\n{shown}");
+}
+
+#[test]
+fn only_the_pane_with_the_keys_paints_the_active_surface() {
+    let palette = Palette::default();
+    let chrome = colour(palette.surface_chrome());
+    let active = colour(palette.surface_active());
+    // The chat pane is 32 columns at 80: the line at 32, the conversation from 33.
+    let list_filled = |buffer: &Buffer| (1..32).any(|x| buffer[(x, 2)].bg == active);
+    let conversation_filled =
+        |buffer: &Buffer| (2..22).any(|y| (33..80).any(|x| buffer[(x, y)].bg == active));
+
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(app.pane(), Pane::Messages);
+    let buffer = draw(&mut app, 80, 24);
+    // The conversation has the keys: its selected message is filled, the list is not, and the
+    // bar still says which chat is selected.
+    assert!(conversation_filled(&buffer), "{}", text(&buffer));
+    assert!(!list_filled(&buffer), "{}", text(&buffer));
+    assert_eq!(buffer[(0, 2)].symbol(), "▌");
+    assert_eq!(buffer[(1, 2)].bg, chrome);
+
+    // `Tab` moves the keys to the list: the fill moves with them.
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.pane(), Pane::Chats);
+    let buffer = draw(&mut app, 80, 24);
+    assert!(list_filled(&buffer), "{}", text(&buffer));
+    assert!(!conversation_filled(&buffer), "{}", text(&buffer));
+}
+
+#[test]
+fn the_transcript_opens_with_its_start_marker() {
+    let muted = colour(Palette::default().text_muted());
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    let buffer = draw(&mut app, 80, 24);
+    let (x, y) = find(&buffer, "Beginning of conversation");
+    assert_eq!(buffer[(x, y)].fg, muted);
+    assert!(
+        y < row_of(&buffer, "hello there"),
+        "above the first message:\n{}",
+        text(&buffer)
+    );
+}
+
+#[test]
+fn the_scroll_gutter_says_what_is_hidden() {
+    let mut app = two_chats();
+    let mut many = conversation();
+    for n in 0..30 {
+        many.push(message(
+            &format!("N{n}"),
+            &format!("line {n}"),
+            false,
+            "2026-10-18T10:00:00Z",
+        ));
+    }
+    open(&mut app, ADA, many);
+    // It opens at the newest message, so there is more above.
+    let buffer = draw(&mut app, 80, 24);
+    let shown = text(&buffer);
+    assert!(shown.contains("▲"), "more above:\n{shown}");
+    // At the oldest, the gutter points the other way and the start marker is on screen.
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('g')));
+    let buffer = draw(&mut app, 80, 24);
+    let shown = text(&buffer);
+    assert!(shown.contains("▼"), "more below:\n{shown}");
+    assert!(!shown.contains("▲"), "nothing above:\n{shown}");
+    assert!(shown.contains("Beginning of conversation"), "{shown}");
+}
+
+#[test]
+fn the_composer_says_what_enter_does_and_marks_its_rule_when_focused() {
+    let palette = Palette::default();
+    let muted = colour(palette.text_muted());
+    let accent = colour(palette.accent());
+    let mut app = two_chats();
+    // With nothing to send, the placeholder says how to write at all.
+    let buffer = draw(&mut app, 80, 24);
+    let (x, y) = find(&buffer, "i or Enter to write");
+    assert_eq!(buffer[(x, y)].fg, muted);
+    assert!(!text(&buffer).contains("Enter sends"));
+
+    // With a draft, the rule says what Enter does and starts with the accent bar.
+    open(&mut app, ADA, conversation());
+    app.handle_key(key(KeyCode::Char('h')));
+    app.handle_key(key(KeyCode::Char('i')));
+    let buffer = draw(&mut app, 80, 24);
+    let shown = text(&buffer);
+    assert!(shown.contains("Enter sends · Alt-Enter newline"), "{shown}");
+    let rule = row_of(&buffer, "Enter sends");
+    assert_eq!(buffer[(33, rule)].symbol(), "▌");
+    assert_eq!(buffer[(33, rule)].fg, accent);
+    // The hint ends in the pane's last column: the fill reached it, not a column short.
+    let hint = "Enter sends · Alt-Enter newline ";
+    let (x, _) = find(&buffer, hint.trim_end());
+    assert_eq!(usize::from(x) + hint.chars().count(), 80);
+
+    // The same rule with a reply's quote: the fill still reaches the hint.
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('k')));
+    app.handle_key(key(KeyCode::Char('r')));
+    // Wide enough for the quote and the hint: the rule still reaches the last column.
+    let buffer = draw(&mut app, 240, 24);
+    let rule = row_of(&buffer, "Enter sends");
+    assert!(
+        row(&buffer, rule).contains("replying to:"),
+        "{}",
+        text(&buffer)
+    );
+    let (x, _) = find(&buffer, hint.trim_end());
+    assert_eq!(usize::from(x) + hint.chars().count(), 240);
+
+    // At a narrow width the quote takes the rule, so the hint gives way instead of overflowing.
+    let buffer = draw(&mut app, 40, 20);
+    let shown = text(&buffer);
+    assert!(shown.contains("replying to:"), "{shown}");
+    assert!(!shown.contains("Enter sends"), "{shown}");
+}
+
+#[test]
+fn the_overlays_share_one_width_rule() {
+    let chrome = colour(Palette::default().surface_chrome());
+    let mut app = two_chats();
+    app.handle_key(key(KeyCode::Char('?')));
+    let buffer = draw(&mut app, 240, 60);
+    let y = row_of(&buffer, "Keys");
+    let width = (0..240).filter(|&x| buffer[(x, y)].bg == chrome).count();
+    assert_eq!(width, 76, "the widest overlay:\n{}", text(&buffer));
+    // On a small screen the same panel is the screen minus four columns.
+    let buffer = draw(&mut app, 40, 20);
+    let y = row_of(&buffer, "Keys");
+    let width = (0..40).filter(|&x| buffer[(x, y)].bg == chrome).count();
+    assert_eq!(width, 36, "{}", text(&buffer));
+}
+
+#[test]
+fn the_reaction_picker_stacks_its_keys_when_it_is_narrow() {
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('k')));
+    app.handle_key(key(KeyCode::Char('e')));
+    // Wide: one row of pairs.
+    let buffer = draw(&mut app, 80, 24);
+    assert_eq!(
+        row_of(&buffer, "👍"),
+        row_of(&buffer, "❤"),
+        "one row of pairs:\n{}",
+        text(&buffer)
+    );
+    // Narrow: a row per reaction, so the panel still fits.
+    let buffer = draw(&mut app, 40, 20);
+    assert_ne!(
+        row_of(&buffer, "👍"),
+        row_of(&buffer, "❤"),
+        "one reaction per row:\n{}",
         text(&buffer)
     );
 }

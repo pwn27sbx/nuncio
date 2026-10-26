@@ -103,6 +103,37 @@ pub struct ChatList {
     pub(crate) pending: HashSet<String>,
 }
 
+/// A filter of the chat list (design plan §5): which chats the list shows. One definition for
+/// both clients.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Filter {
+    All,
+    Unread,
+    Archived,
+}
+
+impl Filter {
+    /// The filters in their order.
+    pub const EACH: [Self; 3] = [Self::All, Self::Unread, Self::Archived];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Unread => "Unread",
+            Self::Archived => "Archived",
+        }
+    }
+
+    /// Whether `chat` is listed under this filter.
+    pub fn keeps(self, chat: &Chat) -> bool {
+        match self {
+            Self::All => true,
+            Self::Unread => chat.unread > 0,
+            Self::Archived => chat.archived,
+        }
+    }
+}
+
 impl ChatList {
     /// The chats as shown: the daemon's order, archived chats last.
     pub fn chats(&self) -> &[Chat] {

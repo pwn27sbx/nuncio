@@ -168,7 +168,8 @@ jobs:
           pacman -Sy --noconfirm archlinux-keyring
           # base-devel and namcap, the PKGBUILD's depends and makedepends (rust provides cargo,
           # base-devel provides pkgconf), and check.sh's python and desktop-file-utils.
-          pacman -Su --noconfirm --needed base-devel git namcap \
+          # `dbus` is explicit: without it check() passes while every D-Bus test skips.
+          pacman -Su --noconfirm --needed base-devel git namcap dbus \
             gtk4 libadwaita glib2 gcc-libs glibc go rust pkgconf \
             python desktop-file-utils
       # After git is installed, so the checkout is a git repository: package-source.sh runs

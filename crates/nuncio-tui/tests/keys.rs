@@ -339,29 +339,31 @@ fn q_and_slash_are_text_in_the_composer_and_ctrl_c_quits_anywhere() {
 }
 
 #[test]
-fn the_footer_always_starts_with_the_same_hint_and_adds_the_panes_keys() {
-    let base = "? help · Tab switch pane · Enter open · / search · q quit";
+fn the_footer_offers_the_panes_keys_and_drops_the_tail_before_the_primary_one() {
     let mut app = two_chats();
     for (width, height) in [(80, 24), (240, 60)] {
         let screen = render(&mut app, width, height);
         let footer = row(&screen, height - 1);
-        assert!(footer.trim_start().starts_with(base), "{footer:?}");
+        assert!(footer.trim_start().starts_with("Enter open"), "{footer:?}");
+        assert!(footer.contains("? all keys"), "{footer:?}");
+        assert!(footer.trim_end().ends_with("linked"), "{footer:?}");
     }
     let footer = row(&render(&mut app, 240, 60), 59);
-    assert!(
-        footer.contains("j/k move"),
-        "the list's keys after it: {footer:?}"
-    );
+    assert!(footer.contains("/ search"), "the list's keys: {footer:?}");
+    // Narrow: the tail drops, the primary key and `? all keys` stay, the state never moves.
+    let footer = row(&render(&mut app, 40, 12), 11);
+    assert!(footer.contains("Enter open"), "{footer:?}");
+    assert!(footer.contains("? all keys"), "{footer:?}");
+    assert!(!footer.contains("j/k"), "{footer:?}");
+    assert!(footer.trim_end().ends_with("linked"), "{footer:?}");
+    assert_eq!(footer.matches("Enter").count(), 1, "{footer:?}");
 
+    // The conversation's keys replace the list's.
     app.handle_key(key(KeyCode::Tab));
     let footer = row(&render(&mut app, 240, 60), 59);
-    assert!(
-        footer
-            .trim_start()
-            .starts_with("? help · Tab switch pane · Enter write · / search · q quit"),
-        "{footer:?}"
-    );
+    assert!(footer.contains("Enter write"), "{footer:?}");
     assert!(footer.contains("j/k select"), "{footer:?}");
+    assert!(!footer.contains("q quit"), "{footer:?}");
     // With a message selected, the message keys follow.
     let mut app = two_chats();
     open_ada(&mut app, three());
@@ -535,7 +537,7 @@ fn the_mouse_does_nothing_while_the_help_is_open() {
 // --- chat markers ------------------------------------------------------------------------
 
 #[test]
-fn chat_markers_sit_in_one_fixed_column_after_the_name() {
+fn chat_markers_follow_the_name_in_their_own_order() {
     let family = "👨‍👩‍👧‍👦";
     let mut pinned = chat(ADA, &format!("{family} Family group with a long name"));
     pinned.pinned = true;
@@ -550,61 +552,29 @@ fn chat_markers_sit_in_one_fixed_column_after_the_name() {
         let mut app = app_with(vec![pinned.clone(), muted.clone(), archived.clone()]);
         let screen = render(&mut app, width, height);
         let right = split(&screen);
-        let mut columns: Vec<(&str, u16, u16)> = Vec::new();
-        for y in 2..height - 2 {
-            for x in 0..right {
-                let symbol = screen[(x, y)].symbol();
-                if matches!(symbol, "★" | "⊘" | "▤") {
-                    columns.push((
-                        if symbol == "★" {
-                            "pin"
-                        } else if symbol == "⊘" {
-                            "mute"
-                        } else {
-                            "archive"
-                        },
-                        x,
-                        y,
-                    ));
-                }
-            }
-        }
+        let rows: Vec<String> = (2..height - 2)
+            .map(|y| (0..right).map(|x| screen[(x, y)].symbol()).collect())
+            .collect();
         let shown = text(&screen);
-        let at = |what: &str| -> Vec<u16> {
-            columns
-                .iter()
-                .filter(|(w, _, _)| *w == what)
-                .map(|(_, x, _)| *x)
-                .collect()
+        let row = |needle: &str| -> String {
+            rows.iter()
+                .find(|row| row.contains(needle))
+                .unwrap_or_else(|| panic!("no {needle:?} row at {width}x{height}:\n{shown}"))
+                .clone()
         };
-        let pins = at("pin");
-        let mutes = at("mute");
-        let archives = at("archive");
-        assert_eq!(pins.len(), 2, "{width}x{height}:\n{shown}");
-        assert_eq!(mutes.len(), 2, "{width}x{height}:\n{shown}");
-        assert_eq!(archives.len(), 1, "{width}x{height}:\n{shown}");
-        assert!(pins.iter().all(|&x| x == pins[0]), "one ★ column:\n{shown}");
-        assert!(
-            mutes.iter().all(|&x| x == mutes[0]),
-            "one ⊘ column:\n{shown}"
-        );
-        // Each marker has a space between it and the next, and the last ends by the border.
-        assert_eq!(mutes[0], pins[0] + 2, "{shown}");
-        assert_eq!(archives[0], mutes[0] + 2, "{shown}");
-        assert_eq!(
-            archives[0],
-            right - 1,
-            "the column ends at the border:\n{shown}"
-        );
-        // Every name row has a blank cell before the marker column: the name never touches it.
-        for (_, _, y) in &columns {
-            assert_eq!(screen[(pins[0] - 1, *y)].symbol(), " ", "row {y}:\n{shown}");
-        }
-        // The names come first.
-        let (name_x, name_y) = find(&screen, "Bo");
-        assert!(name_x < pins[0]);
-        assert!(columns.iter().any(|(_, _, y)| *y == name_y));
-        assert!(shown.contains("(3)"), "the unread badge stays:\n{shown}");
+        // Only the markers the chat has, right after its name.
+        let run =
+            |row: &str| -> String { row.chars().filter(|c| "★⊘▤".contains(*c)).collect() };
+        assert_eq!(run(&row("Family")), "★", "{width}x{height}:\n{shown}");
+        assert_eq!(run(&row("Bo")), "★⊘▤", "{width}x{height}:\n{shown}");
+        // The muted chat is the only row with a ⊘ and nothing else.
+        let muted = rows
+            .iter()
+            .find(|row| row.contains('⊘'))
+            .unwrap_or_else(|| panic!("no muted row:\n{shown}"));
+        assert_eq!(run(muted), "⊘", "{width}x{height}:\n{shown}");
+        // On the name row, never on the preview row.
+        assert!(!row("(no messages)").contains('★'), "{width}x{height}");
     }
 }
 
@@ -644,4 +614,130 @@ fn the_conversation_scrolls_back_to_the_newest_after_a_send_or_another_chat() {
         shown.contains("fresh words"),
         "the send is on screen:\n{shown}"
     );
+}
+
+#[test]
+fn in_a_single_pane_the_hidden_pane_takes_no_clicks() {
+    let mut app = two_chats();
+    let screen = render(&mut app, 80, 24);
+    let (x, y) = find(&screen, "Grace Hopper");
+    let _ = click(&mut app, (x, y + 1));
+    assert_eq!(
+        app.selected(),
+        1,
+        "a click opens the second chat at 80 columns"
+    );
+    // Leave the composer for the conversation, then shrink to one pane.
+    app.handle_key(key(KeyCode::Esc));
+    let _ = render(&mut app, 40, 12);
+    assert_eq!(app.pane(), Pane::Messages);
+    // The left half is where the chat list would be: it is not drawn, so it takes nothing.
+    assert_eq!(click(&mut app, (3, 4)), None);
+    assert_eq!(app.selected(), 1, "the hidden list took no click");
+    assert_eq!(app.pane(), Pane::Messages);
+}
+
+#[test]
+fn the_chat_list_filters_to_unread_and_archived() {
+    // Ada has 2 unread, Grace none, nobody archived.
+    let mut ada = chat(ADA, "Ada Lovelace");
+    ada.unread = 2;
+    let mut app = app_with(vec![ada, chat(GRACE, "Grace Hopper")]);
+    let buffer = render(&mut app, 80, 24);
+    assert!(text(&buffer).contains("Chats (2)"), "{}", text(&buffer));
+
+    app.handle_key(key(KeyCode::Char(']')));
+    let buffer = render(&mut app, 80, 24);
+    let shown = text(&buffer);
+    assert!(shown.contains("Chats · Unread (1)"), "{shown}");
+    assert!(shown.contains("Ada Lovelace"), "{shown}");
+    assert!(!shown.contains("Grace Hopper"), "{shown}");
+
+    // A click on the row under the filter opens the chat it is drawn for.
+    let (x, y) = find(&buffer, "Ada Lovelace");
+    let _ = click(&mut app, (x, y + 1));
+    assert_eq!(app.selected(), 0);
+
+    // Nobody archived: the list says why it is empty instead of pretending there are none.
+    app.handle_key(key(KeyCode::Char(']')));
+    let shown = text(&render(&mut app, 80, 24));
+    assert!(shown.contains("Chats · Archived (0)"), "{shown}");
+    assert!(shown.contains("No chats under this filter"), "{shown}");
+
+    // Back around to All.
+    app.handle_key(key(KeyCode::Char(']')));
+    assert!(text(&render(&mut app, 80, 24)).contains("Chats (2)"));
+    app.handle_key(key(KeyCode::Char('[')));
+    assert!(text(&render(&mut app, 80, 24)).contains("Chats · Archived (0)"));
+}
+
+#[test]
+fn the_filter_walks_up_and_down_without_landing_on_a_hidden_chat() {
+    // In the model: B unread, A read, C unread.
+    let mut b = chat("1@s.whatsapp.net", "Bea");
+    b.unread = 1;
+    let a = chat("2@s.whatsapp.net", "Ann");
+    let mut c = chat("3@s.whatsapp.net", "Cyd");
+    c.unread = 1;
+    let mut app = app_with(vec![b, a, c]);
+    app.handle_key(key(KeyCode::Char(']')));
+    let shown = text(&render(&mut app, 80, 24));
+    assert!(shown.contains("Chats · Unread (2)"), "{shown}");
+
+    // `j` from the first unread (B) goes to the next unread (C), not through the read one.
+    app.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(app.selected(), 2, "{shown}");
+    // `k` comes back to B, not stuck on C.
+    app.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(app.selected(), 0);
+    app.handle_key(key(KeyCode::Char('k')));
+    assert_eq!(app.selected(), 0, "it stops at the first listed chat");
+}
+
+#[test]
+fn a_filter_that_hides_everything_selects_no_hidden_chat() {
+    // A read, B unread, C read: under Unread only B is listed.
+    let a = chat("1@s.whatsapp.net", "Ann");
+    let mut b = chat("2@s.whatsapp.net", "Bea");
+    b.unread = 1;
+    let c = chat("3@s.whatsapp.net", "Cyd");
+    let mut app = app_with(vec![a, b, c]);
+    // Start on C, then filter to Unread.
+    app.handle_key(key(KeyCode::Char('j')));
+    app.handle_key(key(KeyCode::Char('j')));
+    assert_eq!(app.selected(), 2);
+    app.handle_key(key(KeyCode::Char(']')));
+    assert_eq!(app.selected(), 1, "the only listed chat, not index 0");
+
+    // Archived lists nothing here: the selection stays, nothing hidden is chosen.
+    app.handle_key(key(KeyCode::Char(']')));
+    assert_eq!(app.selected(), 1);
+    let shown = text(&render(&mut app, 80, 24));
+    assert!(shown.contains("No chats under this filter"), "{shown}");
+}
+
+#[test]
+fn the_archived_filter_lists_the_archived_chat() {
+    let mut ada = chat(ADA, "Ada Lovelace");
+    ada.unread = 2;
+    let mut old = chat(GRACE, "Grace Hopper");
+    old.archived = true;
+    let mut app = app_with(vec![ada, old]);
+    // All lists both; Archived lists only the archived one, and it is selectable.
+    assert!(text(&render(&mut app, 80, 24)).contains("Chats (2)"));
+    app.handle_key(key(KeyCode::Char(']')));
+    app.handle_key(key(KeyCode::Char(']')));
+    let buffer = render(&mut app, 80, 24);
+    let shown = text(&buffer);
+    assert!(shown.contains("Chats · Archived (1)"), "{shown}");
+    assert!(shown.contains("Grace Hopper"), "{shown}");
+    let right = split(&buffer);
+    let rows: Vec<String> = (2..22)
+        .map(|y| (0..right).map(|x| buffer[(x, y)].symbol()).collect())
+        .collect();
+    assert!(
+        rows.iter().all(|row| !row.contains("Ada Lovelace")),
+        "the unarchived chat is not listed:\n{shown}"
+    );
+    assert_eq!(app.selected(), 1, "the archived chat is the only one");
 }

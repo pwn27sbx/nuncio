@@ -77,20 +77,20 @@ fn a_reconnect_is_due_only_after_its_delay_and_a_success_starts_over() {
 }
 
 #[test]
-fn the_header_says_reconnecting_instead_of_the_session_while_disconnected() {
+fn the_footer_says_reconnecting_instead_of_the_session_while_disconnected() {
     let mut app = app();
     assert!(app.connected());
-    let header = first_line(&render(&mut app, 80, 24));
+    let header = last_line(&render(&mut app, 80, 24));
     assert!(header.contains("linked"), "{header}");
     assert!(!header.contains("reconnecting"), "{header}");
 
     app.set_connected(false);
-    let header = first_line(&render(&mut app, 80, 24));
+    let header = last_line(&render(&mut app, 80, 24));
     assert!(header.contains("reconnecting…"), "{header}");
     assert!(!header.contains("linked"), "{header}");
 
     app.set_connected(true);
-    let header = first_line(&render(&mut app, 80, 24));
+    let header = last_line(&render(&mut app, 80, 24));
     assert!(header.contains("linked"), "{header}");
 }
 
@@ -280,10 +280,6 @@ fn render(app: &mut App, width: u16, height: u16) -> String {
         .collect()
 }
 
-fn first_line(screen: &str) -> String {
-    screen.lines().next().unwrap_or_default().to_owned()
-}
-
 fn last_line(screen: &str) -> String {
     screen.lines().last().unwrap_or_default().to_owned()
 }
@@ -314,7 +310,7 @@ fn drain_until(
     loop {
         let _ = daemon.drain_events(app);
         let screen = render(app, 100, 24);
-        saw_reconnecting |= first_line(&screen).contains("reconnecting…");
+        saw_reconnecting |= last_line(&screen).contains("reconnecting…");
         if done(&screen) {
             return saw_reconnecting;
         }
@@ -364,15 +360,15 @@ fn after_a_daemon_restart_the_tui_reconnects_resyncs_and_keeps_the_draft_and_sel
     let saw_reconnecting = drain_until(&mut daemon, &mut app, "the event after the restart", |s| {
         s.contains("after the restart")
     });
-    assert!(saw_reconnecting, "the header never said reconnecting…");
+    assert!(saw_reconnecting, "the footer never said reconnecting…");
     let screen = render(&mut app, 100, 24);
     assert!(daemon.is_connected());
     assert!(app.connected());
     assert!(
-        first_line(&screen).contains("fake/2 · linked"),
+        last_line(&screen).contains("linked"),
         "the status was resynced:\n{screen}"
     );
-    assert!(!first_line(&screen).contains("reconnecting"), "{screen}");
+    assert!(!last_line(&screen).contains("reconnecting"), "{screen}");
     assert!(
         last_line(&screen).contains("reconnected to nunciod"),
         "{screen}"
@@ -451,7 +447,7 @@ fn a_send_while_disconnected_is_not_sent_says_so_and_is_never_retried() {
     let mut app = app();
     open_ada(&mut daemon, &mut app);
     drain_until(&mut daemon, &mut app, "noticing the lost daemon", |s| {
-        first_line(s).contains("reconnecting…")
+        last_line(s).contains("reconnecting…")
     });
     assert!(!daemon.is_connected());
 
@@ -697,7 +693,7 @@ fn r_sends_a_send_made_while_the_daemon_was_down_once_under_the_same_client_id()
     let mut app = app();
     open_ada(&mut daemon, &mut app);
     drain_until(&mut daemon, &mut app, "noticing the lost daemon", |s| {
-        first_line(s).contains("reconnecting…")
+        last_line(s).contains("reconnecting…")
     });
     app.handle_key(key(KeyCode::Char('i')));
     type_text(&mut app, "while it is down");

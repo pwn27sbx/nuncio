@@ -12,14 +12,14 @@
 
 use std::path::PathBuf;
 
-use nuncio_client::model::{Effect, Model, chat_title, is_picture, quoted};
-use nuncio_client::wire::MessageState;
+use nuncio_client::model::{Effect, Filter, Model, chat_title, is_picture, quoted};
+use nuncio_client::wire::{MessageState, Session};
 use nuncio_client::{Chat, ClientFrame, DaemonFrame, Message, Palette, Rgb, Snapshot};
 use ratatui::Frame;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
-use ratatui::layout::{Alignment, Constraint, Layout, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap};
@@ -75,8 +75,9 @@ pub struct ScreenMap {
     pub chat_rows: Rect,
     /// The list's scroll: the index of the chat on its first row.
     pub chat_offset: usize,
-    /// How many chats are listed.
-    pub chat_count: usize,
+    /// The model index of every chat row drawn, in order: a filter shows a subset, and a click
+    /// has to land on the chat it is drawn for, not on its position on screen.
+    pub chat_indices: Vec<usize>,
     /// The conversation pane, its header rule included (the composer is inside it).
     pub conversation: Rect,
     /// The rows the conversation's messages are drawn in.
@@ -108,7 +109,7 @@ pub fn hit_test(map: &ScreenMap, column: u16, row: u16) -> Option<Target> {
     if inside(map.chats) {
         let index = inside(map.chat_rows)
             .then(|| map.chat_offset + usize::from((row - map.chat_rows.y) / CHAT_ROWS))
-            .filter(|&index| index < map.chat_count);
+            .and_then(|row_index| map.chat_indices.get(row_index).copied());
         return Some(Target::Chats(index));
     }
     if inside(map.composer) {
@@ -135,6 +136,12 @@ const MUTED: char = '⊘';
 /// Marks an archived chat.
 const ARCHIVED: char = '▤';
 
+/// At or above this width the chat list takes 40 % of the screen (R6).
+const WIDE: u16 = 100;
+/// Between this width and `WIDE` the chat list is a fixed 32 columns.
+const LIST: u16 = 32;
+/// Below this width only the focused pane is drawn, and `Tab` swaps it (R6).
+const NARROW: u16 = 60;
 /// How many lines PageUp/PageDown scroll.
 const PAGE: usize = 10;
 /// The reactions the picker offers (the shared set), on keys `1`..`6`; `x` removes mine.
@@ -156,6 +163,7 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
                 "open the chat and write (marks it read on WhatsApp)",
             ),
             ("l →", "open it to read"),
+            ("[ ]", "filter: All, Unread, Archived"),
             ("Tab", "focus the conversation"),
             ("/", "search the selected chat"),
             ("q Esc", "quit"),
@@ -248,7 +256,12 @@ pub struct App {
     search_list: ListState,
     /// The inline pictures, when the terminal draws them.
     images: Option<images::Images>,
-    /// The pictures' protocol name, shown on the right of the footer.
+    /// Which chats the list shows (R6/Q3): All, Unread or Archived, cycled with `[`/`]`.
+    filter: Filter,
+    /// True on the last draw when only one pane fits (under `NARROW` columns): the rule says
+    /// so and `Tab` is the only way to the other one.
+    narrow: bool,
+    /// The pictures' protocol name, shown in `?`.
     protocol: Option<&'static str>,
     utc_offset: time::UtcOffset,
     /// Where things were on the last drawn screen, for the mouse.
@@ -280,6 +293,8 @@ impl App {
             picking: false,
             search_list: ListState::default(),
             images: None,
+            filter: Filter::All,
+            narrow: false,
             protocol: None,
             utc_offset: time::UtcOffset::UTC,
             map: ScreenMap::default(),
@@ -415,13 +430,33 @@ impl App {
 
     /// Select the next chat, stopping at the last one.
     pub fn select_next(&mut self) {
-        self.model.select_next_chat();
+        // Walk the list the filter shows, not the model's whole one: otherwise a step lands on a
+        // hidden chat and the selection appears not to move.
+        let listed = self.listed();
+        if listed.is_empty() {
+            return;
+        }
+        let at = listed
+            .iter()
+            .position(|&index| index == self.selected())
+            .unwrap_or(0);
+        let next = listed[(at + 1).min(listed.len() - 1)];
+        self.model.select_chat(next);
         self.sync();
     }
 
     /// Select the previous chat, stopping at the first one.
     pub fn select_previous(&mut self) {
-        self.model.select_previous_chat();
+        let listed = self.listed();
+        if listed.is_empty() {
+            return;
+        }
+        let at = listed
+            .iter()
+            .position(|&index| index == self.selected())
+            .unwrap_or(0);
+        let previous = listed[at.saturating_sub(1)];
+        self.model.select_chat(previous);
         self.sync();
     }
 
@@ -430,6 +465,55 @@ impl App {
             Pane::Chats => Pane::Messages,
             Pane::Messages | Pane::Compose => Pane::Chats,
         });
+    }
+
+    /// The model indices of the chats the list shows, in its order, under the current filter.
+    pub fn listed(&self) -> Vec<usize> {
+        self.model
+            .chat_list()
+            .chats()
+            .iter()
+            .enumerate()
+            .filter(|(_, chat)| self.filter.keeps(chat))
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Cycle the chat list's filter with `[`/`]` and land the selection on a chat it shows.
+    pub fn cycle_filter(&mut self, next: bool) {
+        let at = Filter::EACH
+            .iter()
+            .position(|filter| *filter == self.filter)
+            .unwrap_or(0);
+        let len = Filter::EACH.len();
+        self.filter = Filter::EACH[if next {
+            (at + 1) % len
+        } else {
+            (at + len - 1) % len
+        }];
+        self.ensure_selected_listed();
+    }
+
+    /// Keep the selection on a chat the filter shows: the nearest one at or after it, else the
+    /// last one before it. A filter that hides everything leaves the selection where it is and
+    /// the pane says so, so no hidden chat is ever selected.
+    fn ensure_selected_listed(&mut self) {
+        // Unfiltered, the model already keeps the selection on a chat; only a filter can hide it.
+        if self.filter == Filter::All || self.model.chat_list().chats().is_empty() {
+            return;
+        }
+        let listed = self.listed();
+        if listed.is_empty() || listed.contains(&self.selected()) {
+            return;
+        }
+        let target = listed
+            .iter()
+            .find(|&&index| index >= self.selected())
+            .or_else(|| listed.last())
+            .copied();
+        if let Some(target) = target {
+            self.model.select_chat(target);
+        }
     }
 
     /// Focus `pane`; outside the chat list the selected chat's conversation is open.
@@ -471,6 +555,9 @@ impl App {
     }
 
     fn applied(&mut self, frame: &DaemonFrame, effect: Option<Effect>) -> Option<Action> {
+        // A frame can move a chat out of the filter (it was read, archived): the selection has to
+        // land somewhere it can still see.
+        self.ensure_selected_listed();
         self.sync();
         if matches!(frame, DaemonFrame::EventFocus { .. }) && effect.is_some() {
             self.help = false;
@@ -602,6 +689,8 @@ impl App {
             (Pane::Chats, KeyCode::Char('k') | KeyCode::Up) => self.select_previous(),
             (Pane::Chats, KeyCode::Enter) => return self.open_to_write(),
             (Pane::Chats, KeyCode::Char('l') | KeyCode::Right) => return self.open_selected(),
+            (_, KeyCode::Char('[')) => self.cycle_filter(false),
+            (_, KeyCode::Char(']')) => self.cycle_filter(true),
             (Pane::Messages, KeyCode::Char('k') | KeyCode::Up) => {
                 self.reveal |= self.model.select_older();
             }
@@ -752,17 +841,33 @@ impl App {
         .areas(frame.area());
 
         self.draw_header(frame, header);
-        let [chats, line, messages] = Layout::horizontal([
-            Constraint::Percentage(40),
-            Constraint::Length(1),
-            Constraint::Min(0),
-        ])
-        .areas(body);
-        self.draw_separator(frame, line);
-        self.draw_chats(frame, chats);
-        // The line between the panes is part of the chat pane for the mouse.
-        self.map.chats = chats.union(line);
-        self.draw_messages(frame, messages);
+        // What the mouse can hit is rebuilt every frame: a pane that is not drawn must not keep
+        // last frame's rectangles (a click in a hidden pane would land on the visible one).
+        self.map.chats = Rect::default();
+        self.map.conversation = Rect::default();
+        self.map.message_area = Rect::default();
+        self.map.composer = Rect::default();
+        self.narrow = body.width < NARROW;
+        if self.narrow {
+            if self.pane == Pane::Chats {
+                self.draw_chats(frame, body);
+            } else {
+                self.draw_messages(frame, body);
+            }
+        } else {
+            let list = if body.width >= WIDE {
+                Constraint::Percentage(40)
+            } else {
+                Constraint::Length(LIST)
+            };
+            let [chats, line, messages] =
+                Layout::horizontal([list, Constraint::Length(1), Constraint::Min(0)]).areas(body);
+            self.draw_separator(frame, line);
+            self.draw_chats(frame, chats);
+            // The line between the panes is part of the chat pane for the mouse.
+            self.map.chats = chats.union(line);
+            self.draw_messages(frame, messages);
+        }
         self.draw_footer(frame, footer);
         if self.help {
             self.draw_help(frame, body);
@@ -787,7 +892,7 @@ impl App {
     }
 
     /// A pane's header: its title on the header rule. The focused pane's title is bold, the
-    /// other's dim, so where the keys go shows without colour.
+    /// other's muted, so where the keys go shows without colour.
     fn draw_rule_title(&self, frame: &mut Frame, area: Rect, title: String, focused: bool) {
         if area.is_empty() {
             return;
@@ -814,6 +919,12 @@ impl App {
             self.line_style(),
         ));
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    /// The width every overlay takes: four columns narrower than the screen, and never wider
+    /// than 76 (R8).
+    fn overlay_width(area: Rect) -> u16 {
+        area.width.saturating_sub(4).min(76)
     }
 
     /// A panel over `area` hidden behind a solid `surface` scrim (a terminal has no alpha): the
@@ -844,22 +955,36 @@ impl App {
     }
 
     fn draw_picker(&self, frame: &mut Frame, area: Rect) {
-        let mut spans = Vec::new();
-        for (n, emoji) in REACTIONS.iter().enumerate() {
-            spans.push(Span::styled(format!(" {} ", n + 1), self.muted()));
-            spans.push(Span::raw(plain(emoji)));
+        let width = Self::overlay_width(area);
+        // Six `n emoji` pairs plus `x` need 52 columns; below that each takes its own row, keys
+        // right-aligned like every other overlay (R8).
+        let one_row = width >= 52;
+        let mut lines = vec![self.panel_title("React"), Line::default()];
+        if one_row {
+            let mut spans = Vec::new();
+            for (n, emoji) in REACTIONS.iter().enumerate() {
+                spans.push(Span::styled(format!(" {} ", n + 1), self.muted()));
+                spans.push(Span::raw(plain(emoji)));
+            }
+            spans.push(Span::styled("  x remove mine", self.muted()));
+            lines.push(Line::from(spans));
+        } else {
+            let inner = usize::from(width.saturating_sub(2));
+            for (n, emoji) in REACTIONS.iter().enumerate() {
+                let emoji = plain(emoji);
+                let pad = inner.saturating_sub(display_width(&emoji) + 2).max(1);
+                lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(emoji, Style::default().fg(rgb(self.palette.text()))),
+                    Span::raw(" ".repeat(pad)),
+                    Span::styled(format!("{} ", n + 1), self.muted()),
+                ]));
+            }
+            lines.push(Line::from(Span::styled(" x  remove mine ", self.muted())));
         }
-        spans.push(Span::styled("  x remove mine", self.muted()));
-        let inner = self.panel(frame, area, false, 48, 3);
-        frame.render_widget(
-            Paragraph::new(vec![
-                self.panel_title("React"),
-                Line::default(),
-                Line::from(spans),
-            ])
-            .wrap(Wrap { trim: false }),
-            inner,
-        );
+        let height = u16::try_from(lines.len()).unwrap_or(u16::MAX);
+        let inner = self.panel(frame, area, false, width, height);
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
     }
 
     fn panel_title(&self, title: &str) -> Line<'static> {
@@ -880,7 +1005,7 @@ impl App {
             Span::raw(" "),
         ]);
         let active = Style::default().bg(rgb(self.palette.surface_active()));
-        let inner = self.panel(frame, area, true, 72, area.height);
+        let inner = self.panel(frame, area, true, Self::overlay_width(area), area.height);
         let Some(search) = self.model.transcript().search() else {
             return;
         };
@@ -915,131 +1040,215 @@ impl App {
         self.model.set_result_selected(self.search_list.selected());
     }
 
+    /// The one chrome line: the app's name on the left, and one right-aligned datum — the
+    /// unread count in the accent, or the fixture warning. No version, no session state, no
+    /// daemon name: those live in `?` and in the footer's right slot (R1).
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
-        let warning = Style::default()
-            .fg(rgb(self.palette.warning()))
-            .add_modifier(Modifier::BOLD);
-        let status = match self.source {
-            Source::Daemon if !self.model.connected() => Span::styled(
-                format!(
-                    " · {} · reconnecting… · {} unread",
-                    self.model.status().daemon,
-                    self.model.status().unread
-                ),
-                warning,
-            ),
-            Source::Daemon => Span::styled(
-                format!(
-                    " · {} · {}{} · {} unread",
-                    self.model.status().daemon,
-                    self.model.status().session.as_str(),
-                    // Why WhatsApp stopped the session, or why nunciod keeps the device
-                    // closed, as fixed text (never WhatsApp's own).
-                    self.model
-                        .status()
-                        .stop_reason
-                        .map_or_else(String::new, |r| format!(" · {}", r.describe())),
-                    self.model.status().unread
-                ),
-                self.muted(),
-            ),
-            Source::Fixture => Span::styled(
-                format!(
-                    " · FIXTURE DATA · no daemon · {} unread",
-                    self.model.status().unread
-                ),
-                warning,
-            ),
-        };
-        let line = Line::from(vec![
-            Span::styled(
-                "nuncio",
+        let width = usize::from(area.width);
+        let (right, style) = match self.source {
+            Source::Fixture => (
+                "FIXTURE DATA".to_owned(),
                 Style::default()
-                    .fg(rgb(self.palette.text()))
+                    .fg(rgb(self.palette.warning()))
                     .add_modifier(Modifier::BOLD),
             ),
-            status,
-        ]);
+            Source::Daemon if self.model.status().unread > 0 => (
+                format!("{} unread", self.model.status().unread),
+                Style::default().fg(rgb(self.palette.accent())),
+            ),
+            Source::Daemon => (String::new(), Style::default()),
+        };
+        let brand = "nuncio";
+        let mut spans = vec![Span::styled(
+            brand,
+            Style::default()
+                .fg(rgb(self.palette.text()))
+                .add_modifier(Modifier::BOLD),
+        )];
+        if !right.is_empty() {
+            let right = fit(&right, width.saturating_sub(display_width(brand) + 1));
+            let pad = width.saturating_sub(display_width(brand) + display_width(&right));
+            spans.push(Span::raw(" ".repeat(pad)));
+            spans.push(Span::styled(right, style));
+        }
         frame.render_widget(
-            Paragraph::new(line).style(Style::default().bg(rgb(self.palette.surface_chrome()))),
+            Paragraph::new(Line::from(spans))
+                .style(Style::default().bg(rgb(self.palette.surface_chrome()))),
             area,
         );
     }
 
-    fn draw_footer(&self, frame: &mut Frame, area: Rect) {
-        // The same hint first wherever q and / are keys, then the keys of where the focus is.
-        let base = |enter: &str| {
-            format!(" ? help · Tab switch pane · Enter {enter} · / search · q quit · ")
-        };
-        // The primary key where the focus is: the one hint in the accent (plan §9.2).
-        let (keys, primary) = match self.pane {
-            _ if self.model.transcript().search().is_some() => (
-                " Enter search/select · j/k move · / edit · Esc close ".to_owned(),
+    /// The session state for the footer's right slot, and whether it is a warning (anything
+    /// but `linked`).
+    fn state_label(&self) -> (String, bool) {
+        match self.source {
+            Source::Fixture => ("no daemon".to_owned(), true),
+            Source::Daemon if !self.model.connected() => ("reconnecting…".to_owned(), true),
+            Source::Daemon => {
+                let status = self.model.status();
+                let label = match &status.session {
+                    Session::Unlinked => "not linked".to_owned(),
+                    other => other.as_str().to_owned(),
+                };
+                let label = match status.stop_reason {
+                    Some(reason) => format!("{} · {}", label, reason.describe()),
+                    None => label,
+                };
+                (label, !status.linked)
+            }
+        }
+    }
+
+    /// The keys the footer offers where the focus is: the primary key and its verb (the key is
+    /// drawn in the accent), then the optional ones, first in the list is dropped last.
+    fn footer_hints(
+        &self,
+    ) -> (
+        &'static str,
+        &'static str,
+        Vec<(&'static str, &'static str)>,
+    ) {
+        if self.model.transcript().search().is_some() {
+            return (
                 "Enter",
-            ),
-            _ if self.picking => (" 1-6 react · x remove mine · Esc cancel ".to_owned(), "1-6"),
+                "search/select",
+                vec![("j/k", "move"), ("/", "edit"), ("Esc", "close")],
+            );
+        }
+        if self.picking {
+            return ("1-6", "react", vec![("x", "remove"), ("Esc", "cancel")]);
+        }
+        match self.pane {
             Pane::Chats => (
-                base("open") + "j/k move · l open to read · Ctrl-C quit ",
                 "Enter",
+                "open",
+                vec![
+                    ("j/k", "move"),
+                    ("/", "search"),
+                    ("[ ]", "filter"),
+                    ("i", "write"),
+                    ("l", "read"),
+                    ("Tab", "pane"),
+                ],
             ),
             Pane::Messages if self.model.transcript().cursor().is_some() => (
-                base("write")
-                    + "j/k select · r reply · e react · R retry · o open media · Esc chats ",
                 "Enter",
+                "write",
+                vec![
+                    ("j/k", "select"),
+                    ("r", "reply"),
+                    ("e", "react"),
+                    ("R", "retry"),
+                    ("o", "open"),
+                    ("Esc", "chats"),
+                ],
             ),
             Pane::Messages => (
-                base("write") + "j/k select · PgUp/PgDn scroll · Esc chats ",
                 "Enter",
-            ),
-            Pane::Compose if self.model.composer().reply_to().is_some() => (
-                " Enter send reply · Alt-Enter newline · ←/→ move · Esc conversation · Ctrl-C quit "
-                    .to_owned(),
-                "Enter",
+                "write",
+                vec![
+                    ("j/k", "select"),
+                    ("Esc", "chats"),
+                    ("/", "search"),
+                    ("Tab", "pane"),
+                ],
             ),
             Pane::Compose => (
-                " Enter send · Alt-Enter newline · ←/→ move · Esc conversation · Ctrl-C quit "
-                    .to_owned(),
                 "Enter",
+                "send",
+                vec![("Alt-Enter", "newline"), ("Esc", "conversation")],
             ),
-        };
-        // The notice comes first, so a narrow terminal still shows it.
-        let mut spans = Vec::new();
-        if let Some(notice) = self.model.notice() {
-            spans.push(Span::styled(
-                format!(" {notice} ·"),
+        }
+    }
+
+    /// One line: a notice if there is one, the pane's primary key in the accent, the keys that
+    /// still fit, `? all keys`, and the session state on the right. A part is dropped from the
+    /// tail — the optional keys first, then `? all keys`, then the primary key — so the state is
+    /// the last thing to give way, and only when the line cannot hold it (R2).
+    fn draw_footer(&self, frame: &mut Frame, area: Rect) {
+        let width = usize::from(area.width);
+        let (key, verb, hints) = self.footer_hints();
+        let primary: Vec<(String, Style)> = vec![
+            (
+                key.to_owned(),
+                Style::default().fg(rgb(self.palette.accent())),
+            ),
+            (format!(" {verb}"), self.muted()),
+        ];
+        let all_keys: Vec<(String, Style)> = vec![("? all keys".to_owned(), self.muted())];
+        let notice = self.model.notice();
+
+        let (state, warn) = self.state_label();
+        let gap = self.muted();
+        // What gives way, in order: the optional keys from the tail, then `? all keys`, then the
+        // primary key. The state is the last thing to give way, and only by being cut (R2).
+        let mut extras: Vec<Vec<(String, Style)>> = hints
+            .into_iter()
+            .map(|(key, what)| vec![(format!("{key} {what}"), self.muted())])
+            .collect();
+        let mut head: Vec<Vec<(String, Style)>> = Vec::new();
+        if let Some(notice) = notice {
+            head.push(vec![(
+                notice.to_owned(),
                 Style::default().fg(rgb(self.palette.warning())),
-            ));
+            )]);
         }
-        // The primary key is the first one standing alone (` Enter `, never `Alt-Enter`).
-        match keys.find(&format!(" {primary} ")) {
-            Some(at) => {
-                let start = at + 1;
-                let end = start + primary.len();
-                spans.push(Span::styled(keys[..start].to_owned(), self.muted()));
-                spans.push(Span::styled(
-                    keys[start..end].to_owned(),
-                    Style::default().fg(rgb(self.palette.accent())),
-                ));
-                spans.push(Span::styled(keys[end..].to_owned(), self.muted()));
+        head.push(primary.clone());
+        let mut show_all_keys = true;
+        let mut parts;
+        loop {
+            parts = head.clone();
+            parts.extend(extras.iter().cloned());
+            if show_all_keys {
+                parts.push(all_keys.clone());
             }
-            None => spans.push(Span::styled(keys, self.muted())),
+            let spans = footer_spans(&parts, gap);
+            if line_width(&spans) + 2 + display_width(&state) <= width {
+                break;
+            }
+            if extras.pop().is_some() {
+                continue;
+            }
+            if show_all_keys {
+                show_all_keys = false;
+                continue;
+            }
+            // The notice stays; the primary key is what is left to drop.
+            if head.len() > 1 {
+                head.pop();
+                continue;
+            }
+            // A notice on its own can still be too long: it is the only part that may be cut.
+            let room = width.saturating_sub(2 + display_width(&state));
+            if let Some((text, _)) = head.first_mut().and_then(|part| part.first_mut()) {
+                *text = fit(text, room);
+            }
+            parts = head.clone();
+            parts.extend(extras.iter().cloned());
+            if show_all_keys {
+                parts.push(all_keys.clone());
+            }
+            break;
         }
-        let line = Line::from(spans);
-        let used = line.width();
+
+        let mut spans = footer_spans(&parts, gap);
+        // One leading blank, the hints, then the state right-aligned.
+        let state = fit(&state, width.saturating_sub(2 + line_width(&spans)));
+        let pad = width.saturating_sub(1 + line_width(&spans) + display_width(&state));
+        let state_style = if warn {
+            Style::default().fg(rgb(self.palette.warning()))
+        } else {
+            self.muted()
+        };
+        let mut line = vec![Span::raw(" ")];
+        line.append(&mut spans);
+        line.push(Span::raw(" ".repeat(pad)));
+        line.push(Span::styled(state, state_style));
         frame.render_widget(
-            Paragraph::new(line).style(Style::default().bg(rgb(self.palette.surface_chrome()))),
+            Paragraph::new(Line::from(line))
+                .style(Style::default().bg(rgb(self.palette.surface_chrome()))),
             area,
         );
-        // The pictures' protocol on the right, when it fits after the keys.
-        if let Some(protocol) = self.protocol {
-            let right = format!("{protocol} ");
-            if used + display_width(&right) < usize::from(area.width) {
-                frame.render_widget(
-                    Paragraph::new(Span::styled(right, self.muted())).alignment(Alignment::Right),
-                    area,
-                );
-            }
-        }
     }
 
     fn draw_help(&self, frame: &mut Frame, area: Rect) {
@@ -1062,15 +1271,23 @@ impl App {
                 (*context, keys)
             })
             .collect();
-        let width = area.width.min(76);
+        let width = Self::overlay_width(area);
         let inner_width = usize::from(width.saturating_sub(2));
-        let tall: usize = 1 + contexts
+        let tall: usize = 2 + contexts
             .iter()
             .map(|(_, keys)| 1 + keys.len())
             .sum::<usize>();
         let mut lines: Vec<Line> = vec![self.panel_title("Keys")];
+        // Where the version and the session state live now that the header carries neither:
+        // the daemon's build, the session's state and, with pictures on, their protocol.
+        let status = self.model.status();
+        let mut about = format!("{} · {}", status.daemon, status.session.as_str());
+        if let Some(protocol) = self.protocol {
+            about.push_str(&format!(" · pictures: {protocol}"));
+        }
+        lines.push(Line::from(Span::styled(format!("  {about}"), self.muted())));
         if tall <= usize::from(area.height) {
-            // A row per key: what it does, then the key right-aligned and dim.
+            // A row per key: what it does, then the key right-aligned and muted.
             for (context, keys) in &contexts {
                 lines.push(Line::from(Span::styled(*context, heading)));
                 for (keys, does) in keys {
@@ -1122,20 +1339,23 @@ impl App {
         );
         let [rule, rows] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-        self.draw_rule_title(
-            frame,
-            rule,
-            format!("Chats ({})", self.chats().len()),
-            self.pane == Pane::Chats,
-        );
+        let listed = self.listed();
+        let mut title = if self.filter == Filter::All {
+            format!("Chats ({})", self.chats().len())
+        } else {
+            format!("Chats · {} ({})", self.filter.name(), listed.len())
+        };
+        if self.narrow {
+            title.push_str(" · Tab");
+        }
+        self.draw_rule_title(frame, rule, title, self.pane == Pane::Chats);
         // Less the gutter: the bar, the dot and a space.
         let width = usize::from(area.width.saturating_sub(3));
         let highlighted = self.model.chat_list().highlighted();
-        let items: Vec<ListItem> = self
-            .chats()
+        let items: Vec<ListItem> = listed
             .iter()
-            .enumerate()
-            .map(|(index, chat)| {
+            .map(|&index| {
+                let chat = &self.chats()[index];
                 chat_item(
                     chat,
                     &self.palette,
@@ -1146,27 +1366,40 @@ impl App {
             })
             .collect();
         if items.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Span::styled("   No chats yet · ? for keys", self.muted())),
-                rows,
-            );
+            // An empty list and a filter that hides everything are two different things.
+            let hint = if self.chats().is_empty() {
+                "   No chats yet · nuncio link"
+            } else {
+                "   No chats under this filter · [ ]"
+            };
+            frame.render_widget(Paragraph::new(Span::styled(hint, self.muted())), rows);
         }
-        let list = List::new(items)
-            .highlight_style(Style::default().bg(rgb(self.palette.surface_active())));
-        self.list.select(highlighted);
+        // Only the pane with the keys fills its selection; the other keeps the bar (R5).
+        let filled = self.pane == Pane::Chats;
+        let list = List::new(items).highlight_style(if filled {
+            Style::default().bg(rgb(self.palette.surface_active()))
+        } else {
+            Style::default()
+        });
+        // The list's state is the position on screen, not the model's index.
+        let position = highlighted.and_then(|index| listed.iter().position(|&i| i == index));
+        self.list.select(position);
         frame.render_stateful_widget(list, rows, &mut self.list);
         self.map.chat_rows = rows;
         self.map.chat_offset = self.list.offset();
-        self.map.chat_count = self.chats().len();
+        self.map.chat_indices = listed;
     }
 
     fn draw_messages(&mut self, frame: &mut Frame, area: Rect) {
-        let title = self
+        let mut title = self
             .model
             .selected_chat()
             .map(|chat| plain(&chat_title(chat)))
             // With no chat the pane still has a title, so its focus shows.
             .unwrap_or_else(|| "Conversation".to_owned());
+        if self.narrow {
+            title.push_str(" · Tab");
+        }
         let [rule, body] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
         self.draw_rule_title(frame, rule, title, self.pane != Pane::Chats);
@@ -1223,15 +1456,38 @@ impl App {
             let width = usize::from(area.width);
             let mut spans = Vec::new();
             let mut used = 0;
+            // The pane with the keys marks the composer's rule with the accent bar.
+            if self.pane == Pane::Compose {
+                spans.push(Span::styled(
+                    "▌",
+                    Style::default().fg(rgb(self.palette.accent())),
+                ));
+                used += 1;
+            }
             if let Some(quoted) = quoted {
-                spans.push(Span::styled("── ", self.line_style()));
-                used += 3 + display_width(&quoted);
+                spans.push(Span::styled("─ ", self.line_style()));
+                used += 2 + display_width(&quoted);
                 spans.push(Span::styled(quoted, self.muted()));
             }
+            // What Enter does here, where it does it, while there is something to send and the
+            // room exists: a reply's quote can take the whole rule at a narrow width.
+            let candidate = "Enter sends · Alt-Enter newline ";
+            let sends = if draft.is_some()
+                && self.pane == Pane::Compose
+                && used + display_width(candidate) <= width
+            {
+                candidate
+            } else {
+                ""
+            };
+            let sends_width = display_width(sends);
             spans.push(Span::styled(
-                "─".repeat(width.saturating_sub(used)),
+                "─".repeat(width.saturating_sub(used + sends_width)),
                 self.line_style(),
             ));
+            if !sends.is_empty() {
+                spans.push(Span::styled(sends, self.muted()));
+            }
             frame.render_widget(
                 Paragraph::new(Line::from(spans)),
                 Rect {
@@ -1269,7 +1525,7 @@ impl App {
             return;
         }
         let Some((rows, (row, column))) = draft else {
-            let hint = Line::from(Span::styled("  Enter to write a message", self.muted()));
+            let hint = Line::from(Span::styled("  i or Enter to write", self.muted()));
             frame.render_widget(Paragraph::new(hint), area);
             return;
         };
@@ -1305,6 +1561,18 @@ impl App {
             images.resized(area.width);
             let background = self.palette.surface();
             images.backdrop([background.r, background.g, background.b]);
+        }
+        // Nothing to read is still a place: it says so and how to get out (R7).
+        if self.model.selected_chat().is_none() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "No chat open · Tab switches panes",
+                    self.muted(),
+                )),
+                area,
+            );
+            self.map.message_area = area;
+            return;
         }
         let (lines, selected, owners, boxes) = self.conversation_lines(area.width);
         let visible = usize::from(area.height);
@@ -1368,7 +1636,12 @@ impl App {
         }
         // The selected message's rows, the whole width, on the active surface: its picture box
         // and reactions included (a picture draws its own cells over the box after this).
-        if let Some(cursor) = self.model.transcript().cursor() {
+        if let Some(cursor) = self
+            .model
+            .transcript()
+            .cursor()
+            .filter(|_| self.pane != Pane::Chats)
+        {
             let active = Style::default().bg(rgb(self.palette.surface_active()));
             for (y, owner) in self.map.message_rows.iter().enumerate() {
                 if *owner == Some(cursor) {
@@ -1380,6 +1653,17 @@ impl App {
                     frame.buffer_mut().set_style(row, active);
                 }
             }
+        }
+        // The scroll gutter: the free last column says whether there is more above or below.
+        let gutter = area.right().saturating_sub(1);
+        let muted = self.muted();
+        if top > self.scroll {
+            frame.buffer_mut().set_string(gutter, area.y, "▲", muted);
+        }
+        if self.scroll > 0 {
+            frame
+                .buffer_mut()
+                .set_string(gutter, area.y + area.height - 1, "▼", muted);
         }
         self.draw_pictures(frame, area, &boxes, &heights, first_row);
     }
@@ -1543,8 +1827,8 @@ impl App {
     /// line the index of the loaded message it belongs to, and the picture boxes (blank lines the
     /// pictures are drawn over).
     ///
-    /// One line per message (plan §9.4): the author in bold and the time dim, then the text. A
-    /// day starts with its label in dim caps, after a blank line; an author's run of messages has
+    /// One line per message (plan §9.4): the author in bold and the time muted, then the text. A
+    /// day starts with its label in muted caps, after a blank line; an author's run of messages has
     /// no blank line in it, and the next author starts after one.
     fn conversation_lines(&self, columns: u16) -> ConversationLines {
         let Some(chat) = self.model.selected_chat() else {
@@ -1568,7 +1852,7 @@ impl App {
         if messages.is_empty() {
             return (
                 vec![Line::from(Span::styled(
-                    "No messages yet · i to write",
+                    "No messages yet · i writes the first one",
                     self.muted(),
                 ))],
                 None,
@@ -1578,8 +1862,14 @@ impl App {
         }
         let body = Style::default().fg(rgb(self.palette.text()));
         let name = body.add_modifier(Modifier::BOLD);
-        let mut lines = Vec::with_capacity(messages.len() * 2);
-        let mut owners = Vec::with_capacity(messages.len() * 2);
+        let mut lines = Vec::with_capacity(messages.len() * 2 + 1);
+        // The top of the conversation is a place too: it says so when it is on screen, which
+        // is where a short transcript leaves the eye with nothing to hold on to (R7).
+        lines.push(Line::from(Span::styled(
+            "Beginning of conversation",
+            self.muted(),
+        )));
+        let mut owners = Vec::with_capacity(messages.len() * 2 + 1);
         let mut selected = None;
         let mut boxes = Vec::new();
         // The day whose label was drawn last, and the author of the message before.
@@ -1592,7 +1882,8 @@ impl App {
             // A message with no readable time (a send not answered yet) stays in its day.
             match local_day(message, self.utc_offset).filter(|day| labelled != Some(*day)) {
                 Some(day) => {
-                    if !lines.is_empty() {
+                    // A blank line before a day, except right under the start marker.
+                    if lines.len() > 1 {
                         lines.push(Line::default());
                     }
                     lines.push(Line::from(Span::styled(day_label(day), self.muted())));
@@ -1683,7 +1974,7 @@ impl App {
                         spans.push(Span::styled(shown.to_owned(), body));
                     }
                 }
-                // Cut into the author and time by a very narrow pane: drawn as one dim run.
+                // Cut into the author and time by a very narrow pane: drawn as one muted run.
                 None => spans.push(Span::styled(
                     line.strip_prefix(bar).unwrap_or(&line).to_owned(),
                     meta_style,
@@ -1722,11 +2013,11 @@ impl App {
         (lines, selected, owners, boxes)
     }
 
-    /// Meta text: the text role, dim (plan §9.3).
+    /// Meta text: the `text_muted` role, the only tone with a 4.5:1 floor on both surfaces.
+    /// `Modifier::DIM` is not used for text: the terminal decides how much it dims, so the
+    /// contrast could not be held by a test (design plan §9.3, R3).
     fn muted(&self) -> Style {
-        Style::default()
-            .fg(rgb(self.palette.text()))
-            .add_modifier(Modifier::DIM)
+        Style::default().fg(rgb(self.palette.text_muted()))
     }
 
     /// The one-cell lines: the header rule, the line between the panes, the composer rule.
@@ -1869,6 +2160,27 @@ fn snippet(message: &Message) -> String {
     }
 }
 
+/// The footer's parts joined with ` · `, each part one or more spans.
+fn footer_spans(parts: &[Vec<(String, Style)>], gap: Style) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::styled(" · ", gap));
+        }
+        for (text, style) in part {
+            spans.push(Span::styled(text.clone(), *style));
+        }
+    }
+    spans
+}
+
+fn line_width(spans: &[Span<'_>]) -> usize {
+    spans
+        .iter()
+        .map(|span| display_width(&span.content))
+        .sum::<usize>()
+}
+
 /// `text` cut to at most `width` terminal columns, ending in `…` when it was cut.
 fn fit(text: &str, width: usize) -> String {
     if display_width(text) <= width {
@@ -2004,18 +2316,19 @@ fn local_hhmm(message: &Message, offset: time::UtcOffset) -> String {
     format!("{:02}:{:02}", local / 60, local % 60)
 }
 
-/// The marker column at the end of a chat's name row: a space, then `★ ⊘ ▤` with a space between
-/// them, a missing marker left blank, so every marker sits in the same column on every row.
-const MARKERS: usize = 6;
-/// Below this many columns for the name, the markers give up their column: only the ones a chat
-/// has are drawn, right after the name, so a very narrow list still shows who the chat is.
+/// The fewest columns a chat's name keeps before the row gives up its time and markers.
 const NARROW_NAME: usize = 6;
+/// The badge's fixed width on a chat row's second line: `●3`, `●12`, `●99+`.
+const BADGE: usize = 4;
+/// The unread badge's dot.
+const BULLET: &str = "●";
 
-/// A chat in the list, after a three-column gutter: the selection bar `▌` (both rows, when it is
-/// the highlighted chat), the unread dot `●`, a space. Then its name in bold and its unread count,
-/// padded to the marker column, then its markers; under it, its last message cut to `width`
-/// columns with `…` so the ` · HH:MM` after it is always whole. The name is cut first, so the
-/// count and the markers always show. Only the bar and the dot are in the accent (plan §9.2).
+/// A chat in the list, in two rows. Row one: the selection bar `▌` (both rows, when it is the
+/// highlighted chat), a space, the name in bold, the markers the chat has right after it, and the
+/// time in its own five-column slot at the right edge. Row two: two spaces, its last message cut
+/// to `width` columns with `…`, then the unread badge right-aligned in four columns. A narrow
+/// list gives up the time first, then the markers, and only then cuts the name below six
+/// columns. Only the bar and the badge are in the accent (plan §9.2, R4).
 fn chat_item(
     chat: &Chat,
     palette: &Palette,
@@ -2025,7 +2338,7 @@ fn chat_item(
 ) -> ListItem<'static> {
     let accent = Style::default().fg(rgb(palette.accent()));
     let text = Style::default().fg(rgb(palette.text()));
-    let dim = text.add_modifier(Modifier::DIM);
+    let muted = Style::default().fg(rgb(palette.text_muted()));
     let bar = || {
         if selected {
             Span::styled("▌", accent)
@@ -2033,71 +2346,90 @@ fn chat_item(
             Span::raw(" ")
         }
     };
-    let badge = (chat.unread > 0).then(|| format!(" ({})", chat.unread));
-    let badge_width = badge.as_deref().map_or(0, display_width);
-    let column = width.saturating_sub(MARKERS).saturating_sub(badge_width) >= NARROW_NAME;
-    let markers = if column {
-        format!(
-            " {} {} {}",
-            if chat.pinned { PINNED } else { ' ' },
-            if chat.muted { MUTED } else { ' ' },
-            if chat.archived { ARCHIVED } else { ' ' }
-        )
-    } else {
-        let shown: String = [
-            (chat.pinned, PINNED),
-            (chat.muted, MUTED),
-            (chat.archived, ARCHIVED),
-        ]
-        .iter()
-        .filter_map(|&(on, marker)| on.then_some(marker))
-        .collect();
-        if shown.is_empty() {
-            shown
-        } else {
-            format!(" {shown}")
-        }
+    // The badge keeps four columns: `● 3`, `●12`, `●99+`, or blank.
+    let badge = match chat.unread {
+        0 => String::new(),
+        n if n > 99 => format!("{BULLET}99+"),
+        n => format!("{BULLET}{n}"),
     };
-    let markers_width = display_width(&markers);
-    let room = width
-        .saturating_sub(markers_width)
-        .saturating_sub(badge_width);
-    let name = fit(&plain(&chat_title(chat)), room);
+    // The markers follow the name, only the ones the chat has.
+    let markers: String = [
+        (chat.pinned, PINNED),
+        (chat.muted, MUTED),
+        (chat.archived, ARCHIVED),
+    ]
+    .iter()
+    .filter_map(|&(on, marker)| on.then_some(marker))
+    .collect();
+    let markers = if markers.is_empty() {
+        markers
+    } else {
+        format!(" {markers}")
+    };
+    // The time is its own column at the right edge of the first row.
+    let time = chat
+        .last_message
+        .as_ref()
+        .map_or_else(String::new, |message| local_hhmm(message, offset));
+    // A narrow list gives up the time first, then the markers, before it cuts the name to
+    // nothing: something of the chat's name has to stay readable.
+    let mut time = time;
+    let mut markers = markers;
+    let mut time_width = display_width(&time);
+    let mut gap = usize::from(time_width != 0);
+    let mut named = width.saturating_sub(2 + display_width(&markers) + gap + time_width);
+    if named < NARROW_NAME {
+        time.clear();
+        time_width = 0;
+        gap = 0;
+        named = width.saturating_sub(2 + display_width(&markers));
+    }
+    if named < NARROW_NAME {
+        markers.clear();
+        named = width.saturating_sub(2);
+    }
+    let name = fit(&plain(&chat_title(chat)), named);
     let mut title = vec![
         bar(),
-        if chat.unread > 0 {
-            Span::styled("●", accent)
-        } else {
-            Span::raw(" ")
-        },
         Span::raw(" "),
         Span::styled(name.clone(), text.add_modifier(Modifier::BOLD)),
     ];
-    let mut used = display_width(&name);
-    if let Some(badge) = badge {
-        used += display_width(&badge);
-        title.push(Span::raw(" "));
-        title.push(Span::styled(badge.trim_start().to_owned(), dim));
+    if !markers.is_empty() {
+        title.push(Span::styled(markers.clone(), muted));
     }
-    let pad = width.saturating_sub(markers_width).saturating_sub(used);
-    title.push(Span::raw(" ".repeat(pad)));
-    title.push(Span::styled(markers, dim));
+    let used = 2 + display_width(&name) + display_width(&markers);
+    title.push(Span::raw(
+        " ".repeat(width.saturating_sub(used + gap + time_width)),
+    ));
+    if time_width > 0 {
+        title.push(Span::styled(time, muted));
+    }
 
     // A message with no text (a non-text kind) shows its kind instead of an empty row.
     let detail = match chat.last_message.as_ref() {
         Some(message) => {
             let text = message.text.lines().next().unwrap_or_default();
-            let text = plain(if text.is_empty() { &message.kind } else { text });
-            let time = format!(" · {}", local_hhmm(message, offset));
-            fit(&text, width.saturating_sub(display_width(&time))) + &time
+            plain(if text.is_empty() { &message.kind } else { text })
         }
         None => "(no messages)".to_owned(),
     };
+    let badge_width = BADGE;
+    let detail = fit(&detail, width.saturating_sub(3 + badge_width));
+    let pad = width.saturating_sub(3 + display_width(&detail) + badge_width);
+    let mut second = vec![
+        bar(),
+        Span::raw("  "),
+        Span::styled(detail, muted),
+        Span::raw(" ".repeat(pad)),
+    ];
+    if badge.is_empty() {
+        second.push(Span::raw(" ".repeat(badge_width)));
+    } else {
+        second.push(Span::raw(" ".repeat(badge_width - display_width(&badge))));
+        second.push(Span::styled(badge, accent));
+    }
 
-    ListItem::new(vec![
-        Line::from(title),
-        Line::from(vec![bar(), Span::raw("  "), Span::styled(detail, dim)]),
-    ])
+    ListItem::new(vec![Line::from(title), Line::from(second)])
 }
 
 #[cfg(test)]
@@ -2134,7 +2466,7 @@ mod tests {
             chats: Rect::new(0, 1, 32, 22),
             chat_rows: Rect::new(1, 2, 30, 20),
             chat_offset: 1,
-            chat_count: 3,
+            chat_indices: vec![0, 1, 2],
             conversation: Rect::new(32, 1, 48, 22),
             message_area: Rect::new(33, 2, 46, 18),
             message_rows,

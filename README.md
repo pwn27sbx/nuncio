@@ -22,8 +22,9 @@ about.**
   entirely against fakes: the tests never connect to WhatsApp. The core had one real-account run
   (T15, on a spare number); the fixes it led to have not been re-checked on the real account yet.
 - M4 (packaging and the Omarchy glue: everything below about Arch, systemd, the hotkey and the bar)
-  is written but has **never been built or installed on Linux**. Acceptance on Arch/Omarchy is
-  pending.
+  builds and installs: the package is built by `makepkg`, installed with `pacman -U`, and CI checks
+  every installed path against `packaging/MANIFEST`. **No release has been published yet**; until
+  one is, install it from a local build with `packaging/README.md`.
 - The Signal state in `nuncio.db` is sealed under a data key held in the Secret Service (T17,
   [ADR 0003](docs/adr/0003-where-the-signal-state-lives.md), see [SECURITY.md](SECURITY.md)): the
   binaries are wired to it and tested against a fake keyring only. With the real Secret Service it
@@ -36,17 +37,22 @@ for it. Use a spare number, never the one that carries your two-factor authentic
 
 ### From a release (once one is published)
 
+One line, pasted in a terminal (Super + Return on Omarchy):
+
 ```sh
-curl -fLO https://github.com/pwn27sbx/nuncio/raw/v<version>/packaging/install.sh
-less install.sh                         # read it first
-bash install.sh --version <version>
+curl -L -o /tmp/nuncio.pkg.tar.zst https://github.com/pwn27sbx/nuncio/releases/latest/download/nuncio-x86_64.pkg.tar.zst && sudo pacman -U /tmp/nuncio.pkg.tar.zst
 ```
 
-The installer prints its plan and asks first, downloads `nuncio-<version>-1-x86_64.pkg.tar.zst`
-and `SHA256SUMS` from the GitHub release, **checks the package's SHA-256 and stops on a mismatch**,
-runs `sudo pacman -U` and enables the daemon's user unit (`--no-enable` skips that). It never pipes
-a download into a shell and does nothing outside Arch. `bash install.sh --uninstall` removes it,
-and with it the Omarchy bar widget and hotkey if you installed them and did not change them
+Run the same line to update; `sudo pacman -R nuncio` to uninstall. [INSTALL.md](INSTALL.md) says
+what happens on the first run (linking a device), what the package does not do for you, and where
+your data lives.
+
+`packaging/install.sh` is the alternative for an offline install or a scripted one: it downloads
+`nuncio-<version>-1-x86_64.pkg.tar.zst` and `SHA256SUMS` from the GitHub release, **checks the
+package's SHA-256 and stops on a mismatch**, runs `sudo pacman -U` and enables the daemon's user
+unit (`--no-enable` skips that). It never pipes a download into a shell and does nothing outside
+Arch. `bash install.sh --uninstall` removes it, and with it the Omarchy bar widget and hotkey if
+you installed them and did not change them
 ([contrib/omarchy/README.md](contrib/omarchy/README.md)).
 Details: [packaging/README.md](packaging/README.md).
 

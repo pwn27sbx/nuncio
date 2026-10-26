@@ -6,8 +6,8 @@ events. With no daemon it still starts, shows `proto/fixtures/chats_response.jso
 `FIXTURE DATA`; a send then shows as not sent.
 
 If the daemon goes away later (it restarted, a read hit the 5 s bound, a send's answer the 25 s
-one), the header says
-`reconnecting…` instead of the session and the footer says `daemon connection lost: …`. The TUI
+one), the footer's right slot says
+`reconnecting…` instead of the session and its left side says `daemon connection lost: …`. The TUI
 tries again after 0.5 s, doubling up to every 5 s; once back it says `reconnected to nunciod`,
 says hello and subscribes again, and reloads the status, the chat list and the selected chat's
 messages, keeping the draft, the selected chat and message and the open pane. A send made while
@@ -15,7 +15,7 @@ disconnected is shown as `not sent` and the footer says `not connected to nuncio
 retries it by itself. `R` does, once reconnected: nunciod never got it, so `R` sends it once
 under the same client_id instead of asking nunciod to retry a send it does not have.
 
-After the session the header names why it is not connected when the daemon says so
+After the session the footer's right slot names why it is not connected when the daemon says so
 (`stop_reason`, `proto/wire.md`), in fixed text: a WhatsApp stop (`offline · WhatsApp temporarily
 banned this account`, …), `offline · keyring locked: unlock it to connect` while the keyring is
 locked, or `offline · the stored key does not open this device: see SECURITY.md` when the stored
@@ -64,37 +64,46 @@ nuncio-tui [--image <png>]
   roles: the list on `surface_chrome`, the conversation on `surface`, the selected chat on
   `surface_active`. The accent marks only the unread dot `●`, the selection bar `▌` and the one
   primary key in the footer (`Enter`, or `1-6` in the reaction picker); names are bold, times
-  and other meta are dim, and senders are never colour-coded. The colours are sent as 24-bit
+  and other meta use the `text_muted` role, and senders are never colour-coded. The colours are sent as 24-bit
   RGB, as before.
-- **Chat list** (left): an unread chat has the dot `●` before its name; the selected one has the
-  bar `▌` down both its rows. Then the name and unread count `(n)`, then `★` pinned, `⊘` muted, `▤` archived in
-  a fixed column at the end of the row (one cell apart, a missing marker left blank), so the
-  markers line up whatever the name; a name too long is cut with `…` before the column. In a list
-  too narrow for that column (under six columns left for the name), only a chat's own markers are
-  drawn, right after its name.
+- **Chat list** (left): two fixed rows per chat, the selected one with the bar `▌` down both.
+  Row one: the name in bold, then only the markers it has — `★` pinned, `⊘` muted, `▤` archived,
+  in that order, right after the name — and the time in its own five-column slot at the right
+  edge, so times line up down the list whatever the names. Row two: the last message, cut with
+  `…` (by display width, so wide characters count as two columns), and the unread badge
+  right-aligned in four columns — `●3`, `●12`, `●99+`, or nothing when it is read. A narrow list
+  gives up the time first, then the markers, before it cuts the name below six columns.
+  `[` and `]` cycle the list's filter — `All`, `Unread`, `Archived` — and the rule says which
+  one is on with its count (`Chats · Unread (3)`); clicking a row opens the chat it is drawn
+  for, whatever the filter. A filter that hides everything says `No chats under this filter`
+  instead of pretending the account is empty.
   Archived chats are kept in the list, sectioned after every other chat. A pin, archive or mute
   made on the phone (`event_chat`) updates the markers at once and sorts the list again as the
   daemon's `chats` lists it (newest message first, the same time by JID, archived last), keeping
-  the selection on the same chat. Under the name, the
-  last message and its time; a preview too long for the pane is cut with `…` (by display width,
-  so wide characters count as two columns) and the ` · HH:MM` after it is always whole.
+  the selection on the same chat.
 - **Times** are local: the time zone offset is read once at startup (so a message from the other
   side of a daylight-saving change shows an hour off until the next start). If the offset cannot
   be read, times are UTC and the footer says so.
 - **Conversation** (right): the selected chat, newest message at the bottom. Before a chat is
   opened it shows the chat's last message only. One line per message: the author in bold and
-  the time dim, then the text (a message's further lines get rows of their own). Each day starts
-  with its local date in dim caps (`SUN 18 OCT 2026`) after a blank line; the messages of one
+  the time muted, then the text (a message's further lines get rows of their own). Each day starts
+  with its local date in muted caps (`SUN 18 OCT 2026`) after a blank line; the messages of one
   author follow each other with no blank line, and the next author starts after one. With no
-  message it says `No messages yet · i to write`, with no chats `No chats yet` (its title is
-  then `Conversation`, so the focus still shows).
+  message it says `No messages yet · i writes the first one`, with no chats `No chats yet`
+  (its title is then `Conversation`, so the focus still shows). The transcript opens with a
+  muted `Beginning of conversation` line, which is what you see when the top is on screen; when
+  there is more above or below, the free column on the right says so with `▲` or `▼`. With no
+  chat at all it says `No chat open · Tab switches panes`; an empty list says
+  `No chats yet · nuncio link`.
 - **Read**: opening a chat that has unread messages marks it read, here and on WhatsApp too, as
   the official clients do: your other devices clear it and the sender sees blue ticks, unless read
   receipts are off in WhatsApp's privacy settings (then only your own devices clear it). A new
   message arriving in the open chat is marked read the same way. The unread counts clear when the
   daemon answers; if it refuses (offline, not linked, ...) the footer shows why, the chat stays
   unread, and nothing retries on its own: opening the chat again does.
-- **Composer**: the last rows of the conversation. `Enter` sends; `Alt-Enter` or `Ctrl-J` starts a
+- **Composer**: the last rows of the conversation, under its own rule: with nothing to send the
+  rule is plain and the row says `i or Enter to write`; with the keys in it the rule starts with
+  the accent bar, and with a draft it ends with `Enter sends · Alt-Enter newline`. `Enter` sends; `Alt-Enter` or `Ctrl-J` starts a
   new line (use `Ctrl-J` where the terminal keeps `Alt-Enter`, as macOS terminals do unless
   Option is set to act as Alt), and the message is sent with its line breaks. `←`/`→` move the
   cursor one character (a whole emoji sequence or accented letter is one step), `Home`/`End` to
@@ -112,16 +121,27 @@ nuncio-tui [--image <png>]
   message state. A connection that dies silently still counts as linked for up to 3 minutes,
   until its keepalive fails, so a send in that window shows `not confirmed` rather than `queued`.
 - **Focus**: one pane has the keys at a time, the chat list or the conversation (the composer
-  counts as the conversation); its title on the header rule is bold, the other's dim. `Tab`
-  switches between them.
-- **Footer**: always one line of hints, dim, with the focused pane's primary key in the accent
-  and, when pictures are drawn and there is room, their protocol (`kitty`, `half blocks`, ...) on
-  the right. Outside the composer it starts with
-  `? help · Tab switch pane · Enter open · / search · q quit` (`Enter write` in the conversation)
-  and adds the focused pane's keys after it; in the composer, where `q` and `/` are text, it says
-  how to send and `Esc conversation · Ctrl-C quit`. `?` shows every key, grouped by context, on
-  a panel over a solid `surface` scrim: one key per row, right-aligned and dim, when the terminal
-  is tall enough, else each context's keys on one wrapped line.
+  counts as the conversation); its title on the header rule is bold, the other's muted, and only
+  the pane with the keys fills its selection on `surface_active` — the other keeps the `▌` bar,
+  so the screen never shows two "selected" things. `Tab` switches between them.
+- **Widths**: at 100 columns and up the chat list takes 40 % of the screen; from 60 to 99 it is
+  a fixed 32 columns; under 60 only the focused pane is drawn, filling the width, and its rule
+  says `· Tab` so the other pane is one key away. The mouse map is rebuilt on every draw, so a
+  click can never land on a pane that is not on screen.
+- **Status line**: the header is only the app's name plus one right-aligned datum, the unread
+  count in the accent when there is one (`3 unread`), or `FIXTURE DATA` with no daemon. The
+  daemon's build, the session and the picture protocol are in `?`.
+- **Footer**: one line. Its right slot is the session state — `linked`, `reconnecting…`,
+  `offline`, `not linked`, `unknown`, `no daemon` — in the warning tone whenever it is not
+  `linked`, with the stop reason after it when there is one. Its left side is the focused pane's
+  primary key in the accent (`Enter open`, `Enter write`, `Enter send`, `Enter search/select`,
+  `1-6 react`), then `? all keys`, with the pane's other keys in between only while they fit: the
+  tail is dropped on a narrow terminal and no key is printed twice. A notice (an error from the
+  daemon, `not sent`, `not confirmed`) takes the left side and the key hints follow only when
+  they still fit; the state on the right is never displaced. `?` shows every key, grouped by
+  context, on a panel over a solid `surface` scrim: one key per row, right-aligned and muted,
+  when the terminal is tall enough, else each context's keys on one wrapped line, and its first
+  line carries the daemon's build, the session and the picture protocol.
 - **Selected message**: in the conversation, `k`/`↑` select a message (marked with the bar `▌`, the newest first,
   then older) and `j`/`↓` a newer one; `r` replies to it, `e` reacts, `R`
   retries a send of mine that is `not sent` or `not confirmed` (one attempt per key press, under

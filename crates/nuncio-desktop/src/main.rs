@@ -67,6 +67,10 @@ fn main() -> glib::ExitCode {
         return probe(&palette_file);
     }
 
+    // The daemon comes back after a logout without the user ever typing `systemctl`: enabling a
+    // unit of the *user* manager needs no root, and the call is best effort.
+    nuncio_client::bus::enable_daemon_unit();
+
     // Read before any window, so a typo stops the app with its reason.
     let config = match Config::default_path().map(|path| Config::load(&path)) {
         Some(Ok(config)) => config,

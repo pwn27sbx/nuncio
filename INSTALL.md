@@ -36,8 +36,11 @@ Omarchy ships one already. Without it, linking a device fails with
 
 ## First run
 
-The package does **not** start the daemon for you, and the command line reaches the daemon
-through D-Bus, so link **before** anything starts it:
+Open **nuncio** from your launcher. That is all: the app asks the session bus for the daemon, the
+bus starts it, and the app enables the daemon's login item for you, so it comes back after a
+logout without you typing a thing. No `systemctl`, no terminal.
+
+Linking a device is still done from the command line in this version:
 
 ```sh
 nuncio link --qr --consent
@@ -45,16 +48,12 @@ nuncio link --qr --consent
 
 `--consent` is required: linking a device is the one action that needs your explicit yes, and
 without it the command only prints the warning. A QR code appears; scan it from WhatsApp on your
-phone (**Linked devices → Link a device**). Once it says the device is linked:
-
-```sh
-systemctl --user enable --now nunciod.service
-```
+phone (**Linked devices → Link a device**). A future version links from inside the app.
 
 Then open either app:
 
-- **`nuncio-tui`** in a terminal, or **nuncio (terminal)** from your launcher;
-- **nuncio** (the GTK app) from your launcher, or D-Bus starts it.
+- **nuncio** (the GTK app) from your launcher — the chat list;
+- **nuncio (terminal)** from your launcher, or **`nuncio-tui`** in a terminal.
 
 If `nuncio link` refuses because `nunciod is running`, stop it first:
 
@@ -111,7 +110,8 @@ so run them **before** `pacman -R`.
 
 - **`the keyring (Secret Service) is locked or unavailable`**: unlock your login keyring (it
   normally unlocks with your session), or install a Secret Service (see above).
-- **`nunciod is running` when linking**: `systemctl --user stop nunciod`, link, then start it.
+- **`nunciod is running` when linking**: `systemctl --user stop nunciod`, link, then open the app
+  again (it starts the daemon).
 - **The apps start but show `reconnecting…`**: `systemctl --user status nunciod` says why. A
   session WhatsApp stopped (logged out, banned, another device replaced it) is shown in the app's
   status line, in fixed text.

@@ -20,5 +20,7 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 # Already in Cargo.lock: the wire's `thumb` is standard base64.
 base64 = "0.22"
 # The session bus, for two calls: starting the daemon on demand (the package ships the
-# activation file) and enabling its systemd --user unit from the app. Blocking API only.
-zbus = "5"
+# activation file) and enabling its systemd --user unit from the app. zbus 6 is async only, so
+# `zruntime` gives the two one-shot calls a runtime to block on.
+zbus = "6"
+zruntime = { version = "0.2", features = ["helper"] }

@@ -12,8 +12,10 @@ pub const DAEMON_BUS_NAME: &str = "io.github.pwn27sbx.nuncio";
 /// The daemon's user unit.
 pub const DAEMON_UNIT: &str = "nunciod.service";
 
-fn session() -> Option<zbus::blocking::Connection> {
-    zbus::blocking::Connection::session().ok()
+/// A session-bus connection, on a runtime of our own: both calls are one request, so a blocking
+/// wait is simpler than carrying an executor through the clients.
+fn session() -> Option<zbus::Connection> {
+    zruntime::block_on(async { zbus::Connection::session().await.ok() })
 }
 
 /// Ask the session bus to start the daemon. The bus starts it through the activation file the
@@ -21,13 +23,16 @@ fn session() -> Option<zbus::blocking::Connection> {
 /// caller's next connection attempt reports the truth.
 pub fn start_daemon() {
     let Some(bus) = session() else { return };
-    let _ = bus.call_method(
-        Some("org.freedesktop.DBus"),
-        "/org/freedesktop/DBus",
-        Some("org.freedesktop.DBus"),
-        "StartServiceByName",
-        &(DAEMON_BUS_NAME, 0u32),
-    );
+    let _ = zruntime::block_on(async {
+        bus.call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "StartServiceByName",
+            &(DAEMON_BUS_NAME, 0u32),
+        )
+        .await
+    });
 }
 
 /// Enable the daemon's user unit through the systemd **user** manager: no root, no polkit, no
@@ -40,13 +45,17 @@ pub fn enable_daemon_unit() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let Some(bus) = session() else { return };
-        if let Err(error) = bus.call_method(
-            Some("org.freedesktop.systemd1"),
-            "/org/freedesktop/systemd1",
-            Some("org.freedesktop.systemd1.Manager"),
-            "EnableUnitFiles",
-            &(vec![DAEMON_UNIT], false, true),
-        ) {
+        let enabled = zruntime::block_on(async {
+            bus.call_method(
+                Some("org.freedesktop.systemd1"),
+                "/org/freedesktop/systemd1",
+                Some("org.freedesktop.systemd1.Manager"),
+                "EnableUnitFiles",
+                &(vec![DAEMON_UNIT], false, true),
+            )
+            .await
+        });
+        if let Err(error) = enabled {
             // Not fatal (the daemon still starts on demand), but it must not vanish: without it
             // the daemon does not come back after a logout.
             eprintln!("nuncio: could not enable the daemon's login item: {error}");

@@ -68,7 +68,7 @@ Rust clients (`crates/*/Cargo.toml`):
 | `libadwaita` | desktop | MIT |
 | `glib` | desktop | MIT |
 | `futures-channel` | desktop | MIT OR Apache-2.0 |
-| `zbus` (blocking API) | client (TUI and desktop) | MIT |
+| `zbus` (with `zruntime`) | client (TUI and desktop) | MIT |
 
 `image` decodes through `zune-jpeg` (MIT OR Apache-2.0 OR Zlib), `image-webp`
 (MIT OR Apache-2.0) and `png` (MIT OR Apache-2.0); the TUI draws through

@@ -104,13 +104,51 @@ impl Link {
     /// Connect and handshake the request connection, then a second connection that subscribes;
     /// every read is bounded by `timeout`.
     pub fn open(path: &Path, client: &str, timeout: Duration) -> Result<Self, ClientError> {
-        let mut requests = Connection::connect_with_timeout(path, timeout)?;
+        let mut requests = connect_starting(path, timeout, &crate::bus::start_daemon)?;
         requests.handshake(client)?;
         let mut events = Connection::connect_with_timeout(path, timeout)?;
         events.handshake(client)?;
         events.subscribe()?;
         Ok(Self { requests, events })
     }
+}
+
+/// How long to wait between the connection attempts that follow a bus activation request.
+const START_RETRY: Duration = Duration::from_millis(100);
+/// How many times to try the socket after asking the bus to start the daemon: two seconds in all,
+/// which covers a cold `nunciod` opening its database.
+const START_ATTEMPTS: usize = 20;
+
+/// Connect to `path`; when the socket is not there yet, ask the session bus to start the daemon
+/// (the package's activation file makes the bus run it) and try again for up to [`START_RETRY`] ×
+/// [`START_ATTEMPTS`]. `start` is a parameter so a test can prove the request and the retry
+/// without a bus.
+fn connect_starting(
+    path: &Path,
+    timeout: Duration,
+    start: &dyn Fn(),
+) -> Result<Connection, ClientError> {
+    match Connection::connect_with_timeout(path, timeout) {
+        Ok(connection) => return Ok(connection),
+        Err(ClientError::Connect { source, .. })
+            if source.kind() == std::io::ErrorKind::NotFound =>
+        {
+            start();
+        }
+        Err(error) => return Err(error),
+    }
+    let mut last = None;
+    for _ in 0..START_ATTEMPTS {
+        std::thread::sleep(START_RETRY);
+        match Connection::connect_with_timeout(path, timeout) {
+            Ok(connection) => return Ok(connection),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(last.unwrap_or_else(|| ClientError::Connect {
+        path: path.to_owned(),
+        source: std::io::Error::new(std::io::ErrorKind::NotFound, "the daemon did not start"),
+    }))
 }
 
 /// How long the reply to `frame` may take on a connection whose reads are bounded by `bound`: a
@@ -282,6 +320,74 @@ mod tests {
         program: "nuncio-desktop",
         retry_hint: "Retry once reconnected",
     };
+
+    #[test]
+    fn a_missing_socket_asks_the_bus_once_and_connects_when_the_daemon_arrives() {
+        use std::os::unix::net::UnixListener;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = std::env::temp_dir().join(format!(
+            "nuncio-start-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let path = root.join("core.sock");
+
+        // The daemon appears because the bus started it: the stub binds the socket it would bind.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let start = {
+            let calls = Arc::clone(&calls);
+            let path = path.clone();
+            move || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                let listener = UnixListener::bind(&path).expect("bind the socket");
+                std::thread::spawn(move || {
+                    let _kept = listener.accept();
+                    std::thread::sleep(Duration::from_millis(400));
+                });
+            }
+        };
+
+        let connection = connect_starting(&path, Duration::from_secs(1), &start);
+        assert!(connection.is_ok(), "{connection:?}");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "asked the bus exactly once"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_socket_that_is_already_there_never_asks_the_bus() {
+        use std::os::unix::net::UnixListener;
+
+        let root = std::env::temp_dir().join(format!(
+            "nuncio-noop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let path = root.join("core.sock");
+        let _listener = UnixListener::bind(&path).expect("bind");
+        let started = std::cell::Cell::new(0);
+        let start = || started.set(started.get() + 1);
+
+        let connection = connect_starting(&path, Duration::from_secs(1), &start);
+        assert!(connection.is_ok(), "{connection:?}");
+        assert_eq!(started.get(), 0, "the daemon was already there");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     fn ana() -> Model {
         let chat: Chat = serde_json::from_value(serde_json::json!({

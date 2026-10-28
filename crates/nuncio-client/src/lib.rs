@@ -8,6 +8,7 @@
 //! The wire contract itself lives in `proto/wire.md` and is checked against the shared
 //! fixtures in `proto/fixtures/` by the Go daemon's tests and by `tests/contract.rs` here.
 
+pub mod bus;
 pub mod config;
 pub mod conn;
 pub mod driver;

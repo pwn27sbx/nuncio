@@ -19,3 +19,6 @@ unicode-segmentation = "1.13"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 # Already in Cargo.lock: the wire's `thumb` is standard base64.
 base64 = "0.22"
+# The session bus, for two calls: starting the daemon on demand (the package ships the
+# activation file) and enabling its systemd --user unit from the app. Blocking API only.
+zbus = "5"

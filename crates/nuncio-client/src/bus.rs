@@ -40,12 +40,16 @@ pub fn enable_daemon_unit() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
         let Some(bus) = session() else { return };
-        let _ = bus.call_method(
+        if let Err(error) = bus.call_method(
             Some("org.freedesktop.systemd1"),
             "/org/freedesktop/systemd1",
             Some("org.freedesktop.systemd1.Manager"),
             "EnableUnitFiles",
             &(vec![DAEMON_UNIT], false, true),
-        );
+        ) {
+            // Not fatal (the daemon still starts on demand), but it must not vanish: without it
+            // the daemon does not come back after a logout.
+            eprintln!("nuncio: could not enable the daemon's login item: {error}");
+        }
     });
 }

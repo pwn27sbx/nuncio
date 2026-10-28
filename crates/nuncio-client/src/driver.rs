@@ -119,6 +119,9 @@ const START_RETRY: Duration = Duration::from_millis(100);
 /// which covers a cold `nunciod` opening its database.
 const START_ATTEMPTS: usize = 20;
 
+/// Whether this process already asked the bus to start the daemon.
+static START_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Connect to `path`; when the socket is not there yet, ask the session bus to start the daemon
 /// (the package's activation file makes the bus run it) and try again for up to [`START_RETRY`] ×
 /// [`START_ATTEMPTS`]. `start` is a parameter so a test can prove the request and the retry
@@ -133,6 +136,11 @@ fn connect_starting(
         Err(ClientError::Connect { source, .. })
             if source.kind() == std::io::ErrorKind::NotFound =>
         {
+            // Asked once per process: a reconnect loop must not spend two seconds here on every
+            // attempt, and its own backoff already paces the tries.
+            if START_ASKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                return Connection::connect_with_timeout(path, timeout);
+            }
             start();
         }
         Err(error) => return Err(error),

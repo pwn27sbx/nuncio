@@ -370,7 +370,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
         &dir.join("hello_ok_daemon.json"),
         &DaemonFrame::HelloOk {
             v: PROTOCOL_VERSION,
-            daemon: "nunciod/0.1.0".to_owned(),
+            daemon: "nunciod/0.1.1".to_owned(),
             session: Session::Unlinked,
             unread: 0,
         },
@@ -380,7 +380,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
         &dir.join("status_response.json"),
         &DaemonFrame::Status {
             v: PROTOCOL_VERSION,
-            daemon: "nunciod/0.1.0".to_owned(),
+            daemon: "nunciod/0.1.1".to_owned(),
             linked: false,
             session: Session::Unlinked,
             unread: 0,
@@ -391,7 +391,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
         &dir.join("status_stopped_response.json"),
         &DaemonFrame::Status {
             v: PROTOCOL_VERSION,
-            daemon: "nunciod/0.1.0".to_owned(),
+            daemon: "nunciod/0.1.1".to_owned(),
             linked: false,
             session: Session::Unlinked,
             unread: 0,
@@ -402,7 +402,7 @@ fn constructed_daemon_frames_match_their_fixtures() {
         &dir.join("status_device_unreadable_response.json"),
         &DaemonFrame::Status {
             v: PROTOCOL_VERSION,
-            daemon: "nunciod/0.1.0".to_owned(),
+            daemon: "nunciod/0.1.1".to_owned(),
             linked: true,
             session: Session::Offline,
             unread: 0,

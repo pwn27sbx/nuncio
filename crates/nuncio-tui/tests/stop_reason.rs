@@ -26,7 +26,7 @@ fn footer_at(app: &mut App, width: u16) -> String {
 fn app(session: Session, stop_reason: Option<StopReason>) -> App {
     App::new(
         Snapshot {
-            daemon: "nunciod/0.1.0".to_owned(),
+            daemon: "nunciod/0.1.1".to_owned(),
             linked: true,
             session,
             unread: 2,

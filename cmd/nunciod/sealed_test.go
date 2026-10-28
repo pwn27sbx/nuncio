@@ -457,11 +457,11 @@ func TestStatusAndHelloFramesAreUnchangedWhenLinkedNormally(t *testing.T) {
 	}
 	defer live.Close()
 	const (
-		linkedHello   = `{"v":1,"op":"hello_ok","daemon":"nunciod/0.1.0","session":"linked","unread":0}`
-		linkedStatus  = `{"v":1,"op":"status","daemon":"nunciod/0.1.0","linked":true,"session":"linked","unread":0}`
-		offlineHello  = `{"v":1,"op":"hello_ok","daemon":"nunciod/0.1.0","session":"offline","unread":0}`
-		offlineStatus = `{"v":1,"op":"status","daemon":"nunciod/0.1.0","linked":true,"session":"offline","unread":0}`
-		lockedStatus  = `{"v":1,"op":"status","daemon":"nunciod/0.1.0","linked":true,"session":"offline","unread":0,"stop_reason":"keyring_locked"}`
+		linkedHello   = `{"v":1,"op":"hello_ok","daemon":"nunciod/0.1.1","session":"linked","unread":0}`
+		linkedStatus  = `{"v":1,"op":"status","daemon":"nunciod/0.1.1","linked":true,"session":"linked","unread":0}`
+		offlineHello  = `{"v":1,"op":"hello_ok","daemon":"nunciod/0.1.1","session":"offline","unread":0}`
+		offlineStatus = `{"v":1,"op":"status","daemon":"nunciod/0.1.1","linked":true,"session":"offline","unread":0}`
+		lockedStatus  = `{"v":1,"op":"status","daemon":"nunciod/0.1.1","linked":true,"session":"offline","unread":0,"stop_reason":"keyring_locked"}`
 	)
 	for _, c := range []struct {
 		name          string
@@ -596,7 +596,7 @@ func TestDaemonServesOfflineWhileTheKeyringBlocks(t *testing.T) {
 		t.Fatal(err)
 	}
 	sock := serveSocket(t, d, nil)
-	const offlineStatus = `{"v":1,"op":"status","daemon":"nunciod/0.1.0","linked":true,"session":"offline","unread":0}`
+	const offlineStatus = `{"v":1,"op":"status","daemon":"nunciod/0.1.1","linked":true,"session":"offline","unread":0}`
 	if _, status := rawFrames(t, sock); status != offlineStatus {
 		t.Errorf("status while the keyring blocks = %s, want %s", status, offlineStatus)
 	}

@@ -89,7 +89,7 @@ fn fetch_performs_the_hello_status_chats_handshake() {
 
     let snapshot = fetch(&path, "nuncio-tui/0.1.0", 40).expect("the handshake succeeds");
 
-    assert_eq!(snapshot.daemon, "nunciod/0.1.0");
+    assert_eq!(snapshot.daemon, "nunciod/0.1.1");
     assert_eq!(snapshot.session, Session::Unlinked);
     assert!(!snapshot.linked);
     assert_eq!(snapshot.unread, 0);
@@ -116,7 +116,7 @@ fn fetch_performs_the_hello_status_chats_handshake() {
 /// Q6: a client started after WhatsApp stopped the session shows why, from `status`.
 #[test]
 fn fetch_keeps_the_stop_reason_of_status() {
-    let status = r#"{"v":1,"op":"status","daemon":"nunciod/0.1.0","linked":true,"session":"offline","unread":0,"stop_reason":"temporary_ban"}"#;
+    let status = r#"{"v":1,"op":"status","daemon":"nunciod/0.1.1","linked":true,"session":"offline","unread":0,"stop_reason":"temporary_ban"}"#;
     let (_dir, path, _server) = fake_daemon(lines(&[HELLO_OK, status, CHATS]));
     let snapshot = fetch(&path, "nuncio-tui/0.1.0", 40).expect("the handshake succeeds");
     assert_eq!(

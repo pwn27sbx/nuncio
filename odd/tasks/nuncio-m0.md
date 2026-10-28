@@ -73,7 +73,7 @@ Source of record: `~/Documents/Plans/2026-10-18-whatsapp-client/README.md`, sect
   the owner's live theme untouched.
 - **L7** End-to-end check the workers could not do: `nuncio-tui` against the real `nunciod` over the
   socket under a pty at 80×24. The daemon log shows `hello from nuncio-tui/0.1.0`, the header reads
-  `nuncio · nunciod/0.1.0 · unlinked · 0 unread`, and no fixture fallback was used.
+  `nuncio · nunciod/0.1.1 · unlinked · 0 unread`, and no fixture fallback was used.
 - **L8** `proto/wire.md` extended with the D-Bus interface/object path and the protocol corners both
   implementations now depend on (bad_frame/version_mismatch cases, limit range, size boundary). The
   contract is not allowed to leave those implicit.

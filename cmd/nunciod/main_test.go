@@ -265,7 +265,7 @@ func TestDaemonServesProtocolOnSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	want := ipc.StatusResponse{V: 1, Op: ipc.OpStatus, Daemon: "nunciod/0.1.0", Session: ipc.SessionUnlinked}
+	want := ipc.StatusResponse{V: 1, Op: ipc.OpStatus, Daemon: "nunciod/0.1.1", Session: ipc.SessionUnlinked}
 	if st != want {
 		t.Fatalf("Status() = %+v, want %+v", st, want)
 	}
@@ -614,8 +614,8 @@ func TestDBusActivationStartsDaemonInUnderOneSecond(t *testing.T) {
 	if elapsed >= time.Second {
 		t.Fatalf("activation round trip took %v, want under 1s", elapsed)
 	}
-	if st.Linked || st.Session != ipc.SessionUnlinked || st.Unread != 0 || st.Daemon != "nunciod/0.1.0" {
-		t.Errorf("D-Bus Status = %+v, want the unlinked M0 state of nunciod/0.1.0", st)
+	if st.Linked || st.Session != ipc.SessionUnlinked || st.Unread != 0 || st.Daemon != "nunciod/0.1.1" {
+		t.Errorf("D-Bus Status = %+v, want the unlinked M0 state of nunciod/0.1.1", st)
 	}
 	if !reflect.DeepEqual(st, ipc.Status{
 		Daemon: overSocket.Daemon, Linked: overSocket.Linked, Session: overSocket.Session, Unread: overSocket.Unread,

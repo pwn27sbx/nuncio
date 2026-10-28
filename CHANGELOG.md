@@ -3,6 +3,20 @@
 One section per release; the tag equals the version (`v0.1.0` → `pkgver=0.1.0`), and the section
 becomes the release notes.
 
+## v0.1.1 — the apps start the daemon
+
+- **No more `systemctl`.** The terminal and desktop clients now ask the session bus for the
+  daemon (the activation file the package ships), so a fresh install works by opening the app;
+  the desktop app also enables the daemon's login item itself, once, without a terminal.
+- **A font read caught mid-rewrite is no longer reported as "no font"** (it made the app fall
+  back for a frame on every theme switch, and it made CI flaky).
+- The image test that assumed a queued encode is always cancellable now states the real
+  contract: the running encode plus the newest width. It blocked the release build while CI
+  passed, because the release runs the same suite under more load.
+
+Linking a device is still done with `nuncio link --qr --consent`; linking from inside the app is
+the next piece of work.
+
 ## v0.1.0 — the first release
 
 The first public package, and the first time the whole thing installs with one line.

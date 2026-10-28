@@ -12,18 +12,24 @@ pub const DAEMON_BUS_NAME: &str = "io.github.pwn27sbx.nuncio";
 /// The daemon's user unit.
 pub const DAEMON_UNIT: &str = "nunciod.service";
 
-/// A session-bus connection, on a runtime of our own: both calls are one request, so a blocking
-/// wait is simpler than carrying an executor through the clients.
-fn session() -> Option<zbus::Connection> {
-    zruntime::block_on(async { zbus::Connection::session().await.ok() })
+/// Run one session-bus request to completion. The connection and the call share one `block_on`:
+/// zbus keeps a reader task on the runtime it was opened with, so opening the connection in one
+/// blocking call and using it in another would leave that task behind.
+fn request<T, F>(call: F) -> Option<T>
+where
+    F: AsyncFnOnce(zbus::Connection) -> zbus::Result<T>,
+{
+    zruntime::block_on(async {
+        let bus = zbus::Connection::session().await.ok()?;
+        call(bus).await.ok()
+    })
 }
 
 /// Ask the session bus to start the daemon. The bus starts it through the activation file the
 /// package installs; without that file, or without a session bus, this does nothing and the
 /// caller's next connection attempt reports the truth.
 pub fn start_daemon() {
-    let Some(bus) = session() else { return };
-    let _ = zruntime::block_on(async {
+    let _ = request(|bus: zbus::Connection| async move {
         bus.call_method(
             Some("org.freedesktop.DBus"),
             "/org/freedesktop/DBus",
@@ -44,8 +50,8 @@ pub fn start_daemon() {
 pub fn enable_daemon_unit() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
-        let Some(bus) = session() else { return };
         let enabled = zruntime::block_on(async {
+            let bus = zbus::Connection::session().await?;
             bus.call_method(
                 Some("org.freedesktop.systemd1"),
                 "/org/freedesktop/systemd1",

@@ -38,6 +38,10 @@ const MAX_OUTPUT: u64 = 64 * 1024;
 /// How long to wait after a filesystem event before asking fontconfig again: `omarchy-font-set`
 /// creates the directory and then writes the file, so one switch is a burst of events.
 const DEBOUNCE: Duration = Duration::from_millis(150);
+/// How long to wait before reading again when a read came back empty while a font was applied:
+/// a rewrite is observed between truncate and write, and an empty read there is not a switch to
+/// "no font" (it made the font test fail about one run in twenty on CI).
+const EMPTY_RETRY: Duration = Duration::from_millis(120);
 
 /// Why a desktop helper gave no answer.
 #[derive(Debug, thiserror::Error)]
@@ -260,7 +264,12 @@ impl FontWatcher {
                     };
                     armed = arm(&watcher, &dir);
                 }
-                let family = query();
+                let mut family = query();
+                if family.is_none() && last.is_some() {
+                    // The file was caught mid-rewrite: read it once more before believing it.
+                    std::thread::sleep(EMPTY_RETRY);
+                    family = query();
+                }
                 if family == last {
                     continue;
                 }
@@ -317,7 +326,7 @@ mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant, SystemTime};
 
     /// What `fc-match monospace -f '%{family}\n'` prints on a stock Omarchy: the family and its
@@ -480,6 +489,37 @@ mod tests {
             }
         }
         panic!("no font change noticed; wanted {want:?}");
+    }
+
+    #[test]
+    fn a_read_between_truncate_and_write_is_not_reported_as_no_font() {
+        let root = unique_root("transient");
+        let dir = root.join("fontconfig");
+        fs::create_dir_all(&dir).expect("create fontconfig dir");
+        fs::write(dir.join("fonts.conf"), "JetBrainsMono Nerd Font\n").expect("write");
+        // The first read after the rewrite sees the file truncated; the second sees the family.
+        let truncated = Arc::new(AtomicBool::new(true));
+        let query = {
+            let truncated = Arc::clone(&truncated);
+            let dir = dir.clone();
+            move || {
+                if truncated.swap(false, Ordering::SeqCst) {
+                    return None;
+                }
+                fs::read_to_string(dir.join("fonts.conf"))
+                    .ok()
+                    .and_then(|text| parse_fc_match(&text))
+            }
+        };
+        let watcher = FontWatcher::start(&dir, Some("JetBrainsMono Nerd Font".to_owned()), query)
+            .expect("watcher starts");
+        std::thread::sleep(Duration::from_millis(250));
+
+        fs::write(dir.join("fonts.conf"), "CaskaydiaMono Nerd Font\n").expect("rewrite");
+        // The truncate read is not a font: the new family is what has to arrive.
+        wait_for(&watcher, Some("CaskaydiaMono Nerd Font"));
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

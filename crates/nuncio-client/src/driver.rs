@@ -104,7 +104,8 @@ impl Link {
     /// Connect and handshake the request connection, then a second connection that subscribes;
     /// every read is bounded by `timeout`.
     pub fn open(path: &Path, client: &str, timeout: Duration) -> Result<Self, ClientError> {
-        let mut requests = connect_starting(path, timeout, &crate::bus::start_daemon)?;
+        let mut requests =
+            connect_starting(path, timeout, &crate::bus::start_daemon, &START_ASKED)?;
         requests.handshake(client)?;
         let mut events = Connection::connect_with_timeout(path, timeout)?;
         events.handshake(client)?;
@@ -130,6 +131,7 @@ fn connect_starting(
     path: &Path,
     timeout: Duration,
     start: &dyn Fn(),
+    asked: &std::sync::atomic::AtomicBool,
 ) -> Result<Connection, ClientError> {
     match Connection::connect_with_timeout(path, timeout) {
         Ok(connection) => return Ok(connection),
@@ -138,7 +140,7 @@ fn connect_starting(
         {
             // Asked once per process: a reconnect loop must not spend two seconds here on every
             // attempt, and its own backoff already paces the tries.
-            if START_ASKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            if asked.swap(true, std::sync::atomic::Ordering::SeqCst) {
                 return Connection::connect_with_timeout(path, timeout);
             }
             start();
@@ -361,13 +363,15 @@ mod tests {
             }
         };
 
-        let connection = connect_starting(&path, Duration::from_secs(1), &start);
+        let asked = std::sync::atomic::AtomicBool::new(false);
+        let connection = connect_starting(&path, Duration::from_secs(1), &start, &asked);
         assert!(connection.is_ok(), "{connection:?}");
         assert_eq!(
             calls.load(Ordering::SeqCst),
             1,
             "asked the bus exactly once"
         );
+        assert!(asked.load(Ordering::SeqCst), "and it is remembered");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -390,9 +394,14 @@ mod tests {
         let started = std::cell::Cell::new(0);
         let start = || started.set(started.get() + 1);
 
-        let connection = connect_starting(&path, Duration::from_secs(1), &start);
+        let asked = std::sync::atomic::AtomicBool::new(false);
+        let connection = connect_starting(&path, Duration::from_secs(1), &start, &asked);
         assert!(connection.is_ok(), "{connection:?}");
         assert_eq!(started.get(), 0, "the daemon was already there");
+        assert!(
+            !asked.load(std::sync::atomic::Ordering::SeqCst),
+            "nothing to remember"
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

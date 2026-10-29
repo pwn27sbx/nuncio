@@ -151,7 +151,7 @@ func newFakeHandler(t *testing.T) *fakeHandler {
 		t.Fatalf("unmarshal messages fixture: %v", err)
 	}
 	return &fakeHandler{
-		status:   Status{Daemon: "nunciod/0.1.0", Session: SessionUnlinked, Unread: 0},
+		status:   Status{Daemon: "nunciod/0.1.1", Session: SessionUnlinked, Unread: 0},
 		chats:    resp.Chats,
 		messages: map[string][]Message{msgs.JID: msgs.Messages},
 	}

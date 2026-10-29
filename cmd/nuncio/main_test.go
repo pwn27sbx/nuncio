@@ -74,7 +74,7 @@ func (d *fakeDaemon) wipeCalls() []bool {
 
 func (d *fakeDaemon) Hello(string) ipc.Status { return d.Status() }
 func (d *fakeDaemon) Status() ipc.Status {
-	return ipc.Status{Daemon: "nunciod/0.1.0", Linked: d.session != ipc.SessionUnlinked, Session: d.session}
+	return ipc.Status{Daemon: "nunciod/0.1.1", Linked: d.session != ipc.SessionUnlinked, Session: d.session}
 }
 func (d *fakeDaemon) Chats() []ipc.Chat { return d.chats }
 func (d *fakeDaemon) Messages(string, int) ([]ipc.Message, error) {

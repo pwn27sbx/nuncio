@@ -1365,7 +1365,7 @@ dependencies = [
 
 [[package]]
 name = "nuncio-client"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "image",
@@ -1381,7 +1381,7 @@ dependencies = [
 
 [[package]]
 name = "nuncio-desktop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "futures-channel",
@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "nuncio-tui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64",
  "image",

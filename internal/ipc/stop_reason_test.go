@@ -11,13 +11,13 @@ import (
 // Q6: status names why WhatsApp stopped the session, as a fixed stop_reason.
 func TestStatusCarriesTheStopReason(t *testing.T) {
 	h := newFakeHandler(t)
-	h.status = Status{Daemon: "nunciod/0.1.0", Linked: true, Session: SessionOffline, StopReason: StopTemporaryBan}
+	h.status = Status{Daemon: "nunciod/0.1.1", Linked: true, Session: SessionOffline, StopReason: StopTemporaryBan}
 	sock := startServer(t, h)
 	conn, br := rawConn(t, sock)
 	handshake(t, conn, br)
 
 	sendRaw(t, conn, `{"v":1,"op":"status"}`)
-	want := `{"v":1,"op":"status","daemon":"nunciod/0.1.0","linked":true,"session":"offline","unread":0,"stop_reason":"temporary_ban"}`
+	want := `{"v":1,"op":"status","daemon":"nunciod/0.1.1","linked":true,"session":"offline","unread":0,"stop_reason":"temporary_ban"}`
 	if got := string(recvRaw(t, br)); got != want {
 		t.Errorf("status = %s, want %s", got, want)
 	}

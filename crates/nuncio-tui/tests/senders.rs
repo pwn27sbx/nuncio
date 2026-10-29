@@ -40,7 +40,7 @@ fn a_group_message_header_names_its_sender_and_falls_back_to_the_group() {
     }))
     .expect("a chat");
     let snapshot = Snapshot {
-        daemon: "nunciod/0.1.0".to_owned(),
+        daemon: "nunciod/0.1.1".to_owned(),
         linked: true,
         session: Session::Linked,
         unread: 0,

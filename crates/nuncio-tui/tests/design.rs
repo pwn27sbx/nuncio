@@ -63,7 +63,7 @@ fn chat(jid: &str, name: &str, unread: u32) -> Chat {
 fn app_with(chats: Vec<Chat>) -> App {
     let unread = chats.iter().map(|chat| chat.unread).sum();
     let snapshot = Snapshot {
-        daemon: "nunciod/0.1.0".to_owned(),
+        daemon: "nunciod/0.1.1".to_owned(),
         linked: true,
         session: Session::Linked,
         unread,

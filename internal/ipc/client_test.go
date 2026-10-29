@@ -46,7 +46,7 @@ func TestDialHandshakesAndCarriesRequests(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	want := StatusResponse{V: 1, Op: OpStatus, Daemon: "nunciod/0.1.0", Session: SessionUnlinked}
+	want := StatusResponse{V: 1, Op: OpStatus, Daemon: "nunciod/0.1.1", Session: SessionUnlinked}
 	if st != want {
 		t.Fatalf("Status() = %+v, want %+v", st, want)
 	}
@@ -115,7 +115,7 @@ func startSilentServer(t *testing.T, answerHello bool) string {
 					if _, err := rd.Next(); err != nil {
 						return
 					}
-					_ = WriteFrame(conn, HelloOK{V: Version, Op: OpHelloOK, Daemon: "nunciod/0.1.0"})
+					_ = WriteFrame(conn, HelloOK{V: Version, Op: OpHelloOK, Daemon: "nunciod/0.1.1"})
 				}()
 			}
 		}

@@ -85,7 +85,12 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 	// when pairing saves it, so a link that never pairs leaves no key and no device behind.
 	device, migration, err := wa.OpenDevice(ctx, db, path, localKeyring, true)
 	if notice := migration.Notice(); notice != "" {
-		fmt.Fprintln(stdout, "nuncio:", notice)
+		// In plain mode stdout belongs to the code: a GUI draws every line as art.
+		out := stdout
+		if *plain {
+			out = stderr
+		}
+		fmt.Fprintln(out, "nuncio:", notice)
 	}
 	switch {
 	case errors.Is(err, store.ErrKeyringUnavailable):

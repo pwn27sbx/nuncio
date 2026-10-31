@@ -62,7 +62,7 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | T8 | S10: the TUI's unlinked copy stops pointing at the CLI | inline | done: RED (the new `an_unlinked_app_says_no_device_is_linked_and_points_at_nuncio` failed on the tip, which drew `No chats yet · nuncio link` for an unlinked app) → GREEN; the empty-list hint keys on `Session::Unlinked` (`No device linked · open nuncio to link it`, wrapped so a narrow pane does not cut it), a linked app with no chats keeps `No chats yet`, and the design suite asserts both at 80x24 and 240x60 | 497d9d1 |
 | T9 | S11: unlink from the app with a typed confirmation | delegated writer (context backstop) | done: RED (34 compile errors for the five missing `Controller` methods, then the smoke `Cancel closes the confirmation` failed on a real defect: `window.close()` does nothing on an unrealized window) → GREEN; Settings gains a destructive section with **Unlink this device**, a confirmation that spells out the deletion, counts drafts and queued sends before the field, and keeps **Unlink** insensitive until exactly `unlink` is typed; confirming sends one `wipe(true)` (no new frame), only `wiped{unlinked:true}` claims it, and the app lands on the link screen without a restart | fde0c50 |
 | T10 | S12: `INSTALL.md` for the average user, the CLI into `docs/COMMAND-LINE.md`, CHANGELOG and README | delegated writer (context backstop) | done: `INSTALL.md` = the one install line → open nuncio → press Link → scan → chat list, then uninstall (unlink first, `pacman -R nuncio`, the three leftovers named) and no-terminal trouble-shooting, with no `systemctl` in any command block; the CLI moved into `docs/COMMAND-LINE.md` (README keeps a pointer and the one-line list); CHANGELOG `Unreleased` says the release becomes 0.2.0 when the home run passes; the package now installs `/usr/share/doc/nuncio/INSTALL.md` and the unit's `Documentation=` names it, pinned by `check.sh` and `MANIFEST`; `packaging/tests/docs.sh` refuses a page that names an `install.sh` flag the script rejects | 46e9cc3 |
-| T11 | S15: build the package, install it, run the flow from a fresh data dir | inline | pending | — |
+| T11 | S15: build the package, install it, run the flow from a fresh data dir | owner (needs `pacman`/`sudo` and a spare phone) | pending: the **0.2.0** release candidate is built and reviewed (`2dd85ba`), and the runbook is `~/Documents/ObsidianVault/nuncio/2026-10-31-home-acceptance-run/README.md` | 2dd85ba |
 
 ## Log
 
@@ -365,3 +365,16 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   `install.sh`, the `Documentation=` pin accepts two `Documentation=` lines, and
   `packaging/README.md:124` lost a verb ("`install.sh` offers to as well"). None blocks and none
   reopens the candidate.
+- L21 (evidence and review, 2026-10-31, release) **0.2.0 is prepared, not tagged.** One mechanical
+  commit (`2dd85ba`) moves the workspace version and the daemon's frame version to 0.2.0 and
+  updates every test, fixture and doc that names `nunciod/0.1.1` (27 files, 53 lines each way),
+  exactly as the 0.1.1 release did; `Cargo.lock` changes only the three local crates' version
+  fields. The CHANGELOG's `Unreleased` section becomes `v0.2.0` and says the tag follows the home
+  acceptance run. Verified: `gofmt`, `CGO_ENABLED=0 go build ./...`, `CGO_ENABLED=0 go test -count=1
+  ./...`, `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test
+  --workspace` (25 suites), `packaging/check.sh` (61 ok, only the pre-existing `systemd-analyze
+  verify`). Review: medium, lenses risk and reliability, approved and acknowledged with its
+  authority burned and **no findings** from either lens. **T11 is the owner's run**: this machine
+  needs `sudo`/`pacman` to install the package and a spare phone to scan, and neither is something
+  an agent may do (the owner's rules forbid `sudo`, the real data dir and real numbers). The runbook
+  is in the vault. When it passes: tag `v0.2.0`, publish the release, and close T11.

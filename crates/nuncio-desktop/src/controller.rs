@@ -13,11 +13,13 @@ use nuncio_client::driver::{self, Outcome};
 use nuncio_client::link::{LinkError, parse_link};
 use nuncio_client::model::Effect;
 use nuncio_client::notify::{Notification, ViewState, notification_for};
+use nuncio_client::wire::MessageState;
 use nuncio_client::{
     ClientError, ClientFrame, Config, DaemonFrame, LinkFlow, LinkQr, LinkState, LinkUpdate, Model,
-    Session, Snapshot,
+    PROTOCOL_VERSION, Session, Snapshot,
 };
 
+use crate::unlink::{self, Unsent};
 use crate::worker::Incoming;
 
 /// How the desktop app names itself in the driver's notices.
@@ -143,6 +145,15 @@ pub struct Controller {
     /// (`nuncio link --qr` in a terminal) is on this screen too; leaving this window must not
     /// cancel that one.
     link_started_here: bool,
+    /// A `wipe` the app sent is in flight: a second one is never sent (S11).
+    unlink_running: bool,
+    /// The daemon answered the app's `wipe` with `unlinked: true` (S11): the device is gone and
+    /// so is nuncio's data, so the first screen belongs on the screen even while the daemon that
+    /// replaces it starts.
+    wiped: bool,
+    /// The answer to the app's wipe, until the window closed the confirmation on it: `true` when
+    /// the device is unlinked and the data is deleted.
+    unlink_settled: Option<bool>,
 }
 
 fn commands(effect: Option<Effect>) -> Vec<Command> {
@@ -200,6 +211,9 @@ impl Controller {
             link_linked: false,
             link_cancel_pending: false,
             link_started_here: false,
+            unlink_running: false,
+            wiped: false,
+            unlink_settled: None,
         }
     }
 
@@ -247,6 +261,10 @@ impl Controller {
                 commands
             }
             Incoming::Reply { request, result } => {
+                // The confirmation's own `wipe` (S11): the model has nothing to say about it.
+                if matches!(request, ClientFrame::Wipe { .. }) {
+                    return self.wipe_reply(result);
+                }
                 if matches!(
                     request,
                     ClientFrame::LinkStart { .. } | ClientFrame::LinkCancel { .. }
@@ -283,6 +301,10 @@ impl Controller {
             // A send from a life that has ended: it marks its own send, and its loss (if any) was
             // the old link's, already shown.
             Incoming::LateReply { request, result } => {
+                // The wipe's answer, on a connection that ended since: the daemon's word stands.
+                if matches!(request, ClientFrame::Wipe { .. }) {
+                    return self.wipe_reply(result);
+                }
                 match driver::settle(&mut self.model, &request, result, CLIENT) {
                     Outcome::Effect(effect) => commands(Some(effect)),
                     Outcome::Done | Outcome::Lost(_) => Vec::new(),
@@ -294,6 +316,11 @@ impl Controller {
                     *self.link.borrow_mut() = LinkFlow::new();
                     self.link_screen = LinkScreen::Consent;
                     self.link_started_here = false;
+                }
+                if matches!(frame, ClientFrame::Wipe { .. }) {
+                    // Nothing reached the daemon, so nothing was deleted, and the confirmation
+                    // can be pressed again.
+                    self.unlink_running = false;
                 }
                 driver::not_connected(&mut self.model, &frame, CLIENT);
                 Vec::new()
@@ -324,12 +351,16 @@ impl Controller {
                     )
                 {
                     self.link_linked = true;
+                    self.wiped = false;
                     link.extend(self.model.resync().into_iter().map(Command::Send));
                 }
                 link.extend(commands(self.model.apply(&frame)));
                 link
             }
             Incoming::Lost(error) => {
+                // Whether a wipe the connection carried happened is the daemon's word on the next
+                // connection, never this client's: nothing is claimed here (S11).
+                self.unlink_running = false;
                 driver::lost(&mut self.model, &error);
                 Vec::new()
             }
@@ -343,12 +374,13 @@ impl Controller {
     }
 
     /// The link screen, while the app has no device: the daemon says `unlinked` and no flow has
-    /// paired yet (S4). `None` at any other time, and the panes show instead.
+    /// paired yet (S4). `None` at any other time, and the panes show instead. A wipe this app
+    /// confirmed leaves no device and no data, so the screen stays up across the reconnect to the
+    /// daemon that replaces the wiped one, instead of flashing empty panes (S11).
     pub fn link_screen(&self) -> Option<&LinkScreen> {
-        (self.model.connected()
-            && self.model.status().session == Session::Unlinked
-            && !self.link_linked)
-            .then_some(&self.link_screen)
+        let unlinked = self.model.status().session == Session::Unlinked
+            && (self.model.connected() || self.wiped);
+        (unlinked && !self.link_linked).then_some(&self.link_screen)
     }
 
     /// The code the link screen draws now; `None` before the first one, and once the flow ended.
@@ -403,6 +435,129 @@ impl Controller {
         vec![Command::Send(ClientFrame::link_cancel())]
     }
 
+    /// What a wipe would destroy that the user has not sent yet: the draft of every chat that has
+    /// one, and the sends the daemon still holds queued. The confirmation says how much before
+    /// asking for the word (S11).
+    pub fn unsent_work(&self) -> Unsent {
+        let mut jids: Vec<&str> = self
+            .model
+            .chat_list()
+            .chats()
+            .iter()
+            .map(|chat| chat.jid.as_str())
+            .collect();
+        // The chat whose conversation is open may have vanished from the list and kept its draft.
+        if let Some(jid) = self.model.selected_jid()
+            && !jids.contains(&jid)
+        {
+            jids.push(jid);
+        }
+        let queued = jids
+            .into_iter()
+            .filter_map(|jid| self.model.transcript().conversation(jid))
+            .flatten()
+            .filter(|message| message.from_me && message.state == Some(MessageState::Queued))
+            .count();
+        // Drafts live per chat in the model, which shows only the selected one: a copy is asked
+        // chat by chat through the public selection, so nothing of the model is duplicated here.
+        let mut probe = self.model.clone();
+        let shown = probe.selected_jid().map(str::to_owned);
+        let mut drafts = usize::from(!probe.composer().text().is_empty());
+        for (index, chat) in self.model.chat_list().chats().iter().enumerate() {
+            if shown.as_deref() == Some(chat.jid.as_str()) {
+                continue;
+            }
+            probe.select_chat(index);
+            drafts += usize::from(!probe.composer().text().is_empty());
+        }
+        Unsent { drafts, queued }
+    }
+
+    /// The line the confirmation shows before the field, when a wipe would destroy unsent work.
+    pub fn unlink_warning(&self) -> Option<String> {
+        self.unsent_work().sentence()
+    }
+
+    /// The confirmation's one button: it sends the daemon's `wipe` with `unlink: true` once (S11),
+    /// and only when `typed` is exactly [`unlink::WORD`]. There is no new frame: this is the
+    /// daemon's existing logout path (`proto/wire.md`, the wipe frame).
+    pub fn confirm_unlink(&mut self, typed: &str) -> Vec<Command> {
+        if self.unlink_running || !self.model.status().linked || typed != unlink::WORD {
+            return Vec::new();
+        }
+        self.unlink_running = true;
+        vec![Command::Send(ClientFrame::wipe(true))]
+    }
+
+    /// Whether a `wipe` is in flight: the confirmation keeps its button disabled until it lands.
+    pub fn unlink_running(&self) -> bool {
+        self.unlink_running
+    }
+
+    /// The answer to a wipe the user confirmed, until the window closed the confirmation on it:
+    /// `true` when the device is unlinked and nuncio's data is deleted.
+    pub fn take_unlink_settled(&mut self) -> Option<bool> {
+        self.unlink_settled.take()
+    }
+
+    /// The daemon's answer to the confirmation (S11): the device is unlinked and the data is
+    /// gone (the app ends on the link screen, S4), WhatsApp did not confirm it, or nothing was
+    /// deleted and the daemon said why.
+    fn wipe_reply(&mut self, result: Result<DaemonFrame, ClientError>) -> Vec<Command> {
+        self.unlink_running = false;
+        match result {
+            Ok(DaemonFrame::Wiped { unlinked: true, .. }) => {
+                self.unlink_settled = Some(true);
+                // The daemon deleted its data, its socket and exited: this app is unlinked, and
+                // the first screen belongs here without a restart. What the daemon that replaces
+                // it reports says the same.
+                self.wiped = true;
+                self.link_linked = false;
+                self.link_screen = LinkScreen::Consent;
+                self.link_started_here = false;
+                *self.link.borrow_mut() = LinkFlow::new();
+                let daemon = self.model.status().daemon.clone();
+                self.model.apply(&DaemonFrame::Status {
+                    v: PROTOCOL_VERSION,
+                    daemon,
+                    linked: false,
+                    session: Session::Unlinked,
+                    unread: 0,
+                    stop_reason: None,
+                });
+                self.model.set_notice(unlink::UNLINKED.to_owned());
+                Vec::new()
+            }
+            Ok(DaemonFrame::Wiped {
+                unlinked: false, ..
+            }) => {
+                self.unlink_settled = Some(false);
+                self.model.set_notice(unlink::UNCONFIRMED.to_owned());
+                Vec::new()
+            }
+            // The daemon refused the wipe (a logout WhatsApp did not confirm, a deletion that
+            // failed): its own sentence, and nothing changes here.
+            Err(ClientError::Daemon { message, .. }) => {
+                self.unlink_settled = Some(false);
+                self.model.set_notice(message);
+                Vec::new()
+            }
+            // An answer to a wipe that says something else: nothing is claimed for it.
+            Ok(other) => {
+                self.unlink_settled = Some(false);
+                self.model
+                    .set_notice(format!("nunciod answered `{}` to the unlink", other.op()));
+                Vec::new()
+            }
+            // The connection broke before the answer: whether the wipe happened is the daemon's
+            // word on the next connection, never this client's.
+            Err(error) => {
+                driver::lost(&mut self.model, &error);
+                Vec::new()
+            }
+        }
+    }
+
     /// Fold one daemon frame into the link screen; returns the frames the change asks for.
     fn fold_link(&mut self, frame: &DaemonFrame) -> Vec<Command> {
         let update = self.link.borrow_mut().apply(frame);
@@ -429,6 +584,7 @@ impl Controller {
                 // The daemon serves the paired device now: the chat list appears without a
                 // restart. A clean first screen is left for a later logout.
                 self.link_linked = true;
+                self.wiped = false;
                 self.link_started_here = false;
                 *self.link.borrow_mut() = LinkFlow::new();
                 self.link_screen = LinkScreen::Consent;
@@ -766,3 +922,274 @@ impl Controller {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod unlink_tests {
+    use super::*;
+    use crate::unlink::{UNCONFIRMED, UNLINKED, Unsent, WORD};
+    use nuncio_client::{Chat, PROTOCOL_VERSION};
+
+    const ANA: &str = "15551230001@s.whatsapp.net";
+    const BEN: &str = "15551230002@s.whatsapp.net";
+
+    fn chat(jid: &str, name: &str) -> Chat {
+        Chat {
+            jid: jid.to_owned(),
+            name: name.to_owned(),
+            unread: 0,
+            archived: false,
+            pinned: false,
+            muted: false,
+            aliases: Vec::new(),
+            phone: None,
+            last_message: None,
+        }
+    }
+
+    /// A controller over a linked device with Ana and Ben listed.
+    fn linked() -> Controller {
+        let model = Model::new(
+            Snapshot {
+                daemon: "nunciod/test".to_owned(),
+                linked: true,
+                session: Session::Linked,
+                unread: 0,
+                chats: vec![chat(ANA, "Ana"), chat(BEN, "Ben")],
+                stop_reason: None,
+            },
+            "d",
+        );
+        Controller::with_model(model)
+    }
+
+    /// The daemon's answer to the one `wipe` the confirmation sends.
+    fn wiped(unlinked: bool) -> Incoming {
+        Incoming::Reply {
+            request: ClientFrame::wipe(true),
+            result: Ok(DaemonFrame::Wiped {
+                v: PROTOCOL_VERSION,
+                unlinked,
+            }),
+        }
+    }
+
+    #[test]
+    fn nothing_unlinks_before_the_exact_word_is_typed() {
+        let mut c = linked();
+        for wrong in [
+            "", " ", "unlin", "unlinked", "Unlink", "UNLINK", "unlink ", " unlink",
+        ] {
+            assert!(
+                c.confirm_unlink(wrong).is_empty(),
+                "`{wrong}` is not the word"
+            );
+            assert!(!c.unlink_running(), "`{wrong}` sent nothing");
+        }
+        assert_eq!(
+            c.confirm_unlink(WORD),
+            [Command::Send(ClientFrame::wipe(true))],
+            "the exact word sends the daemon's own wipe, once"
+        );
+        assert!(c.unlink_running());
+    }
+
+    #[test]
+    fn a_second_wipe_never_goes_out_while_one_runs() {
+        let mut c = linked();
+        assert_eq!(c.confirm_unlink(WORD).len(), 1);
+        assert!(c.confirm_unlink(WORD).is_empty(), "a repeat confirm");
+        assert!(
+            c.confirm_unlink(WORD).is_empty(),
+            "a double click is one wipe"
+        );
+        c.incoming(wiped(false));
+        assert!(!c.unlink_running(), "answered: a new attempt is possible");
+        assert_eq!(c.confirm_unlink(WORD).len(), 1);
+    }
+
+    #[test]
+    fn an_unlinked_app_does_not_unlink() {
+        let model = Model::new(
+            Snapshot {
+                daemon: "nunciod/test".to_owned(),
+                linked: false,
+                session: Session::Unlinked,
+                unread: 0,
+                chats: Vec::new(),
+                stop_reason: None,
+            },
+            "d",
+        );
+        let mut c = Controller::with_model(model);
+        assert!(c.confirm_unlink(WORD).is_empty());
+    }
+
+    #[test]
+    fn the_daemons_unlinked_answer_ends_on_the_link_screen_with_one_notice() {
+        let mut c = linked();
+        assert_eq!(c.confirm_unlink(WORD).len(), 1);
+        c.incoming(wiped(true));
+        assert_eq!(
+            c.link_screen(),
+            Some(&LinkScreen::Consent),
+            "the app ends on the first screen, not on empty panes"
+        );
+        assert_eq!(c.take_notice().as_deref(), Some(UNLINKED));
+        assert_eq!(c.model().status().session, Session::Unlinked);
+        assert!(!c.model().status().linked, "the device is gone");
+        assert!(!c.unlink_running());
+        assert_eq!(c.take_unlink_settled(), Some(true));
+        assert_eq!(c.take_unlink_settled(), None, "said once");
+    }
+
+    #[test]
+    fn an_unconfirmed_unlink_is_said_and_claims_nothing() {
+        let mut c = linked();
+        c.confirm_unlink(WORD);
+        c.incoming(wiped(false));
+        assert_eq!(c.take_notice().as_deref(), Some(UNCONFIRMED));
+        assert_eq!(
+            c.link_screen(),
+            None,
+            "the device stays linked: the panes stay"
+        );
+        assert_eq!(c.model().status().session, Session::Linked);
+        assert_eq!(c.take_unlink_settled(), Some(false));
+    }
+
+    #[test]
+    fn a_refused_wipe_shows_the_daemons_message_and_changes_nothing() {
+        let message =
+            "could not delete all of nuncio's local data; run nuncio purge --confirm to finish";
+        let mut c = linked();
+        c.confirm_unlink(WORD);
+        c.incoming(Incoming::Reply {
+            request: ClientFrame::wipe(true),
+            result: Err(ClientError::Daemon {
+                code: "internal".to_owned(),
+                message: message.to_owned(),
+            }),
+        });
+        assert_eq!(c.take_notice().as_deref(), Some(message));
+        assert_eq!(c.model().status().session, Session::Linked);
+        assert!(c.model().status().linked);
+        assert!(c.link_screen().is_none());
+        assert_eq!(c.take_unlink_settled(), Some(false));
+        assert_eq!(c.confirm_unlink(WORD).len(), 1, "the user may try again");
+    }
+
+    #[test]
+    fn a_wipe_that_never_left_the_app_claims_nothing_and_can_be_redone() {
+        let mut c = linked();
+        let commands = c.confirm_unlink(WORD);
+        let [Command::Send(frame)] = commands.as_slice() else {
+            panic!("one wipe");
+        };
+        let frame = frame.clone();
+        c.incoming(Incoming::NotConnected(frame));
+        assert!(!c.unlink_running());
+        assert_eq!(c.take_unlink_settled(), None);
+        assert_eq!(
+            c.model().notice(),
+            Some("not connected to nunciod; reconnecting…")
+        );
+        assert_eq!(c.confirm_unlink(WORD).len(), 1, "nothing happened");
+    }
+
+    #[test]
+    fn a_lost_connection_does_not_claim_the_device_is_gone() {
+        let mut c = linked();
+        c.confirm_unlink(WORD);
+        c.incoming(Incoming::Lost(ClientError::Closed));
+        assert!(!c.unlink_running(), "the confirmation can be pressed again");
+        assert_eq!(c.take_unlink_settled(), None, "nothing is claimed");
+        assert!(c.link_screen().is_none());
+    }
+
+    #[test]
+    fn the_link_screen_stays_up_while_the_wiped_daemon_restarts() {
+        let mut c = linked();
+        c.confirm_unlink(WORD);
+        c.incoming(wiped(true));
+        c.take_notice();
+        // The wiped daemon exits and its socket goes, so the worker reconnects on the backoff.
+        c.incoming(Incoming::Lost(ClientError::Closed));
+        assert_eq!(
+            c.link_screen(),
+            Some(&LinkScreen::Consent),
+            "the app does not flash empty panes while the daemon restarts"
+        );
+        c.incoming(Incoming::Connected);
+        assert_eq!(c.link_screen(), Some(&LinkScreen::Consent));
+    }
+
+    #[test]
+    fn a_linked_device_brings_the_panes_back_after_a_wipe() {
+        let mut c = linked();
+        c.confirm_unlink(WORD);
+        c.incoming(wiped(true));
+        c.take_notice();
+        c.incoming(Incoming::Event(DaemonFrame::EventConnection {
+            v: PROTOCOL_VERSION,
+            session: Session::Linked,
+            stop_reason: None,
+        }));
+        assert_eq!(c.link_screen(), None, "another device is linked now");
+    }
+
+    #[test]
+    fn the_count_holds_every_chats_draft_and_queued_send() {
+        let mut c = linked();
+        assert_eq!(c.unsent_work(), Unsent::default());
+        assert_eq!(c.unlink_warning(), None);
+
+        c.open_chat(0);
+        c.set_draft("for Ana");
+        c.open_chat(1);
+        c.set_draft("for Ben");
+        assert_eq!(
+            c.unsent_work(),
+            Unsent {
+                drafts: 2,
+                queued: 0
+            },
+            "the draft of a chat the user left is counted too"
+        );
+
+        let (sent, commands) = c.send();
+        assert!(sent);
+        let [Command::Send(frame)] = commands.as_slice() else {
+            panic!("one send");
+        };
+        let ClientFrame::Send { client_id, .. } = frame else {
+            panic!("a send");
+        };
+        c.incoming(Incoming::Reply {
+            request: frame.clone(),
+            result: Ok(DaemonFrame::Sent {
+                v: PROTOCOL_VERSION,
+                client_id: client_id.clone(),
+                state: nuncio_client::SendState::Queued,
+                id: None,
+                timestamp: None,
+            }),
+        });
+        assert_eq!(
+            c.unsent_work(),
+            Unsent {
+                drafts: 1,
+                queued: 1
+            }
+        );
+        assert_eq!(
+            c.unlink_warning().as_deref(),
+            Some("1 unsent draft and 1 message waiting to send will be deleted with it.")
+        );
+        assert!(
+            c.unsent_work()
+                .sentence()
+                .is_some_and(|line| line.contains("queued") || line.contains("waiting to send")),
+            "the queued send is named as what it is"
+        );
+    }
+}

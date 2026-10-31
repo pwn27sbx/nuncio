@@ -219,6 +219,7 @@ fn main() {
     closing_in_background_mode_hides_and_keeps_the_state_and_worker(&daemon);
     the_palette_opens_on_f1_and_jumps_to_a_chat();
     the_settings_write_the_file_and_apply_at_once();
+    the_settings_unlink_asks_for_the_word_and_sends_one_wipe();
     the_search_is_inline_in_the_conversation();
     pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click();
     the_panes_the_filters_and_the_strip();
@@ -1637,7 +1638,7 @@ fn the_settings_write_the_file_and_apply_at_once() {
     // Plan §6.7: one 480 px column, sections under meta headers.
     check(view.window.default_width() == 480, "a 480 px column");
     check(
-        view.headers() == ["NOTIFICATIONS", "WINDOW", "TERMINAL CLIENT"],
+        view.headers() == ["NOTIFICATIONS", "WINDOW", "TERMINAL CLIENT", "THIS DEVICE"],
         &format!("the sections' headers: {:?}", view.headers()),
     );
     check(ui.title_bar_shown(), "the title bar is shown at first");
@@ -1690,6 +1691,157 @@ fn the_settings_write_the_file_and_apply_at_once() {
     );
     view.window.destroy();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The Settings row **Unlink this device** (S11): the destructive section asks for the exact
+/// word, says how much unsent work a wipe would destroy before the field, sends one `wipe` with
+/// `unlink: true` — the daemon's own logout path, no new frame — and the app ends on the link
+/// screen when the daemon confirms it.
+fn the_settings_unlink_asks_for_the_word_and_sends_one_wipe() {
+    let ui = listed();
+    // The daemon's word on the device: only a linked device can be unlinked.
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::status(),
+        result: Ok(DaemonFrame::Status {
+            v: PROTOCOL_VERSION,
+            daemon: "nunciod/0.1.1".to_owned(),
+            linked: true,
+            session: nuncio_client::Session::Linked,
+            unread: 0,
+            stop_reason: None,
+        }),
+    });
+    ui.take_undelivered();
+
+    let view = ui.settings_view();
+    check(
+        view.headers().last().map(String::as_str) == Some("THIS DEVICE"),
+        &format!(
+            "the destructive section is the last one: {:?}",
+            view.headers()
+        ),
+    );
+    check(
+        view.unlink_row.title() == "Unlink this device" && view.unlink_row.is_sensitive(),
+        "a linked device offers to unlink",
+    );
+
+    let dialog = view.open_unlink();
+    check(
+        dialog.body.text().contains("WhatsApp")
+            && dialog.body.text().contains("database")
+            && dialog.body.text().contains("keys")
+            && dialog.body.text().contains("media"),
+        &format!("the dialog spells out what happens: {}", dialog.body.text()),
+    );
+    check(
+        dialog.ask.text() == "Type unlink to confirm",
+        "and states the exact word it wants",
+    );
+    check(
+        !dialog.warning.get_visible(),
+        "nothing unsent: no warning before the field",
+    );
+    check(
+        !dialog.unlink.is_sensitive(),
+        "Unlink stays insensitive before the word is typed",
+    );
+    dialog.typed("unlin");
+    check(!dialog.unlink.is_sensitive(), "a prefix is not the word");
+    dialog.press();
+    check(
+        ui.take_undelivered().is_empty(),
+        "a wrong word sends nothing",
+    );
+    dialog.cancel.emit_clicked();
+    check(!ui.unlink_open(), "Cancel closes the confirmation");
+    check(
+        ui.take_undelivered().is_empty(),
+        "and leaves everything untouched",
+    );
+
+    // A draft the wipe would destroy: the confirmation says so before the field.
+    ui.open_chat(0);
+    ui.take_undelivered();
+    ui.type_draft("half a thought");
+    let dialog = view.open_unlink();
+    check(
+        dialog.warning.get_visible() && dialog.warning.text().contains("1 unsent draft"),
+        &format!("the draft is counted first: {}", dialog.warning.text()),
+    );
+    dialog.typed("unlink");
+    check(
+        dialog.unlink.is_sensitive(),
+        "the exact word enables Unlink",
+    );
+    // Realized (never shown), so the windows' close paths run for real on the answer below.
+    gtk::prelude::WidgetExt::realize(&view.window);
+    gtk::prelude::WidgetExt::realize(&dialog.window);
+    dialog.press();
+    check(
+        ui.take_undelivered() == [Command::Send(ClientFrame::wipe(true))],
+        "one wipe, with unlink: true",
+    );
+    check(!dialog.unlink.is_sensitive(), "Unlink is off while it runs");
+    dialog.press();
+    check(
+        ui.take_undelivered().is_empty(),
+        "a second press sends nothing",
+    );
+
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::wipe(true),
+        result: Ok(DaemonFrame::Wiped {
+            v: PROTOCOL_VERSION,
+            unlinked: true,
+        }),
+    });
+    check(!ui.unlink_open(), "the answer closes the confirmation");
+    check(
+        !view.window.is_visible(),
+        "and the settings window it was asked from",
+    );
+    let screen = ui.link_screen().expect("the app ends on the link screen");
+    check(
+        screen.title == "Link this device to WhatsApp" && screen.action.as_deref() == Some("Link"),
+        "with nothing to restart",
+    );
+    check(
+        ui.panes_shown() == (false, false, false),
+        "the panes give way to it",
+    );
+    check(
+        ui.last_toast().as_deref() == Some(nuncio_desktop::unlink::UNLINKED),
+        "and one line says the device was unlinked",
+    );
+    if view.window.is_realized() {
+        view.window.destroy();
+    }
+
+    // An unlinked app offers no unlink.
+    let ui = Ui::new(None, Controller::new("unlinked"), 0, true);
+    ui.incoming(Incoming::Connected);
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::status(),
+        result: Ok(DaemonFrame::Status {
+            v: PROTOCOL_VERSION,
+            daemon: "nunciod/0.1.1".to_owned(),
+            linked: false,
+            session: nuncio_client::Session::Unlinked,
+            unread: 0,
+            stop_reason: None,
+        }),
+    });
+    let view = ui.settings_view();
+    check(
+        !view.unlink_row.is_sensitive(),
+        "there is no device to unlink",
+    );
+    check(
+        view.problem.is_some(),
+        "and this test's settings have no file at all",
+    );
+    view.window.destroy();
 }
 
 /// `[app] background = true`: closing hides the window; the state and the worker stay until Quit.

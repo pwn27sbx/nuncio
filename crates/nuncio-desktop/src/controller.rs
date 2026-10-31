@@ -138,6 +138,11 @@ pub struct Controller {
     /// A `link_cancel` the worker could not deliver (the link was down): sent on the next
     /// connect, so a flow the user stopped leaves nothing behind (S7).
     link_cancel_pending: bool,
+    /// Whether this app sent the `link_start` of the flow the screen is showing. The daemon
+    /// publishes `link_qr`/`link_state` to every subscriber, so a flow another client started
+    /// (`nuncio link --qr` in a terminal) is on this screen too; leaving this window must not
+    /// cancel that one.
+    link_started_here: bool,
 }
 
 fn commands(effect: Option<Effect>) -> Vec<Command> {
@@ -194,6 +199,7 @@ impl Controller {
             link_screen: LinkScreen::Consent,
             link_linked: false,
             link_cancel_pending: false,
+            link_started_here: false,
         }
     }
 
@@ -287,6 +293,7 @@ impl Controller {
                     // Nothing reached the daemon: no flow was started.
                     *self.link.borrow_mut() = LinkFlow::new();
                     self.link_screen = LinkScreen::Consent;
+                    self.link_started_here = false;
                 }
                 driver::not_connected(&mut self.model, &frame, CLIENT);
                 Vec::new()
@@ -370,6 +377,7 @@ impl Controller {
         let probe = matches!(self.link_screen, LinkScreen::Refused(_));
         *self.link.borrow_mut() = LinkFlow::new();
         self.link_linked = false;
+        self.link_started_here = true;
         self.link_screen = LinkScreen::Starting;
         let mut commands: Vec<Command> = Vec::new();
         if probe {
@@ -383,9 +391,11 @@ impl Controller {
     /// answers once what the flow created is gone (S7). A cancel that cannot be delivered now is
     /// sent on the next connect.
     pub fn cancel_link(&mut self) -> Vec<Command> {
-        let running = matches!(self.link_screen, LinkScreen::Starting | LinkScreen::Waiting);
+        let running = self.link_started_here
+            && matches!(self.link_screen, LinkScreen::Starting | LinkScreen::Waiting);
         *self.link.borrow_mut() = LinkFlow::new();
         self.link_screen = LinkScreen::Consent;
+        self.link_started_here = false;
         if !running {
             return Vec::new();
         }
@@ -410,6 +420,8 @@ impl Controller {
                 Vec::new()
             }
             Some(LinkUpdate::State(LinkState::Failed)) => {
+                // The daemon ended the flow and removed what it created, whoever started it.
+                self.link_started_here = false;
                 self.link_screen = LinkScreen::Failed;
                 Vec::new()
             }
@@ -417,6 +429,7 @@ impl Controller {
                 // The daemon serves the paired device now: the chat list appears without a
                 // restart. A clean first screen is left for a later logout.
                 self.link_linked = true;
+                self.link_started_here = false;
                 *self.link.borrow_mut() = LinkFlow::new();
                 self.link_screen = LinkScreen::Consent;
                 self.model.resync().into_iter().map(Command::Send).collect()
@@ -445,6 +458,7 @@ impl Controller {
                 *self.link.borrow_mut() = LinkFlow::new();
                 self.link_screen = LinkScreen::Consent;
                 self.link_cancel_pending = false;
+                self.link_started_here = false;
                 Vec::new()
             }
             Ok(_) => Vec::new(),
@@ -456,6 +470,7 @@ impl Controller {
                 *self.link.borrow_mut() = LinkFlow::new();
                 self.link_screen = LinkScreen::Consent;
                 self.link_cancel_pending = false;
+                self.link_started_here = false;
                 self.model.set_notice(format!(
                     "nuncio could not remove everything linking created: {message}"
                 ));
@@ -463,6 +478,8 @@ impl Controller {
             }
             Err(ClientError::Daemon { message, .. }) => {
                 *self.link.borrow_mut() = LinkFlow::new();
+                // The daemon refused the start: no flow of ours runs.
+                self.link_started_here = false;
                 self.link_screen = if message.to_lowercase().contains("keyring") {
                     LinkScreen::Refused(LinkRefusal::Keyring)
                 } else {

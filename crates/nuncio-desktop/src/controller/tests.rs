@@ -1179,6 +1179,28 @@ fn a_link_completed_elsewhere_brings_the_chats_too() {
     assert!(c.link_screen().is_none());
 }
 
+// R3-CancelsOtherClientFlow (T7 review, BLOCKER, corroborated by the refuter): the daemon
+// publishes `link_qr` to every subscriber, so a flow a terminal started (`nuncio link --qr`) is on
+// this screen too. Leaving this window must not cancel that one, and must stop showing it.
+#[test]
+fn a_flow_this_app_did_not_start_is_never_cancelled_by_this_one() {
+    let mut c = unlinked();
+    c.incoming(Incoming::Event(qr(21)));
+
+    assert_eq!(
+        c.link_screen(),
+        Some(&LinkScreen::Waiting),
+        "another client's code is worth drawing"
+    );
+    assert_eq!(
+        c.cancel_link(),
+        Vec::new(),
+        "a flow this app did not start is not this app's to cancel"
+    );
+    assert_eq!(c.link_screen(), Some(&LinkScreen::Consent));
+    assert_eq!(c.link_qr(), None);
+}
+
 #[test]
 fn a_cancel_the_worker_could_not_deliver_is_sent_once_connected() {
     let mut c = unlinked();

@@ -57,6 +57,15 @@ func TestLinkBootstrapCreatesTheStoreAndOneDataKey(t *testing.T) {
 	} else if stored {
 		t.Error("the bootstrap stored a device before pairing")
 	}
+	// nuncio's own tables are there from the start: a request served during the handover must not
+	// answer "no such table: outbox" (T11 saw that toast right after a real link).
+	for _, table := range []string{"chats", "messages", "outbox", "outbox_replies", "chat_aliases"} {
+		var name string
+		err := b.db.QueryRow(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&name)
+		if err != nil {
+			t.Errorf("the bootstrap's store has no %s table: %v", table, err)
+		}
+	}
 	_ = b.db.Close()
 
 	b, err = openLinkBootstrap(context.Background(), path, kr)

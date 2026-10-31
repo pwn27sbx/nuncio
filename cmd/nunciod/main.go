@@ -457,7 +457,7 @@ func (d *daemon) unread() int {
 	n, err := d.unreadCount()
 	if err != nil {
 		// The error's type only: SQLite's text can quote a value.
-		log.Printf("cannot count the unread messages (%T)", err)
+		log.Printf("cannot count the unread messages (%s)", wa.ErrKind(err))
 		return 0
 	}
 	return n
@@ -489,7 +489,7 @@ func (d *daemon) Chats() []ipc.Chat {
 	rows, err := store.ListChats(db, ipc.MaxChatLimit)
 	if err != nil {
 		// The error's type only: SQLite's text can quote a value.
-		log.Printf("cannot list the chats (%T)", err)
+		log.Printf("cannot list the chats (%s)", wa.ErrKind(err))
 		return nil
 	}
 	chats := make([]ipc.Chat, 0, len(rows))

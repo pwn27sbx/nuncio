@@ -114,6 +114,13 @@ func openLinkBootstrap(ctx context.Context, dbPath string, kr store.Keyring) (*l
 	if err != nil {
 		return nil, err
 	}
+	// nuncio's own tables, before anything can query the store: the flow's database has to be
+	// complete from the moment it exists, or a request served during the handover answers
+	// "no such table: outbox" (T11 saw exactly that toast right after a real link).
+	if err := store.EnsureSchema(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	fail := func(err error) (*linkBootstrap, error) {
 		_ = db.Close()
 		return nil, err

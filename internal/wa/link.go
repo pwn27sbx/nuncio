@@ -98,13 +98,28 @@ type whatsmeowLinker struct {
 	client *whatsmeow.Client
 }
 
-func (l *whatsmeowLinker) QR(ctx context.Context) (<-chan Code, error) {
-	if err := l.client.Connect(); err != nil {
-		return nil, fmt.Errorf("wa: connecting to link: %w", err)
-	}
-	raw, err := l.client.GetQRChannel(ctx)
+// startQR subscribes to the QR channel before connecting. whatsmeow refuses the other order
+// ("GetQRChannel must be called before connecting") and refuses it immediately, so a flow that
+// connected first never published a single code: the one place the order is spelled out.
+func startQR(
+	ctx context.Context,
+	get func(context.Context) (<-chan whatsmeow.QRChannelItem, error),
+	connect func() error,
+) (<-chan whatsmeow.QRChannelItem, error) {
+	raw, err := get(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("wa: asking for a QR channel: %w", err)
+	}
+	if err := connect(); err != nil {
+		return nil, fmt.Errorf("wa: connecting to link: %w", err)
+	}
+	return raw, nil
+}
+
+func (l *whatsmeowLinker) QR(ctx context.Context) (<-chan Code, error) {
+	raw, err := startQR(ctx, l.client.GetQRChannel, l.client.Connect)
+	if err != nil {
+		return nil, err
 	}
 	out := make(chan Code)
 	go func() {
@@ -124,12 +139,9 @@ func (l *whatsmeowLinker) QR(ctx context.Context) (<-chan Code, error) {
 func (l *whatsmeowLinker) Phone(ctx context.Context, number string) (string, error) {
 	// whatsmeow wants the login websocket fully up before PairPhone: subscribe to the QR channel
 	// before connecting and wait for its first item (the QR itself is ignored in this flow).
-	qr, err := l.client.GetQRChannel(ctx)
+	qr, err := startQR(ctx, l.client.GetQRChannel, l.client.Connect)
 	if err != nil {
-		return "", fmt.Errorf("wa: preparing to link: %w", err)
-	}
-	if err := l.client.Connect(); err != nil {
-		return "", fmt.Errorf("wa: connecting to link: %w", err)
+		return "", err
 	}
 	select {
 	case <-qr:

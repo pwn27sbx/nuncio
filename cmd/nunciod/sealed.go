@@ -41,11 +41,17 @@ var (
 type daemonSession interface {
 	sessionState
 	SetEvents(*ipc.Broker)
+	// SetUnreadChanged flags the D-Bus face after every change that may move the total unread.
+	SetUnreadChanged(func())
 	Start() error
 }
 
 // openSessionOn is wa.OpenSessionOn; tests replace it.
 var openSessionOn = wa.OpenSessionOn
+
+// openDaemonSession is openSession; tests replace it to hand the daemon a session that never
+// connects.
+var openDaemonSession = openSession
 
 // openSession opens the daemon's session over the database at dbPath with the data key in kr. A
 // missing database is unlinked and nothing is created. Without a stored device the session is

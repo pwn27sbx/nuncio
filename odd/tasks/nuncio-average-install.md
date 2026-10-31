@@ -55,7 +55,7 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | T1 | S13: the unit keeps the daemon's write budget to its own data dir and pulls in the user-tmpfiles service that creates it 0700 before start; `check.sh` pins the exact single-path `ReadWritePaths` and the tmpfiles line | inline | done: RED (no tmpfiles entry, `check.sh` unguarded) → GREEN; the temporary `ReadWritePaths=%h/.local/share` was rejected by review as a sandbox widening and replaced | this commit |
 | T2 | S13: the daemon can bootstrap on first run — a "no device yet" state that opens the store and creates the data key, reached only when a link is asked | inline | done: RED (undefined `openLinkBootstrap`) → GREEN; tmpfiles' empty 0700 dir yields one 0600 store, one data key and an unpaired device with no device row written; a linked store is refused before the keyring is read, byte for byte unchanged, and its device still opens; a stopped keyring refuses with `store.ErrKeyringUnavailable` and leaves no key and no device; a key the flow did not create is never reported as its own | this commit |
 | T3 | S4/S5/S9: the wire carries the flow — `link_start`, `link_cancel`, `link_started`, `link_cancelled`, `link_qr`, `link_state`, with fixtures and both contract suites | inline | done: RED (9 unresolved types in both suites) → GREEN; 8 fixtures, spec table rows plus a "The link flow" section (no quiet zone, the QR never logged, rows as the only representation), Go types in `internal/ipc`, Rust variants with the `link_qr`/`link_state` serde renames; `go test ./internal/ipc/...` and `cargo test -p nuncio-client` green, the 177-module frame is 31.9 kB against a 1 MiB cap | this commit |
-| T4 | S4/S5/S8: the daemon serves it — handler, QR rotation, cancel, fixed failure sentences | inline | pending | — |
+| T4 | S4/S5/S8: the daemon serves it — handler, QR rotation, cancel, fixed failure sentences | inline | done: RED (undefined `LinkStarter`, `LinkCanceller`, `MaxLinkQRSize`, `LinkFailureReason`) → GREEN; `link_start` without consent (false or absent) is refused with `bad_frame` before the daemon opens anything, and the flow gates again with `wa.Gate`; one `link_qr` per code, `size`+`rows` only, at most 177 modules per side; `waiting` → codes → `linked`, and a stop carries exactly `WhatsApp stopped the linking: ask for a new QR`; cancel removes the store and only the key this flow made, and a linked store is refused before the keyring is read; a paired device is handed to the daemon, which serves it without a restart; no frame, log line or error carries the payload | this commit |
 | T5 | S9: `nuncio link` becomes a thin client of the frames, unchanged from the outside | inline | pending | — |
 | T6 | S4/S5: `nuncio-client` parses the frames and exposes the link flow to both clients | inline | pending | — |
 | T7 | S4/S6/S7/S8: the GTK app's link screen — consent, drawn QR, Link, cancel, error states, then the chat list | inline | pending | — |
@@ -124,3 +124,23 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   `ForgetDataKey`'s error, so a keyring that refuses the delete leaves a key no later flow claims —
   T4's cancel must surface a failed delete instead of ignoring it; (d) the same root from the
   reliability lens: a cleanup failure after the key was created is untested.
+- L9 (evidence, 2026-10-31, T4) The daemon serves the flow in two commits. The wire half adds
+  `LinkStarter`/`LinkCanceller` (optional, like `Searcher`, so a Handler written before them still
+  compiles), the dispatch of `link_start`/`link_cancel`, `ipc.LinkFailureReason` (the exact fixture
+  sentence) and `ipc.MaxLinkQRSize` (177), and documents the refusal in `proto/wire.md`: a
+  `link_start` without consent is answered `bad_frame` before anything opens. The daemon half adds
+  `linkFlow`: one flow at a time (`errLinkBusy`), the QR encoded with `rsc.io/qr` (now a direct
+  dependency; `qrterminal` already used it) into `size`+`rows`, `waiting`/`linked`/`failed` states,
+  and `discard` on every non-pairing end (the store it opened, and only the data key it created).
+  Pairing hands the device back through `daemon.linkedDevice`, which opens the session and swaps it
+  in: `session`/`db` now sit behind a `sync.RWMutex` (`sess()`/`store()`/`handOver`) because a flow
+  replaces them while requests are served, and the unlinked session it replaces is inert. Two bugs
+  found in self-review before the review: a finished flow left `f.run` set, so a second `link_start`
+  would have answered `errLinkBusy` forever (now cleared by the flow itself, with a test), and a
+  `link_cancel` during a start answered before the cleanup (now it waits for the start's discard).
+  Tests never reach WhatsApp: `prepareLink` is a fake Linker, `openDaemonSession` hands the daemon a
+  session that never connects, and every keyring is a fake. Verified: `gofmt`, `go vet ./...`,
+  `CGO_ENABLED=0 go build ./...`, `CGO_ENABLED=0 go test -count=1 ./...`, `go test -race -count=1
+  ./...`, `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` green; `packaging/check.sh` green except `systemd-analyze --user verify`
+  (needs `/usr/bin/nunciod`, installed in T11).

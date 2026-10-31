@@ -60,7 +60,7 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | T6 | S4/S5: `nuncio-client` parses the frames and exposes the link flow to both clients | inline | done: RED (7th event fixture dropped the connection with `Unexpected { expected: "event", got: "link_qr" }`, then `LinkFlow`/`LinkState`/`LinkUpdate` unresolved at the crate root) → GREEN; `is_event` accepts `link_qr`/`link_state`, every event fixture is received through `next_event`, and one `LinkFlow` folds the flow with `LinkQr` (row-first, bounds-safe `module()`, `Debug` without the matrix) and the daemon's failure sentence verbatim | 4378882 |
 | T7 | S4/S6/S7/S8: the GTK app's link screen — consent, drawn QR, Link, cancel, error states, then the chat list | delegated writer (context backstop) | done: RED (`cargo test -p nuncio-desktop --lib` refused to compile with `LinkFlow: Clone` unsatisfied and the missing renderer API; then the new `a_flow_this_app_did_not_start_is_never_cancelled_by_this_one` failed on the tip with `left: [Send(LinkCancel { v: 1 })]`) → GREEN; the unlinked window opens on the link screen, the only `link_start` is the press, the matrix is drawn from `LinkQr::module` in a monospace label with the 4-module quiet zone, `linked` brings the chats without a restart, `failed` shows the daemon's sentence, `Esc`/close cancels only a flow this app started, D3's keyring sentence appears only after the press with a re-probing Try again | f583d1f, e83b4d7, 7d00ecf |
 | T8 | S10: the TUI's unlinked copy stops pointing at the CLI | inline | done: RED (the new `an_unlinked_app_says_no_device_is_linked_and_points_at_nuncio` failed on the tip, which drew `No chats yet · nuncio link` for an unlinked app) → GREEN; the empty-list hint keys on `Session::Unlinked` (`No device linked · open nuncio to link it`, wrapped so a narrow pane does not cut it), a linked app with no chats keeps `No chats yet`, and the design suite asserts both at 80x24 and 240x60 | 497d9d1 |
-| T9 | S11: unlink from the app with a typed confirmation | inline | pending | — |
+| T9 | S11: unlink from the app with a typed confirmation | delegated writer (context backstop) | done: RED (34 compile errors for the five missing `Controller` methods, then the smoke `Cancel closes the confirmation` failed on a real defect: `window.close()` does nothing on an unrealized window) → GREEN; Settings gains a destructive section with **Unlink this device**, a confirmation that spells out the deletion, counts drafts and queued sends before the field, and keeps **Unlink** insensitive until exactly `unlink` is typed; confirming sends one `wipe(true)` (no new frame), only `wiped{unlinked:true}` claims it, and the app lands on the link screen without a restart | fde0c50 |
 | T10 | S12: `INSTALL.md` for the average user, the CLI into `docs/COMMAND-LINE.md`, CHANGELOG and README | inline | pending | — |
 | T11 | S15: build the package, install it, run the flow from a fresh data dir | inline | pending | — |
 
@@ -308,3 +308,30 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   their document, the README says "on a linked device" where the code tests "not unlinked", and
   the test's pane split hard-codes the border glyph — all inputs for the next touch of this
   renderer.
+- L19 (evidence and review, 2026-10-31, T9) Unlink from the app landed in one commit:
+  `crates/nuncio-desktop/src/unlink.rs` (the copy, the word, the counts), a controller state machine
+  (`unsent_work`, `unlink_warning`, `confirm_unlink`, `unlink_running`, `take_unlink_settled`,
+  `wipe_reply` over the Reply, LateReply, NotConnected and Lost paths) and the Settings row plus its
+  dialog (a new "This device" section; the exact word `unlink`; the button insensitive until it
+  matches; the draft/queued count above the field). It sends the daemon's existing `wipe(unlink)`;
+  no frame was added. Only `wiped{unlinked:true}` claims the device was unlinked — `unlinked:false`,
+  a daemon error and a lost connection each claim nothing and change nothing locally — and a
+  confirmed wipe leaves the app on the link screen (T7's first screen) with one line, no restart. An
+  independent verifier re-ran every gate and probed it: 13 wrong words (empty, prefix, case,
+  trailing space, NUL) send nothing, the exact word sends exactly one `wipe(true)`, a second and a
+  third confirm send none, and false/error/lost leave the chat list and status untouched. No
+  blocker; five advisories, all real and recorded as inputs for T10/T11: the dialog's
+  `connect_destroy` cleanup never runs (a presented window closed in gtk4-rs 0.11 is hidden, not
+  destroyed) so the "is open" tracking goes stale; a lost connection during a wipe re-enables the
+  button, so a second press can reach the daemon's wipe a second time (the daemon has no guard and
+  the app cannot know); the success notice is overwritten by the reconnect notice a moment later;
+  `unsent_work` only counts drafts and queued sends of chats already loaded; and the smoke test's
+  settings-window visibility assertion is vacuous because that window is never presented there.
+  Diagnostics of the gates: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, `cargo test --workspace` (desktop lib 227, `smoke: ok`), `gofmt`, `go vet ./...`,
+  `CGO_ENABLED=0 go test -count=1 ./...`, `packaging/check.sh` green except
+  `systemd-analyze --user verify` (T11). The review (medium; lenses risk, readability and
+  reliability) approved it and burned its authority; twelve advisory findings, none blocking, the
+  reports of which name the residual in-memory chat list after a wipe (the writer's own disclosed
+  risk) and the enable-rule written in three places — both listed for the next touch of this
+  dialog.

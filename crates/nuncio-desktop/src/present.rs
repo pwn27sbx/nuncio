@@ -9,7 +9,9 @@ use std::path::PathBuf;
 
 use nuncio_client::model::{MERGED_NOTICE, Model, chat_title, is_picture, quoted};
 use nuncio_client::wire::MessageState;
-use nuncio_client::{Chat, Message, Session, TitleBar};
+use nuncio_client::{Chat, LinkQr, Message, Session, TitleBar};
+
+use crate::controller::{LinkRefusal, LinkScreen};
 
 /// How many characters of a quoted message, a preview or a search result are shown.
 const SNIPPET: usize = 60;
@@ -923,6 +925,159 @@ pub fn shows_title_bar(
                 && !current_desktop.is_some_and(|desktop| desktop.contains("Hyprland"))
         }
     }
+}
+
+/// The light modules drawn around a code on every side: a phone finds a QR's timing pattern by
+/// its quiet zone, and `link_qr` carries none (`proto/wire.md`, "The link flow").
+pub const LINK_QUIET_ZONE: u32 = 4;
+
+/// The link screen's title (S4): what the first screen of an unlinked app says.
+pub const LINK_TITLE: &str = "Link this device to WhatsApp";
+
+/// The consent text under it: what linking does, and to whom. Pressing Link is the explicit yes
+/// the daemon requires (`link_start` carries `consent: true` only after it, S6).
+pub const LINK_CONSENT: &str = "Scan the code with your phone's WhatsApp, under Linked devices. \
+     Linking connects this computer to your account: it can then read and send your messages.";
+
+/// What the code's place says before Link is pressed: the code only exists once the daemon is
+/// asked, and the keyring is not spoken of until it answers (D3).
+pub const LINK_IDLE: &str = "The code appears here when you press Link.";
+
+/// What the code's place says while the daemon opens the store and the keyring.
+pub const LINK_STARTING: &str = "Asking nuncio for a code…";
+
+/// D3's one sentence, shown only after Link was pressed: it names both cases (a locked keyring,
+/// one that is not there) and the remedy, and the app installs nothing itself (Omarchy already
+/// ships a Secret Service).
+pub const KEYRING_SENTENCE: &str = "nuncio could not reach the keyring: unlock it, or on plain \
+     Arch install gnome-keyring (Omarchy ships a Secret Service).";
+
+/// The link screen's one button: the first press gives consent, Try again re-probes after a
+/// refusal (D3), and a failed flow offers a new code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkAction {
+    /// Ask the daemon for a code, with the user's consent.
+    Link,
+    /// Ask the daemon for its state, then for a new code.
+    TryAgain,
+    /// Ask for one more code, the consent already given.
+    NewCode,
+}
+
+impl LinkAction {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Link => "Link",
+            Self::TryAgain => "Try again",
+            Self::NewCode => "New code",
+        }
+    }
+}
+
+/// The unlinked app's first screen, as the window draws it (S4): the copy, the drawn code and
+/// its one button.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkView {
+    pub title: &'static str,
+    pub consent: &'static str,
+    /// What the code's place says while there is no code to draw.
+    pub placeholder: Option<&'static str>,
+    /// The code itself, drawn as text: one module per column, two module rows per line.
+    pub qr: Option<String>,
+    /// The daemon's failure sentence (verbatim, made safe to show), or D3's keyring sentence.
+    pub sentence: Option<String>,
+    /// The one button, when there is one to press.
+    pub action: Option<LinkAction>,
+    /// Cancel is offered once a flow may be running.
+    pub cancel: bool,
+}
+
+/// The link screen for `screen`, with `qr` (the live code) and `reason` (the daemon's sentence).
+pub fn link_view(screen: &LinkScreen, qr: Option<&LinkQr>, reason: Option<&str>) -> LinkView {
+    let (placeholder, sentence, action, cancel) = match screen {
+        LinkScreen::Consent => (Some(LINK_IDLE), None, Some(LinkAction::Link), false),
+        LinkScreen::Starting => (Some(LINK_STARTING), None, None, true),
+        LinkScreen::Waiting => (None, None, None, true),
+        LinkScreen::Failed => (
+            None,
+            reason.map(shown_text),
+            Some(LinkAction::NewCode),
+            true,
+        ),
+        LinkScreen::Refused(LinkRefusal::Keyring) => (
+            None,
+            Some(KEYRING_SENTENCE.to_owned()),
+            Some(LinkAction::TryAgain),
+            true,
+        ),
+        LinkScreen::Refused(LinkRefusal::Other(message)) => (
+            None,
+            Some(format!(
+                "nuncio could not start linking: {}",
+                shown_text(message)
+            )),
+            Some(LinkAction::TryAgain),
+            true,
+        ),
+    };
+    LinkView {
+        title: LINK_TITLE,
+        consent: LINK_CONSENT,
+        placeholder,
+        qr: qr.map(link_qr_text),
+        sentence,
+        action,
+        cancel,
+    }
+}
+
+/// `text` as one line safe to show: a sentence that came from the wire is shown verbatim, but a
+/// control character (a terminal escape, the newline that would make a second row) is dropped
+/// rather than echoed at a sink (T6 review, L13c).
+fn shown_text(text: &str) -> String {
+    text.chars().filter(|c| !c.is_control()).collect()
+}
+
+/// `qr` drawn as half blocks: one character per module across, two module rows per line, and
+/// [`LINK_QUIET_ZONE`] light modules on every side.
+///
+/// Two module rows per text line is what makes the modules square in a monospace font, whose
+/// line height is about twice its advance: `█` is two dark modules, `▀` and `▄` one, and a space
+/// two light ones. The matrix is read through [`LinkQr::module`], which is bounds-safe; `rows()`
+/// is never indexed with `size()` (the two can disagree, T6 review L13a).
+pub fn link_qr_text(qr: &LinkQr) -> String {
+    let side = qr.size() + 2 * LINK_QUIET_ZONE;
+    let lines = side.div_ceil(2);
+    let mut text = String::with_capacity((side as usize + 1) * lines as usize);
+    for line in 0..lines {
+        for column in 0..side {
+            let cell = match (
+                module(qr, 2 * line, column),
+                module(qr, 2 * line + 1, column),
+            ) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            };
+            text.push(cell);
+        }
+        if line + 1 < lines {
+            text.push('\n');
+        }
+    }
+    text
+}
+
+/// Whether the module at `row`/`column` of the drawn grid (quiet zone included) is dark.
+fn module(qr: &LinkQr, row: u32, column: u32) -> bool {
+    let Some(row) = row.checked_sub(LINK_QUIET_ZONE) else {
+        return false;
+    };
+    let Some(column) = column.checked_sub(LINK_QUIET_ZONE) else {
+        return false;
+    };
+    row < qr.size() && column < qr.size() && qr.module(row, column)
 }
 
 #[cfg(test)]

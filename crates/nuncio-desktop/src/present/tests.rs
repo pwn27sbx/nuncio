@@ -1,6 +1,6 @@
 use super::*;
 use nuncio_client::wire::{PROTOCOL_VERSION, Reaction, SendState};
-use nuncio_client::{ClientFrame, DaemonFrame, Session, Snapshot};
+use nuncio_client::{ClientFrame, DaemonFrame, LinkFlow, LinkQr, Session, Snapshot};
 
 const ANA: &str = "15551230001@s.whatsapp.net";
 const BEN: &str = "15551230002@s.whatsapp.net";
@@ -1090,4 +1090,160 @@ fn the_search_hint_shows_only_while_the_open_search_is_empty_and_focused() {
     // Only what the search does: every word must be in the message (no `from:` or `is:`).
     assert!(!SEARCH_HINT.contains(':'), "{SEARCH_HINT}");
     assert!(SEARCH_HINT.contains("every word"), "{SEARCH_HINT}");
+}
+
+/// A code as the daemon publishes it, folded the way the window folds it.
+fn code(size: u32, dark: impl Fn(u32, u32) -> bool) -> LinkQr {
+    let rows = (0..size)
+        .map(|row| {
+            (0..size)
+                .map(|col| if dark(row, col) { '1' } else { '0' })
+                .collect()
+        })
+        .collect();
+    let mut flow = LinkFlow::new();
+    flow.apply(&DaemonFrame::EventLinkQr {
+        v: PROTOCOL_VERSION,
+        size,
+        rows,
+    });
+    flow.qr().expect("a code").clone()
+}
+
+/// One character of the drawing, as (upper module dark, lower module dark).
+fn cells(line: &str) -> Vec<(bool, bool)> {
+    line.chars()
+        .map(|c| match c {
+            '█' => (true, true),
+            '▀' => (true, false),
+            '▄' => (false, true),
+            ' ' => (false, false),
+            other => panic!("{other:?} is not a half-block cell"),
+        })
+        .collect()
+}
+
+#[test]
+fn the_code_is_drawn_with_two_module_rows_per_line_and_a_four_module_quiet_zone() {
+    // QR sides are odd; 21 modules is the smallest code (version 1).
+    let size = 21;
+    let qr = code(size, |row, col| (row + col) % 3 == 0);
+    let text = link_qr_text(&qr);
+    let lines: Vec<&str> = text.lines().collect();
+    let side = (size + 2 * LINK_QUIET_ZONE) as usize;
+    assert_eq!(
+        lines.len(),
+        side.div_ceil(2),
+        "two module rows per text line: {text}"
+    );
+    for line in &lines {
+        assert_eq!(
+            line.chars().count(),
+            side,
+            "one character per module across: {line:?}"
+        );
+    }
+    // Four light modules on every side: the quiet zone a phone needs to find the code's edges.
+    for line in &lines[..2] {
+        assert!(line.trim().is_empty(), "the top quiet zone: {line:?}");
+    }
+    for line in &lines[lines.len() - 2..] {
+        assert!(line.trim().is_empty(), "the bottom quiet zone: {line:?}");
+    }
+    for line in &lines {
+        assert!(
+            line.starts_with("    "),
+            "four light modules at the left: {line:?}"
+        );
+        assert!(
+            line.ends_with("    "),
+            "four light modules at the right: {line:?}"
+        );
+    }
+    // Every module is where the frame put it, read back through `module()` (never by indexing
+    // the rows with `size`).
+    for (line, row0) in lines.iter().zip((0..).step_by(2)) {
+        for (col, (upper, lower)) in cells(line).into_iter().enumerate() {
+            for (row, dark) in [(row0, upper), (row0 + 1, lower)] {
+                if row as usize >= side {
+                    continue;
+                }
+                let inside = (LINK_QUIET_ZONE..LINK_QUIET_ZONE + size).contains(&(row));
+                let inside_col = (LINK_QUIET_ZONE..LINK_QUIET_ZONE + size).contains(&(col as u32));
+                let want = inside
+                    && inside_col
+                    && qr.module(row - LINK_QUIET_ZONE, col as u32 - LINK_QUIET_ZONE);
+                assert_eq!(dark, want, "module row {row}, column {col}");
+            }
+        }
+    }
+}
+
+#[test]
+fn a_code_shorter_than_its_size_draws_light_rather_than_panicking() {
+    // A frame whose `size` claims more rows than it carries (T6 review, L13a).
+    let mut flow = LinkFlow::new();
+    flow.apply(&DaemonFrame::EventLinkQr {
+        v: PROTOCOL_VERSION,
+        size: 25,
+        rows: vec!["1".repeat(21); 21],
+    });
+    let qr = flow.qr().expect("a code").clone();
+    let text = link_qr_text(&qr);
+    let side = (25 + 2 * LINK_QUIET_ZONE) as usize;
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), side.div_ceil(2));
+    for line in &lines {
+        assert_eq!(line.chars().count(), side);
+    }
+    // The 21 rows it does carry are dark; the four `size` claims and the frame does not carry
+    // read as light, and nothing panics drawing them.
+    assert!(lines[12].contains('▀'), "{:?}", lines[12]);
+    assert!(lines[13].trim().is_empty(), "{:?}", lines[13]);
+}
+
+#[test]
+fn only_a_pressed_link_speaks_of_the_keyring() {
+    let consent = link_view(&LinkScreen::Consent, None, None);
+    assert_eq!(consent.title, LINK_TITLE);
+    assert_eq!(consent.action, Some(LinkAction::Link));
+    assert_eq!(consent.placeholder, Some(LINK_IDLE));
+    assert_eq!(consent.qr, None, "no code before the daemon is asked");
+    assert_eq!(consent.sentence, None, "the keyring is not spoken of yet");
+    assert!(!consent.cancel, "nothing to cancel before the press");
+
+    let refused = link_view(&LinkScreen::Refused(LinkRefusal::Keyring), None, None);
+    assert_eq!(refused.action, Some(LinkAction::TryAgain));
+    assert!(refused.cancel);
+    let sentence = refused.sentence.expect("the one sentence");
+    for word in ["keyring", "unlock", "gnome-keyring", "Omarchy"] {
+        assert!(sentence.contains(word), "{sentence}");
+    }
+    assert!(
+        !sentence.contains('\n'),
+        "one line names both cases and the remedy: {sentence:?}"
+    );
+}
+
+#[test]
+fn a_failed_flow_says_the_daemons_sentence_and_offers_a_new_code() {
+    let reason = "WhatsApp stopped the linking: ask for a new QR";
+    let view = link_view(&LinkScreen::Failed, None, Some(reason));
+    assert_eq!(view.sentence.as_deref(), Some(reason), "verbatim");
+    assert_eq!(view.action, Some(LinkAction::NewCode));
+    assert!(view.cancel);
+    // The sentence comes from the wire: control characters are dropped, so it cannot carry a
+    // terminal escape or make a second row.
+    let hostile = link_view(&LinkScreen::Failed, None, Some("\u{1b}[2Jone\ncanvas\u{7}"));
+    assert_eq!(hostile.sentence.as_deref(), Some("[2Jonecanvas"));
+}
+
+#[test]
+fn a_waiting_flow_draws_the_code_and_offers_only_cancel() {
+    let qr = code(21, |row, col| (row * 7 + col) % 5 == 0);
+    let view = link_view(&LinkScreen::Waiting, Some(&qr), None);
+    assert_eq!(view.qr.as_deref(), Some(link_qr_text(&qr).as_str()));
+    assert_eq!(view.placeholder, None, "the code is the screen");
+    assert_eq!(view.action, None, "nothing to press but Cancel");
+    assert!(view.cancel);
 }

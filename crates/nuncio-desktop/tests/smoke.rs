@@ -210,6 +210,8 @@ fn main() {
     connects_and_loads_the_chats_with_no_ui_handle_kept(&daemon, "a fake daemon");
     notifications_and_the_open_chat_action();
     a_link_fills_the_composer_and_sends_nothing();
+    the_link_screen_draws_the_code_and_gives_way_to_the_chats();
+    the_worker_carries_the_flow_and_the_cancel();
     the_rail_button_asks_for_a_number_and_opens_its_chat();
     the_composer_keys_send_button_and_reply_strip();
     closing_in_background_mode_hides_and_keeps_the_state_and_worker(&daemon);
@@ -285,6 +287,269 @@ fn connects_and_loads_the_chats_with_no_ui_handle_kept(socket: &Path, what: &str
 
 const BEN: &str = "15551230002@s.whatsapp.net";
 const CARA: &str = "15551230003@s.whatsapp.net";
+
+/// The unlinked app's first screen (S4/S6/S7/S8): the consent, the one Link button, the drawn
+/// code with its quiet zone, the failure states, and the chat list once a device is paired.
+fn the_link_screen_draws_the_code_and_gives_way_to_the_chats() {
+    let ui = Ui::new(None, Controller::new("link"), 0, true);
+    ui.incoming(Incoming::Connected);
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::status(),
+        result: Ok(DaemonFrame::Status {
+            v: PROTOCOL_VERSION,
+            daemon: "nunciod/0.1.1".to_owned(),
+            linked: false,
+            session: nuncio_client::Session::Unlinked,
+            unread: 0,
+            stop_reason: None,
+        }),
+    });
+    let first = ui.link_screen().expect("the unlinked app asks to link");
+    check(
+        first.title == "Link this device to WhatsApp" && !first.consent.is_empty(),
+        "the first screen names what it does and carries the consent text",
+    );
+    check(
+        first.sentence.is_none(),
+        "the keyring is not spoken of before the press",
+    );
+    check(first.qr.is_none(), "no code before the daemon is asked");
+    check(
+        first.action.as_deref() == Some("Link") && !first.cancel && first.placeholder.is_some(),
+        "one Link button, and nothing to cancel yet",
+    );
+    check(
+        ui.panes_shown() == (false, false, false),
+        "the link screen replaces the panes",
+    );
+    check(
+        !ui.take_undelivered()
+            .iter()
+            .any(|command| matches!(command, Command::Send(ClientFrame::LinkStart { .. }))),
+        "opening the app links nothing",
+    );
+
+    ui.link_press();
+    check(
+        ui.take_undelivered() == [Command::Send(ClientFrame::link_start(true))],
+        "the press is the consent",
+    );
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::link_start(true),
+        result: Ok(DaemonFrame::LinkStarted {
+            v: PROTOCOL_VERSION,
+        }),
+    });
+    let rows: Vec<String> = (0..21)
+        .map(|row| {
+            (0..21)
+                .map(|col| if (row * 3 + col) % 4 == 0 { '1' } else { '0' })
+                .collect()
+        })
+        .collect();
+    ui.incoming(Incoming::Event(DaemonFrame::EventLinkQr {
+        v: PROTOCOL_VERSION,
+        size: 21,
+        rows,
+    }));
+    let drawing = ui.link_screen().expect("the code is on the link screen");
+    let qr = drawing.qr.expect("the code is drawn");
+    check(
+        qr.lines().count() == 15,
+        "two module rows per text line: 21 modules and the quiet zone make 15 lines",
+    );
+    check(
+        qr.lines().all(|line| line.chars().count() == 29),
+        "one character per module across, quiet zone included",
+    );
+    check(
+        drawing.placeholder.is_none() && drawing.action.is_none() && drawing.cancel,
+        "the code and Cancel, nothing to press",
+    );
+    check(drawing.monospace, "the code is drawn in a monospace label");
+
+    check(ui.press("Escape"), "Escape is the window's");
+    check(
+        ui.take_undelivered() == [Command::Send(ClientFrame::link_cancel())],
+        "Esc cancels the flow",
+    );
+    let back = ui.link_screen().expect("the first screen is back");
+    check(
+        back.qr.is_none() && back.action.as_deref() == Some("Link"),
+        "and draws no code",
+    );
+
+    ui.link_press();
+    ui.take_undelivered();
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::link_start(true),
+        result: Err(nuncio_client::ClientError::Daemon {
+            code: "internal".to_owned(),
+            message: "store: the keyring is unavailable".to_owned(),
+        }),
+    });
+    let refused = ui.link_screen().expect("the refusal stays on the screen");
+    check(
+        refused.sentence.as_deref().is_some_and(|sentence| {
+            sentence.contains("unlock") && sentence.contains("gnome-keyring")
+        }),
+        "one sentence names both cases and the remedy",
+    );
+    check(
+        refused.action.as_deref() == Some("Try again"),
+        "and one Try again",
+    );
+    ui.link_press();
+    check(
+        ui.take_undelivered()
+            == [
+                Command::Send(ClientFrame::status()),
+                Command::Send(ClientFrame::link_start(true)),
+            ],
+        "Try again probes the daemon's state first",
+    );
+
+    ui.incoming(Incoming::Event(DaemonFrame::EventLinkState {
+        v: PROTOCOL_VERSION,
+        state: nuncio_client::LinkState::Failed,
+        reason: Some("WhatsApp stopped the linking: ask for a new QR".to_owned()),
+    }));
+    let failed = ui.link_screen().expect("the failure stays on the screen");
+    check(
+        failed.sentence.as_deref() == Some("WhatsApp stopped the linking: ask for a new QR"),
+        "the daemon's sentence, as it came",
+    );
+    check(
+        failed.action.as_deref() == Some("New code"),
+        "and a new code is offered",
+    );
+
+    ui.incoming(Incoming::Event(DaemonFrame::EventLinkState {
+        v: PROTOCOL_VERSION,
+        state: nuncio_client::LinkState::Linked,
+        reason: None,
+    }));
+    check(ui.link_screen().is_none(), "the link screen gives way");
+    check(ui.panes_shown().0, "the panes are back");
+    check(
+        ui.take_undelivered()
+            .contains(&Command::Send(ClientFrame::chats(200))),
+        "the chats are asked for at once, without a restart",
+    );
+}
+
+/// A fake daemon that serves one link flow: it records every frame it reads and pushes a code as
+/// soon as `link_start` arrives, on the connection that subscribed.
+fn linking_daemon() -> (PathBuf, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let path = PathBuf::from(format!("/tmp/ndsl-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let listener = UnixListener::bind(&path).expect("bind");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscribed: std::sync::Arc<std::sync::Mutex<Option<UnixStream>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let log = std::sync::Arc::clone(&seen);
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let log = std::sync::Arc::clone(&log);
+            let subscribed = std::sync::Arc::clone(&subscribed);
+            std::thread::spawn(move || serve_link(stream, &log, &subscribed));
+        }
+    });
+    (path, seen)
+}
+
+/// One connection of [`linking_daemon`]: the requests and the subscribed one, side by side.
+fn serve_link(
+    stream: UnixStream,
+    seen: &std::sync::Mutex<Vec<String>>,
+    subscribed: &std::sync::Mutex<Option<UnixStream>>,
+) {
+    let mut out = stream.try_clone().expect("clone");
+    for line in BufReader::new(stream).lines() {
+        let Ok(line) = line else { return };
+        let op = |name: &str| line.contains(&format!("\"op\":\"{name}\""));
+        seen.lock().expect("log").push(line.clone());
+        let reply = if op("hello") {
+            include_str!("../../../proto/fixtures/hello_ok_daemon.json")
+        } else if op("subscribe") {
+            *subscribed.lock().expect("subscribed") = Some(out.try_clone().expect("clone"));
+            include_str!("../../../proto/fixtures/subscribed_response.json")
+        } else if op("status") {
+            include_str!("../../../proto/fixtures/status_response.json")
+        } else if op("chats") {
+            include_str!("../../../proto/fixtures/chats_response.json")
+        } else if op("link_start") {
+            include_str!("../../../proto/fixtures/link_started_response.json")
+        } else if op("link_cancel") {
+            include_str!("../../../proto/fixtures/link_cancelled_response.json")
+        } else {
+            continue;
+        };
+        if writeln!(out, "{}", reply.trim()).is_err() {
+            return;
+        }
+        if op("link_start") {
+            // The subscribe thread may not have stored its side yet; the client subscribes before
+            // it asks anything, so it is a matter of a few milliseconds.
+            let deadline = Instant::now() + Duration::from_secs(2);
+            let mut events = None;
+            while Instant::now() < deadline {
+                if let Some(stream) = subscribed.lock().expect("subscribed").as_mut() {
+                    events = Some(stream.try_clone().expect("clone"));
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            if let Some(mut events) = events {
+                let code = include_str!("../../../proto/fixtures/event_link_qr.json");
+                let waiting = include_str!("../../../proto/fixtures/event_link_state_waiting.json");
+                if writeln!(events, "{}", code.trim()).is_err()
+                    || writeln!(events, "{}", waiting.trim()).is_err()
+                {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// The whole path the app uses: the worker connection carries `link_start`, the daemon's `link_qr`
+/// and `link_state` reach the screen through the subscribed connection, and Escape sends
+/// `link_cancel` back over the same worker (S4/S6/S7).
+fn the_worker_carries_the_flow_and_the_cancel() {
+    let (socket, seen) = linking_daemon();
+    let ui = Ui::new(None, Controller::new("link-worker"), 0, true);
+    ui.start_worker(Settings {
+        path: socket.clone(),
+        client: "nuncio-desktop/smoke".to_owned(),
+        timeout: Duration::from_secs(2),
+        send_wait: nuncio_client::driver::SEND_WAIT,
+        backoff: Backoff::default(),
+    });
+    check(
+        wait_for(&ui, |ui| ui.link_screen().is_some()),
+        "the daemon's unlinked status shows the link screen",
+    );
+    ui.link_press();
+    check(
+        wait_for(&ui, |ui| {
+            ui.link_screen().is_some_and(|shown| shown.qr.is_some())
+        }),
+        "the code reaches the screen on the subscribed connection",
+    );
+    check(ui.press("Escape"), "Escape is the window's");
+    check(
+        wait_for(&ui, |_| {
+            seen.lock()
+                .expect("log")
+                .iter()
+                .any(|line| line.contains("\"op\":\"link_cancel\""))
+        }),
+        "the worker carries the cancel to the daemon",
+    );
+    ui.quit();
+    let _ = std::fs::remove_file(&socket);
+}
 
 /// A window with no worker and Ana and Ben listed (the commands stay undelivered).
 fn listed() -> Ui {

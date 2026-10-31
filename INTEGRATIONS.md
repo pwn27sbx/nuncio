@@ -77,9 +77,9 @@ The package installs (see [packaging/README.md](packaging/README.md)):
 
 - `/usr/lib/systemd/user/nunciod.service`: the daemon as a `systemd --user` service (`Type=dbus`,
   restarted only after a crash, slowly, and sandboxed; see [SECURITY.md](SECURITY.md#the-systemd-unit)).
-  The package does not enable it; `install.sh` offers to, or run
-  `systemctl --user enable --now nunciod.service`. Enabled, it starts at login
-  (`WantedBy=default.target`), which keeps the bar widget fed.
+  The package does not enable it: nuncio enables the login item itself the first time it opens,
+  and `install.sh` enables it unless `--no-enable` (for a machine whose app is never opened).
+  Enabled, it starts at login (`WantedBy=default.target`), which keeps the bar widget fed.
 - `/usr/share/dbus-1/services/io.github.pwn27sbx.nuncio.service`: D-Bus activation, so `nuncio`
   can start the daemon through its unit when it is not running.
 - `/etc/xdg/autostart/io.github.pwn27sbx.nuncio.Desktop.desktop`: starts nuncio-desktop at login as

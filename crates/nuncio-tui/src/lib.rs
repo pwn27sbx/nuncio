@@ -1366,13 +1366,21 @@ impl App {
             })
             .collect();
         if items.is_empty() {
-            // An empty list and a filter that hides everything are two different things.
-            let hint = if self.chats().is_empty() {
-                "   No chats yet · nuncio link"
+            // An empty list and a filter that hides everything are two different things, and an
+            // unlinked app is a third: it points at nuncio, never at the command line (S10).
+            let hint = if self.model.status().session == Session::Unlinked {
+                "   No device linked · open nuncio to link it"
+            } else if self.chats().is_empty() {
+                "   No chats yet"
             } else {
                 "   No chats under this filter · [ ]"
             };
-            frame.render_widget(Paragraph::new(Span::styled(hint, self.muted())), rows);
+            // The sentence is longer than a narrow list pane: wrapped, it stays readable instead
+            // of losing its second half.
+            frame.render_widget(
+                Paragraph::new(Span::styled(hint, self.muted())).wrap(Wrap { trim: false }),
+                rows,
+            );
         }
         // Only the pane with the keys fills its selection; the other keeps the bar (R5).
         let filled = self.pane == Pane::Chats;

@@ -93,8 +93,9 @@ nuncio-tui [--image <png>]
   (its title is then `Conversation`, so the focus still shows). The transcript opens with a
   muted `Beginning of conversation` line, which is what you see when the top is on screen; when
   there is more above or below, the free column on the right says so with `▲` or `▼`. With no
-  chat at all it says `No chat open · Tab switches panes`; an empty list says
-  `No chats yet · nuncio link`.
+  chat at all it says `No chat open · Tab switches panes`; an empty list says `No chats yet` on a
+  linked device and `No device linked · open nuncio to link it` when no device is linked, which
+  points at the app and never at a command line (S10).
 - **Read**: opening a chat that has unread messages marks it read, here and on WhatsApp too, as
   the official clients do: your other devices clear it and the sender sees blue ticks, unless read
   receipts are off in WhatsApp's privacy settings (then only your own devices clear it). A new

@@ -61,7 +61,7 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | T7 | S4/S6/S7/S8: the GTK app's link screen — consent, drawn QR, Link, cancel, error states, then the chat list | delegated writer (context backstop) | done: RED (`cargo test -p nuncio-desktop --lib` refused to compile with `LinkFlow: Clone` unsatisfied and the missing renderer API; then the new `a_flow_this_app_did_not_start_is_never_cancelled_by_this_one` failed on the tip with `left: [Send(LinkCancel { v: 1 })]`) → GREEN; the unlinked window opens on the link screen, the only `link_start` is the press, the matrix is drawn from `LinkQr::module` in a monospace label with the 4-module quiet zone, `linked` brings the chats without a restart, `failed` shows the daemon's sentence, `Esc`/close cancels only a flow this app started, D3's keyring sentence appears only after the press with a re-probing Try again | f583d1f, e83b4d7, 7d00ecf |
 | T8 | S10: the TUI's unlinked copy stops pointing at the CLI | inline | done: RED (the new `an_unlinked_app_says_no_device_is_linked_and_points_at_nuncio` failed on the tip, which drew `No chats yet · nuncio link` for an unlinked app) → GREEN; the empty-list hint keys on `Session::Unlinked` (`No device linked · open nuncio to link it`, wrapped so a narrow pane does not cut it), a linked app with no chats keeps `No chats yet`, and the design suite asserts both at 80x24 and 240x60 | 497d9d1 |
 | T9 | S11: unlink from the app with a typed confirmation | delegated writer (context backstop) | done: RED (34 compile errors for the five missing `Controller` methods, then the smoke `Cancel closes the confirmation` failed on a real defect: `window.close()` does nothing on an unrealized window) → GREEN; Settings gains a destructive section with **Unlink this device**, a confirmation that spells out the deletion, counts drafts and queued sends before the field, and keeps **Unlink** insensitive until exactly `unlink` is typed; confirming sends one `wipe(true)` (no new frame), only `wiped{unlinked:true}` claims it, and the app lands on the link screen without a restart | fde0c50 |
-| T10 | S12: `INSTALL.md` for the average user, the CLI into `docs/COMMAND-LINE.md`, CHANGELOG and README | inline | pending | — |
+| T10 | S12: `INSTALL.md` for the average user, the CLI into `docs/COMMAND-LINE.md`, CHANGELOG and README | delegated writer (context backstop) | done: `INSTALL.md` = the one install line → open nuncio → press Link → scan → chat list, then uninstall (unlink first, `pacman -R nuncio`, the three leftovers named) and no-terminal trouble-shooting, with no `systemctl` in any command block; the CLI moved into `docs/COMMAND-LINE.md` (README keeps a pointer and the one-line list); CHANGELOG `Unreleased` says the release becomes 0.2.0 when the home run passes; the package now installs `/usr/share/doc/nuncio/INSTALL.md` and the unit's `Documentation=` names it, pinned by `check.sh` and `MANIFEST`; `packaging/tests/docs.sh` refuses a page that names an `install.sh` flag the script rejects | 46e9cc3 |
 | T11 | S15: build the package, install it, run the flow from a fresh data dir | inline | pending | — |
 
 ## Log
@@ -335,3 +335,33 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   reports of which name the residual in-memory chat list after a wipe (the writer's own disclosed
   risk) and the enable-rule written in three places — both listed for the next touch of this
   dialog.
+- L20 (evidence and review, 2026-10-31, T10) The docs pass landed in one commit over eleven files.
+  `INSTALL.md` is the average-user story and nothing else: the one install line, open **nuncio**,
+  press **Link**, scan, the chat list without a restart, update, then uninstall — **unlink first**
+  (Settings → This device → Unlink this device, or `nuncio logout --confirm`), `sudo pacman -R
+  nuncio`, and exactly the three leftovers (`~/.local/share/nuncio`, the keyring item `nuncio` /
+  `store.data_key`, `~/.config/systemd/user/default.target.wants/nunciod.service`) with what
+  removes each — plus trouble-shooting in the app's own words. No command block in it runs
+  `systemctl`; README's first run follows the same flow and its install-from-source steps lost
+  their `systemctl` lines; the whole CLI moved into `docs/COMMAND-LINE.md` and README keeps a
+  pointer. The package installs `INSTALL.md` to `/usr/share/doc/nuncio/`, the unit's
+  `Documentation=` names exactly that page, and `check.sh` pins it to `MANIFEST` (a mutated unit
+  makes the pin fail, so it is not vacuous). `packaging/install.sh` stops telling the user to stop
+  the daemon and run `nuncio link`: it says to open nuncio and press Link. A new
+  `packaging/tests/docs.sh` refuses a page that names an `install.sh` flag the script rejects, that
+  puts `pacman -R` before the unlink, or that omits a leftover or runs a unit command — it exists
+  because an independent verifier found the first version of this task naming `install.sh
+  --enable`, a flag the script does not have (the fix is `unless --no-enable`). Verified: the
+  verifier re-ran `check.sh` (61 `ok`, only the pre-existing `systemd-analyze verify`),
+  `packaging/tests/uninstall.sh` (75 checks), proved the `Documentation=` pin fails on a mutated
+  unit and on an INSTALL.md dropped from `PKGBUILD.in`, classified every remaining `systemctl` hit
+  (none is an install-path instruction) and confirmed the five changed pages stay inside the
+  manifest. Review: high risk (a new executable shell test and `check.sh` process spawning),
+  approved and acknowledged with its authority burned. Six advisory findings; one of them — that
+  `packaging/tests/docs.sh` has no caller — is wrong, because `check.sh` group 7 runs every
+  `packaging/tests/*.sh` (it is reached in CI, where `/usr/bin/nunciod` exists). The real ones are
+  kept for a later pass: the flag check matches an unanchored substring (so `--dir` would pass for
+  `--directory`), it skips a renamed page silently, it only reads flags on the same line as
+  `install.sh`, the `Documentation=` pin accepts two `Documentation=` lines, and
+  `packaging/README.md:124` lost a verb ("`install.sh` offers to as well"). None blocks and none
+  reopens the candidate.

@@ -32,11 +32,16 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 	qr := fs.Bool("qr", false, "link by scanning a QR code in the terminal")
 	phone := fs.String("phone", "", "link with an 8-digit pairing code for this E.164 number")
 	consentFlag := fs.Bool("consent", false, "you have read the warning and accept the risk")
+	plain := fs.Bool("plain-qr", false, "print only the QR code, frame by frame, for a GUI to draw")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	if *qr == (*phone != "") {
 		fmt.Fprintln(stderr, "nuncio link: pass exactly one of --qr or --phone <number>")
+		return 2
+	}
+	if *plain && !*qr {
+		fmt.Fprintln(stderr, "nuncio link: --plain-qr needs --qr")
 		return 2
 	}
 
@@ -122,12 +127,15 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 	defer client.Disconnect()
 
 	if *qr {
-		if code := runQRLink(ctx, prepared.Linker, stdout, stderr); code != 0 {
+		if code := runQRLink(ctx, prepared.Linker, stdout, stderr, *plain); code != 0 {
 			return code
 		}
 		user := ""
 		if client.Store.ID != nil {
 			user = client.Store.ID.User
+		}
+		if *plain {
+			return 0
 		}
 		return linked(stdout, user)
 	}
@@ -185,7 +193,10 @@ func watch(client *whatsmeow.Client) linkEvents {
 	return ev
 }
 
-func runQRLink(ctx context.Context, linker wa.Linker, stdout, stderr io.Writer) int {
+// runQRLink draws each QR WhatsApp offers until the phone says yes. With `plain`, it writes only
+// the code's own art and nothing else: a GUI (nuncio-desktop's link screen) draws exactly these
+// lines in a monospace label and learns the outcome from the exit status.
+func runQRLink(ctx context.Context, linker wa.Linker, stdout, stderr io.Writer, plain bool) int {
 	codes, err := linker.QR(ctx)
 	if err != nil {
 		fmt.Fprintln(stderr, "nuncio link:", err)
@@ -193,11 +204,17 @@ func runQRLink(ctx context.Context, linker wa.Linker, stdout, stderr io.Writer) 
 	}
 	for code := range codes {
 		if code.Text != "" {
-			fmt.Fprintf(stdout, "\nScan with WhatsApp → Settings → Linked devices (valid %s):\n\n",
-				code.Timeout.Round(time.Second))
+			if !plain {
+				fmt.Fprintf(stdout, "\nScan with WhatsApp → Settings → Linked devices (valid %s):\n\n",
+					code.Timeout.Round(time.Second))
+			}
 			if err := wa.RenderQR(stdout, code.Text); err != nil {
 				fmt.Fprintln(stderr, "nuncio link: cannot draw the QR code:", err)
 				return 1
+			}
+			if plain {
+				// One frame per offer: the reader knows a new code starts after a blank line.
+				fmt.Fprintln(stdout)
 			}
 		}
 		if code.Done() {

@@ -26,7 +26,8 @@ const usage = `usage:
   nuncio send <jid> <message>   send one message to one chat; quote the message, it is one argument
   nuncio retry <client_id>      send again, once, a message that ended not sent (or not confirmed)
   nuncio focus <jid>            ask the running UI to open that chat
-  nuncio link --qr              link by scanning a QR code (needs --consent)
+  nuncio link --qr              link by scanning a QR code (needs --consent; --plain-qr draws
+                                only the code, for a GUI)
   nuncio link --phone N         link with an 8-digit pairing code (needs --consent)
   nuncio logout --confirm       unlink this device from WhatsApp, delete all local data, backups and keys, stop nunciod
   nuncio purge --confirm        the same without contacting WhatsApp, for a device already removed on the phone

@@ -81,7 +81,8 @@ how to uninstall it.
    nuncio link --qr --consent              # or: nuncio link --phone <E.164 number> --consent
    ```
 
-   `--qr` draws a QR code in the terminal for Settings → Linked devices → Link a device;
+   `--qr` draws a QR code in the terminal for Settings → Linked devices → Link a device
+   (`--plain-qr` prints only the code, frame by frame, for the desktop app's link screen);
    `--phone` prints an 8-digit pairing code to enter on the phone instead. Once the phone accepts
    it, the command prints `nuncio: linked as …` (the number masked to its last four digits), says
    how to start the daemon, and exits. It never sends a message.

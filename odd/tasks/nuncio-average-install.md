@@ -53,7 +53,7 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | ID | Specs | Route | Status | Commit |
 |---|---|---|---|---|
 | T1 | S13: the unit keeps the daemon's write budget to its own data dir and pulls in the user-tmpfiles service that creates it 0700 before start; `check.sh` pins the exact single-path `ReadWritePaths` and the tmpfiles line | inline | done: RED (no tmpfiles entry, `check.sh` unguarded) → GREEN; the temporary `ReadWritePaths=%h/.local/share` was rejected by review as a sandbox widening and replaced | this commit |
-| T2 | S13: the daemon can bootstrap on first run — a "no device yet" state that opens the store and creates the data key, reached only when a link is asked | inline | pending | — |
+| T2 | S13: the daemon can bootstrap on first run — a "no device yet" state that opens the store and creates the data key, reached only when a link is asked | inline | done: RED (undefined `openLinkBootstrap`) → GREEN; tmpfiles' empty 0700 dir yields one 0600 store, one data key and an unpaired device with no device row written; a linked store is refused before the keyring is read, byte for byte unchanged, and its device still opens; a stopped keyring refuses with `store.ErrKeyringUnavailable` and leaves no key and no device; a key the flow did not create is never reported as its own | this commit |
 | T3 | S4/S5/S9: the wire carries the flow — `link_start`, `link_cancel`, `link_started`, `link_cancelled`, `link_qr`, `link_state`, with fixtures and both contract suites | inline | done: RED (9 unresolved types in both suites) → GREEN; 8 fixtures, spec table rows plus a "The link flow" section (no quiet zone, the QR never logged, rows as the only representation), Go types in `internal/ipc`, Rust variants with the `link_qr`/`link_state` serde renames; `go test ./internal/ipc/...` and `cargo test -p nuncio-client` green, the 177-module frame is 31.9 kB against a 1 MiB cap | this commit |
 | T4 | S4/S5/S8: the daemon serves it — handler, QR rotation, cancel, fixed failure sentences | inline | pending | — |
 | T5 | S9: `nuncio link` becomes a thin client of the frames, unchanged from the outside | inline | pending | — |
@@ -99,3 +99,18 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   must not add any logging or `Debug` path for `link_qr`; (b) `LinkStartRequest.Consent` is a
   client-supplied boolean with no enforcement in this slice — T4 must refuse `false` or an absent
   value (Go's zero value) before it generates or publishes a single QR.
+- L7 (evidence, 2026-10-31, T2) `openLinkBootstrap` is the daemon-side path a link flow will use
+  (T4): it opens/creates the store at `wa.DBPath()` and creates the data key in the keyring only
+  while the store holds no device, and answers an unpaired `*wastore.Device`. It refuses with
+  `errLinkRefused` before asking the keyring at all when a device is stored, so a linked device's
+  store and key are never touched, and it refuses with `store.ErrKeyringUnavailable` when the
+  keyring is stopped (the same refusal `nuncio link` gives today). `createdKey` says whether this
+  call made the key, so T4's cancel deletes only a key the flow created; an existing (orphan) key is
+  reused and never claimed. A failed bootstrap forgets the key it just made. RED reproduced by
+  stashing the implementation: 6 undefined symbols in the new test. Verified: `gofmt -l cmd internal`
+  and `go vet ./...` clean, `CGO_ENABLED=0 go build ./...` clean, `CGO_ENABLED=0 go test -count=1
+  ./...` and `go test -race -count=1 ./...` green, `cargo fmt --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings` and `cargo test --workspace` green. `packaging/check.sh` passes
+  every group except `systemd-analyze --user verify`, which on this machine reports
+  `Command /usr/bin/nunciod is not executable` because the package is only installed in T11; `T2`
+  touches nothing under `packaging/` and CI runs that step in a container that installs the binary.

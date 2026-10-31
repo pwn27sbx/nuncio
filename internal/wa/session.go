@@ -569,7 +569,8 @@ var ErrCleanupPending = errors.New("wa: the old plain keys are not wiped from th
 //     new unpaired device. Nothing of a new device is written until pairing saves it: only then
 //     does its first save create the data key (when the keyring has none), read it back, write
 //     the seal check row, read the keyring again and compare (so a key another process put there
-//     meanwhile is caught) and save the device. A link that never pairs leaves no key and no row.
+//     meanwhile is caught) and save the device. A `nuncio link` that never pairs leaves no key and
+//     no row.
 func OpenDevice(ctx context.Context, db *sql.DB, dbPath string, kr store.Keyring, forLink bool) (*wastore.Device, store.MigrationResult, error) {
 	var res store.MigrationResult
 	stored, err := HasStoredDevice(ctx, db)

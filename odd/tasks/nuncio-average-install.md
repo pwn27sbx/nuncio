@@ -114,3 +114,13 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   every group except `systemd-analyze --user verify`, which on this machine reports
   `Command /usr/bin/nunciod is not executable` because the package is only installed in T11; `T2`
   touches nothing under `packaging/` and CI runs that step in a container that installs the binary.
+- L8 (review, 2026-10-31, T2) Approved (medium tier, lenses risk and reliability) with four
+  advisory findings. None blocked and none reopens this candidate; all four are inputs for T4 and
+  are recorded so they are not lost: (a) `openLinkBootstrap` carries no consent check of its own —
+  the only barrier is the caller's `wa.Gate`, so T4 must reach it behind the gate and never at
+  daemon start; (b) the 0700 assertion in the bootstrap test re-reads the mode its own helper set,
+  so it proves nothing about the daemon — the real directory is proven by T1's tmpfiles check and
+  by T11's fresh-profile run, and a future test must not claim more; (c) the failure path discards
+  `ForgetDataKey`'s error, so a keyring that refuses the delete leaves a key no later flow claims —
+  T4's cancel must surface a failed delete instead of ignoring it; (d) the same root from the
+  reliability lens: a cleanup failure after the key was created is untested.

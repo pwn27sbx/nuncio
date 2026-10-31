@@ -39,8 +39,9 @@ pub use nuncio_client::{Backoff, Reconnect};
 pub enum Source {
     /// Read from the daemon over the socket.
     Daemon,
-    /// The compiled-in fixture, because the daemon was unreachable. The screen says so.
-    Fixture,
+    /// The daemon was unreachable: an empty, unlinked screen that says so — never demo data that
+    /// a user could mistake for their own chats.
+    Unavailable,
 }
 
 /// Which pane has the keyboard.
@@ -224,16 +225,12 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
-/// The chat list from `proto/fixtures/chats_response.json`.
+/// The chat list from `proto/fixtures/chats_response.json`, for the render tests only: no
+/// production path loads it (a shipped app must never show chats nobody has).
 ///
 /// Compiled in, so the client always renders when no daemon is reachable — which is what
 /// makes S9 checkable with no daemon and no linked device. The fixture is shared with the
 /// Go daemon and checked by `nuncio-client`'s contract tests.
-pub fn fixture_snapshot() -> Snapshot {
-    Snapshot::from_chats_json(include_str!("../../../proto/fixtures/chats_response.json"))
-        .expect("the embedded chats fixture matches the wire types")
-}
-
 /// The terminal client: the shared view [`Model`] (chat list, transcript, composer and their
 /// rules) plus what only the terminal has: the focused pane, the overlays, the scroll, the
 /// pictures and the [`Palette`]. It changes only through [`App::handle_key`],
@@ -1046,8 +1043,8 @@ impl App {
     fn draw_header(&self, frame: &mut Frame, area: Rect) {
         let width = usize::from(area.width);
         let (right, style) = match self.source {
-            Source::Fixture => (
-                "FIXTURE DATA".to_owned(),
+            Source::Unavailable => (
+                "NO DAEMON".to_owned(),
                 Style::default()
                     .fg(rgb(self.palette.warning()))
                     .add_modifier(Modifier::BOLD),
@@ -1082,7 +1079,7 @@ impl App {
     /// but `linked`).
     fn state_label(&self) -> (String, bool) {
         match self.source {
-            Source::Fixture => ("no daemon".to_owned(), true),
+            Source::Unavailable => ("no daemon".to_owned(), true),
             Source::Daemon if !self.model.connected() => ("reconnecting…".to_owned(), true),
             Source::Daemon => {
                 let status = self.model.status();
@@ -1368,7 +1365,9 @@ impl App {
         if items.is_empty() {
             // An empty list and a filter that hides everything are two different things, and an
             // unlinked app is a third: it points at nuncio, never at the command line (S10).
-            let hint = if self.model.status().session == Session::Unlinked {
+            let hint = if self.source == Source::Unavailable {
+                "   nunciod is not running · open nuncio to start it"
+            } else if self.model.status().session == Session::Unlinked {
                 "   No device linked · open nuncio to link it"
             } else if self.chats().is_empty() {
                 "   No chats yet"

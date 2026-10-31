@@ -3,9 +3,9 @@
 //! Connects to `nunciod` over `$XDG_RUNTIME_DIR/nuncio/core.sock` (one request connection, one
 //! subscribed event connection, and one for sends, whose answers are awaited off the loop),
 //! renders the chat list and conversations, sends one message at a time from the (multi-line)
-//! composer, and follows the daemon's events and the Omarchy theme. **If the
-//! daemon is not reachable it still runs**, rendering `proto/fixtures/chats_response.json`
-//! instead and saying so on screen; sends are then shown as not sent. A connection lost later (a
+//! composer, and follows the daemon's events and the Omarchy theme. **If the daemon is not
+//! reachable it still runs**, with an empty screen that says so: it never shows demo data that a
+//! user could take for their own chats; sends are then shown as not sent. A connection lost later (a
 //! daemon restart) is retried on a capped backoff while the header says `reconnecting…`.
 //!
 //! It never links a WhatsApp device and never shows a QR code. The keys are in `README.md`.
@@ -16,11 +16,11 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use nuncio_client::{
-    ClientFrame, Config, DaemonFrame, ImageProtocol, PROTOCOL_VERSION, Palette, Snapshot,
+    ClientFrame, Config, DaemonFrame, ImageProtocol, PROTOCOL_VERSION, Palette, Session, Snapshot,
     ThemeWatcher, fetch, socket_path,
 };
 use nuncio_tui::images::{self, Graphics, Plan, ProtocolChoice};
-use nuncio_tui::{Action, App, Daemon, Source, fixture_snapshot, open_externally};
+use nuncio_tui::{Action, App, Daemon, Source, open_externally};
 use ratatui::crossterm::event::{
     self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
 };
@@ -107,7 +107,7 @@ fn main() -> ExitCode {
                 Daemon::disconnected(&path, CLIENT_NAME)
             })
         }),
-        Source::Fixture => None,
+        Source::Unavailable => None,
     };
 
     let mut terminal = match ratatui::try_init() {
@@ -174,13 +174,23 @@ fn main() -> ExitCode {
     }
 }
 
-/// The daemon's view, or the compiled-in fixture when the daemon is unreachable.
+/// The daemon's view, or an empty screen that says the daemon is unreachable.
 fn load_snapshot() -> (Snapshot, Source) {
     match socket_path().and_then(|path| fetch(&path, CLIENT_NAME, CHAT_LIMIT)) {
         Ok(snapshot) => (snapshot, Source::Daemon),
         Err(error) => {
-            eprintln!("nuncio-tui: no daemon ({error}); showing fixture data");
-            (fixture_snapshot(), Source::Fixture)
+            eprintln!("nuncio-tui: no daemon ({error})");
+            (
+                Snapshot {
+                    daemon: String::new(),
+                    linked: false,
+                    session: Session::Unlinked,
+                    unread: 0,
+                    chats: Vec::new(),
+                    stop_reason: None,
+                },
+                Source::Unavailable,
+            )
         }
     }
 }

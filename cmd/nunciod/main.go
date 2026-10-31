@@ -312,6 +312,9 @@ type daemon struct {
 	// closed is set once Wipe closed the session and its store: from then on nothing is served
 	// from the store, even if the wipe failed and the daemon keeps serving.
 	closed atomic.Bool
+	// wiping is set, under mu, from the moment a wipe owns the daemon until it finishes or gives
+	// up: a link flow that pairs meanwhile must not install a session over data being deleted.
+	wiping bool
 	// unreadChanged, when not nil, flags the D-Bus face that the total unread may have moved
 	// (notifyUnread); it never blocks.
 	unreadChanged func()
@@ -376,8 +379,8 @@ func (d *daemon) store() *sql.DB {
 // replaces is closed, which for the unlinked one is a no-op: it holds no client and no store.
 func (d *daemon) handOver(s sessionState, db *sql.DB) {
 	d.mu.Lock()
-	if d.closed.Load() {
-		// A wipe ran meanwhile: the data is being deleted, so the new session is not served.
+	if d.closed.Load() || d.wiping {
+		// A wipe is running or done: the data is being deleted, so the new session is not served.
 		d.mu.Unlock()
 		_ = db.Close()
 		s.Close()
@@ -639,15 +642,27 @@ func (d *daemon) Wipe(unlink bool) error {
 	if d.dataDir == "" || d.socket == "" || d.keyring == nil {
 		return errors.New("this daemon cannot wipe: it does not know its data dir, keyring or socket")
 	}
+	// The wipe owns the handover from here, under the same lock a link flow takes to install its
+	// session: a pairing that lands in this window is refused rather than served over deleted data.
+	d.mu.Lock()
+	d.wiping = true
+	session := d.session
+	d.mu.Unlock()
 	if unlink {
 		ctx, cancel := context.WithTimeout(context.Background(), logoutTimeout)
 		defer cancel()
-		if err := d.sess().Logout(ctx); err != nil {
+		if err := session.Logout(ctx); err != nil {
+			d.mu.Lock()
+			d.wiping = false
+			d.mu.Unlock()
 			return err
 		}
 	}
-	d.sess().Close()
+	d.mu.Lock()
 	d.closed.Store(true)
+	d.wiping = false
+	d.mu.Unlock()
+	session.Close()
 	// The store is closed, so the total is 0 from now on: the bar's badge clears even when the
 	// deletion below fails and the daemon keeps serving.
 	if d.unreadChanged != nil {

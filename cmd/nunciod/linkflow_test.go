@@ -287,6 +287,28 @@ func TestLinkFlowCancelRemovesOnlyWhatItCreated(t *testing.T) {
 	}
 }
 
+// A cancel whose cleanup fails is not answered as clean: the client learns something was left
+// behind instead of being told the flow removed everything.
+func TestLinkFlowCancelReportsWhatItCouldNotRemove(t *testing.T) {
+	lt := newLinkFlowTest(t)
+	withLinker(t, &fakeLinker{blocked: true})
+	if err := lt.flow.Start(true); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if !lt.kr.hasDataKey() {
+		t.Fatal("the flow did not create the data key")
+	}
+	// The keyring refuses every call from here, as one that locks between pairing and cancel does.
+	lt.kr.locked.Store(true)
+	if err := lt.flow.Cancel(); err == nil {
+		t.Fatal("Cancel answered clean while the data key could not be removed")
+	}
+	lt.kr.locked.Store(false)
+	if !lt.kr.hasDataKey() {
+		t.Fatal("the key went away, so the test did not exercise a failed cleanup")
+	}
+}
+
 // A store that already holds a linked device refuses the flow before anything is written, and
 // cancel cannot touch it: the device still opens afterwards.
 func TestLinkFlowRefusesALinkedDeviceAndCancelLeavesIt(t *testing.T) {

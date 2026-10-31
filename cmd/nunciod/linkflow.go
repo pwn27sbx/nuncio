@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"go.mau.fi/whatsmeow"
@@ -47,12 +48,14 @@ type linkFlow struct {
 	run       *linkRun      // the flow in progress, nil when none
 }
 
-// linkRun is one flow in progress: what it opened and how to stop it.
+// linkRun is one flow in progress: what it opened and how to stop it. cleanupErr is what removing
+// that turned out to be impossible, written before done closes and read by the cancel that waited.
 type linkRun struct {
-	cancel context.CancelFunc
-	done   chan struct{}
-	boot   *linkBootstrap
-	client *whatsmeow.Client
+	cancel     context.CancelFunc
+	done       chan struct{}
+	boot       *linkBootstrap
+	client     *whatsmeow.Client
+	cleanupErr error
 }
 
 // Start begins a flow and returns once it runs. It refuses without the owner's consent before it
@@ -91,11 +94,11 @@ func (f *linkFlow) Start(consent bool) error {
 	}
 	if canceled {
 		// A link_cancel arrived while the keyring blocked: the flow never ran, so it removes what
-		// this start created before the cancel is answered.
+		// this start created before the cancel is answered, and reports what it could not remove.
 		f.mu.Unlock()
-		f.discard(boot)
+		err := f.discard(boot)
 		close(done)
-		return nil
+		return err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &linkRun{cancel: cancel, done: make(chan struct{}), boot: boot}
@@ -126,7 +129,7 @@ func (f *linkFlow) Cancel() error {
 	}
 	r.cancel()
 	<-r.done
-	return nil
+	return r.cleanupErr
 }
 
 // serve runs one flow until it pairs, fails or is cancelled, and removes what it created when it
@@ -140,7 +143,10 @@ func (f *linkFlow) serve(ctx context.Context, r *linkRun, consent bool) {
 			r.client.Disconnect()
 		}
 		if !paired {
-			f.discard(r.boot)
+			r.cleanupErr = f.discard(r.boot)
+			if r.cleanupErr != nil {
+				log.Printf("the link flow could not remove everything it created: %v", r.cleanupErr)
+			}
 		}
 		// Last, so no link_start can start a new flow over the files this one is still removing.
 		f.mu.Lock()
@@ -235,31 +241,31 @@ func (f *linkFlow) publishState(state, reason string) {
 
 // discard removes what a flow that did not pair created: the store it opened and, only when this
 // flow made it, the data key. A device that was already linked is refused before any of this, so
-// nothing of a previous device is ever removed here.
-func (f *linkFlow) discard(boot *linkBootstrap) {
+// nothing of a previous device is ever removed here. It reports everything it could not remove, so
+// a cancel is never answered as clean when something was left behind.
+func (f *linkFlow) discard(boot *linkBootstrap) error {
+	var left []error
 	if boot.db != nil {
 		_ = boot.db.Close()
 	}
 	for _, p := range []string{f.dbPath, f.dbPath + "-wal", f.dbPath + "-shm"} {
 		if err := os.Remove(p); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			// The error's type only: its text names the data dir's paths.
-			log.Printf("cannot remove the link flow's store (%T)", err)
+			// The base name only: the error's own text names the data dir's paths.
+			left = append(left, fmt.Errorf("remove %s: %w", filepath.Base(p), err))
 		}
 	}
-	if !boot.createdKey {
-		return
+	if boot.createdKey {
+		key, err := store.LoadDataKey(f.kr, false)
+		if err != nil {
+			left = append(left, fmt.Errorf("read back the data key to remove it: %w", err))
+		} else {
+			defer clear(key)
+			if err := store.ForgetDataKey(f.kr, key); err != nil {
+				left = append(left, fmt.Errorf("remove the data key: %w", err))
+			}
+		}
 	}
-	key, err := store.LoadDataKey(f.kr, false)
-	if err != nil {
-		log.Printf("cannot read back the link flow's data key to remove it (%T)", err)
-		return
-	}
-	defer clear(key)
-	if err := store.ForgetDataKey(f.kr, key); err != nil {
-		// A key that stays behind seals nothing without a device, but it must not pass unnoticed:
-		// a later flow would find it and could not call it its own.
-		log.Printf("cannot remove the link flow's data key (%T)", err)
-	}
+	return errors.Join(left...)
 }
 
 // linkQR encodes payload as the matrix a link_qr frame carries: size modules per side and rows of

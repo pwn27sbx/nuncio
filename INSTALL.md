@@ -36,11 +36,7 @@ Omarchy ships one already. Without it, linking a device fails with
 
 ## First run
 
-Open **nuncio** from your launcher. That is all: the app asks the session bus for the daemon, the
-bus starts it, and the app enables the daemon's login item for you, so it comes back after a
-logout without you typing a thing. No `systemctl`, no terminal.
-
-Linking a device is still done from the command line in this version:
+**Link first, then open the app.** In this version linking is still one command:
 
 ```sh
 nuncio link --qr --consent
@@ -50,16 +46,27 @@ nuncio link --qr --consent
 without it the command only prints the warning. A QR code appears; scan it from WhatsApp on your
 phone (**Linked devices → Link a device**). A future version links from inside the app.
 
+Once it says the device is linked, open **nuncio** from your launcher. That is all: the app asks
+the session bus for the daemon, the bus starts it, and the app enables the daemon's login item for
+you, so it comes back after a logout.
+
 Then open either app:
 
 - **nuncio** (the GTK app) from your launcher — the chat list;
 - **nuncio (terminal)** from your launcher, or **`nuncio-tui`** in a terminal.
 
-If `nuncio link` refuses because `nunciod is running`, stop it first:
+### If you already opened the app before linking
+
+The running daemon holds the database, and `nuncio link` refuses while it answers — deliberately:
+two processes must never create the device. Stop it once, link, and open the app again:
 
 ```sh
 systemctl --user stop nunciod
+nuncio link --qr --consent
 ```
+
+This is the **only** command in the install path that is not `pacman`; the release that links from
+inside the app removes it.
 
 ### The Omarchy hotkey and bar badge (optional, not packaged)
 
@@ -110,8 +117,8 @@ so run them **before** `pacman -R`.
 
 - **`the keyring (Secret Service) is locked or unavailable`**: unlock your login keyring (it
   normally unlocks with your session), or install a Secret Service (see above).
-- **`nunciod is running` when linking**: `systemctl --user stop nunciod`, link, then open the app
-  again (it starts the daemon).
+- **`nunciod is running` when linking**: that is the daemon the app started. Stop it once
+  (`systemctl --user stop nunciod`), link, and open the app again; it starts the daemon itself.
 - **The apps start but show `reconnecting…`**: `systemctl --user status nunciod` says why. A
   session WhatsApp stopped (logged out, banned, another device replaced it) is shown in the app's
   status line, in fixed text.

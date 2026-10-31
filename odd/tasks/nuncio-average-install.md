@@ -55,7 +55,7 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | T1 | S13: the unit keeps the daemon's write budget to its own data dir and pulls in the user-tmpfiles service that creates it 0700 before start; `check.sh` pins the exact single-path `ReadWritePaths` and the tmpfiles line | inline | done: RED (no tmpfiles entry, `check.sh` unguarded) → GREEN; the temporary `ReadWritePaths=%h/.local/share` was rejected by review as a sandbox widening and replaced | this commit |
 | T2 | S13: the daemon can bootstrap on first run — a "no device yet" state that opens the store and creates the data key, reached only when a link is asked | inline | done: RED (undefined `openLinkBootstrap`) → GREEN; tmpfiles' empty 0700 dir yields one 0600 store, one data key and an unpaired device with no device row written; a linked store is refused before the keyring is read, byte for byte unchanged, and its device still opens; a stopped keyring refuses with `store.ErrKeyringUnavailable` and leaves no key and no device; a key the flow did not create is never reported as its own | this commit |
 | T3 | S4/S5/S9: the wire carries the flow — `link_start`, `link_cancel`, `link_started`, `link_cancelled`, `link_qr`, `link_state`, with fixtures and both contract suites | inline | done: RED (9 unresolved types in both suites) → GREEN; 8 fixtures, spec table rows plus a "The link flow" section (no quiet zone, the QR never logged, rows as the only representation), Go types in `internal/ipc`, Rust variants with the `link_qr`/`link_state` serde renames; `go test ./internal/ipc/...` and `cargo test -p nuncio-client` green, the 177-module frame is 31.9 kB against a 1 MiB cap | this commit |
-| T4 | S4/S5/S8: the daemon serves it — handler, QR rotation, cancel, fixed failure sentences | inline | done: RED (undefined `LinkStarter`, `LinkCanceller`, `MaxLinkQRSize`, `LinkFailureReason`) → GREEN; `link_start` without consent (false or absent) is refused with `bad_frame` before the daemon opens anything, and the flow gates again with `wa.Gate`; one `link_qr` per code, `size`+`rows` only, at most 177 modules per side; `waiting` → codes → `linked`, and a stop carries exactly `WhatsApp stopped the linking: ask for a new QR`; cancel removes the store and only the key this flow made, and a linked store is refused before the keyring is read; a paired device is handed to the daemon, which serves it without a restart; no frame, log line or error carries the payload | this commit |
+| T4 | S4/S5/S8: the daemon serves it — handler, QR rotation, cancel, fixed failure sentences | inline | done: RED (undefined `LinkStarter`, `LinkCanceller`, `MaxLinkQRSize`, `LinkFailureReason`) → GREEN; `link_start` without consent (false or absent) is refused with `bad_frame` before the daemon opens anything, and the flow gates again with `wa.Gate`; one `link_qr` per code, `size`+`rows` only, at most 177 modules per side; `waiting` → codes → `linked`, and a stop carries exactly `WhatsApp stopped the linking: ask for a new QR`; cancel removes the store and only the key this flow made, and a linked store is refused before the keyring is read; a paired device is handed to the daemon, which serves it without a restart; no frame, log line or error carries the payload | f2cfc78 (wire), 70b44ab (daemon), fixes 261c69a, 0efa996, c1bb599 |
 | T5 | S9: `nuncio link` becomes a thin client of the frames, unchanged from the outside | inline | pending | — |
 | T6 | S4/S5: `nuncio-client` parses the frames and exposes the link flow to both clients | inline | pending | — |
 | T7 | S4/S6/S7/S8: the GTK app's link screen — consent, drawn QR, Link, cancel, error states, then the chat list | inline | pending | — |
@@ -155,3 +155,19 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   in the same PR: `gga`'s `claude` provider is out of quota, `codex` returns nothing and `gemini` is
   retired, so `.gga` now reviews with `opencode:opencode-go/deepseek-v4.1-flash#high` through the
   tool-free `gga-reviewer` agent, and `STRICT_MODE` stays on.
+- L11 (incident, 2026-10-31, T4) The review's bounded correction landed (c1bb599) but its targeted
+  validator could not be captured: the provider task for `provider_targeted_validator` carries
+  `lineage_id`, `revision`, `target_identity`, `repository_context` and `role`, and the capture
+  arguments carry `lineage`, `expected-revision`, `target`, `repository-context`, `agent`, `role` —
+  neither a `request_hash` nor the validation request itself, while `review inspect-candidate
+  --purpose targeted-validation` requires "the exact provider-issued repository context, revision,
+  lineage, target, and request hash". The relay refused twice with
+  `opencode_review_transport_relay_refused (reason: output_refused, cause: role_capture_failed)` and
+  STATUS keeps re-offering the identical slot, so the lineage stays in `correction_required` with no
+  runnable exit. This is the equivalent already tracked as
+  https://github.com/Gentleman-Programming/gentle-ai/issues/4972 (open, same contract and runtime),
+  on which one occurrence was added with the observed evidence and no label changed; the installed
+  build is 4.3.1 stable, so no published fix is claimed. The correction is verified by the gates
+  (`gofmt`, `go vet`, `CGO_ENABLED=0 go test ./...`, `go test -race ./cmd/nunciod/`, the GGA
+  review) but carries no native receipt; its authority is not burned, and a fresh review of the
+  corrected commit can start when the defect is fixed. T5 proceeds.

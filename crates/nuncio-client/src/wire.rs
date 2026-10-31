@@ -100,6 +100,17 @@ pub enum ClientFrame {
         jid: String,
         id: String,
     },
+    /// Start the device-linking flow: the daemon generates the QR, the client only draws it.
+    /// `consent` is `true` only when the user gave their explicit yes; `false` is a refusal that
+    /// links nothing.
+    LinkStart {
+        v: u8,
+        consent: bool,
+    },
+    /// Stop a linking flow in progress; it leaves no device, store or keyring entry behind.
+    LinkCancel {
+        v: u8,
+    },
 }
 
 impl ClientFrame {
@@ -223,6 +234,21 @@ impl ClientFrame {
             id: id.into(),
         }
     }
+
+    /// The `link_start` frame. `consent` is `true` only when the user gave their explicit yes in
+    /// the app; `false` is a refusal, and it links nothing.
+    pub fn link_start(consent: bool) -> Self {
+        Self::LinkStart {
+            v: PROTOCOL_VERSION,
+            consent,
+        }
+    }
+
+    pub fn link_cancel() -> Self {
+        Self::LinkCancel {
+            v: PROTOCOL_VERSION,
+        }
+    }
 }
 
 /// A frame the daemon sends to a client.
@@ -319,6 +345,15 @@ pub enum DaemonFrame {
         jid: String,
         unread: u32,
     },
+    /// A linking flow started (the `link_start` asked for it with consent): its `link_qr` and
+    /// `link_state` frames follow on a subscribed connection.
+    LinkStarted {
+        v: u8,
+    },
+    /// A linking flow stopped; no device was linked.
+    LinkCancelled {
+        v: u8,
+    },
     EventMessage {
         v: u8,
         jid: String,
@@ -348,6 +383,25 @@ pub enum DaemonFrame {
         v: u8,
         chat: Chat,
     },
+    /// One QR code of a linking flow: `size` modules per side, `rows` its matrix, row 0 first, each
+    /// row `size` characters of `0` or `1`. It carries no quiet zone, so a client draws a 4-module
+    /// margin around it. The matrix is ephemeral pairing material and must never be logged; `size`
+    /// and `rows` are its only representation on the wire.
+    #[serde(rename = "link_qr")]
+    EventLinkQr {
+        v: u8,
+        size: u32,
+        rows: Vec<String>,
+    },
+    /// Where a linking flow stands: `reason` is the one fixed sentence to show, set only when the
+    /// state is `failed`.
+    #[serde(rename = "link_state")]
+    EventLinkState {
+        v: u8,
+        state: LinkState,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// A frame whose `op` this build does not know: an event or a reply a newer daemon added.
     /// Only its `op` is kept; it serialises as `{"op": op}`.
     #[serde(skip)]
@@ -371,11 +425,15 @@ const KNOWN_DAEMON_OPS: &[&str] = &[
     "media_ready",
     "reacted",
     "marked_read",
+    "link_started",
+    "link_cancelled",
     "event_message",
     "event_connection",
     "event_unread",
     "event_focus",
     "event_chat",
+    "link_qr",
+    "link_state",
 ];
 
 impl Serialize for DaemonFrame {
@@ -421,11 +479,15 @@ impl DaemonFrame {
             Self::MediaReady { .. } => "media_ready",
             Self::Reacted { .. } => "reacted",
             Self::MarkedRead { .. } => "marked_read",
+            Self::LinkStarted { .. } => "link_started",
+            Self::LinkCancelled { .. } => "link_cancelled",
             Self::EventMessage { .. } => "event_message",
             Self::EventConnection { .. } => "event_connection",
             Self::EventUnread { .. } => "event_unread",
             Self::EventFocus { .. } => "event_focus",
             Self::EventChat { .. } => "event_chat",
+            Self::EventLinkQr { .. } => "link_qr",
+            Self::EventLinkState { .. } => "link_state",
             Self::Unknown { op } => op,
         }
     }
@@ -518,6 +580,25 @@ impl StopReason {
             Self::DeviceUnreadable => "the stored key does not open this device: see SECURITY.md",
         }
     }
+}
+
+/// Where a device-linking flow stands (`link_state`). A linking failure is not a `stop_reason`: it
+/// says nothing about a device that was already linked.
+///
+/// A state this build does not know becomes [`LinkState::Unknown`], for the same reason
+/// [`Session::Unknown`] exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkState {
+    /// The flow runs and a `link_qr` is (or will be) published; a later one replaces it.
+    Waiting,
+    /// The device is paired; the session's own frames follow.
+    Linked,
+    /// The flow ended without linking; `reason` carries the one fixed sentence to show.
+    Failed,
+    /// A state this build does not know yet.
+    #[serde(other)]
+    Unknown,
 }
 
 /// The state of an accepted send. Unknown states become [`SendState::Unknown`] for the same

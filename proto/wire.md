@@ -51,6 +51,8 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `search` | `v`, `op`, `jid`, `query` (string, every word must match), `limit` (int, 1..200); answered with `messages` (added in M2) | `search_request.json` |
 | `react` | `v`, `op`, `jid`, `id` (the message id), `emoji` (string; empty removes my reaction) (added in M2) | `react_request.json`, `react_remove_request.json` |
 | `mark_read` | `v`, `op`, `jid`; a UI sends it when the user opens the chat, which marks the chat read here and on WhatsApp (added in M2) | `mark_read_request.json` |
+| `link_start` | `v`, `op`, `consent` (bool: `true` only when the user gave their explicit yes in the client; `false` is a refusal that links nothing); see "The link flow" (added in the link-from-the-app work) | `link_start_request.json` |
+| `link_cancel` | `v`, `op`; stops the linking flow and leaves no device behind; see "The link flow" (added in the link-from-the-app work) | `link_cancel_request.json` |
 
 ### daemon → client
 
@@ -69,6 +71,8 @@ a `Z` suffix (`2026-10-18T17:55:04Z`).
 | `media_ready` | `v`, `op`, `jid`, `id`, `path` (string: the cached file), `mime` (string) | `media_ready_response.json` |
 | `reacted` | `v`, `op`, `jid`, `id`, `emoji` (as asked; empty = removed) (added in M2) | `reacted_response.json` |
 | `marked_read` | `v`, `op`, `jid`, `unread` (int: the new total unread count) (added in M2) | `marked_read_response.json` |
+| `link_started` | `v`, `op`; answers a `link_start` whose `consent` is `true`: the flow runs and its events follow on subscribed connections (added in the link-from-the-app work) | `link_started_response.json` |
+| `link_cancelled` | `v`, `op`; answers a `link_cancel`: the flow stopped and no device was linked (added in the link-from-the-app work) | `link_cancelled_response.json` |
 
 ### Events (daemon → subscribed clients)
 
@@ -91,6 +95,39 @@ because events were lost; to avoid it, a UI drains every queued event on each ti
 | `event_unread` | `v`, `op`, `unread` (int, total), `jid`, `chat_unread` (int) | `event_unread.json` |
 | `event_focus` | `v`, `op`, `jid` | `event_focus.json` |
 | `event_chat` | `v`, `op`, `chat` (Chat): published when app-state sync from another device changes a chat's pin, archive or mute; `chat` is the chat as it now is, as `chats` would list it (its unread count and `last_message` included), so a client replaces the chat with the same `jid` or adds it (added in M2). Also published after every merge of a contact's phone-number chat into her LID chat, with `aliases` (T15, see "One chat per contact"): a client then drops or renames the entries named in `aliases`. Also published when a chat's `name` changes (see "Chat names") | `event_chat.json`, `event_chat_aliases.json`, `event_chat_phone.json` |
+| `link_qr` | `v`, `op`, `size` (int: modules per side), `rows` (array of `size` strings, each `size` characters long, every character `0` or `1`, row 0 first; no quiet zone, see "The link flow") (added in the link-from-the-app work) | `event_link_qr.json` |
+| `link_state` | `v`, `op`, `state` (`waiting`, `linked` or `failed`), `reason` (string, present only when `state` is `failed`: one fixed sentence chosen by nuncio); see "The link flow" (added in the link-from-the-app work) | `event_link_state_waiting.json`, `event_link_state_linked.json`, `event_link_state_failed.json` |
+
+### The link flow
+
+Pairing a device is the daemon's job, so no client needs its own WhatsApp session: a client asks
+`link_start` (with the user's explicit `consent`), the daemon answers `link_started`, and from then
+on it publishes, to subscribed connections, one `link_qr` per QR code it generates and one
+`link_state` per change of the flow:
+
+- `waiting` — the flow runs and a QR is (or will be) published; `link_qr` frames refresh while it
+  waits, each one replacing the one before.
+- `linked` — the device is paired; the session's usual frames follow (`event_connection` with
+  `linked`, then the chat list over `chats`), so a client shows the chats without restarting.
+- `failed` — the flow ended without linking (WhatsApp stopped it, a ban or a logout while pairing,
+  or one that simply expired); `reason` is the one fixed sentence a client shows, then it offers a
+  new QR (`link_start` again). It is not a `stop_reason`, and it says nothing about a device that
+  was already linked.
+
+`link_cancel` stops a flow in progress and is answered `link_cancelled`; it leaves no device, no
+store and no keyring entry behind. `nuncio link --qr --consent` is a thin client of these same
+frames.
+
+Two things a client author cannot infer from the tables:
+
+- **No quiet zone.** `link_qr` carries the matrix only: `rows[0]` is the first module row and
+  `rows[r][c]` is one module, `0` or `1`. A client that draws it adds a margin of **4 modules**
+  around the matrix itself (in the app's background colour, outside the drawn matrix), because a QR
+  code only scans with that margin around it.
+- **The QR is ephemeral pairing material.** It is a short-lived secret that pairs the account, so it
+  MUST NOT be logged, kept in a file, or shown in a log line, a crash report or a notification; and
+  `size` and `rows` are its only representation on the wire — no payload string, reference or key
+  ever travels with it or instead of it. A client holds it only as long as the drawn screen lives.
 
 ### `session`
 

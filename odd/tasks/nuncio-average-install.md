@@ -54,7 +54,7 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 |---|---|---|---|---|
 | T1 | S13: the unit keeps the daemon's write budget to its own data dir and pulls in the user-tmpfiles service that creates it 0700 before start; `check.sh` pins the exact single-path `ReadWritePaths` and the tmpfiles line | inline | done: RED (no tmpfiles entry, `check.sh` unguarded) → GREEN; the temporary `ReadWritePaths=%h/.local/share` was rejected by review as a sandbox widening and replaced | this commit |
 | T2 | S13: the daemon can bootstrap on first run — a "no device yet" state that opens the store and creates the data key, reached only when a link is asked | inline | pending | — |
-| T3 | S4/S5/S9: the wire carries the flow — `link_start`, `link_qr`, `link_state`, `link_cancel`, with fixtures and both contract suites | inline | pending | — |
+| T3 | S4/S5/S9: the wire carries the flow — `link_start`, `link_cancel`, `link_started`, `link_cancelled`, `link_qr`, `link_state`, with fixtures and both contract suites | inline | done: RED (9 unresolved types in both suites) → GREEN; 8 fixtures, spec table rows plus a "The link flow" section (no quiet zone, the QR never logged, rows as the only representation), Go types in `internal/ipc`, Rust variants with the `link_qr`/`link_state` serde renames; `go test ./internal/ipc/...` and `cargo test -p nuncio-client` green, the 177-module frame is 31.9 kB against a 1 MiB cap | this commit |
 | T4 | S4/S5/S8: the daemon serves it — handler, QR rotation, cancel, fixed failure sentences | inline | pending | — |
 | T5 | S9: `nuncio link` becomes a thin client of the frames, unchanged from the outside | inline | pending | — |
 | T6 | S4/S5: `nuncio-client` parses the frames and exposes the link flow to both clients | inline | pending | — |
@@ -86,3 +86,10 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   `ReadWritePaths` under `ProtectSystem=strict` writes inside it, and
   `~/.local/share/applications` is not writable. The first transaction escalated without a
   receipt, so its boundary does not advance; the final state is reviewed again.
+- L5 (evidence, 2026-10-31, T3) The wire half landed with 8 fixtures. Three things a later unit
+  must not forget, all found while implementing: (a) `crates/nuncio-client/src/conn.rs`'s
+  `is_event` is a hand-maintained allow-list, so `link_qr`/`link_state` drop the connection until
+  T6 adds them there; (b) `LinkState` is not re-exported from `nuncio-client`'s `lib.rs` yet, also
+  T6; (c) the failed sentence in `proto/fixtures/event_link_state_failed.json` is
+  "WhatsApp stopped the linking: ask for a new QR", and T4 must emit exactly that text (or change
+  the fixture with it), and T4 owns clamping `link_qr.size` (177 modules is the largest QR).

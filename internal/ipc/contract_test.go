@@ -447,8 +447,81 @@ func fixtureCases() []fixtureCase {
 				return MarkedRead{V: 1, Op: OpMarkedRead, JID: "15551230001@s.whatsapp.net", Unread: 17}
 			},
 		},
+		{
+			file:  "link_start_request.json",
+			into:  func() any { return &LinkStartRequest{} },
+			build: func() any { return LinkStartRequest{V: 1, Op: OpLinkStart, Consent: true} },
+		},
+		{
+			file:  "link_cancel_request.json",
+			into:  func() any { return &LinkCancelRequest{} },
+			build: func() any { return LinkCancelRequest{V: 1, Op: OpLinkCancel} },
+		},
+		{
+			file:  "link_started_response.json",
+			into:  func() any { return &LinkStarted{} },
+			build: func() any { return LinkStarted{V: 1, Op: OpLinkStarted} },
+		},
+		{
+			file:  "link_cancelled_response.json",
+			into:  func() any { return &LinkCancelled{} },
+			build: func() any { return LinkCancelled{V: 1, Op: OpLinkCancelled} },
+		},
+		{
+			file: "event_link_qr.json",
+			into: func() any { return &EventLinkQR{} },
+			build: func() any {
+				return EventLinkQR{V: 1, Op: OpLinkQR, Size: len(fixtureLinkQRRows), Rows: fixtureLinkQRRows}
+			},
+		},
+		{
+			file:  "event_link_state_waiting.json",
+			into:  func() any { return &EventLinkState{} },
+			build: func() any { return EventLinkState{V: 1, Op: OpLinkState, State: LinkWaiting} },
+		},
+		{
+			file:  "event_link_state_linked.json",
+			into:  func() any { return &EventLinkState{} },
+			build: func() any { return EventLinkState{V: 1, Op: OpLinkState, State: LinkLinked} },
+		},
+		{
+			file: "event_link_state_failed.json",
+			into: func() any { return &EventLinkState{} },
+			build: func() any {
+				return EventLinkState{V: 1, Op: OpLinkState, State: LinkFailed, Reason: fixtureLinkFailureReason}
+			},
+		},
 	}
 }
+
+// fixtureLinkQRRows is the matrix of proto/fixtures/event_link_qr.json: 21 modules per side, row 0
+// first, with no quiet zone (a client draws the 4-module margin itself).
+var fixtureLinkQRRows = []string{
+	"111111101011101111111",
+	"100000100001001000001",
+	"101110100100101011101",
+	"101110101100101011101",
+	"101110101000001011101",
+	"100000100010101000001",
+	"111111101010101111111",
+	"000000001001000000000",
+	"011010110010011000000",
+	"110011001101101100101",
+	"010000111101000001010",
+	"101100000001110011111",
+	"000001100001010001011",
+	"000000000101011100010",
+	"111111100110111010111",
+	"100000100001010101011",
+	"101110101000011101110",
+	"101110100010011100001",
+	"101110101110011001101",
+	"100000100101110000011",
+	"111111100100100001110",
+}
+
+// fixtureLinkFailureReason is the fixed sentence a failed linking flow carries in its reason.
+const fixtureLinkFailureReason = "WhatsApp stopped the linking: ask for a new QR"
 
 // fixtureMediaPath is the path in media_ready_response.json.
 const fixtureMediaPath = "/home/ada/.local/share/nuncio/media/e9603b3a3952bcc1847052b2b73de4ac145b06a2c5a615735b7440e41d65ad12.jpeg"
@@ -545,6 +618,8 @@ func TestFixturesCarryVersionOne(t *testing.T) {
 		OpEventConnection: true, OpEventUnread: true, OpEventFocus: true, OpWipe: true, OpWiped: true,
 		OpDownloadMedia: true, OpMediaReady: true, OpRetry: true, OpSearch: true, OpReact: true, OpReacted: true,
 		OpMarkRead: true, OpMarkedRead: true, OpEventChat: true,
+		OpLinkStart: true, OpLinkCancel: true, OpLinkStarted: true, OpLinkCancelled: true,
+		OpLinkQR: true, OpLinkState: true,
 	}
 	for _, tc := range fixtureCases() {
 		t.Run(tc.file, func(t *testing.T) {
@@ -673,5 +748,46 @@ func TestMaskPhoneKeepsTheLastFourDigitsOnly(t *testing.T) {
 		if got := MaskPhone(tc.in); got != tc.want {
 			t.Errorf("MaskPhone(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// A link_qr frame carries a regular matrix and nothing else: size rows of size characters of "0" or
+// "1", row 0 first, with no quiet zone (a client draws the 4-module margin itself).
+func TestLinkQRFramesCarryARegularMatrix(t *testing.T) {
+	var ev EventLinkQR
+	if err := json.Unmarshal(readFixture(t, "event_link_qr.json"), &ev); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if ev.Op != OpLinkQR {
+		t.Fatalf("op = %q, want %q", ev.Op, OpLinkQR)
+	}
+	if len(ev.Rows) != ev.Size {
+		t.Fatalf("got %d rows for size %d, want %d", len(ev.Rows), ev.Size, ev.Size)
+	}
+	for r, row := range ev.Rows {
+		if len(row) != ev.Size {
+			t.Errorf("row %d has %d characters, want %d", r, len(row), ev.Size)
+		}
+		if strings.Trim(row, "01") != "" {
+			t.Errorf("row %d has a character that is not 0 or 1: %q", r, row)
+		}
+	}
+}
+
+// The largest matrix a QR code can hold (version 40: 177 modules per side) still fits in one frame,
+// with room to spare: a layout, not a payload, is what a link_qr frame carries.
+func TestALargestLinkQRFrameFitsTheFrameLimit(t *testing.T) {
+	const side = 177
+	rows := make([]string, side)
+	for i := range rows {
+		rows[i] = strings.Repeat("1", side)
+	}
+	frame := EventLinkQR{V: 1, Op: OpLinkQR, Size: side, Rows: rows}
+	got, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if len(got)+1 > MaxFrameLen {
+		t.Fatalf("the largest link_qr frame is %d bytes, over the %d byte limit", len(got)+1, MaxFrameLen)
 	}
 }

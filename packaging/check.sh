@@ -104,6 +104,21 @@ if grep -qE '^(ProtectHome|PrivateNetwork|IPAddressDeny|PrivateUsers)=' "$unit";
 else
 	pass "unit: no ProtectHome/PrivateNetwork/IPAddressDeny"
 fi
+# The daemon's write budget under ProtectSystem=strict is exactly its own data directory. A
+# client-visible widening (or a second path on the same line) would let the process that parses
+# untrusted WhatsApp input write other applications' data and launchers.
+writable=$(sed -n 's/^ReadWritePaths=//p' "$unit")
+if [[ $writable == '-%h/.local/share/nuncio' ]]; then
+	pass "unit: the daemon's write budget is its own data dir"
+else
+	fail "unit: ReadWritePaths must be exactly -%h/.local/share/nuncio (found: ${writable:-none})"
+fi
+# And that directory has to exist before the unit starts, or the `-` prefix skips it and the
+# daemon has no writable store at all: systemd-tmpfiles creates it, and the unit pulls it in.
+tmpfiles=$here/nuncio-tmpfiles.conf
+has "$tmpfiles" 'd %h/.local/share/nuncio 0700 - - -' "tmpfiles: creates the data dir 0700"
+has "$unit" 'Wants=systemd-tmpfiles-setup.service' "unit: pulls in systemd-tmpfiles"
+has "$unit" 'After=systemd-tmpfiles-setup.service' "unit: starts after systemd-tmpfiles created the dir"
 # The daemon's name in the code and in the packaging files must be the same string.
 code_name=$(sed -n 's/^[[:space:]]*DaemonName = "\(.*\)"$/\1/p' "$root/internal/ipc/connect.go")
 has "$here/io.github.pwn27sbx.nuncio.service" "Name=$code_name" "D-Bus service: Name= is the code's DaemonName ($code_name)"

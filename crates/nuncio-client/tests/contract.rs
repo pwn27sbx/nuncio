@@ -12,7 +12,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use nuncio_client::wire::{MessageState, Reaction};
+use nuncio_client::wire::{LinkState, MessageState, Reaction};
 use nuncio_client::{
     Chat, ClientFrame, DaemonFrame, ErrorCode, MAX_FRAME_BYTES, Media, Message, PROTOCOL_VERSION,
     SendState, Session, StopReason,
@@ -86,12 +86,12 @@ fn every_fixture_round_trips_through_exactly_one_direction() {
 }
 
 #[test]
-fn fixture_directory_holds_the_forty_eight_documented_files() {
+fn fixture_directory_holds_the_fifty_six_documented_files() {
     let names: Vec<String> = fixture_files()
         .iter()
         .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
         .collect();
-    assert_eq!(names.len(), 48, "unexpected fixture count: {names:?}");
+    assert_eq!(names.len(), 56, "unexpected fixture count: {names:?}");
 }
 
 /// The client frames the Rust client actually sends must byte-for-byte agree with the
@@ -823,7 +823,7 @@ fn every_daemon_fixture_parses_to_its_own_variant_not_the_catch_all() {
             Err(_) => assert!(is_client, "{name}: a daemon fixture does not parse"),
         }
     }
-    assert_eq!(daemon_fixtures, 33, "every daemon fixture was checked");
+    assert_eq!(daemon_fixtures, 39, "every daemon fixture was checked");
 }
 
 /// ADR 0001: `event_chat` (and `chats`) name the phone-number chats merged into a chat in
@@ -1062,4 +1062,104 @@ fn constructed_group_messages_with_their_sender_match_their_fixtures() {
             ),
         },
     );
+}
+
+/// The matrix of `event_link_qr.json`: 21 modules per side, row 0 first, with no quiet zone (a
+/// client draws the 4-module margin itself).
+fn link_qr_rows() -> Vec<String> {
+    [
+        "111111101011101111111",
+        "100000100001001000001",
+        "101110100100101011101",
+        "101110101100101011101",
+        "101110101000001011101",
+        "100000100010101000001",
+        "111111101010101111111",
+        "000000001001000000000",
+        "011010110010011000000",
+        "110011001101101100101",
+        "010000111101000001010",
+        "101100000001110011111",
+        "000001100001010001011",
+        "000000000101011100010",
+        "111111100110111010111",
+        "100000100001010101011",
+        "101110101000011101110",
+        "101110100010011100001",
+        "101110101110011001101",
+        "100000100101110000011",
+        "111111100100100001110",
+    ]
+    .iter()
+    .map(|row| (*row).to_owned())
+    .collect()
+}
+
+/// The device-linking flow (added in the link-from-the-app work): the client asks with consent, the
+/// daemon answers, and it publishes the QR and one state per change; constructed in Rust.
+#[test]
+fn constructed_link_frames_match_their_fixtures() {
+    let dir = fixtures_dir();
+    assert_frame(
+        &dir.join("link_start_request.json"),
+        &ClientFrame::link_start(true),
+    );
+    assert_frame(
+        &dir.join("link_cancel_request.json"),
+        &ClientFrame::link_cancel(),
+    );
+    assert_frame(
+        &dir.join("link_started_response.json"),
+        &DaemonFrame::LinkStarted {
+            v: PROTOCOL_VERSION,
+        },
+    );
+    assert_frame(
+        &dir.join("link_cancelled_response.json"),
+        &DaemonFrame::LinkCancelled {
+            v: PROTOCOL_VERSION,
+        },
+    );
+    assert_frame(
+        &dir.join("event_link_qr.json"),
+        &DaemonFrame::EventLinkQr {
+            v: PROTOCOL_VERSION,
+            size: 21,
+            rows: link_qr_rows(),
+        },
+    );
+    for (file, state) in [
+        ("event_link_state_waiting.json", LinkState::Waiting),
+        ("event_link_state_linked.json", LinkState::Linked),
+    ] {
+        assert_frame(
+            &dir.join(file),
+            &DaemonFrame::EventLinkState {
+                v: PROTOCOL_VERSION,
+                state,
+                reason: None,
+            },
+        );
+    }
+    assert_frame(
+        &dir.join("event_link_state_failed.json"),
+        &DaemonFrame::EventLinkState {
+            v: PROTOCOL_VERSION,
+            state: LinkState::Failed,
+            reason: Some("WhatsApp stopped the linking: ask for a new QR".to_owned()),
+        },
+    );
+}
+
+/// A linking state a newer daemon invents parses instead of breaking the connection, as with any
+/// other fixed word of this protocol.
+#[test]
+fn a_link_state_this_client_does_not_know_yet_still_parses() {
+    let frame: DaemonFrame = serde_json::from_str(r#"{"v":1,"op":"link_state","state":"expired"}"#)
+        .expect("an unknown link state parses");
+    let DaemonFrame::EventLinkState { state, reason, .. } = frame else {
+        panic!("a link_state frame stays a link_state frame");
+    };
+    assert_eq!(state, LinkState::Unknown);
+    assert!(reason.is_none());
 }

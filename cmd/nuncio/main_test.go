@@ -997,6 +997,79 @@ func (qrLinker) Phone(context.Context, string) (string, error) {
 	return "", errors.New("qrLinker: no phone flow")
 }
 
+// A GUI draws the code itself: --plain-qr writes only the code's art, frame by frame, and says
+// nothing in prose. The outcome is the exit status.
+func TestLinkPlainQRWritesOnlyTheCodeArt(t *testing.T) {
+	isolateData(t)
+	fakeKeys(t)
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
+	prepare := prepareLink
+	prepareLink = func(c wa.Consent, _ *whatsmeow.Client) (wa.Prepared, error) {
+		return wa.Prepared{Linker: oneCodeLinker{}, Consent: c}, nil
+	}
+	t.Cleanup(func() { prepareLink = prepare })
+
+	code, out, errOut := runCLI("link", "--qr", "--consent", "--plain-qr")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q; want 0", code, errOut)
+	}
+	for _, prose := range []string{"Scan with WhatsApp", "nuncio: linked", "systemctl", "nuncio:"} {
+		if strings.Contains(out, prose) {
+			t.Errorf("plain output holds %q, which a GUI does not draw:\n%s", prose, out)
+		}
+	}
+	// The art itself: half blocks, which is what the app's monospace label draws.
+	if !strings.ContainsAny(out, "█▀▄") {
+		t.Errorf("plain output holds no QR art:\n%q", out)
+	}
+	if errOut != "" {
+		t.Errorf("stderr %q; want nothing", errOut)
+	}
+}
+
+// oneCodeLinker offers one scannable code, so the art has something to draw.
+type oneCodeLinker struct{}
+
+func (oneCodeLinker) QR(context.Context) (<-chan wa.Code, error) {
+	codes := make(chan wa.Code, 2)
+	codes <- wa.Code{Text: "2@abc,def,ghi", Timeout: 20 * time.Second}
+	codes <- wa.Code{Event: "success"}
+	close(codes)
+	return codes, nil
+}
+
+func (oneCodeLinker) Phone(context.Context, string) (string, error) {
+	return "", errors.New("oneCodeLinker: no phone flow")
+}
+
+func TestLinkPlainQRNeedsQR(t *testing.T) {
+	code, _, errOut := runCLI("link", "--phone", "15551230001", "--consent", "--plain-qr")
+	if code != 2 || !strings.Contains(errOut, "--plain-qr needs --qr") {
+		t.Fatalf("exit %d, stderr %q; want 2 and the usage line", code, errOut)
+	}
+}
+
+// A GUI draws stdout as the code: on a machine that already holds a device, plain mode says
+// nothing and connects to nothing.
+func TestLinkPlainQRIsSilentWhenAlreadyLinked(t *testing.T) {
+	isolateData(t)
+	fakeKeys(t)
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
+	linkedDevice(t)
+	calls := fakeConnect(t)
+
+	code, out, errOut := runCLI("link", "--qr", "--consent", "--plain-qr")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q; want 0", code, errOut)
+	}
+	if out != "" {
+		t.Errorf("stdout %q; a GUI would draw it as the code", out)
+	}
+	if *calls != 0 {
+		t.Errorf("connect called %d times; an already linked device needs none", *calls)
+	}
+}
+
 // After pairing, link reports the device as linked, says how to start the daemon and exits: it
 // never waits for a message and never sends one.
 func TestLinkExitsAfterReportingLinkedAndSendsNothing(t *testing.T) {

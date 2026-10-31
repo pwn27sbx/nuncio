@@ -66,6 +66,15 @@ const (
 	OpMarkRead   = "mark_read"
 	OpMarkedRead = "marked_read"
 
+	// The device-linking flow: the daemon generates the QR and the clients only draw it (added
+	// in the link-from-the-app work).
+	OpLinkStart     = "link_start"
+	OpLinkCancel    = "link_cancel"
+	OpLinkStarted   = "link_started"
+	OpLinkCancelled = "link_cancelled"
+	OpLinkQR        = "link_qr"
+	OpLinkState     = "link_state"
+
 	OpEventMessage    = "event_message"
 	OpEventConnection = "event_connection"
 	OpEventUnread     = "event_unread"
@@ -96,6 +105,17 @@ const (
 const (
 	MessageQueued  = "queued"
 	MessageNotSent = "not_sent"
+)
+
+// Values of the link_state frame's state field: where a device-linking flow stands.
+const (
+	// LinkWaiting: the flow runs and a link_qr frame is (or will be) published; a later one
+	// replaces it while the flow waits.
+	LinkWaiting = "waiting"
+	// LinkLinked: the device is paired; the session's own frames follow.
+	LinkLinked = "linked"
+	// LinkFailed: the flow ended without linking, with one fixed sentence in its reason.
+	LinkFailed = "failed"
 )
 
 // Error codes.
@@ -247,6 +267,22 @@ type SubscribeRequest struct {
 	Op string `json:"op"`
 }
 
+// LinkStartRequest starts the device-linking flow: the daemon generates the QR and publishes it to
+// subscribed connections, and the client only draws it. Consent is true only when the user gave
+// their explicit yes in the client; false is a refusal that links nothing.
+type LinkStartRequest struct {
+	V       int    `json:"v"`
+	Op      string `json:"op"`
+	Consent bool   `json:"consent"`
+}
+
+// LinkCancelRequest stops a linking flow in progress; it leaves no device, store or keyring entry
+// behind.
+type LinkCancelRequest struct {
+	V  int    `json:"v"`
+	Op string `json:"op"`
+}
+
 // FocusRequest asks the running UIs to open one chat.
 type FocusRequest struct {
 	V   int    `json:"v"`
@@ -328,6 +364,19 @@ type SendFailed struct {
 
 // Subscribed answers a SubscribeRequest; event frames follow on the same connection.
 type Subscribed struct {
+	V  int    `json:"v"`
+	Op string `json:"op"`
+}
+
+// LinkStarted answers a LinkStartRequest whose Consent was true: the flow runs and its link_qr and
+// link_state frames follow on subscribed connections.
+type LinkStarted struct {
+	V  int    `json:"v"`
+	Op string `json:"op"`
+}
+
+// LinkCancelled answers a LinkCancelRequest: the flow stopped and no device was linked.
+type LinkCancelled struct {
 	V  int    `json:"v"`
 	Op string `json:"op"`
 }
@@ -421,6 +470,26 @@ type EventChat struct {
 	V    int    `json:"v"`
 	Op   string `json:"op"`
 	Chat Chat   `json:"chat"`
+}
+
+// EventLinkQR publishes one QR code of a device-linking flow: Size modules per side and Rows its
+// matrix, row 0 first, each row Size characters of "0" or "1". It carries no quiet zone, so a
+// client draws a 4-module margin around it. The matrix is ephemeral pairing material and must never
+// be logged; Size and Rows are its only representation on the wire, so no payload string travels.
+type EventLinkQR struct {
+	V    int      `json:"v"`
+	Op   string   `json:"op"`
+	Size int      `json:"size"`
+	Rows []string `json:"rows"`
+}
+
+// EventLinkState publishes where a device-linking flow stands: State is one of the Link* values,
+// with Reason set (one fixed sentence) only when State is LinkFailed.
+type EventLinkState struct {
+	V      int    `json:"v"`
+	Op     string `json:"op"`
+	State  string `json:"state"`
+	Reason string `json:"reason,omitempty"`
 }
 
 // Error reports a protocol or request failure. Code is one of the Code*

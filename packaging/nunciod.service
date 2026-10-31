@@ -1,10 +1,15 @@
 # nunciod as a systemd --user service. Installed to /usr/lib/systemd/user/nunciod.service.
-# Enable it per user:  systemctl --user enable --now nunciod.service
-# (packaging/install.sh offers to do that). `nuncio` also starts it on demand through D-Bus
-# activation (/usr/share/dbus-1/services/io.github.pwn27sbx.nuncio.service names this unit).
+# The desktop app enables it on first run (no terminal, no root) and every client starts it on
+# demand through D-Bus activation (/usr/share/dbus-1/services/io.github.pwn27sbx.nuncio.service
+# names this unit).
 [Unit]
 Description=nuncio daemon (WhatsApp linked-device session)
 Documentation=file:///usr/share/doc/nuncio/README.md
+# The data directory is created 0700 by systemd-tmpfiles (user-tmpfiles.d) before this unit
+# starts: under ProtectSystem=strict the daemon cannot create it, and a ReadWritePaths entry is
+# skipped while the path does not exist. Pulling the service in is what makes the first run work.
+Wants=systemd-tmpfiles-setup.service
+After=systemd-tmpfiles-setup.service
 # Ban-risk rule: a restart is a new WhatsApp connection, so restarts are few and slow. At most 4
 # starts in 30 minutes; past that the unit stays failed until the user starts it again.
 StartLimitIntervalSec=30min
@@ -43,14 +48,18 @@ NoNewPrivileges=yes
 # Connecting to a Unix socket is allowed on a read-only mount, so the session bus
 # ($XDG_RUNTIME_DIR/bus) and with it the Secret Service (the keyring) keep working.
 ProtectSystem=strict
-# The data directory: nuncio.db (with -wal and -shm), the media cache and the exports. The `-`
-# skips it while it does not exist (nothing linked yet: nunciod creates nothing then, and
-# `nuncio link` refuses while the daemon runs, so the unit is restarted after linking).
+# The data directory: nuncio.db (with -wal and -shm), the media cache and the exports. It is
+# created 0700 by packaging/nuncio-tmpfiles.conf, which this unit pulls in above; the `-` below
+# still skips it in the one case it can be missing (a direct start before tmpfiles ran), and the
+# daemon then answers that it has no writable store instead of failing to start. The budget is
+# this directory alone: other applications' stores and ~/.local/share/applications, from which a
+# launcher entry is selected and executed, stay read-only for the process that parses untrusted
+# WhatsApp input.
 # Assumes the default XDG_DATA_HOME (~/.local/share): a unit file cannot read environment
 # variables. With another XDG_DATA_HOME, add a drop-in (`systemctl --user edit nunciod`).
-# The directory is bind-mounted onto itself inside a read-only tree, so `nuncio logout` and
-# `nuncio purge` delete everything in it but cannot remove the directory itself; the wipe
-# accepts that an emptied directory stays when its rmdir fails with EBUSY or EROFS.
+# The directory is bind-mounted inside a read-only tree, so `nuncio logout` and `nuncio purge`
+# delete everything in it but cannot remove the directory itself; the wipe accepts that an
+# emptied directory stays when its rmdir fails with EBUSY or EROFS.
 ReadWritePaths=-%h/.local/share/nuncio
 # A private /tmp and /var/tmp (SQLite's temporary files land there).
 PrivateTmp=yes

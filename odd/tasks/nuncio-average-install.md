@@ -56,7 +56,7 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | T2 | S13: the daemon can bootstrap on first run — a "no device yet" state that opens the store and creates the data key, reached only when a link is asked | inline | done: RED (undefined `openLinkBootstrap`) → GREEN; tmpfiles' empty 0700 dir yields one 0600 store, one data key and an unpaired device with no device row written; a linked store is refused before the keyring is read, byte for byte unchanged, and its device still opens; a stopped keyring refuses with `store.ErrKeyringUnavailable` and leaves no key and no device; a key the flow did not create is never reported as its own | this commit |
 | T3 | S4/S5/S9: the wire carries the flow — `link_start`, `link_cancel`, `link_started`, `link_cancelled`, `link_qr`, `link_state`, with fixtures and both contract suites | inline | done: RED (9 unresolved types in both suites) → GREEN; 8 fixtures, spec table rows plus a "The link flow" section (no quiet zone, the QR never logged, rows as the only representation), Go types in `internal/ipc`, Rust variants with the `link_qr`/`link_state` serde renames; `go test ./internal/ipc/...` and `cargo test -p nuncio-client` green, the 177-module frame is 31.9 kB against a 1 MiB cap | this commit |
 | T4 | S4/S5/S8: the daemon serves it — handler, QR rotation, cancel, fixed failure sentences | inline | done: RED (undefined `LinkStarter`, `LinkCanceller`, `MaxLinkQRSize`, `LinkFailureReason`) → GREEN; `link_start` without consent (false or absent) is refused with `bad_frame` before the daemon opens anything, and the flow gates again with `wa.Gate`; one `link_qr` per code, `size`+`rows` only, at most 177 modules per side; `waiting` → codes → `linked`, and a stop carries exactly `WhatsApp stopped the linking: ask for a new QR`; cancel removes the store and only the key this flow made, and a linked store is refused before the keyring is read; a paired device is handed to the daemon, which serves it without a restart; no frame, log line or error carries the payload | f2cfc78 (wire), 70b44ab (daemon), fixes 261c69a, 0efa996, c1bb599 |
-| T5 | S9: `nuncio link` becomes a thin client of the frames, unchanged from the outside | inline | pending | — |
+| T5 | S9: `nuncio link` becomes a thin client of the frames, unchanged from the outside | inline | done: RED (undefined `RenderMatrix`, `Client.LinkStart`/`LinkCancel`/`Subscribe`/`NextEvent`, `linkByQR` — `go vet` refused the three packages) → GREEN; `--qr` subscribes, sends `link_start` with consent, draws each published matrix and stops at `link_state`, opening no store and no keyring; `--phone` keeps the direct path and its refusal; Ctrl-C sends `link_cancel`; three intended output changes recorded (below) | f954648 |
 | T6 | S4/S5: `nuncio-client` parses the frames and exposes the link flow to both clients | inline | done: RED (7th event fixture dropped the connection with `Unexpected { expected: "event", got: "link_qr" }`, then `LinkFlow`/`LinkState`/`LinkUpdate` unresolved at the crate root) → GREEN; `is_event` accepts `link_qr`/`link_state`, every event fixture is received through `next_event`, and one `LinkFlow` folds the flow with `LinkQr` (row-first, bounds-safe `module()`, `Debug` without the matrix) and the daemon's failure sentence verbatim | 4378882 |
 | T7 | S4/S6/S7/S8: the GTK app's link screen — consent, drawn QR, Link, cancel, error states, then the chat list | inline | pending | — |
 | T8 | S10: the TUI's unlinked copy stops pointing at the CLI | inline | pending | — |
@@ -204,3 +204,49 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   markup sink. The readability lens also noted the crate root now carries three "link" surfaces
   (`driver::Link`, the `whatsapp:` `link` module, `link_flow`); the names stay, because renaming the
   driver's pair or the URL module is outside this task and T7 consumes `LinkFlow` as documented.
+- L14 (evidence, 2026-10-31, T5) `nuncio link --qr` is a thin client of the frames: it dials twice
+  (requests and a subscribed events connection), sends `link_start` with the gate's consent, draws
+  every `link_qr` with `wa.RenderMatrix` (half blocks, a 4-module quiet zone, validation of size,
+  row count, row width and both module characters) and ends on `link_state`: `linked` prints and
+  exits 0, `failed` shows the daemon's sentence (falling back to `ipc.LinkFailureReason` when the
+  frame carries none) and exits 1. It opens no store and no keyring, so a link from here and one
+  from the app leave exactly the same data; `--phone` keeps the direct path and its refusal while
+  `nunciod` answers, because no frame carries a pairing code yet (S9's carve-out, written into
+  `docs/COMMAND-LINE.md`, the usage text and README). Ctrl-C sends `link_cancel` and reports what
+  the daemon did before it answered; a `link_start` whose answer never arrives also cancels the
+  flow it may have started, so the next attempt is not refused as busy. The client half adds
+  `ipc.Client.Subscribe`, `NextEvent`, `LinkStart` and `LinkCancel`. **Three intended output
+  changes:** `--qr` no longer refuses while the daemon answers (it needs it running); its ending no
+  longer prints `systemctl --user start nunciod`; and it draws the wire matrix instead of encoding a
+  payload, so `--plain-qr`'s art comes from `link_qr` (its shape is unchanged: half blocks, one
+  frame per code, blank line between frames). A fourth follows from the first and is stated in the
+  docs: on a machine whose store holds a device, `--qr` no longer connects it locally; the daemon
+  answers with its own refusal. Verified: `gofmt -l cmd internal` empty, `go vet ./...`,
+  `CGO_ENABLED=0 go build ./...`, `CGO_ENABLED=0 go test -count=1 ./...`, `go test -race -count=1
+  ./cmd/nuncio/ ./internal/ipc/ ./internal/wa/`, `cargo fmt --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace` (25 suites) green; `packaging/check.sh`
+  green except `systemd-analyze --user verify` (T11). An independent verifier re-ran every gate in a
+  scratch copy and probed the built binary against a wire-level fake daemon: no daemon → exit 1 with
+  the not-running line and nothing created; waiting → code → linked → exit 0, art, no `systemctl`
+  line, no refusal, `$XDG_DATA_HOME` empty; `--plain-qr` lines art and blanks only; `failed` → the
+  fixed sentence and exit 1; SIGINT → exactly one `link_cancel`; `--phone` with a daemon up →
+  byte-identical refusal to the baseline; `--help` differs only in the four `link` lines. It found
+  no blocker and four advisories, two of them real and fixed before the commit
+  (`phoneWait`-derived "waiting up to N minutes", cancel on a lost `link_start` answer); the
+  remaining two are recorded here: the 60 s `linkEventTimeout` is both the event read bound and the
+  `link_start` reply bound, so a keyring unlock slower than a minute fails the command (the flow is
+  cancelled first), and `wa.RenderQR` now has no production caller (`qrterminal` stays through T10,
+  where the dependency can go with a `go mod tidy`).
+- L15 (review, 2026-10-31, T5) Approved (medium tier, lenses risk, resilience, readability and
+  reliability) and acknowledged with its authority burned; the four captures were admitted on the
+  first relay. No blocker. Six advisory findings, all informational and recorded because two are
+  inputs for T7 and two show the same gap: (a) reliability R3 and resilience R4 — after a successful
+  `link_start`, an event-stream error or a failed draw returns without `LinkCancel`, leaving the
+  daemon's flow running until it ends on its own (a retry then answers busy); self-healing, and the
+  fix belongs with whatever retries the flow, so T7 should cancel on every exit path; (b)
+  readability R2 `linkEventTimeout` carries two bounds (dial and read) under one name, and the two
+  dial sites plus the two decode sites are copy-pasted — inputs for the next touch of
+  `linkByQR`; (c) readability R2 `RenderQR` has no production caller now. The risk lens found
+  nothing: consent is enforced in the daemon (`LinkStart(false)` → `bad_frame`, never reaches the
+  handler), the matrix is validated before it reaches a terminal sink and carries no escapes, and
+  `NextEvent` copies the reader's buffer before handing it out.

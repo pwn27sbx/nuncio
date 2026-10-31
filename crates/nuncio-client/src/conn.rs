@@ -295,6 +295,8 @@ fn is_event(frame: &DaemonFrame) -> bool {
             | DaemonFrame::EventUnread { .. }
             | DaemonFrame::EventFocus { .. }
             | DaemonFrame::EventChat { .. }
+            | DaemonFrame::EventLinkQr { .. }
+            | DaemonFrame::EventLinkState { .. }
             | DaemonFrame::Unknown { .. }
     )
 }

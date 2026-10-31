@@ -338,6 +338,90 @@ func (c *Client) DownloadMedia(jid, id string) (MediaReady, error) {
 // Close closes the connection.
 func (c *Client) Close() error { return c.conn.Close() }
 
+// Subscribe asks the daemon to push event frames on this connection. From then on the connection
+// carries events, so it must be one of its own: requests made on it would race the frames.
+func (c *Client) Subscribe() error {
+	if err := WriteFrame(c.conn, SubscribeRequest{V: Version, Op: OpSubscribe}); err != nil {
+		return err
+	}
+	var reply struct {
+		Op string `json:"op"`
+	}
+	if err := c.readReply(&reply); err != nil {
+		return err
+	}
+	if reply.Op != OpSubscribed {
+		return fmt.Errorf("ipc: expected op %s, got %q", OpSubscribed, reply.Op)
+	}
+	return nil
+}
+
+// NextEvent reads one pushed frame and returns its op with the frame's own bytes, for the caller
+// to decode into the type that op names. An error frame becomes a *ProtocolError, as everywhere
+// else. Reads are bounded by the connection's timeout, so a quiet subscription fails with
+// os.ErrDeadlineExceeded.
+func (c *Client) NextEvent() (string, []byte, error) {
+	if err := c.conn.SetReadDeadline(time.Now().Add(c.timeout)); err != nil {
+		return "", nil, fmt.Errorf("ipc: set read deadline: %w", err)
+	}
+	line, err := c.rd.Next()
+	if err != nil {
+		if errors.Is(err, os.ErrDeadlineExceeded) {
+			return "", nil, fmt.Errorf("ipc: no event within %v: %w", c.timeout, err)
+		}
+		return "", nil, err
+	}
+	// Reader.Next reuses its buffer, so the frame is copied before it is handed out.
+	frame := append([]byte(nil), line...)
+	var head struct {
+		Op      string `json:"op"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+	}
+	if err := json.Unmarshal(frame, &head); err != nil {
+		return "", nil, fmt.Errorf("%w: %v", ErrBadFrame, err)
+	}
+	switch head.Op {
+	case OpError:
+		return "", nil, &ProtocolError{Code: head.Code, Message: head.Message}
+	case "":
+		return "", nil, fmt.Errorf("%w: a frame without an op", ErrBadFrame)
+	}
+	return head.Op, frame, nil
+}
+
+// LinkStart asks the daemon to start the device-linking flow. Consent is the user's explicit yes;
+// without it the daemon answers bad_frame and generates nothing.
+func (c *Client) LinkStart(consent bool) (LinkStarted, error) {
+	if err := WriteFrame(c.conn, LinkStartRequest{V: Version, Op: OpLinkStart, Consent: consent}); err != nil {
+		return LinkStarted{}, err
+	}
+	var resp LinkStarted
+	if err := c.readReply(&resp); err != nil {
+		return LinkStarted{}, err
+	}
+	if resp.Op != OpLinkStarted {
+		return LinkStarted{}, fmt.Errorf("ipc: expected op %s, got %q", OpLinkStarted, resp.Op)
+	}
+	return resp, nil
+}
+
+// LinkCancel stops a linking flow in progress and returns once the daemon has removed what the
+// flow created, so no device, store or keyring entry is left behind.
+func (c *Client) LinkCancel() (LinkCancelled, error) {
+	if err := WriteFrame(c.conn, LinkCancelRequest{V: Version, Op: OpLinkCancel}); err != nil {
+		return LinkCancelled{}, err
+	}
+	var resp LinkCancelled
+	if err := c.readReply(&resp); err != nil {
+		return LinkCancelled{}, err
+	}
+	if resp.Op != OpLinkCancelled {
+		return LinkCancelled{}, fmt.Errorf("ipc: expected op %s, got %q", OpLinkCancelled, resp.Op)
+	}
+	return resp, nil
+}
+
 // readReply decodes the next frame into v, turning an error frame into a
 // *ProtocolError.
 func (c *Client) readReply(v any) error {

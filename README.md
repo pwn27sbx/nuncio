@@ -73,22 +73,23 @@ how to uninstall it.
 
 ## First run
 
-1. Link this machine as a device. The daemon must not be running while you link, and nothing links
-   without `--consent` (without it the command prints the ban warning and does nothing):
+1. Link this machine as a device. `--qr` asks the running daemon for a code (the daemon owns the
+   store and the session it pairs), so start it first; `--phone` pairs from the command itself, so
+   it needs the daemon stopped. Nothing links without `--consent` (without it the command prints
+   the ban warning and does nothing):
 
    ```sh
-   systemctl --user stop nunciod
-   nuncio link --qr --consent              # or: nuncio link --phone <E.164 number> --consent
+   nuncio link --qr --consent              # the daemon must be running
+   # or, with the daemon stopped: nuncio link --phone <E.164 number> --consent
    ```
 
    `--qr` draws a QR code in the terminal for Settings → Linked devices → Link a device
-   (`--plain-qr` prints only the code, frame by frame, for the desktop app's link screen, and
-   nothing at all when a device is already linked);
+   (`--plain-qr` writes only the matrix, frame by frame, for a script or a GUI that draws it);
    `--phone` prints an 8-digit pairing code to enter on the phone instead. Once the phone accepts
-   it, the command prints `nuncio: linked as …` (the number masked to its last four digits), says
-   how to start the daemon, and exits. It never sends a message.
+   it, the command prints `nuncio: linked as …` (the number masked to its last four digits) or
+   `nuncio: linked`, and exits. It never sends a message.
 
-2. Start the daemon again and check it:
+2. Check it (`status` and `chats` start the daemon through D-Bus activation if it is not running):
 
    ```sh
    systemctl --user start nunciod
@@ -144,14 +145,19 @@ A `<jid>` is a WhatsApp chat: `15551230001@s.whatsapp.net` (a person) or
   only reported.
 - `focus` prints how many running UIs got the request; 0 means no UI is running, and that is not
   an error.
-- `link` exits as soon as the device is linked, and never sends a message. Run on a device that is
-  already linked, it connects it once to check that WhatsApp still accepts it, reports it and
-  exits. It refuses to run at all while `nunciod` answers on `core.sock`, before it opens the
-  database: the daemon owns that session. `link` needs the keyring (Secret Service) unlocked: it
-  creates the data key only when pairing saves the new device, reads it back before the device is
-  saved, and a link that never pairs leaves no key and no device behind. A `nuncio.db` an older
-  build left in plain is backed up (`nuncio.db.pre-t17-<UTC time>.bak`, which still holds the keys
-  in plain: delete it once nuncio works) and sealed first, by `link` or by `nunciod` at start.
+- `link` exits as soon as the device is linked, and never sends a message. `--qr` is a thin client
+  of the daemon: `nunciod` draws the codes, owns the store and the data key, and keeps the session
+  it pairs, so the daemon must be **running**, and Ctrl-C cancels the flow and leaves nothing
+  behind. `--phone` still pairs from the command itself, until a frame carries a pairing code: it
+  needs `nunciod` **stopped** (it refuses to run while the daemon answers on `core.sock`, before it
+  opens the database, because the daemon owns that session) and the keyring (Secret Service)
+  unlocked. It creates the data key only when pairing saves the new device, reads it back before
+  the device is saved, and a link that never pairs leaves no key and no device behind; run on a
+  device that is already linked, it connects it once to check that WhatsApp still accepts it,
+  reports it and exits. A `nuncio.db` an older build left in plain is backed up
+  (`nuncio.db.pre-t17-<UTC time>.bak`, which still holds the keys in plain: delete it once nuncio
+  works) and sealed first, by `link` or by `nunciod` at start. See
+  [docs/COMMAND-LINE.md](docs/COMMAND-LINE.md#nuncio-link).
 - With the keyring locked or absent, `nunciod` stays up and answers `offline`, never connects to
   WhatsApp and writes nothing; it tries again on the session's backoff. When the data key is gone
   but a sealed device is stored, nothing creates a new one: the device cannot be read, and the way

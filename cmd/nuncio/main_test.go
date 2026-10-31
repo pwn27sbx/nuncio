@@ -37,10 +37,52 @@ type fakeDaemon struct {
 	// wipeErr answers every Wipe; wipes records each call's unlink.
 	wipeErr error
 
+	// The link flow (link_test.go): linkConsent records every LinkStart's consent, cancels counts
+	// LinkCancel calls, linkErr answers LinkStart, onLinkStart runs inside it (a test publishes the
+	// flow's events there, so they cannot arrive before the client subscribed), and events is the
+	// broker serveFakeDaemon serves.
+	linkConsent []bool
+	cancels     int
+	linkErr     error
+	onLinkStart func(*fakeDaemon)
+	events      *ipc.Broker
+
 	mu      sync.Mutex
 	sends   []ipc.SendRequest
 	retries []string
 	wipes   []bool
+}
+
+// LinkStart records the consent and runs the test's hook, which publishes the flow's frames.
+func (d *fakeDaemon) LinkStart(consent bool) error {
+	d.mu.Lock()
+	d.linkConsent = append(d.linkConsent, consent)
+	hook := d.onLinkStart
+	d.mu.Unlock()
+	if hook != nil {
+		hook(d)
+	}
+	return d.linkErr
+}
+
+// LinkCancel records the cancel: the fake daemon has no store to remove.
+func (d *fakeDaemon) LinkCancel() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.cancels++
+	return nil
+}
+
+func (d *fakeDaemon) linkStarts() []bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]bool(nil), d.linkConsent...)
+}
+
+func (d *fakeDaemon) cancelCalls() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.cancels
 }
 
 // Retry records the client_id and answers like Send.
@@ -131,6 +173,7 @@ func serveFakeDaemon(t *testing.T, d *fakeDaemon) string {
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	events := ipc.NewBroker()
+	d.events = events
 	go func() {
 		for {
 			conn, err := ln.Accept()
@@ -626,6 +669,8 @@ func fakeConnect(t *testing.T) *int {
 	return &calls
 }
 
+// The direct path is `--phone` now: `--qr` belongs to the daemon, so this is the one command that
+// still refuses to run beside it.
 func TestLinkRefusesASecondSessionWhileTheDaemonAnswers(t *testing.T) {
 	isolateData(t)
 	fakeKeys(t)
@@ -633,7 +678,7 @@ func TestLinkRefusesASecondSessionWhileTheDaemonAnswers(t *testing.T) {
 	serveFakeDaemon(t, &fakeDaemon{session: ipc.SessionLinked})
 	calls := fakeConnect(t)
 
-	code, _, errOut := runCLI("link", "--qr", "--consent")
+	code, _, errOut := runCLI("link", "--phone", "+10000000000", "--consent")
 	if code != 1 {
 		t.Errorf("exit %d, want 1", code)
 	}
@@ -652,7 +697,7 @@ func TestLinkConnectsTheLinkedDeviceWhenNoDaemonAnswers(t *testing.T) {
 	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t)) // no core.sock there
 	calls := fakeConnect(t)
 
-	code, _, _ := runCLI("link", "--qr", "--consent")
+	code, _, _ := runCLI("link", "--phone", "+10000000000", "--consent")
 	if code != 1 || *calls != 1 {
 		t.Errorf("exit %d after %d connects, want 1 (the fake connect fails) after exactly 1", code, *calls)
 	}
@@ -982,66 +1027,6 @@ func TestPurgeRefusesWhileSomethingListensButDoesNotAnswer(t *testing.T) {
 	}
 }
 
-// qrLinker is a Linker whose QR flow reports success at once, as a scanned code would; it never
-// touches the network.
-type qrLinker struct{}
-
-func (qrLinker) QR(context.Context) (<-chan wa.Code, error) {
-	codes := make(chan wa.Code, 1)
-	codes <- wa.Code{Event: "success"}
-	close(codes)
-	return codes, nil
-}
-
-func (qrLinker) Phone(context.Context, string) (string, error) {
-	return "", errors.New("qrLinker: no phone flow")
-}
-
-// A GUI draws the code itself: --plain-qr writes only the code's art, frame by frame, and says
-// nothing in prose. The outcome is the exit status.
-func TestLinkPlainQRWritesOnlyTheCodeArt(t *testing.T) {
-	isolateData(t)
-	fakeKeys(t)
-	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
-	prepare := prepareLink
-	prepareLink = func(c wa.Consent, _ *whatsmeow.Client) (wa.Prepared, error) {
-		return wa.Prepared{Linker: oneCodeLinker{}, Consent: c}, nil
-	}
-	t.Cleanup(func() { prepareLink = prepare })
-
-	code, out, errOut := runCLI("link", "--qr", "--consent", "--plain-qr")
-	if code != 0 {
-		t.Fatalf("exit %d, stderr %q; want 0", code, errOut)
-	}
-	for _, prose := range []string{"Scan with WhatsApp", "nuncio: linked", "systemctl", "nuncio:"} {
-		if strings.Contains(out, prose) {
-			t.Errorf("plain output holds %q, which a GUI does not draw:\n%s", prose, out)
-		}
-	}
-	// The art itself: half blocks, which is what the app's monospace label draws.
-	if !strings.ContainsAny(out, "█▀▄") {
-		t.Errorf("plain output holds no QR art:\n%q", out)
-	}
-	if errOut != "" {
-		t.Errorf("stderr %q; want nothing", errOut)
-	}
-}
-
-// oneCodeLinker offers one scannable code, so the art has something to draw.
-type oneCodeLinker struct{}
-
-func (oneCodeLinker) QR(context.Context) (<-chan wa.Code, error) {
-	codes := make(chan wa.Code, 2)
-	codes <- wa.Code{Text: "2@abc,def,ghi", Timeout: 20 * time.Second}
-	codes <- wa.Code{Event: "success"}
-	close(codes)
-	return codes, nil
-}
-
-func (oneCodeLinker) Phone(context.Context, string) (string, error) {
-	return "", errors.New("oneCodeLinker: no phone flow")
-}
-
 func TestLinkPlainQRNeedsQR(t *testing.T) {
 	code, _, errOut := runCLI("link", "--phone", "15551230001", "--consent", "--plain-qr")
 	if code != 2 || !strings.Contains(errOut, "--plain-qr needs --qr") {
@@ -1049,39 +1034,34 @@ func TestLinkPlainQRNeedsQR(t *testing.T) {
 	}
 }
 
-// A GUI draws stdout as the code: on a machine that already holds a device, plain mode says
-// nothing and connects to nothing.
-func TestLinkPlainQRIsSilentWhenAlreadyLinked(t *testing.T) {
+// A machine that already holds a device, or one whose keyring is locked, is refused by the daemon
+// that owns the store: the CLI reports the daemon's own sentence and draws nothing.
+func TestLinkQRReportsTheDaemonsRefusal(t *testing.T) {
 	isolateData(t)
-	fakeKeys(t)
-	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
-	linkedDevice(t)
-	calls := fakeConnect(t)
+	d := &fakeDaemon{session: ipc.SessionLinked, linkErr: errors.New("this machine already holds a linked device")}
+	serveFakeDaemon(t, d)
 
 	code, out, errOut := runCLI("link", "--qr", "--consent", "--plain-qr")
-	if code != 0 {
-		t.Fatalf("exit %d, stderr %q; want 0", code, errOut)
+	if code != 1 {
+		t.Errorf("exit %d, want 1", code)
+	}
+	if !strings.Contains(errOut, d.linkErr.Error()) || !strings.Contains(errOut, "Nothing was linked") {
+		t.Errorf("stderr %q, want the daemon's refusal and nothing-was-linked", errOut)
 	}
 	if out != "" {
 		t.Errorf("stdout %q; a GUI would draw it as the code", out)
 	}
-	if *calls != 0 {
-		t.Errorf("connect called %d times; an already linked device needs none", *calls)
-	}
 }
 
-// After pairing, link reports the device as linked, says how to start the daemon and exits: it
-// never waits for a message and never sends one.
+// After pairing, link reports the device as linked, says the daemon owns the session from now on
+// and exits: it never waits for a message and never sends one.
 func TestLinkExitsAfterReportingLinkedAndSendsNothing(t *testing.T) {
 	isolateData(t)
-	// A link needs the keyring for the data key, even one that never pairs.
-	fakeKeys(t)
-	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t)) // no core.sock there
-	prepare := prepareLink
-	prepareLink = func(c wa.Consent, _ *whatsmeow.Client) (wa.Prepared, error) {
-		return wa.Prepared{Linker: qrLinker{}, Consent: c}, nil
-	}
-	t.Cleanup(func() { prepareLink = prepare })
+	d := linkDaemon(t,
+		ipc.EventLinkState{V: 1, Op: ipc.OpLinkState, State: ipc.LinkWaiting},
+		testQR,
+		ipc.EventLinkState{V: 1, Op: ipc.OpLinkState, State: ipc.LinkLinked},
+	)
 
 	type result struct {
 		code     int
@@ -1101,8 +1081,14 @@ func TestLinkExitsAfterReportingLinkedAndSendsNothing(t *testing.T) {
 	if r.code != 0 {
 		t.Errorf("exit %d, stderr %q; want 0", r.code, r.err)
 	}
-	if !strings.Contains(r.out, "nuncio: linked") || !strings.HasSuffix(r.out, "systemctl --user start nunciod\n") {
-		t.Errorf("stdout %q, want the linked line and, last, how to start the daemon", r.out)
+	if !strings.Contains(r.out, "nuncio: linked") || !strings.Contains(r.out, "nunciod owns the session") {
+		t.Errorf("stdout %q, want the linked line and that the daemon keeps the session", r.out)
+	}
+	if strings.Contains(r.out, "systemctl") {
+		t.Errorf("stdout %q, want no systemctl line: the daemon is already up", r.out)
+	}
+	if got := d.sendCalls(); len(got) != 0 {
+		t.Errorf("the daemon was asked to send %+v; link never sends", got)
 	}
 	for _, s := range []string{r.out, r.err} {
 		if strings.Contains(s, "send one message") || strings.Contains(s, "reply") || strings.Contains(s, "mensaje recibido") {

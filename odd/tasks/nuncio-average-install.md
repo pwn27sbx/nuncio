@@ -144,3 +144,14 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   ./...`, `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace` green; `packaging/check.sh` green except `systemd-analyze --user verify`
   (needs `/usr/bin/nunciod`, installed in T11).
+- L10 (review, 2026-10-31, T4) Approved with observations only, and five of them were real and
+  fixed in two follow-up commits on the same task branch: a cancelled flow cleared `f.run` before
+  its cleanup finished (a `link_start` in that window could start a second flow over the files the
+  first was deleting), a cancelled flow published the failure sentence (saying WhatsApp stopped what
+  the user stopped), a handover could install a session while a wipe deleted the data (the `closed`
+  flag is read under the daemon's lock and a wipe sets it before it closes the session), the flow
+  never cancelled its own context (the linker's QR producer could stay blocked), and the flow's
+  client was disconnected only after the daemon had opened the same device. The gate itself changed
+  in the same PR: `gga`'s `claude` provider is out of quota, `codex` returns nothing and `gemini` is
+  retired, so `.gga` now reviews with `opencode:opencode-go/deepseek-v4.1-flash#high` through the
+  tool-free `gga-reviewer` agent, and `STRICT_MODE` stays on.

@@ -102,7 +102,7 @@ func (f *linkFlow) Start(consent bool) error {
 	f.run = r
 	f.mu.Unlock()
 	close(done)
-	go f.serve(ctx, r)
+	go f.serve(ctx, r, consent)
 	return nil
 }
 
@@ -131,8 +131,10 @@ func (f *linkFlow) Cancel() error {
 
 // serve runs one flow until it pairs, fails or is cancelled, and removes what it created when it
 // does not pair.
-func (f *linkFlow) serve(ctx context.Context, r *linkRun) {
+func (f *linkFlow) serve(ctx context.Context, r *linkRun, consent bool) {
 	paired := false
+	// Whatever the linker started ends with the flow: its QR producer waits on this context.
+	defer r.cancel()
 	defer func() {
 		if r.client != nil {
 			r.client.Disconnect()
@@ -153,8 +155,8 @@ func (f *linkFlow) serve(ctx context.Context, r *linkRun) {
 	// whatsmeow's own retry has no cap, no jitter and no stop on a ban, so it stays off.
 	client.EnableAutoReconnect = false
 	r.client = client
-	// The gate passed in Start; the flow never reaches WhatsApp without it.
-	prepared, err := prepareLink(wa.Consent{Granted: true}, client)
+	// The consent Start gated on, threaded to the call that touches WhatsApp.
+	prepared, err := prepareLink(wa.Consent{Granted: consent}, client)
 	if err != nil {
 		f.failed(err)
 		return
@@ -204,7 +206,11 @@ func (f *linkFlow) serve(ctx context.Context, r *linkRun) {
 // publishes link_state linked only once that session is the daemon's: the frames that follow are
 // the session's own.
 func (f *linkFlow) linked(r *linkRun) {
-	// The flow's own handle goes first: the daemon opens the store again over the paired device.
+	// The flow's own client and handle go first: the daemon opens the store and the device again,
+	// and two whatsmeow clients over one device would take the stream from each other.
+	if r.client != nil {
+		r.client.Disconnect()
+	}
 	_ = r.boot.db.Close()
 	r.boot.db = nil
 	if err := f.paired(); err != nil {

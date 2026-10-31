@@ -82,7 +82,8 @@ how to uninstall it.
    ```
 
    `--qr` draws a QR code in the terminal for Settings → Linked devices → Link a device
-   (`--plain-qr` prints only the code, frame by frame, for the desktop app's link screen);
+   (`--plain-qr` prints only the code, frame by frame, for the desktop app's link screen, and
+   nothing at all when a device is already linked);
    `--phone` prints an 8-digit pairing code to enter on the phone instead. Once the phone accepts
    it, the command prints `nuncio: linked as …` (the number masked to its last four digits), says
    how to start the daemon, and exits. It never sends a message.

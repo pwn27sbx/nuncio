@@ -1042,6 +1042,34 @@ func (oneCodeLinker) Phone(context.Context, string) (string, error) {
 	return "", errors.New("oneCodeLinker: no phone flow")
 }
 
+func TestLinkPlainQRNeedsQR(t *testing.T) {
+	code, _, errOut := runCLI("link", "--phone", "15551230001", "--consent", "--plain-qr")
+	if code != 2 || !strings.Contains(errOut, "--plain-qr needs --qr") {
+		t.Fatalf("exit %d, stderr %q; want 2 and the usage line", code, errOut)
+	}
+}
+
+// A GUI draws stdout as the code: on a machine that already holds a device, plain mode says
+// nothing and connects to nothing.
+func TestLinkPlainQRIsSilentWhenAlreadyLinked(t *testing.T) {
+	isolateData(t)
+	fakeKeys(t)
+	t.Setenv("XDG_RUNTIME_DIR", shortTempDir(t))
+	linkedDevice(t)
+	calls := fakeConnect(t)
+
+	code, out, errOut := runCLI("link", "--qr", "--consent", "--plain-qr")
+	if code != 0 {
+		t.Fatalf("exit %d, stderr %q; want 0", code, errOut)
+	}
+	if out != "" {
+		t.Errorf("stdout %q; a GUI would draw it as the code", out)
+	}
+	if *calls != 0 {
+		t.Errorf("connect called %d times; an already linked device needs none", *calls)
+	}
+}
+
 // After pairing, link reports the device as linked, says how to start the daemon and exits: it
 // never waits for a message and never sends one.
 func TestLinkExitsAfterReportingLinkedAndSendsNothing(t *testing.T) {

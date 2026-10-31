@@ -104,6 +104,10 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 	events := watch(client)
 
 	if device.ID != nil {
+		if *plain {
+			// A GUI draws stdout as the code: nothing else may go there.
+			return 0
+		}
 		fmt.Fprintln(stdout, "nuncio: this machine already holds a linked device:", maskPhone(device.ID.User))
 		if err := connectLinked(client); err != nil {
 			fmt.Fprintln(stderr, "nuncio link:", err)

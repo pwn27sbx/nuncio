@@ -1247,3 +1247,20 @@ fn a_waiting_flow_draws_the_code_and_offers_only_cancel() {
     assert_eq!(view.action, None, "nothing to press but Cancel");
     assert!(view.cancel);
 }
+
+#[test]
+fn the_link_views_debug_carries_no_matrix() {
+    let qr = code(21, |row, col| (row * 7 + col) % 5 == 0);
+    let waiting = format!("{:?}", link_view(&LinkScreen::Waiting, Some(&qr), None));
+    assert!(!waiting.contains(['█', '▀', '▄']), "{waiting}");
+    assert!(!waiting.contains("The code"), "{waiting}");
+    let failed = format!(
+        "{:?}",
+        link_view(
+            &LinkScreen::Failed,
+            None,
+            Some("WhatsApp stopped the linking: ask for a new QR")
+        )
+    );
+    assert!(!failed.contains(['█', '▀', '▄']), "{failed}");
+}

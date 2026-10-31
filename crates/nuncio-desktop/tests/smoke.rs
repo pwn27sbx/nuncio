@@ -212,6 +212,8 @@ fn main() {
     a_link_fills_the_composer_and_sends_nothing();
     the_link_screen_draws_the_code_and_gives_way_to_the_chats();
     the_worker_carries_the_flow_and_the_cancel();
+    quit_during_a_flow_cancels();
+    closing_the_window_during_a_flow_cancels();
     the_rail_button_asks_for_a_number_and_opens_its_chat();
     the_composer_keys_send_button_and_reply_strip();
     closing_in_background_mode_hides_and_keeps_the_state_and_worker(&daemon);
@@ -513,10 +515,9 @@ fn serve_link(
     }
 }
 
-/// The whole path the app uses: the worker connection carries `link_start`, the daemon's `link_qr`
-/// and `link_state` reach the screen through the subscribed connection, and Escape sends
-/// `link_cancel` back over the same worker (S4/S6/S7).
-fn the_worker_carries_the_flow_and_the_cancel() {
+/// A window on a fake daemon with a link flow already started and code drawn, so that closing or
+/// quitting it has a flow to cancel (S7).
+fn flow_ready_to_cancel() -> (Ui, PathBuf, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     let (socket, seen) = linking_daemon();
     let ui = Ui::new(None, Controller::new("link-worker"), 0, true);
     ui.start_worker(Settings {
@@ -537,17 +538,54 @@ fn the_worker_carries_the_flow_and_the_cancel() {
         }),
         "the code reaches the screen on the subscribed connection",
     );
+    (ui, socket, seen)
+}
+
+/// Whether the fake daemon has seen a `link_cancel`.
+fn cancelled(seen: &std::sync::Mutex<Vec<String>>) -> bool {
+    seen.lock()
+        .expect("log")
+        .iter()
+        .any(|line| line.contains("\"op\":\"link_cancel\""))
+}
+
+/// The whole path the app uses: the worker connection carries `link_start`, the daemon's `link_qr`
+/// and `link_state` reach the screen through the subscribed connection, and Escape sends
+/// `link_cancel` back over the same worker (S4/S6/S7).
+fn the_worker_carries_the_flow_and_the_cancel() {
+    let (ui, socket, seen) = flow_ready_to_cancel();
     check(ui.press("Escape"), "Escape is the window's");
     check(
-        wait_for(&ui, |_| {
-            seen.lock()
-                .expect("log")
-                .iter()
-                .any(|line| line.contains("\"op\":\"link_cancel\""))
-        }),
+        wait_for(&ui, |_| cancelled(&seen)),
         "the worker carries the cancel to the daemon",
     );
     ui.quit();
+    let _ = std::fs::remove_file(&socket);
+}
+
+/// Quitting with Ctrl+Q (or Quit in the menu) cancels a flow the app started (S7).
+fn quit_during_a_flow_cancels() {
+    let (ui, socket, seen) = flow_ready_to_cancel();
+    ui.quit();
+    check(
+        wait_for(&ui, |_| cancelled(&seen)),
+        "Quit cancels the flow the app started",
+    );
+    let _ = std::fs::remove_file(&socket);
+}
+
+/// Closing the window in the mode that quits cancels a flow the app started too, so no way of
+/// leaving the window leaves a store, a data key and a pairing client behind (S7).
+fn closing_the_window_during_a_flow_cancels() {
+    let (ui, socket, seen) = flow_ready_to_cancel();
+    // A window that was never shown is not realized, and `close` only acts on a realized one.
+    gtk::prelude::WidgetExt::realize(ui.window());
+    ui.window().close();
+    check(
+        wait_for(&ui, |_| cancelled(&seen)),
+        "closing the window cancels the flow the app started",
+    );
+    drop(ui);
     let _ = std::fs::remove_file(&socket);
 }
 

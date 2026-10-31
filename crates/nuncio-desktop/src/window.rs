@@ -429,7 +429,7 @@ impl LinkScreenWidgets {
 }
 
 /// What the link screen says and offers as drawn (tests).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LinkShown {
     pub title: String,
     pub consent: String,
@@ -441,6 +441,22 @@ pub struct LinkShown {
     pub cancel: bool,
     /// The code label draws in a monospace font, which is what keeps its cells square.
     pub monospace: bool,
+}
+
+impl std::fmt::Debug for LinkShown {
+    /// The code is pairing material: whether one is drawn, never its matrix (L6b, L13c).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkShown")
+            .field("title", &self.title)
+            .field("consent", &self.consent)
+            .field("placeholder", &self.placeholder)
+            .field("code", &self.qr.is_some())
+            .field("sentence", &self.sentence.is_some())
+            .field("action", &self.action)
+            .field("cancel", &self.cancel)
+            .field("monospace", &self.monospace)
+            .finish()
+    }
 }
 
 /// A picture widget drawn now.
@@ -896,6 +912,11 @@ impl Ui {
                 window.set_visible(false);
                 return glib::Propagation::Stop;
             }
+            // The window is really going (this close, or Quit): a flow the app started does not
+            // outlive it (S7). A hidden window keeps its flow, as it keeps the app running.
+            if let Some(ui) = owner.borrow().as_ref() {
+                ui.cancel_started_link();
+            }
             owner.borrow_mut().take();
             glib::Propagation::Proceed
         });
@@ -919,15 +940,7 @@ impl Ui {
 
     /// Close the window for good, also in background mode: the state and the worker go with it.
     pub fn quit(&self) {
-        // A flow the app started does not outlive it: the daemon would keep rotating a code
-        // nobody can see, and a later start would be refused as busy (S7).
-        for command in self.0.controller.borrow_mut().cancel_link() {
-            if let Command::Send(frame) = command
-                && let Some(worker) = self.0.worker.borrow().as_ref()
-            {
-                worker.send(frame);
-            }
-        }
+        self.cancel_started_link();
         self.0.quitting.set(true);
         // `close` only acts on a realized window, and a window started hidden never was.
         WidgetExt::realize(&self.0.window);
@@ -1024,6 +1037,20 @@ impl Ui {
     fn link_cancel(&self) {
         let commands = self.0.controller.borrow_mut().cancel_link();
         self.run(commands);
+    }
+
+    /// The window is going for good (Quit, or a close that quits): cancel a flow the app
+    /// started, so the daemon does not keep rotating a code nobody can see and a later start is
+    /// not refused as busy (S7). Nothing is sent for a flow another client started, or for a
+    /// screen that never pressed Link.
+    fn cancel_started_link(&self) {
+        for command in self.0.controller.borrow_mut().cancel_link() {
+            if let Command::Send(frame) = command
+                && let Some(worker) = self.0.worker.borrow().as_ref()
+            {
+                worker.send(frame);
+            }
+        }
     }
 
     /// Press the link screen's one button, as a click does (tests).
@@ -4321,9 +4348,26 @@ fn find_picture(widget: &gtk::Widget) -> Option<gtk::Picture> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposerKey, ListKey, PaletteKey, composer_key_action, list_key_action, palette_key_action,
+        ComposerKey, LinkShown, ListKey, PaletteKey, composer_key_action, list_key_action,
+        palette_key_action,
     };
     use gtk::gdk::{Key, ModifierType};
+
+    #[test]
+    fn the_drawn_link_screens_debug_carries_no_matrix() {
+        let shown = LinkShown {
+            title: "Link this device to WhatsApp".to_owned(),
+            consent: "Scan the code.".to_owned(),
+            placeholder: None,
+            qr: Some("█▀█▄ ".repeat(72)),
+            sentence: Some("WhatsApp stopped the linking: ask for a new QR".to_owned()),
+            action: Some("New code".to_owned()),
+            cancel: true,
+            monospace: true,
+        };
+        let debug = format!("{shown:?}");
+        assert!(!debug.contains(['█', '▀', '▄']), "{debug}");
+    }
 
     #[test]
     fn the_palette_moves_with_up_and_down_runs_on_enter_and_closes_on_escape() {

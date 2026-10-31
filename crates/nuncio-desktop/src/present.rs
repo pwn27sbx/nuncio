@@ -976,7 +976,7 @@ impl LinkAction {
 
 /// The unlinked app's first screen, as the window draws it (S4): the copy, the drawn code and
 /// its one button.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LinkView {
     pub title: &'static str,
     pub consent: &'static str,
@@ -990,6 +990,21 @@ pub struct LinkView {
     pub action: Option<LinkAction>,
     /// Cancel is offered once a flow may be running.
     pub cancel: bool,
+}
+
+impl std::fmt::Debug for LinkView {
+    /// The drawn code is pairing material and the sentence can quote the daemon: neither is
+    /// printed, only whether they are there (L6b, L13c).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkView")
+            .field("title", &self.title)
+            .field("placeholder", &self.placeholder)
+            .field("code", &self.qr.is_some())
+            .field("sentence", &self.sentence.is_some())
+            .field("action", &self.action)
+            .field("cancel", &self.cancel)
+            .finish()
+    }
 }
 
 /// The link screen for `screen`, with `qr` (the live code) and `reason` (the daemon's sentence).

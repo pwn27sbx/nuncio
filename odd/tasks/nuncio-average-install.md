@@ -93,3 +93,9 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   T6; (c) the failed sentence in `proto/fixtures/event_link_state_failed.json` is
   "WhatsApp stopped the linking: ask for a new QR", and T4 must emit exactly that text (or change
   the fixture with it), and T4 owns clamping `link_qr.size` (177 modules is the largest QR).
+- L6 (review, 2026-10-31, T3) Approved with two advisory findings, both binding on T4:
+  (a) the tracked `event_link_qr.json` is synthetic (version 1 carries ~25 characters, far below a
+  real payload) but nothing proves it, so T4 must keep the fixture synthetic by construction and
+  must not add any logging or `Debug` path for `link_qr`; (b) `LinkStartRequest.Consent` is a
+  client-supplied boolean with no enforcement in this slice — T4 must refuse `false` or an absent
+  value (Go's zero value) before it generates or publishes a single QR.

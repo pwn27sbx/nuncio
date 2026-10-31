@@ -100,6 +100,8 @@ package() {
   # The daemon as a systemd --user service (not enabled by the package: each user enables it,
   # packaging/install.sh asks first), and its D-Bus activation, which `nuncio` uses to start it.
   install -Dm644 packaging/nunciod.service "$pkgdir/usr/lib/systemd/user/nunciod.service"
+  install -Dm644 packaging/nuncio-tmpfiles.conf \
+    "$pkgdir/usr/share/user-tmpfiles.d/nuncio.conf"
   install -Dm644 packaging/io.github.pwn27sbx.nuncio.service \
     "$pkgdir/usr/share/dbus-1/services/io.github.pwn27sbx.nuncio.service"
 

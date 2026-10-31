@@ -267,6 +267,12 @@ func TestLinkFlowCancelRemovesOnlyWhatItCreated(t *testing.T) {
 	if err := lt.flow.Cancel(); err != nil {
 		t.Fatalf("Cancel: %v", err)
 	}
+	// Cancel is the outcome: no failure sentence says WhatsApp stopped what the user stopped.
+	for _, raw := range lt.frames.all() {
+		if strings.Contains(string(raw), ipc.LinkFailureReason) {
+			t.Errorf("a cancelled flow published a failure: %s", raw)
+		}
+	}
 	for _, p := range []string{lt.path, lt.path + "-wal", lt.path + "-shm"} {
 		if _, err := os.Stat(p); !errors.Is(err, os.ErrNotExist) {
 			t.Errorf("%s survived the cancel", filepath.Base(p))

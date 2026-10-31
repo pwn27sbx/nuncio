@@ -120,7 +120,6 @@ func (f *linkFlow) Cancel() error {
 		return nil
 	}
 	r := f.run
-	f.run = nil
 	f.mu.Unlock()
 	if r == nil {
 		return nil
@@ -133,23 +132,21 @@ func (f *linkFlow) Cancel() error {
 // serve runs one flow until it pairs, fails or is cancelled, and removes what it created when it
 // does not pair.
 func (f *linkFlow) serve(ctx context.Context, r *linkRun) {
-	defer close(r.done)
 	paired := false
 	defer func() {
-		// The flow is over: the next link_start starts a new one (a cancel that already took it
-		// cleared f.run itself, and must not clear the flow that replaced it).
+		if r.client != nil {
+			r.client.Disconnect()
+		}
+		if !paired {
+			f.discard(r.boot)
+		}
+		// Last, so no link_start can start a new flow over the files this one is still removing.
 		f.mu.Lock()
 		if f.run == r {
 			f.run = nil
 		}
 		f.mu.Unlock()
-		if r.client != nil {
-			r.client.Disconnect()
-		}
-		if paired {
-			return
-		}
-		f.discard(r.boot)
+		close(r.done)
 	}()
 
 	client := whatsmeow.NewClient(r.boot.device, nil)
@@ -182,6 +179,11 @@ func (f *linkFlow) serve(ctx context.Context, r *linkRun) {
 		if !code.Done() {
 			continue
 		}
+		if ctx.Err() != nil {
+			// A cancel stopped the flow: the client that asked for it gets link_cancelled and no
+			// failure sentence, which would say WhatsApp stopped something the user stopped.
+			return
+		}
 		if code.Event == "success" {
 			paired = true
 			f.linked(r)
@@ -190,6 +192,9 @@ func (f *linkFlow) serve(ctx context.Context, r *linkRun) {
 		// WhatsApp stopped the pairing (a ban, a logout, an expired code): one fixed sentence, and
 		// the client offers a new QR.
 		f.failed(fmt.Errorf("link event %s", code.Event))
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	f.failed(errors.New("the QR stream ended without a result"))

@@ -375,13 +375,14 @@ func (d *daemon) store() *sql.DB {
 // the device is paired, so a client sees the chats without restarting anything. The session it
 // replaces is closed, which for the unlinked one is a no-op: it holds no client and no store.
 func (d *daemon) handOver(s sessionState, db *sql.DB) {
+	d.mu.Lock()
 	if d.closed.Load() {
 		// A wipe ran meanwhile: the data is being deleted, so the new session is not served.
+		d.mu.Unlock()
 		_ = db.Close()
 		s.Close()
 		return
 	}
-	d.mu.Lock()
 	prev, prevDB := d.session, d.db
 	d.session, d.db = s, db
 	d.mu.Unlock()

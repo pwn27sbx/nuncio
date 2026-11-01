@@ -1,6 +1,7 @@
-//! The transcript's measure (design plan §5): a widget holding one child at the left of its room,
-//! at most [`style::TRANSCRIPT_MEASURE_CHARS`] characters of the message text wide, so the room
-//! past it on a wide window stays empty on the right.
+//! The transcript's measure (design plan §5, decision D2): a widget holding one child across its
+//! whole room, up to [`style::TRANSCRIPT_MAX_CHARS`] characters of the message text, so the
+//! conversation fills the window and only a screen wide enough to run a line across it is left
+//! room on the right.
 
 use gtk::glib;
 use gtk::pango;
@@ -25,6 +26,14 @@ impl Measure {
         let measure: Self = glib::Object::new();
         child.set_parent(&measure);
         measure
+    }
+
+    /// The width its child takes in `available` pixels, in the font in use now (tests).
+    pub fn room_for(&self, available: i32) -> i32 {
+        match self.first_child() {
+            Some(child) => self.width_in(&child, available),
+            None => available,
+        }
     }
 
     /// The widest the child may be in `available` pixels: the measure, in the font in use now,

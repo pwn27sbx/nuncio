@@ -276,17 +276,20 @@ pub fn motion_css(animations: bool) -> String {
     css
 }
 
-/// The transcript's measure, in characters of the message text (plan §5).
-pub const TRANSCRIPT_MEASURE_CHARS: i32 = 72;
+/// The transcript's widest measure, in characters of the message text (plan §5, decision D2):
+/// the conversation takes all of the room its pane gives it, and this only bounds a line on a
+/// screen so wide it would otherwise run across the whole monitor.
+pub const TRANSCRIPT_MAX_CHARS: i32 = 240;
 
 /// The transcript's width in a pane `available` pixels wide, for message text whose characters
-/// are `char_width` pixels wide: [`TRANSCRIPT_MEASURE_CHARS`] characters at the left of the pane
-/// (the room past them stays empty, on the right), all of a narrower pane, and never under `min`,
-/// the least the transcript can take. No font measured yet (0) counts a pixel a character.
+/// are `char_width` pixels wide: all of the pane, up to [`TRANSCRIPT_MAX_CHARS`] characters, and
+/// never under `min`, the least the transcript can take. No font measured yet (0): all of the
+/// pane, so a first pass with no font never pinches it.
 pub fn transcript_width(available: i32, char_width: i32, min: i32) -> i32 {
-    available
-        .min(TRANSCRIPT_MEASURE_CHARS * char_width.max(1))
-        .max(min)
+    if char_width <= 0 {
+        return available.max(min);
+    }
+    available.min(TRANSCRIPT_MAX_CHARS * char_width).max(min)
 }
 
 /// The rules for the command palette (plan §6.5), the inline search (§6.6), the settings
@@ -530,8 +533,8 @@ fn list_and_transcript_css(palette: &Palette) -> String {
 mod tests {
     use super::{
         COMPOSER_LINES, COMPOSER_PAD, DIALOG_WIDTH, Layout, PALETTE_WIDTH, SETTINGS_WIDTH,
-        THREE_PANES_FROM, TRANSCRIPT_MEASURE_CHARS, TWO_PANES_FROM, breakpoints,
-        composer_max_height, dialog_width, layout_css, layout_for, palette_width, transcript_width,
+        THREE_PANES_FROM, TRANSCRIPT_MAX_CHARS, TWO_PANES_FROM, breakpoints, composer_max_height,
+        dialog_width, layout_css, layout_for, palette_width, transcript_width,
     };
     use crate::{Look, ROOT_CLASS, WINDOW_CLASS, css_for};
     use nuncio_client::{Palette, Rgb};
@@ -1279,20 +1282,44 @@ mod tests {
     }
 
     #[test]
-    fn the_transcript_is_72_characters_wide_at_most() {
-        assert_eq!(TRANSCRIPT_MEASURE_CHARS, 72);
-        assert_eq!(transcript_width(1311, 8, 100), 576, "72 characters of 8 px");
+    fn the_transcript_takes_its_whole_pane_up_to_a_broad_measure() {
+        // A maximized 1920 window: the rail (200) and the list (360) leave the conversation
+        // 1360 px, and it takes them (F2: it was a 72-character column in the middle).
+        assert_eq!(transcript_width(1360, 8, 100), 1360, "all of the pane");
+        assert_eq!(transcript_width(720, 8, 100), 720, "a 1280×800 window too");
+        assert_eq!(transcript_width(300, 8, 100), 300, "and a narrow one");
         assert_eq!(
-            transcript_width(500, 8, 100),
-            500,
-            "a narrower pane: all of it"
+            transcript_width(4000, 8, 100),
+            TRANSCRIPT_MAX_CHARS * 8,
+            "a screen wide enough to run a line across it gets the broad maximum"
         );
         assert_eq!(
             transcript_width(500, 8, 600),
             600,
             "never under what it needs"
         );
-        assert_eq!(transcript_width(1311, 0, 0), 72, "no font measured yet");
+        assert_eq!(
+            transcript_width(1311, 0, 0),
+            1311,
+            "no font measured yet: all of the pane"
+        );
+    }
+
+    /// The measure follows the font: the transcript's widest width changes in the same proportion
+    /// as the text's characters (F3).
+    #[test]
+    fn the_transcripts_width_changes_in_the_same_proportion_as_the_font() {
+        let big = transcript_width(4000, 8, 0);
+        let small = transcript_width(4000, 6, 0);
+        assert_eq!(
+            (big, small),
+            (TRANSCRIPT_MAX_CHARS * 8, TRANSCRIPT_MAX_CHARS * 6)
+        );
+        assert_eq!(
+            small * 8,
+            big * 6,
+            "three quarters of the character width, three quarters of the measure"
+        );
     }
 }
 

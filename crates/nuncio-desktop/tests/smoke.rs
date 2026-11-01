@@ -223,6 +223,7 @@ fn main() {
     a_unlink_whose_daemon_dies_closes_its_dialogs_and_offers_link();
     the_search_is_inline_in_the_conversation();
     pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click();
+    the_conversation_fills_the_window_and_the_list_keeps_its_width();
     the_panes_the_filters_and_the_strip();
     a_filter_keeps_the_open_chat_and_its_selection();
     the_list_header_filters_the_chats_by_name();
@@ -1393,6 +1394,70 @@ fn pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click() {
     );
     settings.set_gtk_enable_animations(true);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The conversation fills the window and the chat list keeps its fixed width (F2/T16): the
+/// transcript's measure gives it all of its pane on a maximized window, and the list is the same
+/// 360 px at every size, as WhatsApp Web's is.
+fn the_conversation_fills_the_window_and_the_list_keeps_its_width() {
+    let ui = listed();
+    ui.open_chat(0);
+    ui.take_undelivered();
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::messages(ANA, 200),
+        result: Ok(DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: ANA.to_owned(),
+            // Newest first, as the wire carries them: the daemon's order.
+            messages: vec![message("M2", "hello", true), message("M1", "hi", false)],
+        }),
+    });
+    check(
+        ui.bubble_halign(0) == Some(gtk::Align::Start)
+            && ui.bubble_halign(1) == Some(gtk::Align::End),
+        "the bubbles reach both ends of the room: theirs at the start, mine at the end",
+    );
+    ui.apply_layout(Layout::ThreePanes);
+    check(
+        ui.list_width() == 360,
+        "the chat list keeps its fixed width",
+    );
+    // The widest the measure lets it be, in this machine's font: on a maximized 1920 window the
+    // rail (200) and the list (360) leave the conversation 1360 px, and the broad maximum is not
+    // reached there (F2: it used to be 72 characters, a phone's width).
+    let widest = ui.transcript_width(4000);
+    check(
+        widest >= 1360,
+        &format!("a maximized 1920 window is under the broad maximum: {widest} px"),
+    );
+    check(
+        ui.transcript_width(1360) == 1360,
+        "so the conversation takes all of its pane",
+    );
+    check(
+        ui.transcript_width(720) == 720,
+        "a 1280×800 window gives it its 720 px",
+    );
+    check(
+        ui.transcript_width(300) == 300,
+        "and a narrow pane is not cut down further",
+    );
+    // Drawn: the list keeps its width and the conversation takes what the window has over it.
+    ui.window().set_default_size(1280, 800);
+    ui.window().present();
+    iterate();
+    let (list, content) = ui.pane_widths();
+    check(
+        list == ui.list_width(),
+        &format!("the drawn list is its fixed width too: {list} px"),
+    );
+    check(
+        ui.transcript_drawn_width() == content,
+        &format!(
+            "the drawn conversation fills its pane: {} of {content} px",
+            ui.transcript_drawn_width()
+        ),
+    );
 }
 
 fn iterate() {

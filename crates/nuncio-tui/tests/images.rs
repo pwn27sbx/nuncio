@@ -73,7 +73,7 @@ fn chat(jid: &str, name: &str) -> Chat {
 
 fn snapshot() -> Snapshot {
     Snapshot {
-        daemon: "nunciod/0.2.0".to_owned(),
+        daemon: "nunciod/0.2.1".to_owned(),
         linked: true,
         session: Session::Linked,
         unread: 0,

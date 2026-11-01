@@ -220,6 +220,7 @@ fn main() {
     the_palette_opens_on_f1_and_jumps_to_a_chat();
     the_settings_write_the_file_and_apply_at_once();
     the_settings_unlink_asks_for_the_word_and_sends_one_wipe();
+    a_unlink_whose_daemon_dies_closes_its_dialogs_and_offers_link();
     the_search_is_inline_in_the_conversation();
     pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click();
     the_panes_the_filters_and_the_strip();
@@ -1842,6 +1843,101 @@ fn the_settings_unlink_asks_for_the_word_and_sends_one_wipe() {
         "and this test's settings have no file at all",
     );
     view.window.destroy();
+}
+
+/// F5/F6: the daemon that held the unlink stops with it, so the `wiped` never arrives. The
+/// confirmation and Settings still close, the cut is not painted as an error, the app shows the
+/// first screen, and pressing Link starts the daemon and draws the code it publishes.
+fn a_unlink_whose_daemon_dies_closes_its_dialogs_and_offers_link() {
+    let ui = listed();
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::status(),
+        result: Ok(DaemonFrame::Status {
+            v: PROTOCOL_VERSION,
+            daemon: "nunciod/0.2.0".to_owned(),
+            linked: true,
+            session: nuncio_client::Session::Linked,
+            unread: 0,
+            stop_reason: None,
+        }),
+    });
+    ui.take_undelivered();
+
+    let view = ui.settings_view();
+    let dialog = view.open_unlink();
+    // Realized (never shown), so the windows' close paths run for real below.
+    gtk::prelude::WidgetExt::realize(&view.window);
+    gtk::prelude::WidgetExt::realize(&dialog.window);
+    dialog.typed("unlink");
+    dialog.press();
+    check(
+        ui.take_undelivered() == [Command::Send(ClientFrame::wipe(true))],
+        "one wipe with the exact word",
+    );
+
+    // The wipe deletes and the daemon stops with it, so its answer never comes: the worker
+    // reports the cut instead.
+    ui.incoming(Incoming::Lost(nuncio_client::ClientError::Closed));
+    check(
+        !ui.unlink_open(),
+        "the confirmation closes without an answer (F5)",
+    );
+    check(
+        !view.window.is_visible(),
+        "and the Settings window it was asked from",
+    );
+    check(
+        !ui.last_toast()
+            .unwrap_or_default()
+            .contains("connection lost"),
+        &format!(
+            "the cut our own unlink causes is not an error toast (F6): {:?}",
+            ui.last_toast()
+        ),
+    );
+    let screen = ui.link_screen().expect("the app shows the first screen");
+    check(
+        screen.title == "Link this device to WhatsApp" && screen.action.as_deref() == Some("Link"),
+        "with its one Link button",
+    );
+
+    // Nothing serves the socket, so the press is what asks the session bus for the daemon.
+    ui.link_press();
+    check(
+        ui.take_undelivered() == [Command::StartDaemon],
+        "pressing Link starts the daemon",
+    );
+    ui.incoming(Incoming::Connected);
+    check(
+        ui.take_undelivered()
+            .contains(&Command::Send(ClientFrame::link_start(true))),
+        "and the flow the press asked for starts as it answers",
+    );
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::link_start(true),
+        result: Ok(DaemonFrame::LinkStarted {
+            v: PROTOCOL_VERSION,
+        }),
+    });
+    let rows: Vec<String> = (0..21)
+        .map(|row| {
+            (0..21)
+                .map(|col| if (row * 3 + col) % 4 == 0 { '1' } else { '0' })
+                .collect()
+        })
+        .collect();
+    ui.incoming(Incoming::Event(DaemonFrame::EventLinkQr {
+        v: PROTOCOL_VERSION,
+        size: 21,
+        rows,
+    }));
+    check(
+        ui.link_screen().is_some_and(|screen| screen.qr.is_some()),
+        "and the daemon's code is drawn",
+    );
+    if view.window.is_realized() {
+        view.window.destroy();
+    }
 }
 
 /// `[app] background = true`: closing hides the window; the state and the worker stay until Quit.

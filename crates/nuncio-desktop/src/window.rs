@@ -46,7 +46,7 @@ use gtk::{gdk, gio, glib};
 use nuncio_client::driver::open_externally;
 use nuncio_client::model::REACTIONS;
 
-use crate::controller::{Alert, Command, Controller, OPEN_CHAT_ACTION, notification_id};
+use crate::controller::{Alert, Command, Controller, OPEN_CHAT_ACTION, Settled, notification_id};
 use crate::lifecycle::{Close, Lifecycle};
 use crate::palette::{self, Step};
 use crate::pictures::{self, Cache, Decoded, Decoder, Variant};
@@ -1013,12 +1013,16 @@ impl Ui {
         let backlog = Arc::new(Backlog::new(EVENT_BACKLOG));
         let (post, mut posted) = futures_channel::mpsc::unbounded();
         let admit = Arc::clone(&backlog);
-        let worker = Worker::spawn(settings, move |incoming| {
-            if let Some(incoming) = admit.admit(incoming) {
-                // The receiver only goes with the main loop, at exit.
-                let _ = post.unbounded_send(incoming);
-            }
-        });
+        let worker = Worker::spawn(
+            settings,
+            move |incoming| {
+                if let Some(incoming) = admit.admit(incoming) {
+                    // The receiver only goes with the main loop, at exit.
+                    let _ = post.unbounded_send(incoming);
+                }
+            },
+            nuncio_client::bus::start_daemon,
+        );
         *self.0.worker.borrow_mut() = Some(worker);
         let weak = self.weak();
         glib::spawn_future_local(async move {
@@ -2182,6 +2186,10 @@ impl Ui {
                         self.0.controller.borrow_mut().open_failed(&error);
                     }
                 }
+                Command::StartDaemon => match self.0.worker.borrow().as_ref() {
+                    Some(worker) => worker.start_daemon(),
+                    None => self.0.undelivered.borrow_mut().push(Command::StartDaemon),
+                },
             }
         }
         let alerts = self.0.controller.borrow_mut().take_alerts();
@@ -3368,14 +3376,14 @@ impl Ui {
         if close_search_bar {
             inner.search_toggle.set_active(false);
         }
-        // The confirmation's answer landed: it goes, and a confirmed unlink takes the settings
-        // window with it, since the app is the link screen now (S4). It is taken out first: the
-        // windows' own handlers borrow it again as they close.
-        if let Some(unlinked) = settled {
+        // The confirmation's answer landed: it goes, and an unlink — or the daemon that held it
+        // gone — takes the settings window with it, since the app is the link screen then (S4,
+        // F5). It is taken out first: the windows' own handlers borrow it again as they close.
+        if let Some(settled) = settled {
             let closing = inner.unlink.borrow_mut().take();
             if let Some(dialog) = closing {
                 dialog.window.close();
-                if unlinked {
+                if settled != Settled::Unconfirmed {
                     dialog.settings.close();
                 }
             }

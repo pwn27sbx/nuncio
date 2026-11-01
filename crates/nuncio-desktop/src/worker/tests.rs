@@ -107,6 +107,8 @@ fn spawn_with(
         move |incoming| {
             let _ = tx.send(incoming);
         },
+        // The tests never ask a session bus for a daemon: nothing here may start the real one.
+        || {},
     );
     (worker, rx)
 }
@@ -395,4 +397,42 @@ fn events_past_the_backlog_are_dropped_as_one_overflow_and_replies_never_are() {
     backlog.delivered(&Incoming::Overflow);
     assert!(matches!(backlog.admit(event()), Some(Incoming::Event(_))));
     assert!(matches!(backlog.admit(event()), Some(Incoming::Overflow)));
+}
+
+// F6: the link screen's Link, with the daemon our own unlink stopped, asks the session bus for
+// one, once; a life that is still serving is left alone and answers the request that follows.
+#[test]
+fn asking_for_the_daemon_asks_the_bus_once_and_never_drops_a_serving_life() {
+    let path = socket("ask");
+    let listener = UnixListener::bind(&path).expect("bind");
+    let asked = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&asked);
+    let (tx, rx) = mpsc::channel();
+    let worker = Worker::spawn(
+        Settings {
+            path: path.to_owned(),
+            client: "nuncio-desktop/test".to_owned(),
+            timeout: Duration::from_secs(2),
+            send_wait: Duration::from_secs(2),
+            backoff: Backoff::new(Duration::from_millis(20), Duration::from_millis(80)),
+        },
+        move |incoming| {
+            let _ = tx.send(incoming);
+        },
+        move || {
+            count.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+    let mut life = Life::accept(&listener);
+    assert!(matches!(next(&rx), Incoming::Connected));
+
+    worker.start_daemon();
+    worker.send(ClientFrame::status());
+    assert!(
+        life.serve().contains("\"status\""),
+        "the serving life answers the request that follows"
+    );
+    assert!(matches!(next(&rx), Incoming::Reply { result: Ok(_), .. }));
+    assert_eq!(asked.load(Ordering::SeqCst), 1, "one ask per press");
+    let _ = std::fs::remove_file(&path);
 }

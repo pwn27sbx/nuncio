@@ -494,7 +494,7 @@ fn frames(commands: &[Command]) -> Vec<ClientFrame> {
         .iter()
         .filter_map(|command| match command {
             Command::Send(frame) => Some(frame.clone()),
-            Command::Open(_) => None,
+            Command::Open(_) | Command::StartDaemon => None,
         })
         .collect()
 }

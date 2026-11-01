@@ -153,6 +153,8 @@ struct Inner {
     transcript: gtk::ListBox,
     /// What the transcript says when it has no message.
     transcript_empty: Empty,
+    /// The transcript's measure: the pane's width, up to its broad maximum (F2).
+    transcript_measure: Measure,
     transcript_scroll: gtk::ScrolledWindow,
     /// Keep the conversation scrolled to the newest message as it grows.
     stick: Cell<bool>,
@@ -705,11 +707,12 @@ impl Ui {
         transcript.update_property(&[Property::Label("Messages")]);
         let transcript_empty = Empty::new("mail-unread-symbolic");
         transcript.set_placeholder(Some(&transcript_empty.root));
-        // At most 72 characters wide, at the left (plan §5).
+        // All of the conversation's pane, up to the measure's broad maximum (plan §5, D2).
+        let transcript_measure = Measure::new(&transcript);
         let transcript_scroll = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .vexpand(true)
-            .child(&Measure::new(&transcript))
+            .child(&transcript_measure)
             .build();
         // The list box only adopts a scrollable parent's adjustment, and `Measure` is not one:
         // without this PageUp/PageDown and keeping the focused row in view stop working.
@@ -861,6 +864,7 @@ impl Ui {
             chats_empty,
             transcript,
             transcript_empty,
+            transcript_measure,
             transcript_scroll,
             stick: Cell::new(true),
             search_toggle,
@@ -1149,7 +1153,40 @@ impl Ui {
             day: first("nuncio-day"),
             author: first("nuncio-author-line"),
             meta: first("nuncio-meta-line"),
+            media: first("nuncio-media"),
         })
+    }
+
+    /// The width the transcript takes in a conversation pane `available` pixels wide (tests):
+    /// all of it, up to the measure's broad maximum (F2).
+    pub fn transcript_width(&self, available: i32) -> i32 {
+        self.0.transcript_measure.room_for(available)
+    }
+
+    /// The width the chat list keeps, whatever the window's size (tests): the paned's start child
+    /// is not resized with it (F2: the list keeps its width, the conversation takes the rest).
+    pub fn list_width(&self) -> i32 {
+        self.0.lists.position()
+    }
+
+    /// How wide the chat list and the conversation are drawn now (tests). Zero before the window
+    /// is presented and laid out.
+    pub fn pane_widths(&self) -> (i32, i32) {
+        (self.0.list_view.width(), self.0.content_view.width())
+    }
+
+    /// How wide the transcript is drawn inside that pane (tests): the room the measure gave it,
+    /// which is the whole pane up to its broad maximum (F2).
+    pub fn transcript_drawn_width(&self) -> i32 {
+        self.0.transcript_measure.width()
+    }
+
+    /// How the bubble of message `index` is aligned in its lane (tests): at the end for mine, at
+    /// the start for theirs, so the conversation reaches both ends of its pane (F2).
+    pub fn bubble_halign(&self, index: usize) -> Option<gtk::Align> {
+        let row = self.0.transcript.row_at_index(i32::try_from(index).ok()?)?;
+        let body = find_class(row.upcast_ref(), "nuncio-bubble")?;
+        Some(body.parent()?.halign())
     }
 
     /// What the chat list and the transcript say while empty, when they do (tests).
@@ -4312,16 +4349,23 @@ fn bubble_row(ui: &Weak<Inner>, bubble: &Bubble) -> gtk::ListBoxRow {
     let downloading = bubble
         .media
         .as_deref()
-        .is_some_and(|media| media.ends_with("downloading…"));
+        .is_some_and(|media| media.ends_with(present::DOWNLOADING));
     match (&bubble.document, &bubble.media) {
         (Some(document), _) => {
             body.append(&document_row(document));
             if downloading {
-                body.append(&label("downloading…", "nuncio-meta"));
+                body.append(&label(present::DOWNLOADING, "nuncio-meta"));
             }
         }
-        (None, Some(media)) => body.append(&label(media, "nuncio-media")),
-        (None, None) => {}
+        // The picture says what it is (F4, D4): `[image]` or `[sticker]` is only the fallback for
+        // a media message with nothing drawn, a photo whose message embeds no thumbnail included.
+        (None, Some(media)) if !draws_picture(bubble) => {
+            body.append(&label(media, "nuncio-media"));
+        }
+        (None, Some(_)) if downloading => {
+            body.append(&label(present::DOWNLOADING, "nuncio-meta"));
+        }
+        (None, _) => {}
     }
     if let Some(picture) = &bubble.picture {
         body.append(&picture_widget(ui, bubble.index, picture));
@@ -4426,6 +4470,15 @@ fn bubble_row(ui: &Weak<Inner>, bubble: &Bubble) -> gtk::ListBoxRow {
     row
 }
 
+/// Whether the bubble draws its picture, so the `[kind]` label would only repeat it (F4, decision
+/// D4): the message embeds a thumbnail or its full picture is here.
+fn draws_picture(bubble: &Bubble) -> bool {
+    bubble
+        .picture
+        .as_ref()
+        .is_some_and(|picture| picture.thumb || picture.full.is_some())
+}
+
 /// A document's 32 px row: a file glyph, its name and its size.
 fn document_row(document: &present::DocumentView) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -4455,6 +4508,21 @@ fn reaction_chip(chip: &present::ReactionChip) -> gtk::Box {
     shown
 }
 
+/// The first widget with CSS class `class` inside `widget`.
+fn find_class(widget: &gtk::Widget, class: &str) -> Option<gtk::Widget> {
+    if widget.has_css_class(class) {
+        return Some(widget.clone());
+    }
+    let mut child = widget.first_child();
+    while let Some(current) = child {
+        if let Some(found) = find_class(&current, class) {
+            return Some(found);
+        }
+        child = current.next_sibling();
+    }
+    None
+}
+
 /// The texts of the labels with CSS class `class` inside `widget`, in order.
 fn texts_with_class(widget: &gtk::Widget, class: &str, found: &mut Vec<String>) {
     if let Some(label) = widget.downcast_ref::<gtk::Label>()
@@ -4481,6 +4549,8 @@ pub struct MessageParts {
     pub author: Option<String>,
     /// The meta line under it.
     pub meta: Option<String>,
+    /// The `[kind]` label, drawn only when the bubble draws nothing else (F4).
+    pub media: Option<String>,
 }
 
 /// What a bubble's picture widget shows ([`Ui::picture`], tests).
@@ -4550,8 +4620,8 @@ fn reserve(picture: &gtk::Picture, (width, height): (u32, u32)) {
 
 /// The picture inside an image or sticker bubble: its box reserved at once from the size the
 /// message states, the best texture the cache has (the full picture, else the thumbnail), and a
-/// click that shows the full picture ([`Ui::open_picture`]). Without a texture it stays empty
-/// under the bubble's `[image]` / `[sticker]` label.
+/// click that shows the full picture ([`Ui::open_picture`]). A message that embeds no thumbnail
+/// draws no picture, and the bubble keeps its `[image]` / `[sticker]` label as the fallback (F4).
 fn picture_widget(ui: &Weak<Inner>, index: usize, view: &PictureView) -> gtk::Widget {
     let picture = gtk::Picture::builder()
         .can_shrink(true)

@@ -34,6 +34,9 @@ else
 	no "INSTALL.md: 'Unlink first' must come before 'sudo pacman -R nuncio'"
 fi
 
+# These are literal sentences copied from INSTALL.md, not paths to expand: the tilde and the
+# backticks are part of the text the check looks for.
+# shellcheck disable=SC2088,SC2016
 for leftover in '~/.local/share/nuncio' 'the keyring item `nuncio` / `store.data_key`' \
 	'~/.config/systemd/user/default.target.wants/nunciod.service'; do
 	if grep -qF -- "$leftover" "$root/INSTALL.md"; then

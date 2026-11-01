@@ -132,7 +132,7 @@ func TestWrappedNameReadFailuresAreLoggedByTheirCause(t *testing.T) {
 func TestAWrappedLogoutFailureIsLoggedByItsCause(t *testing.T) {
 	fake := &fakeClient{device: true, logoutErr: wrapped("logging out", adapterCause{})}
 	s := NewSession(fake, nil, nil)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	var logs []string
 	s.logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
 	if err := s.Start(); err != nil {

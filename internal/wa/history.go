@@ -24,6 +24,12 @@ import (
 // type only (the store's text could quote a message or a JID) and the import goes on; a blob that
 // panics is contained the same way.
 //
+// An import is the one work whose length is the phone's, not nuncio's (a full sync is thousands of
+// messages), so it is the only one Close stops instead of awaiting: the session's context is
+// checked before every message and a blob still queued is dropped, so an import ends at its next
+// message and a wipe never waits for a whole sync. The store is closed once no import writes to it
+// (Session.Close, and the wait it bounds with importStopTimeout).
+//
 // The messages are stored with the same row a live delivery produces (messageRow, the same
 // canonical chat, the same store), and the store keeps one message per (chat, id), so the same blob
 // applied twice adds nothing. Each chat that received a message is published once as event_chat, as
@@ -35,25 +41,31 @@ func (s *Session) storeHistory(evt *waevents.HistorySync) {
 		return
 	}
 	// Counted under the lock that Close uses to end the session, so an import never starts after
-	// Close began waiting for the running ones (it closes the store they write to).
+	// Close began asking the running ones to stop (it closes the store they write to).
 	s.mu.Lock()
 	run := s.started
 	if run {
-		s.drains.Add(1)
+		s.imports.Add(1)
 	}
 	s.mu.Unlock()
 	if !run {
 		return
 	}
 	go func() {
-		defer s.drains.Done()
+		defer s.imports.Done()
 		s.historyMu.Lock()
 		defer s.historyMu.Unlock()
+		// A blob that was queued behind the running one is dropped when the session is closing:
+		// nobody is going to read what it would store.
+		if s.importCtx.Err() != nil {
+			return
+		}
 		s.importHistory(evt.Data)
 	}()
 }
 
-// importHistory stores every message of one blob, conversation by conversation.
+// importHistory stores every message of one blob, conversation by conversation. It stops at the
+// next message once Close cancelled the session, so a full sync never holds a closing daemon.
 func (s *Session) importHistory(data *waHistorySync.HistorySync) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -67,6 +79,9 @@ func (s *Session) importHistory(data *waHistorySync.HistorySync) {
 		}
 		stored := ""
 		for _, hm := range conv.GetMessages() {
+			if s.importCtx.Err() != nil {
+				return
+			}
 			m, ok := historyRow(chat, hm.GetMessage())
 			if !ok {
 				continue

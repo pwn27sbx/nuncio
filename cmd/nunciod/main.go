@@ -105,7 +105,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 	// Every connection that subscribes gets the session's events (new messages, unread and
 	// connection changes) through this broker.
 	events := ipc.NewBroker()
@@ -338,8 +338,9 @@ type sessionState interface {
 	MarkRead(jid string) (int, error)
 	// Logout tells WhatsApp to unlink the device through the daemon's own session.
 	Logout(ctx context.Context) error
-	// Close disconnects the session and closes the store.
-	Close()
+	// Close disconnects the session and closes the store. It answers an error when a history
+	// import was still writing, because the store then stays open for that import to close.
+	Close() error
 	// DownloadMedia returns the cached path and mime type of a message's attachment, downloading
 	// it on this request only.
 	DownloadMedia(jid, id string) (path, mime string, err error)
@@ -375,7 +376,7 @@ func (d *daemon) handOver(s sessionState, db *sql.DB) {
 		// A wipe is running or done: the data is being deleted, so the new session is not served.
 		d.mu.Unlock()
 		_ = db.Close()
-		s.Close()
+		_ = s.Close()
 		return
 	}
 	prev, prevDB := d.session, d.db
@@ -385,7 +386,9 @@ func (d *daemon) handOver(s sessionState, db *sql.DB) {
 		_ = prevDB.Close()
 	}
 	if prev != nil {
-		prev.Close()
+		// The replaced session holds no store here (it is the unlinked one), so its close has no
+		// error to act on.
+		_ = prev.Close()
 	}
 }
 
@@ -625,11 +628,14 @@ const logoutTimeout = 20 * time.Second
 
 // Wipe is the ordered teardown behind `nuncio logout` (unlink) and `nuncio purge`: (1) with unlink,
 // tell WhatsApp to unlink the device through this daemon's session, and stop with nothing deleted
-// if it does not confirm; (2) close the session and the store, delete the keyring items and (3)
-// the database, media cache and exports; (4) remove the socket. ServeConn then answers wiped and
-// serve returns, so the daemon exits. Without unlink WhatsApp is never contacted. When the
-// deletion fails the daemon keeps serving with the session closed (offline, or unlinked after a
-// confirmed logout) and no store, so a retried purge through it can finish.
+// if it does not confirm; (2) close the session and the store (a history import is stopped, never
+// awaited: a full sync can be thousands of messages and a wipe that waited for one left the daemon
+// alive with its socket gone), delete the keyring items and (3) the database, media cache and
+// exports; (4) remove the socket. ServeConn then answers wiped and serve returns, so the daemon
+// exits. Without unlink WhatsApp is never contacted. When the deletion fails, or a history import
+// outlives the session's bounded stop, the daemon keeps serving with the session closed (offline,
+// or unlinked after a confirmed logout) and nothing deleted, so a retried purge through it can
+// finish.
 func (d *daemon) Wipe(unlink bool) error {
 	if d.dataDir == "" || d.socket == "" || d.keyring == nil {
 		return errors.New("this daemon cannot wipe: it does not know its data dir, keyring or socket")
@@ -654,7 +660,12 @@ func (d *daemon) Wipe(unlink bool) error {
 	d.closed.Store(true)
 	d.wiping = false
 	d.mu.Unlock()
-	session.Close()
+	if err := session.Close(); err != nil {
+		// A history import was still writing after the bounded stop and the store stays open for
+		// it: nothing is deleted under a write. The error's type only, as below.
+		log.Printf("cannot close the store before deleting (%T)", err)
+		return errors.New("could not delete all of nuncio's local data; run nuncio purge --confirm to finish")
+	}
 	// The store is closed, so the total is 0 from now on: the bar's badge clears even when the
 	// deletion below fails and the daemon keeps serving.
 	if d.unreadChanged != nil {

@@ -506,6 +506,27 @@ func TestGateCloseStopsTheAttempts(t *testing.T) {
 	}
 }
 
+// A wipe retried through the gate asks the session again. While a history import keeps the store
+// open the session answers an error, and the second Close must not answer nil: the daemon would
+// then delete the data the import is still writing to.
+func TestAGateCloseRepeatsTheSessionsAnswer(t *testing.T) {
+	stillWriting := errors.New("a history import is still writing to the store")
+	var closed atomic.Int64
+	live := &wa.Session{}
+	g := &gate{live: live, closeSession: func(*wa.Session) error {
+		closed.Add(1)
+		return stillWriting
+	}}
+	for i := 1; i <= 2; i++ {
+		if err := g.Close(); !errors.Is(err, stillWriting) {
+			t.Errorf("Close %d = %v, want the session's answer", i, err)
+		}
+	}
+	if n := closed.Load(); n != 2 {
+		t.Errorf("the session was closed %d times, want 2: a retried wipe has to ask it again", n)
+	}
+}
+
 // blockingKeyring is a lockableKeyring whose Get waits until release is closed, as go-keyring's
 // Secret Service does while an unlock prompt is open (it waits on the prompt with no timeout).
 type blockingKeyring struct {

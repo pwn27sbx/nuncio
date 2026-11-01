@@ -20,6 +20,11 @@ becomes the release notes.
   never counts as unread and never lights the badge), a blob applied twice stores nothing twice,
   and each chat is refreshed in an open app as its messages land. Nothing is downloaded, no history
   is requested and no read receipt is sent.
+- **Unlinking no longer leaves the daemon alive with no socket.** When the phone was still sending
+  the message history, the wipe waited for the whole import to be stored, so the process kept the
+  bus name with nothing serving the socket and every client failed. Closing the session now stops
+  the import at its next message and closes the store once nothing is writing to it, so a wipe
+  right after linking exits the daemon as it should.
 
 ## v0.2.0 — link a device inside the app
 

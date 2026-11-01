@@ -138,9 +138,22 @@ type Session struct {
 	// receipts once; a call waits for it only inside its own 4 s bound.
 	markReadSem chan struct{}
 	// drains counts the work that writes to the store off whatsmeow's event goroutine: the outbox's
-	// drains, the one group-subject query of a Start and the history imports. Close waits for them
-	// before closing the store.
+	// drains and the one group-subject query of a Start. Close waits for them before closing the
+	// store; they are bounded by their own timeouts.
 	drains sync.WaitGroup
+	// imports counts the history imports (the one work whose length is the phone's, not ours) and
+	// importCancel stops them: Close cancels and waits at most importStop for them, so a session
+	// closes even while a full sync is being stored (see history.go).
+	imports      sync.WaitGroup
+	importCtx    context.Context
+	importCancel context.CancelFunc
+	importStop   time.Duration
+	// closeMu serialises Close, and closeRan/closeErr keep what it answered: a wipe retried
+	// through the daemon asks again, and a session that could not close its store answers the same
+	// without waiting a second time.
+	closeMu  sync.Mutex
+	closeRan bool
+	closeErr error
 	// historyMu makes the session import one history-sync blob at a time (see history.go).
 	historyMu sync.Mutex
 	// paceAfter schedules the pause between two drained sends (drainPace) like after; a separate
@@ -163,10 +176,12 @@ type publisher interface{ Publish(frame any) int }
 
 // NewSession wraps client, which may be nil for "no device store at all". db is the message
 // store that incoming messages are saved to, nil for none. closeStore, when not nil, runs on Close
-// after the client is disconnected.
+// after the client is disconnected and no import is writing.
 func NewSession(client Client, db *sql.DB, closeStore func() error) *Session {
+	importCtx, importCancel := context.WithCancel(context.Background())
 	return &Session{client: client, db: db, closeStore: closeStore, state: StateUnlinked, published: StateUnlinked,
-		backoff: NewBackoff(), after: afterFunc, paceAfter: afterFunc, logf: log.Printf, markReadSem: make(chan struct{}, 1)}
+		backoff: NewBackoff(), after: afterFunc, paceAfter: afterFunc, logf: log.Printf, markReadSem: make(chan struct{}, 1),
+		importCtx: importCtx, importCancel: importCancel, importStop: importStopTimeout}
 }
 
 func afterFunc(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
@@ -501,17 +516,51 @@ func (s *Session) publishState() {
 	s.mu.Unlock()
 }
 
+// importStopTimeout bounds the wait for a history import to stop once Close cancelled it: the
+// import checks its context before every message, so it ends at the next one, and this only covers
+// a store that never answers. It is never long enough to cover a whole blob.
+const importStopTimeout = 5 * time.Second
+
+// errImportRunning is what Close answers when a history import was still writing after
+// importStopTimeout: the store stays open (and is closed when that import ends), so nothing closes
+// or deletes a store under a write.
+var errImportRunning = errors.New("wa: a history import is still writing to the store")
+
 // Close cancels a pending reconnect, disconnects a started session, waits for a running outbox
-// drain or group-subject query and closes the device store.
-// Nothing reconnects after it, and a linked session reports offline from then on (an unlinked
-// one stays unlinked).
-func (s *Session) Close() {
+// drain or group-subject query, stops the history import and closes the device store. Nothing
+// reconnects after it, and a linked session reports offline from then on (an unlinked one stays
+// unlinked).
+//
+// The import is asked to stop instead of being awaited: a full sync is thousands of messages and
+// waiting for one left a wipe hanging with the daemon alive and its socket gone. It checks the
+// context before every message, so Close waits for one message at most; the store is closed once
+// no import writes to it, never under one. If the import is still writing after importStopTimeout,
+// Close answers errImportRunning and leaves the close to it (the caller must not delete the data).
+//
+// A second Close answers what the first did and never waits twice: nil once the store is closed
+// (or there never was one), and the first answer while an import still holds it. A wipe retried
+// through the daemon asks again, so the store is deleted only once nothing writes to it.
+func (s *Session) Close() error {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
 	s.mu.Lock()
+	ran, answered, open := s.closeRan, s.closeErr, s.closeStore != nil
+	s.mu.Unlock()
+	if ran {
+		if !open {
+			return nil
+		}
+		return answered
+	}
+	s.mu.Lock()
+	s.closeRan = true
 	started := s.started
 	s.started = false
 	cancel := s.cancel
 	s.cancel = nil
 	s.mu.Unlock()
+	// Before anything else: the import is the one work whose length belongs to the phone.
+	s.importCancel()
 	if cancel != nil {
 		cancel()
 	}
@@ -528,9 +577,46 @@ func (s *Session) Close() {
 	s.publishState()
 	// A running drain finishes (its sends fail fast once disconnected) before the store closes.
 	s.drains.Wait()
-	if s.closeStore != nil {
-		_ = s.closeStore()
-		s.closeStore = nil
+	var err error
+	if !waitWithin(&s.imports, s.importStop) {
+		s.logf("wa: a history import is still writing after %s; it closes the store", s.importStop)
+		go func() {
+			s.imports.Wait()
+			s.closeStoreOnce()
+		}()
+		err = errImportRunning
+	} else {
+		s.closeStoreOnce()
+	}
+	s.mu.Lock()
+	s.closeErr = err
+	s.mu.Unlock()
+	return err
+}
+
+// waitWithin waits for the group, reporting whether it ended within d.
+func waitWithin(w *sync.WaitGroup, d time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		w.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(d):
+		return false
+	}
+}
+
+// closeStoreOnce closes the device store, whichever of Close or the last import gets here first.
+func (s *Session) closeStoreOnce() {
+	s.mu.Lock()
+	closeStore := s.closeStore
+	s.closeStore = nil
+	s.mu.Unlock()
+	if closeStore != nil {
+		_ = closeStore()
 	}
 }
 

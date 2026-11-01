@@ -22,7 +22,7 @@ func gateServed(t *testing.T, path string, kr store.Keyring) (*gate, *manualTime
 		t.Fatalf("openSession: %v", err)
 	}
 	g, timers, starts := asGate(t, s)
-	t.Cleanup(g.Close)
+	t.Cleanup(func() { _ = g.Close() })
 	events := ipc.NewBroker()
 	g.SetEvents(events)
 	d := newDaemon(g, db)

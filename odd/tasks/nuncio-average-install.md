@@ -57,7 +57,7 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | T3 | S4/S5/S9: the wire carries the flow — `link_start`, `link_cancel`, `link_started`, `link_cancelled`, `link_qr`, `link_state`, with fixtures and both contract suites | inline | done: RED (9 unresolved types in both suites) → GREEN; 8 fixtures, spec table rows plus a "The link flow" section (no quiet zone, the QR never logged, rows as the only representation), Go types in `internal/ipc`, Rust variants with the `link_qr`/`link_state` serde renames; `go test ./internal/ipc/...` and `cargo test -p nuncio-client` green, the 177-module frame is 31.9 kB against a 1 MiB cap | this commit |
 | T4 | S4/S5/S8: the daemon serves it — handler, QR rotation, cancel, fixed failure sentences | inline | done: RED (undefined `LinkStarter`, `LinkCanceller`, `MaxLinkQRSize`, `LinkFailureReason`) → GREEN; `link_start` without consent (false or absent) is refused with `bad_frame` before the daemon opens anything, and the flow gates again with `wa.Gate`; one `link_qr` per code, `size`+`rows` only, at most 177 modules per side; `waiting` → codes → `linked`, and a stop carries exactly `WhatsApp stopped the linking: ask for a new QR`; cancel removes the store and only the key this flow made, and a linked store is refused before the keyring is read; a paired device is handed to the daemon, which serves it without a restart; no frame, log line or error carries the payload | f2cfc78 (wire), 70b44ab (daemon), fixes 261c69a, 0efa996, c1bb599 |
 | T5 | S9: `nuncio link` becomes a thin client of the frames, unchanged from the outside | inline | pending | — |
-| T6 | S4/S5: `nuncio-client` parses the frames and exposes the link flow to both clients | inline | pending | — |
+| T6 | S4/S5: `nuncio-client` parses the frames and exposes the link flow to both clients | inline | done: RED (7th event fixture dropped the connection with `Unexpected { expected: "event", got: "link_qr" }`, then `LinkFlow`/`LinkState`/`LinkUpdate` unresolved at the crate root) → GREEN; `is_event` accepts `link_qr`/`link_state`, every event fixture is received through `next_event`, and one `LinkFlow` folds the flow with `LinkQr` (row-first, bounds-safe `module()`, `Debug` without the matrix) and the daemon's failure sentence verbatim | 4378882 |
 | T7 | S4/S6/S7/S8: the GTK app's link screen — consent, drawn QR, Link, cancel, error states, then the chat list | inline | pending | — |
 | T8 | S10: the TUI's unlinked copy stops pointing at the CLI | inline | pending | — |
 | T9 | S11: unlink from the app with a typed confirmation | inline | pending | — |
@@ -171,3 +171,36 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   (`gofmt`, `go vet`, `CGO_ENABLED=0 go test ./...`, `go test -race ./cmd/nunciod/`, the GGA
   review) but carries no native receipt; its authority is not burned, and a fresh review of the
   corrected commit can start when the defect is fixed. T5 proceeds.
+- L12 (evidence, 2026-10-31, T6) The client half landed in one commit. `conn.rs`'s `is_event` gains
+  `EventLinkQr`/`EventLinkState`, so a subscribed client no longer drops the connection on the first
+  frame the daemon publishes (L5a), and `EVENT_FIXTURES` now lists all seven event fixtures, so a
+  new event kind without a client test is noticed there. `LinkState` is re-exported (L5b) and
+  `crates/nuncio-client/src/link_flow.rs` adds `LinkFlow`: `apply(&DaemonFrame) -> Option<LinkUpdate>`
+  folds the two event ops and leaves every other frame to the client, `qr()` holds the live code
+  (`LinkQr`: `size()`, `rows()`, row-first `module()` that reads light outside the matrix, and a
+  hand-written `Debug` that prints the size only, because the matrix is pairing material),
+  `phase()` is `None` until the first `link_state`, and `reason()` carries the daemon's sentence
+  verbatim (a state frame without a reason clears the previous one, so a later failure cannot show a
+  stale sentence). A linked or failed flow drops the code. The handle owns no connection, so the
+  terminal client folds frames in its own loop and the desktop app from its worker thread, and a
+  client that did not start a flow folds the same frames. Named `LinkFlow` because
+  `nuncio_client::Link` is the driver's request/event pair (L5c). Verified: RED reproduced twice
+  (the fixture through `next_event`, then the unresolved exports), `cargo fmt --check`, `cargo
+  clippy --workspace --all-targets -- -D warnings` over both clients, `cargo test --workspace`
+  (25 suites, doc-tests included), `gofmt -l cmd internal` empty, `go vet ./...`, `CGO_ENABLED=0 go
+  build ./...` and `CGO_ENABLED=0 go test ./...` green; `packaging/check.sh` green except
+  `systemd-analyze --user verify` (needs `/usr/bin/nunciod`, installed in T11). The GGA hook passed
+  with advisories only, all of them in code this commit did not touch.
+- L13 (review, 2026-10-31, T6) Approved (medium tier, lenses risk, readability and reliability) and
+  acknowledged with its authority burned — no repeat of L11 this time, because the three lens
+  captures were admitted on the first relay. Six advisory findings, none blocking and none reopening
+  the candidate; three are inputs for T7 and are recorded so they are not lost: (a) `LinkQr` keeps
+  two representations of one dimension — the frame's `size` and the actual `rows` — and `module()`
+  bounds by the rows, so a screen MUST draw through `module()` and never index `rows()` by `size()`
+  (risk R1-QR-SHAPE, readability R2-1, reliability R3-001); (b) `reason()` is only displayable while
+  `phase()` is `Some(LinkState::Failed)`, since every state frame refreshes it (readability R2-2), so
+  T7 shows it in the failed state only; (c) the failure sentence is stored verbatim (risk
+  R1-REASON-VERBATIM), so the renderer sanitizes it instead of echoing bytes at a terminal or a
+  markup sink. The readability lens also noted the crate root now carries three "link" surfaces
+  (`driver::Link`, the `whatsapp:` `link` module, `link_flow`); the names stay, because renaming the
+  driver's pair or the URL module is outside this task and T7 consumes `LinkFlow` as documented.

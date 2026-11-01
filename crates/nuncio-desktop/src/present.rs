@@ -92,7 +92,8 @@ pub struct Bubble {
     /// The quoted message's start, when this one replies to another.
     pub quote: Option<String>,
     /// `[image]`, `[sticker] ▶`, `[document]` …, for a media message; `downloading…` after it
-    /// while its file is fetched to open it.
+    /// while its file is fetched to open it. The bubble draws it only when it draws nothing else
+    /// (F4): a picture or a document speaks for itself.
     pub media: Option<String>,
     /// The text (a media message's caption).
     pub text: String,
@@ -221,6 +222,9 @@ fn snippet(text: &str) -> String {
         line.to_owned()
     }
 }
+
+/// What a media message says while its file is fetched to open it, after its label.
+pub const DOWNLOADING: &str = "downloading…";
 
 /// A media message's label: its kind in brackets, a moving sticker marked `▶`.
 fn media_label(message: &Message) -> Option<String> {
@@ -401,7 +405,7 @@ pub fn bubbles(model: &Model, offset_minutes: i32, today: Option<Day>) -> Vec<Bu
             let media = media_label(message).map(|label| {
                 let transcript = model.transcript();
                 if transcript.is_downloading(&message.id) || transcript.is_showing(&message.id) {
-                    format!("{label} downloading…")
+                    format!("{label} {DOWNLOADING}")
                 } else {
                     label
                 }
@@ -424,12 +428,8 @@ pub fn bubbles(model: &Model, offset_minutes: i32, today: Option<Day>) -> Vec<Bu
             label.push_str(": ");
             // A picture reads as what it is (`Photo`, `Sticker`), then its caption.
             let spoken = match picture_word(message) {
-                Some(word)
-                    if media
-                        .as_deref()
-                        .is_some_and(|m| m.ends_with("downloading…")) =>
-                {
-                    Some(format!("{word}, downloading…"))
+                Some(word) if media.as_deref().is_some_and(|m| m.ends_with(DOWNLOADING)) => {
+                    Some(format!("{word}, {DOWNLOADING}"))
                 }
                 Some(word) => Some(word.to_owned()),
                 None => media.clone(),

@@ -451,11 +451,11 @@ func TestStatusAndHelloFramesAreUnchangedWhenLinkedNormally(t *testing.T) {
 	}
 	defer live.Close()
 	const (
-		linkedHello   = `{"v":1,"op":"hello_ok","daemon":"nunciod/0.2.0","session":"linked","unread":0}`
-		linkedStatus  = `{"v":1,"op":"status","daemon":"nunciod/0.2.0","linked":true,"session":"linked","unread":0}`
-		offlineHello  = `{"v":1,"op":"hello_ok","daemon":"nunciod/0.2.0","session":"offline","unread":0}`
-		offlineStatus = `{"v":1,"op":"status","daemon":"nunciod/0.2.0","linked":true,"session":"offline","unread":0}`
-		lockedStatus  = `{"v":1,"op":"status","daemon":"nunciod/0.2.0","linked":true,"session":"offline","unread":0,"stop_reason":"keyring_locked"}`
+		linkedHello   = `{"v":1,"op":"hello_ok","daemon":"nunciod/0.2.1","session":"linked","unread":0}`
+		linkedStatus  = `{"v":1,"op":"status","daemon":"nunciod/0.2.1","linked":true,"session":"linked","unread":0}`
+		offlineHello  = `{"v":1,"op":"hello_ok","daemon":"nunciod/0.2.1","session":"offline","unread":0}`
+		offlineStatus = `{"v":1,"op":"status","daemon":"nunciod/0.2.1","linked":true,"session":"offline","unread":0}`
+		lockedStatus  = `{"v":1,"op":"status","daemon":"nunciod/0.2.1","linked":true,"session":"offline","unread":0,"stop_reason":"keyring_locked"}`
 	)
 	for _, c := range []struct {
 		name          string
@@ -503,6 +503,27 @@ func TestGateCloseStopsTheAttempts(t *testing.T) {
 	}
 	if err := db.Ping(); err == nil {
 		t.Error("the store is still open after Close")
+	}
+}
+
+// A wipe retried through the gate asks the session again. While a history import keeps the store
+// open the session answers an error, and the second Close must not answer nil: the daemon would
+// then delete the data the import is still writing to.
+func TestAGateCloseRepeatsTheSessionsAnswer(t *testing.T) {
+	stillWriting := errors.New("a history import is still writing to the store")
+	var closed atomic.Int64
+	live := &wa.Session{}
+	g := &gate{live: live, closeSession: func(*wa.Session) error {
+		closed.Add(1)
+		return stillWriting
+	}}
+	for i := 1; i <= 2; i++ {
+		if err := g.Close(); !errors.Is(err, stillWriting) {
+			t.Errorf("Close %d = %v, want the session's answer", i, err)
+		}
+	}
+	if n := closed.Load(); n != 2 {
+		t.Errorf("the session was closed %d times, want 2: a retried wipe has to ask it again", n)
 	}
 }
 
@@ -584,7 +605,7 @@ func TestDaemonServesOfflineWhileTheKeyringBlocks(t *testing.T) {
 	defer g.Close()
 	d := newDaemon(g, db)
 	sock := serveSocket(t, d, nil)
-	const offlineStatus = `{"v":1,"op":"status","daemon":"nunciod/0.2.0","linked":true,"session":"offline","unread":0}`
+	const offlineStatus = `{"v":1,"op":"status","daemon":"nunciod/0.2.1","linked":true,"session":"offline","unread":0}`
 	if _, status := rawFrames(t, sock); status != offlineStatus {
 		t.Errorf("status while the keyring blocks = %s, want %s", status, offlineStatus)
 	}

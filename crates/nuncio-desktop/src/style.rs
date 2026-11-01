@@ -109,10 +109,57 @@ pub fn breakpoints() -> [(String, Layout); 2] {
     ]
 }
 
+/// The app's type scale (F3, decision D3): every font size the sheets below paint, in pixels,
+/// chosen here and nowhere else. One step denser than the first scale, which the owner found far
+/// larger than WhatsApp Web's at the same resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypeScale {
+    /// The pane and conversation titles.
+    pub title: u32,
+    /// The message text, the chat rows' names and previews, the composer, the palette's rows, the
+    /// settings' titles and a dialog's body.
+    pub body: u32,
+    /// A filled button's label and the ticks beside a preview.
+    pub label: u32,
+    /// Times, meta lines, captions, the day label, the small headers, the quotes and the code's
+    /// label.
+    pub meta: u32,
+    /// The unread count.
+    pub chip: u32,
+}
+
+impl TypeScale {
+    /// The scale the app paints.
+    pub const DESIGN: Self = Self {
+        title: 14,
+        body: 12,
+        label: 11,
+        meta: 10,
+        chip: 9,
+    };
+
+    /// Every size in it, largest first.
+    pub fn sizes(self) -> [u32; 5] {
+        [self.title, self.body, self.label, self.meta, self.chip]
+    }
+
+    /// The message text's size in pixels: the transcript's measure
+    /// ([`crate::window::measure`]) measures with this one, so the CSS and the code never drift.
+    pub const fn text_px(self) -> f64 {
+        self.body as f64
+    }
+}
+
 /// The rules for the panes, headers, rail and status strip, in `palette`'s roles, with every
 /// corner of every element inside the app rounded by `radius` pixels (Hyprland's
 /// `decoration:rounding`; 0 squares them all, libadwaita's own radii included).
 pub fn layout_css(palette: &Palette, radius: u32) -> String {
+    sheets(palette, radius, TypeScale::DESIGN)
+}
+
+/// Every sheet the app paints, in `palette`'s roles and the sizes of `fonts` (the one argument
+/// that makes a size testable: a sheet with a size of its own keeps it whatever `fonts` says).
+fn sheets(palette: &Palette, radius: u32, fonts: TypeScale) -> String {
     let root = ROOT_CLASS;
     format!(
         ".{root}, .{root} * {{ border-radius: {radius}px; }}\n\
@@ -137,8 +184,8 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
            border-bottom: 1px solid {border};\n  \
            color: {text};\n\
          }}\n\
-         .{root} .nuncio-title {{ font-size: 15px; font-weight: 600; }}\n\
-         .{root} .nuncio-meta {{ font-size: 11px; color: {muted}; }}\n\
+         .{root} .nuncio-title {{ font-size: {title}px; font-weight: 600; }}\n\
+         .{root} .nuncio-meta {{ font-size: {meta}px; color: {muted}; }}\n\
          .{root} .nuncio-rail {{ padding: 12px 8px; }}\n\
          .{root} button.nuncio-primary {{\n  \
            min-height: 32px;\n  \
@@ -191,7 +238,7 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
          .{root} .nuncio-composer textview > text {{\n  \
            background-color: transparent;\n  \
            color: {text};\n  \
-           font-size: 13px;\n\
+           font-size: {body}px;\n\
          }}\n\
          .{root} button.nuncio-send {{\n  \
            min-height: 32px;\n  \
@@ -199,7 +246,7 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
            background-color: {accent};\n  \
            background-image: none;\n  \
            color: {accent_on};\n  \
-           font-size: 12px;\n  \
+           font-size: {label}px;\n  \
            font-weight: 600;\n  \
            border: none;\n  \
            box-shadow: none;\n\
@@ -209,7 +256,7 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
            padding: 0 4px 0 12px;\n  \
            border-bottom: 1px solid {border};\n\
          }}\n\
-         .{root} .nuncio-reply-quote {{ font-size: 11px; color: {muted}; }}\n\
+         .{root} .nuncio-reply-quote {{ font-size: {meta}px; color: {muted}; }}\n\
          .{root} menubutton.nuncio-icon-button > button, .{root} button.nuncio-icon-button {{\n  \
            min-width: 28px;\n  \
            min-height: 28px;\n  \
@@ -235,7 +282,7 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
            padding: 8px;\n  \
            background-color: #ffffff;\n  \
            color: #000000;\n  \
-           font-size: 11px;\n\
+           font-size: {meta}px;\n\
          }}\n",
         chrome = palette.surface_chrome().to_hex(),
         surface = palette.surface().to_hex(),
@@ -249,8 +296,12 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
         warning = palette.warning().to_hex(),
         header = HEADER_HEIGHT,
         composer = COMPOSER_MIN_HEIGHT,
-    ) + &list_and_transcript_css(palette)
-        + &overlays_css(palette)
+        title = fonts.title,
+        body = fonts.body,
+        label = fonts.label,
+        meta = fonts.meta,
+    ) + &list_and_transcript_css(palette, fonts)
+        + &overlays_css(palette, fonts)
 }
 
 /// How long each of the design's animations takes: at most 120 ms (plan §4.4).
@@ -276,22 +327,25 @@ pub fn motion_css(animations: bool) -> String {
     css
 }
 
-/// The transcript's measure, in characters of the message text (plan §5).
-pub const TRANSCRIPT_MEASURE_CHARS: i32 = 72;
+/// The transcript's widest measure, in characters of the message text (plan §5, decision D2):
+/// the conversation takes all of the room its pane gives it, and this only bounds a line on a
+/// screen so wide it would otherwise run across the whole monitor.
+pub const TRANSCRIPT_MAX_CHARS: i32 = 240;
 
 /// The transcript's width in a pane `available` pixels wide, for message text whose characters
-/// are `char_width` pixels wide: [`TRANSCRIPT_MEASURE_CHARS`] characters at the left of the pane
-/// (the room past them stays empty, on the right), all of a narrower pane, and never under `min`,
-/// the least the transcript can take. No font measured yet (0) counts a pixel a character.
+/// are `char_width` pixels wide: all of the pane, up to [`TRANSCRIPT_MAX_CHARS`] characters, and
+/// never under `min`, the least the transcript can take. No font measured yet (0): all of the
+/// pane, so a first pass with no font never pinches it.
 pub fn transcript_width(available: i32, char_width: i32, min: i32) -> i32 {
-    available
-        .min(TRANSCRIPT_MEASURE_CHARS * char_width.max(1))
-        .max(min)
+    if char_width <= 0 {
+        return available.max(min);
+    }
+    available.min(TRANSCRIPT_MAX_CHARS * char_width).max(min)
 }
 
 /// The rules for the command palette (plan §6.5), the inline search (§6.6), the settings
 /// (§6.7) and the dialogs (§6.8).
-fn overlays_css(palette: &Palette) -> String {
+fn overlays_css(palette: &Palette, fonts: TypeScale) -> String {
     let root = ROOT_CLASS;
     format!(
         ".{root} .nuncio-under {{ background-color: #000000; }}\n\
@@ -314,14 +368,14 @@ fn overlays_css(palette: &Palette) -> String {
            border: none;\n  \
            box-shadow: none;\n  \
            outline: none;\n  \
-           font-size: 13px;\n  \
+           font-size: {body}px;\n  \
            color: {text};\n\
          }}\n\
          .{root} .nuncio-palette-list {{ background-color: transparent; }}\n\
          .{root} .nuncio-palette-list > row {{\n  \
            min-height: 36px;\n  \
            padding: 0 12px;\n  \
-           font-size: 13px;\n  \
+           font-size: {body}px;\n  \
            background-color: transparent;\n  \
            box-shadow: none;\n\
          }}\n\
@@ -330,10 +384,10 @@ fn overlays_css(palette: &Palette) -> String {
            background-color: {active};\n  \
            color: {text};\n\
          }}\n\
-         .{root} .nuncio-palette-key {{ font-size: 11px; color: {faint}; }}\n\
+         .{root} .nuncio-palette-key {{ font-size: {meta}px; color: {faint}; }}\n\
          .{root} .nuncio-palette-header {{\n  \
            padding: 8px 12px 4px 12px;\n  \
-           font-size: 11px;\n  \
+           font-size: {meta}px;\n  \
            letter-spacing: 0.06em;\n  \
            color: {faint};\n\
          }}\n\
@@ -359,7 +413,7 @@ fn overlays_css(palette: &Palette) -> String {
          .{root}.nuncio-settings {{ background-color: {surface}; color: {text}; }}\n\
          .{root} .nuncio-settings-header {{\n  \
            padding: 24px 0 4px 0;\n  \
-           font-size: 11px;\n  \
+           font-size: {meta}px;\n  \
            letter-spacing: 0.06em;\n  \
            color: {muted};\n  \
            border-bottom: 1px solid {border};\n\
@@ -375,8 +429,8 @@ fn overlays_css(palette: &Palette) -> String {
            padding-top: 4px;\n  \
            padding-bottom: 4px;\n\
          }}\n\
-         .{root} .nuncio-settings-list > row .title {{ font-size: 13px; color: {text}; }}\n\
-         .{root} .nuncio-settings-list > row .subtitle {{ font-size: 11px; color: {muted}; }}\n\
+         .{root} .nuncio-settings-list > row .title {{ font-size: {body}px; color: {text}; }}\n\
+         .{root} .nuncio-settings-list > row .subtitle {{ font-size: {meta}px; color: {muted}; }}\n\
          popover.{root}.nuncio-dialog > contents {{\n  \
            background-color: {surface};\n  \
            color: {text};\n  \
@@ -384,8 +438,8 @@ fn overlays_css(palette: &Palette) -> String {
            padding: 16px;\n  \
            box-shadow: none;\n\
          }}\n\
-         .{root} .nuncio-dialog-body {{ font-size: 13px; color: {text}; }}\n\
-         .{root} .nuncio-dialog-error {{ font-size: 11px; color: {warning}; }}\n\
+         .{root} .nuncio-dialog-body {{ font-size: {body}px; color: {text}; }}\n\
+         .{root} .nuncio-dialog-error {{ font-size: {meta}px; color: {warning}; }}\n\
          .{root} button.nuncio-dialog-primary {{\n  \
            background-color: transparent;\n  \
            color: {accent};\n  \
@@ -402,6 +456,8 @@ fn overlays_css(palette: &Palette) -> String {
         active = palette.surface_active().to_hex(),
         accent = palette.accent().to_hex(),
         warning = palette.warning().to_hex(),
+        body = fonts.body,
+        meta = fonts.meta,
     )
 }
 
@@ -410,7 +466,7 @@ const AVATAR_TONE: f64 = 0.35;
 
 /// The rules for the chat rows (plan §6.2), the bubbles and everything around them (plan §6.3),
 /// the empty states, and the avatars' six muted tones (plan §4.3).
-fn list_and_transcript_css(palette: &Palette) -> String {
+fn list_and_transcript_css(palette: &Palette, fonts: TypeScale) -> String {
     let root = ROOT_CLASS;
     let mut css = format!(
         ".{root} .nuncio-chats > row {{\n  \
@@ -427,17 +483,17 @@ fn list_and_transcript_css(palette: &Palette) -> String {
            box-shadow: inset 2px 0 {accent};\n\
          }}\n\
          .{root} .nuncio-unread-mark {{ background-color: {accent}; }}\n\
-         .{root} .nuncio-name {{ font-size: 13px; font-weight: 600; color: {muted}; }}\n\
+         .{root} .nuncio-name {{ font-size: {body}px; font-weight: 600; color: {muted}; }}\n\
          .{root} .nuncio-name.nuncio-name-unread {{ color: {text}; }}\n\
-         .{root} .nuncio-preview {{ font-size: 13px; color: {muted}; }}\n\
-         .{root} .nuncio-preview-author {{ font-size: 13px; color: {text}; }}\n\
-         .{root} .nuncio-ticks {{ font-size: 12px; color: {faint}; }}\n\
+         .{root} .nuncio-preview {{ font-size: {body}px; color: {muted}; }}\n\
+         .{root} .nuncio-preview-author {{ font-size: {body}px; color: {text}; }}\n\
+         .{root} .nuncio-ticks {{ font-size: {label}px; color: {faint}; }}\n\
          .{root} .nuncio-faint {{ color: {faint}; }}\n\
          .{root} .nuncio-chip {{\n  \
            min-width: 16px;\n  \
            min-height: 16px;\n  \
            padding: 0 3px;\n  \
-           font-size: 10px;\n  \
+           font-size: {chip}px;\n  \
            background-color: {accent};\n  \
            color: {accent_on};\n\
          }}\n\
@@ -449,11 +505,11 @@ fn list_and_transcript_css(palette: &Palette) -> String {
          .{root} .nuncio-day {{\n  \
            margin-top: 16px;\n  \
            margin-bottom: 8px;\n  \
-           font-size: 11px;\n  \
+           font-size: {meta}px;\n  \
            letter-spacing: 0.06em;\n  \
            color: {faint};\n\
          }}\n\
-         .{root} .nuncio-author-line {{ font-size: 11px; font-weight: 600; color: {text}; }}\n\
+         .{root} .nuncio-author-line {{ font-size: {meta}px; font-weight: 600; color: {text}; }}\n\
          .{root} .nuncio-bubble {{\n  \
            padding: 8px 12px;\n  \
            color: {text};\n\
@@ -468,24 +524,24 @@ fn list_and_transcript_css(palette: &Palette) -> String {
            background-color: transparent;\n  \
            border: none;\n\
          }}\n\
-         .{root} .nuncio-text {{ font-size: 13px; }}\n\
-         .{root} .nuncio-caption {{ font-size: 11px; color: {muted}; }}\n\
-         .{root} .nuncio-media {{ font-size: 11px; color: {muted}; }}\n\
-         .{root} .nuncio-meta-line {{ font-size: 11px; color: {faint}; }}\n\
+         .{root} .nuncio-text {{ font-size: {body}px; }}\n\
+         .{root} .nuncio-caption {{ font-size: {meta}px; color: {muted}; }}\n\
+         .{root} .nuncio-media {{ font-size: {meta}px; color: {muted}; }}\n\
+         .{root} .nuncio-meta-line {{ font-size: {meta}px; color: {faint}; }}\n\
          .{root} .nuncio-meta-line.nuncio-warning {{ color: {warning}; }}\n\
          .{root} .nuncio-quote {{\n  \
            border-left: 2px solid {accent};\n  \
            padding-left: 8px;\n\
          }}\n\
-         .{root} .nuncio-quote-author {{ font-size: 11px; font-weight: 600; }}\n\
-         .{root} .nuncio-quote-text {{ font-size: 11px; color: {muted}; }}\n\
+         .{root} .nuncio-quote-author {{ font-size: {meta}px; font-weight: 600; }}\n\
+         .{root} .nuncio-quote-text {{ font-size: {meta}px; color: {muted}; }}\n\
          .{root} .nuncio-reaction {{\n  \
            padding: 0 4px;\n  \
            background-color: {surface};\n  \
            border: 1px solid {border};\n\
          }}\n\
          .{root} .nuncio-reaction.nuncio-reaction-mine {{ background-color: {active}; }}\n\
-         .{root} .nuncio-reaction-emoji {{ font-size: 13px; }}\n\
+         .{root} .nuncio-reaction-emoji {{ font-size: {body}px; }}\n\
          .{root} .nuncio-frame {{ border: 1px solid {border}; }}\n\
          .{root} .nuncio-document {{ min-height: 32px; }}\n\
          .{root} row.nuncio-message:focus-visible .nuncio-bubble {{\n  \
@@ -503,6 +559,10 @@ fn list_and_transcript_css(palette: &Palette) -> String {
         accent = palette.accent().to_hex(),
         accent_on = palette.accent_on().to_hex(),
         warning = palette.warning().to_hex(),
+        body = fonts.body,
+        label = fonts.label,
+        meta = fonts.meta,
+        chip = fonts.chip,
     );
     // libadwaita picks one of fourteen saturated colours by name; they fold into six muted tones
     // of the palette, with the text on them.
@@ -530,8 +590,9 @@ fn list_and_transcript_css(palette: &Palette) -> String {
 mod tests {
     use super::{
         COMPOSER_LINES, COMPOSER_PAD, DIALOG_WIDTH, Layout, PALETTE_WIDTH, SETTINGS_WIDTH,
-        THREE_PANES_FROM, TRANSCRIPT_MEASURE_CHARS, TWO_PANES_FROM, breakpoints,
-        composer_max_height, dialog_width, layout_css, layout_for, palette_width, transcript_width,
+        THREE_PANES_FROM, TRANSCRIPT_MAX_CHARS, TWO_PANES_FROM, TypeScale, breakpoints,
+        composer_max_height, dialog_width, layout_css, layout_for, palette_width, sheets,
+        transcript_width,
     };
     use crate::{Look, ROOT_CLASS, WINDOW_CLASS, css_for};
     use nuncio_client::{Palette, Rgb};
@@ -563,6 +624,75 @@ mod tests {
                 value[..value.find(';').expect("a value")].trim()
             })
             .collect()
+    }
+
+    /// Every `font-size` in `css`, as the number before its `px`.
+    fn font_sizes(css: &str) -> Vec<u32> {
+        css.match_indices("font-size:")
+            .map(|(at, key)| {
+                let value = &css[at + key.len()..];
+                let value = &value[..value.find(';').expect("a value")];
+                value
+                    .trim()
+                    .strip_suffix("px")
+                    .expect("a size in pixels")
+                    .parse()
+                    .expect("a number")
+            })
+            .collect()
+    }
+
+    /// The one type scale (F3, decision D3): no sheet picks a size of its own, so a scale nobody
+    /// designed paints every size the sheets paint, and the design's scale is one step denser than
+    /// the first one the app carried.
+    #[test]
+    fn every_font_size_the_sheets_paint_comes_from_the_one_scale() {
+        let odd = TypeScale {
+            title: 21,
+            body: 20,
+            label: 19,
+            meta: 18,
+            chip: 17,
+        };
+        let css = sheets(&gruvbox(), 0, odd);
+        let sizes = font_sizes(&css);
+        assert!(!sizes.is_empty(), "no size at all: {css}");
+        for size in &sizes {
+            assert!(
+                odd.sizes().contains(size),
+                "{size}px is not a size the scale chose: {css}"
+            );
+        }
+        // The app paints the design's scale (13, 12, 11, 10 and 15 were the loose literals).
+        let design = TypeScale::DESIGN;
+        for size in font_sizes(&layout_css(&gruvbox(), 0)) {
+            assert!(
+                design.sizes().contains(&size),
+                "{size}px is not in the scale"
+            );
+        }
+        assert!(
+            design.title < 15
+                && design.body < 13
+                && design.label < 12
+                && design.meta < 11
+                && design.chip < 10,
+            "one step denser than the first scale: {design:?}"
+        );
+    }
+
+    /// The transcript's measure measures with the message text's size, which is the scale's, so a
+    /// size never drifts between the CSS and the code.
+    #[test]
+    fn the_measure_measures_with_the_texts_size() {
+        let design = TypeScale::DESIGN;
+        assert_eq!(design.text_px(), f64::from(design.body));
+        let css = layout_css(&gruvbox(), 0);
+        let text = rule(&css, &format!(".{ROOT_CLASS} .nuncio-text"));
+        assert!(
+            text.contains(&format!("font-size: {}px;", design.body)),
+            "{text}"
+        );
     }
 
     #[test]
@@ -689,7 +819,10 @@ mod tests {
             chip.contains("min-width: 16px;") && chip.contains("min-height: 16px;"),
             "{chip}"
         );
-        assert!(chip.contains("font-size: 10px;"), "{chip}");
+        assert!(
+            chip.contains(&format!("font-size: {}px;", TypeScale::DESIGN.chip)),
+            "{chip}"
+        );
         let sticker = rule(&css, &format!("{root} .nuncio-bubble.nuncio-sticker"));
         for bare in [
             "background-color: transparent;",
@@ -876,7 +1009,7 @@ mod tests {
             "min-height: 32px;".to_owned(),
             format!("background-color: {};", palette.accent().to_hex()),
             format!("color: {};", palette.accent_on().to_hex()),
-            "font-size: 12px;".to_owned(),
+            format!("font-size: {}px;", TypeScale::DESIGN.label),
             "font-weight: 600;".to_owned(),
         ] {
             assert!(send.contains(&declaration), "{declaration} in {send}");
@@ -894,7 +1027,10 @@ mod tests {
             "{strip}"
         );
         let quote = rule(&css, &format!("{root} .nuncio-reply-quote"));
-        assert!(quote.contains("font-size: 11px;"), "{quote}");
+        assert!(
+            quote.contains(&format!("font-size: {}px;", TypeScale::DESIGN.meta)),
+            "{quote}"
+        );
         assert!(
             quote.contains(&format!("color: {};", palette.text_muted().to_hex())),
             "{quote}"
@@ -954,7 +1090,7 @@ mod tests {
             &format!("{root} .nuncio-palette-list > row"),
             &[
                 "min-height: 36px;".to_owned(),
-                "font-size: 13px;".to_owned(),
+                format!("font-size: {}px;", TypeScale::DESIGN.body),
             ],
         );
         has(
@@ -970,7 +1106,10 @@ mod tests {
             has(
                 &css,
                 &format!("{root} {meta}"),
-                &["font-size: 11px;".to_owned(), format!("color: {faint};")],
+                &[
+                    format!("font-size: {}px;", TypeScale::DESIGN.meta),
+                    format!("color: {faint};"),
+                ],
             );
         }
         assert_eq!(PALETTE_WIDTH, 560);
@@ -1015,7 +1154,7 @@ mod tests {
             &css,
             &format!("{root} .nuncio-settings-header"),
             &[
-                "font-size: 11px;".to_owned(),
+                format!("font-size: {}px;", TypeScale::DESIGN.meta),
                 "letter-spacing: 0.06em;".to_owned(),
                 format!("color: {muted};"),
                 format!("border-bottom: 1px solid {border};"),
@@ -1032,12 +1171,15 @@ mod tests {
         has(
             &css,
             &format!("{root} .nuncio-settings-list > row .title"),
-            &["font-size: 13px;".to_owned()],
+            &[format!("font-size: {}px;", TypeScale::DESIGN.body)],
         );
         has(
             &css,
             &format!("{root} .nuncio-settings-list > row .subtitle"),
-            &["font-size: 11px;".to_owned(), format!("color: {muted};")],
+            &[
+                format!("font-size: {}px;", TypeScale::DESIGN.meta),
+                format!("color: {muted};"),
+            ],
         );
         assert_eq!(SETTINGS_WIDTH, 480);
     }
@@ -1060,7 +1202,7 @@ mod tests {
         has(
             &css,
             &format!("{root} .nuncio-dialog-body"),
-            &["font-size: 13px;".to_owned()],
+            &[format!("font-size: {}px;", TypeScale::DESIGN.body)],
         );
         // The primary is a text button in `accent`, not filled (plan §6.8).
         let primary = rule(&css, &format!("{root} button.nuncio-dialog-primary"));
@@ -1076,7 +1218,7 @@ mod tests {
             &css,
             &format!("{root} .nuncio-dialog-error"),
             &[
-                "font-size: 11px;".to_owned(),
+                format!("font-size: {}px;", TypeScale::DESIGN.meta),
                 format!("color: {};", palette.warning().to_hex()),
             ],
         );
@@ -1279,20 +1421,44 @@ mod tests {
     }
 
     #[test]
-    fn the_transcript_is_72_characters_wide_at_most() {
-        assert_eq!(TRANSCRIPT_MEASURE_CHARS, 72);
-        assert_eq!(transcript_width(1311, 8, 100), 576, "72 characters of 8 px");
+    fn the_transcript_takes_its_whole_pane_up_to_a_broad_measure() {
+        // A maximized 1920 window: the rail (200) and the list (360) leave the conversation
+        // 1360 px, and it takes them (F2: it was a 72-character column in the middle).
+        assert_eq!(transcript_width(1360, 8, 100), 1360, "all of the pane");
+        assert_eq!(transcript_width(720, 8, 100), 720, "a 1280×800 window too");
+        assert_eq!(transcript_width(300, 8, 100), 300, "and a narrow one");
         assert_eq!(
-            transcript_width(500, 8, 100),
-            500,
-            "a narrower pane: all of it"
+            transcript_width(4000, 8, 100),
+            TRANSCRIPT_MAX_CHARS * 8,
+            "a screen wide enough to run a line across it gets the broad maximum"
         );
         assert_eq!(
             transcript_width(500, 8, 600),
             600,
             "never under what it needs"
         );
-        assert_eq!(transcript_width(1311, 0, 0), 72, "no font measured yet");
+        assert_eq!(
+            transcript_width(1311, 0, 0),
+            1311,
+            "no font measured yet: all of the pane"
+        );
+    }
+
+    /// The measure follows the font: the transcript's widest width changes in the same proportion
+    /// as the text's characters (F3).
+    #[test]
+    fn the_transcripts_width_changes_in_the_same_proportion_as_the_font() {
+        let big = transcript_width(4000, 8, 0);
+        let small = transcript_width(4000, 6, 0);
+        assert_eq!(
+            (big, small),
+            (TRANSCRIPT_MAX_CHARS * 8, TRANSCRIPT_MAX_CHARS * 6)
+        );
+        assert_eq!(
+            small * 8,
+            big * 6,
+            "three quarters of the character width, three quarters of the measure"
+        );
     }
 }
 

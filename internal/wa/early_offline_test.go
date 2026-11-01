@@ -28,7 +28,7 @@ func linkedOutboxSession(t *testing.T) (*Session, *fakeClient, func() []string, 
 	s.backoff.Rand = rand.New(rand.NewPCG(1, 2)).Float64
 	s.backoff.Now = func() time.Time { return now }
 	events := eventsOf(t, s)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

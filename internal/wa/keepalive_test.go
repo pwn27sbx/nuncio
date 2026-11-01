@@ -190,7 +190,7 @@ func TestOpenSessionForcesActiveDeliveryReceiptsWithoutPresence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenSession: %v", err)
 	}
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	wc, ok := s.client.(whatsmeowClient)
 	if !ok {
 		t.Fatalf("OpenSession client is %T, want whatsmeowClient", s.client)

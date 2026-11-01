@@ -25,8 +25,11 @@ import (
 
 	"github.com/godbus/dbus/v5"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waSyncAction"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	waevents "go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -241,7 +244,7 @@ func TestDaemonServesProtocolOnSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
-	want := ipc.StatusResponse{V: 1, Op: ipc.OpStatus, Daemon: "nunciod/0.2.0", Session: ipc.SessionUnlinked}
+	want := ipc.StatusResponse{V: 1, Op: ipc.OpStatus, Daemon: "nunciod/0.2.1", Session: ipc.SessionUnlinked}
 	if st != want {
 		t.Fatalf("Status() = %+v, want %+v", st, want)
 	}
@@ -309,7 +312,7 @@ func (s fixedSession) Retry(string) (ipc.Sent, error) {
 func (s fixedSession) Logout(context.Context) error {
 	return errors.New("a fixed session cannot log out")
 }
-func (s fixedSession) Close() {}
+func (s fixedSession) Close() error { return nil }
 
 func (s fixedSession) DownloadMedia(string, string) (string, string, error) {
 	if wa.State(s) == wa.StateUnlinked {
@@ -582,8 +585,8 @@ func TestDBusActivationStartsDaemonInUnderOneSecond(t *testing.T) {
 	if elapsed >= time.Second {
 		t.Fatalf("activation round trip took %v, want under 1s", elapsed)
 	}
-	if st.Linked || st.Session != ipc.SessionUnlinked || st.Unread != 0 || st.Daemon != "nunciod/0.2.0" {
-		t.Errorf("D-Bus Status = %+v, want the unlinked M0 state of nunciod/0.2.0", st)
+	if st.Linked || st.Session != ipc.SessionUnlinked || st.Unread != 0 || st.Daemon != "nunciod/0.2.1" {
+		t.Errorf("D-Bus Status = %+v, want the unlinked M0 state of nunciod/0.2.1", st)
 	}
 	if !reflect.DeepEqual(st, ipc.Status{
 		Daemon: overSocket.Daemon, Linked: overSocket.Linked, Session: overSocket.Session, Unread: overSocket.Unread,
@@ -1151,7 +1154,7 @@ func linkedDaemon(t *testing.T) (*wa.Session, *fakeWAClient, string) {
 	db := openTestStore(t)
 	fake := &fakeWAClient{sendID: "3EB0BBB1", sendTime: time.Date(2026, 10, 18, 17, 56, 10, 0, time.UTC)}
 	session := wa.NewSession(fake, db, nil)
-	t.Cleanup(session.Close)
+	t.Cleanup(func() { _ = session.Close() })
 	events := ipc.NewBroker()
 	session.SetEvents(events)
 	if err := session.Start(); err != nil {
@@ -1377,6 +1380,8 @@ var deviceKeyItems = []string{"device.noise_key", "device.identity_key", "device
 type wipeRig struct {
 	fake    *fakeWAClient
 	keyring *fakeKeyring
+	// db is the message store the session writes to, until a wipe closes it.
+	db      *sql.DB
 	dataDir string
 	runtime string
 	socket  string
@@ -1415,6 +1420,7 @@ func newWipeRig(t *testing.T, configure func(*wipeRig)) *wipeRig {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
+	r.db = db
 	if err := store.EnsureSchema(db); err != nil {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
@@ -1433,7 +1439,7 @@ func newWipeRig(t *testing.T, configure func(*wipeRig)) *wipeRig {
 		configure(r)
 	}
 	session := wa.NewSession(r.fake, db, db.Close)
-	t.Cleanup(session.Close)
+	t.Cleanup(func() { _ = session.Close() })
 	events := ipc.NewBroker()
 	session.SetEvents(events)
 	if err := session.Start(); err != nil {
@@ -1543,6 +1549,98 @@ func TestPurgeThroughTheDaemonNeverCallsTheNetworkAndLeavesNothingBehind(t *test
 		t.Errorf("client Logout called %d times by a purge, want 0", n)
 	}
 	r.assertNothingLeft(t)
+}
+
+// historySyncOf is a history-sync event of n text messages in one conversation, as the phone sends
+// a full sync. It is deliberately bigger than an import may take: a wipe must never wait for one.
+func historySyncOf(chat string, n int) *waevents.HistorySync {
+	conv := &waHistorySync.Conversation{ID: proto.String(chat)}
+	for i := 0; i < n; i++ {
+		conv.Messages = append(conv.Messages, &waHistorySync.HistorySyncMsg{Message: &waWeb.WebMessageInfo{
+			Key:              &waCommon.MessageKey{RemoteJID: proto.String(chat), ID: proto.String(fmt.Sprintf("H%d", i))},
+			Message:          &waE2E.Message{Conversation: proto.String("history")},
+			MessageTimestamp: proto.Uint64(uint64(1759000000 + i)),
+		}})
+	}
+	return &waevents.HistorySync{Data: &waHistorySync.HistorySync{
+		SyncType:      waHistorySync.HistorySync_FULL.Enum(),
+		Conversations: []*waHistorySync.Conversation{conv},
+	}}
+}
+
+// A wipe that lands while the history import is still running must still stop the daemon. The
+// owner unlinked right after linking, with his 943 messages coming in, and the process stayed
+// alive holding the bus name with no socket. The blob here is far bigger, so a wipe that waited
+// for the import would be visible as such.
+func TestAWipeStopsTheDaemonWhileAHistoryImportIsRunning(t *testing.T) {
+	r := newWipeRig(t, nil)
+	chat := types.NewJID("15551230001", types.DefaultUserServer)
+	r.fake.emit(historySyncOf(chat.String(), 60000))
+	// The import is running once its first message is stored.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var n int
+		if err := r.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&n); err == nil && n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the history import never stored a message")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	c := dial(t, r.socket)
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Wipe(false)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Wipe(false) while the history import runs: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wipe waited for the history import instead of stopping it")
+	}
+	r.assertNothingLeft(t)
+}
+
+// stillOpen is a session whose store cannot be closed yet: a history import is still writing to it.
+type stillOpen struct{ fixedSession }
+
+func (stillOpen) Close() error {
+	return errors.New("wa: a history import is still writing to the store")
+}
+
+// A wipe that could not close the store deletes nothing: the data is still being written to, and
+// the retried purge is for when it is not.
+func TestAWipeThatCannotCloseTheStoreDeletesNothing(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nuncio")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbFile := filepath.Join(dir, store.DBFile)
+	if err := os.WriteFile(dbFile, []byte("synthetic"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kr := &fakeKeyring{items: map[string]string{}}
+	for _, name := range deviceKeyItems {
+		_ = kr.Set(store.KeyringService, name, "synthetic")
+	}
+	d := newDaemon(stillOpen{}, nil)
+	d.dataDir, d.keyring, d.socket = dir, kr, filepath.Join(shortTempDir(t), "core.sock")
+
+	err := d.Wipe(false)
+	if err == nil || !strings.Contains(err.Error(), "run nuncio purge --confirm to finish") {
+		t.Fatalf("Wipe(false) with a store that cannot close = %v, want the purge hint", err)
+	}
+	if _, err := os.Stat(dbFile); err != nil {
+		t.Errorf("the database is gone after a wipe that could not close the store: %v", err)
+	}
+	if n := kr.count(); n != len(deviceKeyItems) {
+		t.Errorf("keyring holds %d items, want the %d it had", n, len(deviceKeyItems))
+	}
 }
 
 func TestLogoutThatWhatsAppDoesNotConfirmDeletesNothing(t *testing.T) {

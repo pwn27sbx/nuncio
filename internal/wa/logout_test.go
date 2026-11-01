@@ -15,7 +15,7 @@ import (
 func TestLogoutUnlinksTheDeviceOnceAndStopsReconnecting(t *testing.T) {
 	fake := &fakeClient{device: true}
 	s := NewSession(fake, nil, nil)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestLogoutWithoutADeviceIsNotLinkedAndCallsNothing(t *testing.T) {
 func TestLogoutAfterAnExternalLogoutIsNotLinkedAndCallsNothing(t *testing.T) {
 	fake := &fakeClient{device: true}
 	s := NewSession(fake, nil, nil)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestLogoutAfterAnExternalLogoutIsNotLinkedAndCallsNothing(t *testing.T) {
 func TestLogoutThatWhatsAppDoesNotConfirmKeepsTheSession(t *testing.T) {
 	fake := &fakeClient{device: true, logoutErr: errors.New("error sending logout request: timed out")}
 	s := NewSession(fake, nil, nil)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestLogoutThatWhatsAppDoesNotConfirmKeepsTheSession(t *testing.T) {
 func TestLogoutRecordsTheStopWhileHoldingTheConnectionLock(t *testing.T) {
 	fake := &fakeClient{device: true}
 	s := NewSession(fake, nil, nil)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	heldAtStop, logged := false, false
 	s.logf = func(string, ...any) {
 		logged = true
@@ -115,7 +115,7 @@ func TestLogoutRecordsTheStopWhileHoldingTheConnectionLock(t *testing.T) {
 func TestAReconnectQueuedDuringLogoutNeverConnects(t *testing.T) {
 	fake := &fakeClient{device: true}
 	s := NewSession(fake, nil, nil)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	var pending sync.WaitGroup
 	s.after = func(_ time.Duration, f func()) func() bool {
 		pending.Add(1)

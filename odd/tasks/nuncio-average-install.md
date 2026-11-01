@@ -79,6 +79,18 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   y sin toast de error; pulsar **Link** arranca el demonio y da un QR." Scope limit (owner, verbatim):
   "No arregles F7: el demonio que se queda sin socket es T15 y va en otra sesión ... Tú solo haces
   que la app se comporte bien cuando el demonio desaparece."
+- S19 (owner, approved plan 2026-11-01, T15, verbatim from the plan's T15): "El demonio no se queda
+  sin socket tras el wipe (F7) · 0.2.1 · riesgo alto — **Reproducir primero** (es una prueba manual,
+  no de CI): vincular y desvincular en cuanto aparezca la lista, con el historial entrando. Medir el
+  proceso (`pgrep -x nunciod`, `/proc/<pid>/wchan`, `/run/user/1000/nuncio/`). Hipótesis respaldada
+  por el código: `Wipe` cierra la sesión (`main.go:665`), `Close` espera `drains.Wait()`
+  (`internal/wa/session.go:530`) y la importación de historial vive en ese mismo grupo
+  (`internal/wa/history.go:39-50`). Arreglo según causa: acotar esa espera y no bloquear el cierre
+  del demonio. **Aceptación (manual, documentada en el ledger):** tras un wipe, `pgrep -x nunciod`
+  sale vacío o el demonio sirve su socket; nunca 'nombre del bus tomado y sin socket'." Owner,
+  verbatim, for this session: "lo que **no** vale: cerrar el store debajo de una importación en
+  curso (eso es lo que T12 evitó a propósito)". Out of scope, verbatim: "No toques F5/F6/F8 (ya
+  están en `feat/f8-unlink`), ni la UI."
 
 ## Tasks
 
@@ -98,6 +110,7 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | T12 | S16: handle `events.HistorySync` in the daemon's session and store the messages with the `storeMessage` path, deduped by id, read (no badge), protocol/system skipped, off the event goroutine and per-blob failure contained | inline | done: RED (the new tests failed on the tip: 0 messages stored, no `event_chat`, no log line) → GREEN; `internal/wa/history.go` + `internal/wa/history_test.go`, `canonicalRow` extracted from `storeMessage`, `proto/wire.md` "History (after linking)" and the `event_chat` cause, CHANGELOG `Unreleased` | 06a7968 |
 | T13 | S17: an unlinked `nunciod` serves no chats — `Chats()` answers an empty list without a store, `newDaemon` no longer loads the fixture and the fixture's Go copy is test-only; the two tests that asserted the fixture are rewritten, the `limit` clamp is pinned over the store, CHANGELOG and the wire's corners table say it | inline | done: RED (the two rewritten tests failed on the tip with the three fixture chats) → GREEN; the socket and in-memory tests expect the empty list (`[]`, never `null`), the drift test still ties the test copy to `proto/fixtures/chats_response.json`, and the binary no longer carries any fixture name; the TUI's unlinked sentence was already drawn for an empty list (`design.rs`, 23/23) | 2389965 |
 | T14 | S18: the unlink closes its dialogs even when the daemon dies with it — a cut while this app's wipe has no answer settles the confirmation and Settings, paints no error, shows the first screen and leaves the device's word to the next daemon (S11); Link with nothing serving asks the bus for one and sends its `link_start` once the connection comes up | inline | done: RED (the new tests and the rewritten `a_lost_connection_does_not_claim_the_device_is_gone` refused to compile against the tip: no `Settled`, `Command::StartDaemon` or `Worker::start_daemon`) → GREEN; the bus ask is a `Worker::spawn` parameter, so the worker test proves exactly one ask per press without a bus, and `cancel_link` never sends a cancelled press later | 27d0729 |
+| T15 | S19: a wipe right after linking stops the running history import instead of waiting for it — the import has its own accounting and context, `Close` cancels it and waits at most `importStopTimeout` (it ends at its next message, a queued blob is dropped), the store is closed only once no import writes to it, and a wipe that cannot close it deletes nothing and keeps serving its socket | inline | done: RED (two new tests failed on the tip: `Close` did not answer within 2 s while a 60 000-message sync was being stored, and a `wipe(false)` over the socket did not answer within 5 s — the daemon logged `a connection ended with an error`, the owner's own line) → GREEN; `Close` answers `errImportRunning` when a blocked store keeps the import writing, and the store is then closed by that import, never under it | 677fe64 |
 
 ## Log
 
@@ -502,3 +515,33 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   `R4-session-bus-start-unobserved` (a failed bus activation has no result path: the pending start
   waits for a connection or a cancel) — both inputs for the next touch of the link screen. F7 is not
   touched (T15, another session).
+- L26 (evidence, 2026-10-31, T15) The daemon no longer stays alive without a socket after a wipe. The
+  cause the plan hypothesized is the code's: `Wipe` closes the session (`main.go:657`) and
+  `Session.Close` waited on `drains`, where `storeHistory` counted every import
+  (`history.go:42`) — a `WaitGroup` over work whose length is the phone's (943 messages in the
+  owner's run, one goroutine per blob queued behind `historyMu`). The import now has its own
+  `imports` group and its own context: `Close` cancels it first, `importHistory` checks that context
+  before every message, a blob still queued behind `historyMu` is dropped, and `Close` waits at most
+  `importStopTimeout` (5 s) for the group. The store is closed once that wait saw no import writing,
+  which keeps T12's invariant ("`Close` waits for the import before closing the store"): the wait is
+  now one message long, not one blob. When the wait expires (a store that never answers, proven by
+  holding the store's one connection in the test), `Close` answers `errImportRunning`, leaves the
+  store open and the import closes it when it ends; `Wipe` then deletes nothing and answers the
+  existing purge-hint error, so the daemon keeps serving its socket instead of holding the bus name
+  with nothing behind it. That made `Session.Close` and `gate.Close` return an `error` and every
+  test's discarded close explicit. Tests: `TestCloseDoesNotWaitForARunningHistoryImport` (60 000
+  messages; `Close` returns in ~0.1 s, the blob is not stored whole, the queued blob stored
+  nothing, and the store was closed before `Close` returned) and
+  `TestAWipeStopsTheDaemonWhileAHistoryImportIsRunning` (the real socket, a real `wipe(false)`; the
+  daemon answers `wiped`, `serve` returns and the data dir, keyring and socket are gone) — both RED
+  on `11aa1ba` (the second reproduced the owner's `a connection ended with an error` line), plus
+  `TestCloseAnswersWhenAnImportCannotStop` for the bounded stop. The five T12 import tests now wait
+  on `imports` instead of `drains` and stay green. Risk: item 4 (concurrency: a close that now
+  cancels work that was being awaited) and item 1 (a wipe deletes user data — the bounded stop is
+  the path that decides whether it does). Verified: `gofmt -l cmd internal` empty, `go vet ./...`,
+  `CGO_ENABLED=0 go build ./...`, `CGO_ENABLED=0 go test -count=1 ./...`, `go test -race -count=1
+  ./...`, `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test
+  --workspace`, `packaging/check.sh` (all checks, `systemd-analyze` included) green. **S19's
+  acceptance is not the manual run yet**: no phone and no `sudo` here, so what is proven is the
+  failure at the socket level (wipe → the daemon stops serving, nothing left) and not the owner's
+  `pgrep -x nunciod` on his machine. CHANGELOG `Unreleased` names the fix.

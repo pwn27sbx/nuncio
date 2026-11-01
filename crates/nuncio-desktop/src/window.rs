@@ -1153,6 +1153,7 @@ impl Ui {
             day: first("nuncio-day"),
             author: first("nuncio-author-line"),
             meta: first("nuncio-meta-line"),
+            media: first("nuncio-media"),
         })
     }
 
@@ -4348,16 +4349,23 @@ fn bubble_row(ui: &Weak<Inner>, bubble: &Bubble) -> gtk::ListBoxRow {
     let downloading = bubble
         .media
         .as_deref()
-        .is_some_and(|media| media.ends_with("downloading…"));
+        .is_some_and(|media| media.ends_with(present::DOWNLOADING));
     match (&bubble.document, &bubble.media) {
         (Some(document), _) => {
             body.append(&document_row(document));
             if downloading {
-                body.append(&label("downloading…", "nuncio-meta"));
+                body.append(&label(present::DOWNLOADING, "nuncio-meta"));
             }
         }
-        (None, Some(media)) => body.append(&label(media, "nuncio-media")),
-        (None, None) => {}
+        // The picture says what it is (F4, D4): `[image]` or `[sticker]` is only the fallback for
+        // a media message with nothing drawn, a photo whose message embeds no thumbnail included.
+        (None, Some(media)) if !draws_picture(bubble) => {
+            body.append(&label(media, "nuncio-media"));
+        }
+        (None, Some(_)) if downloading => {
+            body.append(&label(present::DOWNLOADING, "nuncio-meta"));
+        }
+        (None, _) => {}
     }
     if let Some(picture) = &bubble.picture {
         body.append(&picture_widget(ui, bubble.index, picture));
@@ -4462,6 +4470,15 @@ fn bubble_row(ui: &Weak<Inner>, bubble: &Bubble) -> gtk::ListBoxRow {
     row
 }
 
+/// Whether the bubble draws its picture, so the `[kind]` label would only repeat it (F4, decision
+/// D4): the message embeds a thumbnail or its full picture is here.
+fn draws_picture(bubble: &Bubble) -> bool {
+    bubble
+        .picture
+        .as_ref()
+        .is_some_and(|picture| picture.thumb || picture.full.is_some())
+}
+
 /// A document's 32 px row: a file glyph, its name and its size.
 fn document_row(document: &present::DocumentView) -> gtk::Box {
     let row = gtk::Box::new(gtk::Orientation::Horizontal, 8);
@@ -4532,6 +4549,8 @@ pub struct MessageParts {
     pub author: Option<String>,
     /// The meta line under it.
     pub meta: Option<String>,
+    /// The `[kind]` label, drawn only when the bubble draws nothing else (F4).
+    pub media: Option<String>,
 }
 
 /// What a bubble's picture widget shows ([`Ui::picture`], tests).
@@ -4601,8 +4620,8 @@ fn reserve(picture: &gtk::Picture, (width, height): (u32, u32)) {
 
 /// The picture inside an image or sticker bubble: its box reserved at once from the size the
 /// message states, the best texture the cache has (the full picture, else the thumbnail), and a
-/// click that shows the full picture ([`Ui::open_picture`]). Without a texture it stays empty
-/// under the bubble's `[image]` / `[sticker]` label.
+/// click that shows the full picture ([`Ui::open_picture`]). A message that embeds no thumbnail
+/// draws no picture, and the bubble keeps its `[image]` / `[sticker]` label as the fallback (F4).
 fn picture_widget(ui: &Weak<Inner>, index: usize, view: &PictureView) -> gtk::Widget {
     let picture = gtk::Picture::builder()
         .can_shrink(true)

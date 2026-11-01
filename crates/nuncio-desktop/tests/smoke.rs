@@ -224,6 +224,7 @@ fn main() {
     the_search_is_inline_in_the_conversation();
     pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click();
     the_conversation_fills_the_window_and_the_list_keeps_its_width();
+    a_drawn_picture_carries_no_bracketed_label();
     the_panes_the_filters_and_the_strip();
     a_filter_keeps_the_open_chat_and_its_selection();
     the_list_header_filters_the_chats_by_name();
@@ -1154,8 +1155,8 @@ fn wait_for(ui: &Ui, done: impl Fn(&Ui) -> bool) -> bool {
 /// A photo and a sticker as the demo sends them: each bubble reserves its box from the message's
 /// size before anything is decoded, its thumbnail becomes a texture of the thumbnail's size in
 /// that box, nothing is downloaded until the picture is clicked, and the full picture the click
-/// fetched replaces the thumbnail in the same box. A thumbnail that does not decode keeps the
-/// label, with nothing drawn.
+/// fetched replaces the thumbnail in the same box. A thumbnail that does not decode leaves its
+/// box empty; the message still embeds one, so no label goes beside it (F4).
 fn pictures_show_their_thumbnail_at_once_and_the_full_one_on_a_click() {
     use base64::Engine;
     let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -1457,6 +1458,79 @@ fn the_conversation_fills_the_window_and_the_list_keeps_its_width() {
             "the drawn conversation fills its pane: {} of {content} px",
             ui.transcript_drawn_width()
         ),
+    );
+}
+
+/// A photo and a sticker show their picture with no `[image]` or `[sticker]` beside it (F4): the
+/// label is only the fallback for a media message with nothing drawn, and a document keeps its
+/// own row. Video has no thumbnail in the wire, so it keeps its label.
+fn a_drawn_picture_carries_no_bracketed_label() {
+    use base64::Engine;
+    let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+    let ui = listed();
+    ui.open_chat(0);
+    ui.take_undelivered();
+    let mut photo = message("F4P1", "the beach", false);
+    photo.kind = "image".to_owned();
+    photo.thumb = Some(encode(&gradient_jpeg(48, 32)));
+    photo.thumb_mime = Some("image/jpeg".to_owned());
+    (photo.width, photo.height) = (Some(480), Some(320));
+    let mut sticker = message("F4S1", "", false);
+    sticker.kind = "sticker".to_owned();
+    sticker.thumb = Some(encode(&disc_png()));
+    sticker.thumb_mime = Some("image/png".to_owned());
+    (sticker.width, sticker.height) = (Some(512), Some(512));
+    sticker.animated = true;
+    // The fallback: a photo whose message embeds no thumbnail, and a video, which has none in
+    // the wire at all.
+    let mut no_thumb = photo.clone();
+    no_thumb.id = "F4P2".to_owned();
+    no_thumb.thumb = None;
+    no_thumb.thumb_mime = None;
+    let mut video = message("F4V1", "", false);
+    video.kind = "video".to_owned();
+    let mut document = message("F4D1", "", false);
+    document.kind = "document".to_owned();
+    document.media = Some(nuncio_client::wire::Media {
+        mime: "application/pdf".to_owned(),
+        size: 900,
+        file_name: "plan.pdf".to_owned(),
+    });
+    // Newest first, as the wire carries them: the drawn bubbles come out in this order.
+    ui.incoming(Incoming::Reply {
+        request: ClientFrame::messages(ANA, 200),
+        result: Ok(DaemonFrame::Messages {
+            v: PROTOCOL_VERSION,
+            jid: ANA.to_owned(),
+            messages: vec![document, video, no_thumb, sticker, photo],
+        }),
+    });
+    let media = |index: usize| ui.message_parts(index).and_then(|parts| parts.media);
+    check(
+        media(0).is_none(),
+        &format!("a drawn photo carries no [image]: {:?}", media(0)),
+    );
+    check(
+        media(1).is_none(),
+        &format!("nor does a sticker carry a [sticker] ▶: {:?}", media(1)),
+    );
+    check(
+        media(2).as_deref() == Some("[image]"),
+        &format!(
+            "a photo with no thumbnail falls back to its label: {:?}",
+            media(2)
+        ),
+    );
+    check(
+        media(3).as_deref() == Some("[video]"),
+        &format!(
+            "video has no thumbnail in the wire, so it keeps its label: {:?}",
+            media(3)
+        ),
+    );
+    check(
+        media(4).is_none(),
+        &format!("a document draws its row, not [document]: {:?}", media(4)),
     );
 }
 

@@ -62,6 +62,23 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   prueba que un segundo sync no duplica; otro prueba que el historial no enciende el contador de no
   leídos". Rules: synthetic blobs only, no WhatsApp, no real keyring, "Los logs nunca llevan texto
   de mensajes, números completos ni material de claves".
+- S17 (owner, approved plan 2026-11-01, T13, verbatim from the plan's T13): "El demonio no sirve
+  chats de demo (F8) · 0.2.1 · riesgo bajo — `Chats()` deja de devolver `d.chats` sin store
+  (`main.go:482-483`); `newDaemon` deja de cargar la fixture en producción (`main.go:354-360`). Los
+  tests que hoy afirman lo contrario se reescriben, no 'siguen verdes': `cmd/nunciod/main_test.go:1038`
+  y el test de socket en `:260-277` esperan la fixture con `db == nil`. **Aceptación:** sesión
+  `unlinked` → `chats` responde lista vacía y el TUI pinta `No device linked · open nuncio to link
+  it` (`lib.rs:1368-1374`, hoy inalcanzable); con store vacío, `No chats yet`; CHANGELOG dice que el
+  wire ya no sirve chats de demo." D1 (approved): "El demonio no inventa chats. Sin store responde
+  lista vacía. La fixture queda para tests y para `nuncio-demo`, que tiene su propio `seed()`".
+- S18 (owner, approved plan 2026-11-01, T14, verbatim from the plan's T14): "El unlink cierra sus
+  diálogos aunque el demonio muera (F5, F6) · 0.2.1 · riesgo bajo — El camino bueno ya existe
+  (`smoke.rs:1798-1806`). Lo que falta: cuando el `wiped` no llega porque el demonio murió (F7), la
+  app no debe quedarse con los diálogos abiertos ni pintar el corte como error. **Aceptación:** con
+  el demonio caído justo después del unlink, la app queda en la pantalla de vinculación sin diálogos
+  y sin toast de error; pulsar **Link** arranca el demonio y da un QR." Scope limit (owner, verbatim):
+  "No arregles F7: el demonio que se queda sin socket es T15 y va en otra sesión ... Tú solo haces
+  que la app se comporte bien cuando el demonio desaparece."
 
 ## Tasks
 
@@ -79,6 +96,8 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | T10 | S12: `INSTALL.md` for the average user, the CLI into `docs/COMMAND-LINE.md`, CHANGELOG and README | delegated writer (context backstop) | done: `INSTALL.md` = the one install line → open nuncio → press Link → scan → chat list, then uninstall (unlink first, `pacman -R nuncio`, the three leftovers named) and no-terminal trouble-shooting, with no `systemctl` in any command block; the CLI moved into `docs/COMMAND-LINE.md` (README keeps a pointer and the one-line list); CHANGELOG `Unreleased` says the release becomes 0.2.0 when the home run passes; the package now installs `/usr/share/doc/nuncio/INSTALL.md` and the unit's `Documentation=` names it, pinned by `check.sh` and `MANIFEST`; `packaging/tests/docs.sh` refuses a page that names an `install.sh` flag the script rejects | 46e9cc3 |
 | T11 | S15: build the package, install it, run the flow from a fresh data dir | owner (needs `pacman`/`sudo` and a spare phone) | pending: the **0.2.0** release candidate is built and reviewed (`2dd85ba`), and the runbook is `~/Documents/ObsidianVault/nuncio/2026-10-31-home-acceptance-run/README.md` | 2dd85ba |
 | T12 | S16: handle `events.HistorySync` in the daemon's session and store the messages with the `storeMessage` path, deduped by id, read (no badge), protocol/system skipped, off the event goroutine and per-blob failure contained | inline | done: RED (the new tests failed on the tip: 0 messages stored, no `event_chat`, no log line) → GREEN; `internal/wa/history.go` + `internal/wa/history_test.go`, `canonicalRow` extracted from `storeMessage`, `proto/wire.md` "History (after linking)" and the `event_chat` cause, CHANGELOG `Unreleased` | 06a7968 |
+| T13 | S17: an unlinked `nunciod` serves no chats — `Chats()` answers an empty list without a store, `newDaemon` no longer loads the fixture and the fixture's Go copy is test-only; the two tests that asserted the fixture are rewritten, the `limit` clamp is pinned over the store, CHANGELOG and the wire's corners table say it | inline | done: RED (the two rewritten tests failed on the tip with the three fixture chats) → GREEN; the socket and in-memory tests expect the empty list (`[]`, never `null`), the drift test still ties the test copy to `proto/fixtures/chats_response.json`, and the binary no longer carries any fixture name; the TUI's unlinked sentence was already drawn for an empty list (`design.rs`, 23/23) | 2389965 |
+| T14 | S18: the unlink closes its dialogs even when the daemon dies with it — a cut while this app's wipe has no answer settles the confirmation and Settings, paints no error, shows the first screen and leaves the device's word to the next daemon (S11); Link with nothing serving asks the bus for one and sends its `link_start` once the connection comes up | inline | done: RED (the new tests and the rewritten `a_lost_connection_does_not_claim_the_device_is_gone` refused to compile against the tip: no `Settled`, `Command::StartDaemon` or `Worker::start_daemon`) → GREEN; the bus ask is a `Worker::spawn` parameter, so the worker test proves exactly one ask per press without a bus, and `cancel_link` never sends a cancelled press later | 27d0729 |
 
 ## Log
 
@@ -430,3 +449,56 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   R3-history-timestamp-bounds — the `uint64` timestamp is converted without bounds, so a missing
   one lands the message in 1970. The owner chose to review this candidate (consent relayed, not
   answered here).
+- L24 (evidence and review, 2026-10-31, T13) On branch `feat/f8-unlink` (from `fix/link-flow-end`).
+  `Chats()` answers `nil` without a store, which the wire already turns into the empty list
+  (`internal/ipc/wire.go`, `chats == nil → []Chat{}`), and `newDaemon` is a plain constructor again:
+  the error it returned only ever came from the fixture. The embedded copy moved to
+  `cmd/nunciod/chats_test.go`, so production cannot serve it and `strings` finds no fixture name in
+  the binary; `cmd/nuncio-demo` keeps its own `seed()`. The two tests that asserted the fixture are
+  rewritten (socket and in-memory), and the daemon's `limit` clamp is pinned over the store in
+  `TestDaemonServesChatsMessagesAndUnreadFromTheStore` instead of the fixture. Docs: CHANGELOG says
+  the wire no longer serves demo chats and `proto/wire.md`'s corners table pins `chats` → empty list
+  while unlinked; the TUI's README lost its stale `FIXTURE DATA` claim (the code says `NO DAEMON` and
+  `nunciod is not running · open nuncio to start it`). Risk: none (no data, no security, no wire
+  contract change — the same frame, a different answer). Verified: `gofmt -l cmd internal` empty,
+  `go vet ./...`, `CGO_ENABLED=0 go build ./...`, `CGO_ENABLED=0 go test -count=1 ./...`, `go test
+  -race -count=1 ./...`, `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D
+  warnings`, `cargo test --workspace` (25 suites) and `packaging/check.sh` (92 ok, including
+  `systemd-analyze --user verify`) green. Review: medium, lenses risk and reliability, approved and
+  acknowledged with its authority burned. No blocker; one advisory, `R3-linkflow-retry-overlap` on
+  `cmd/nunciod/linkflow.go:242`, which is **not** this commit's code: the reviewed range started at
+  the branch point `8e2983b` and therefore included `176629b` (the previous session's linkflow fix),
+  so it is an input for that work and not a finding on T13.
+- L25 (evidence, verification and review, 2026-10-31, T14) The app now treats the cut its own unlink
+  causes as expected. `Controller::lost` replaces the two bare `driver::lost` calls: while a wipe the
+  app sent has no answer (`unlink_pending`) the confirmation and Settings close (`Settled::Lost`),
+  nothing is said about the device, and the model gets a local `Status{linked:false, unlinked}` so
+  the first screen shows while nothing serves it — the next daemon's own status replaces it, and a
+  daemon that still has the device brings the panes back (S11 kept: no `UNLINKED` line). The cut that
+  follows a confirmed `wiped` is silent too (`wiped`), since the daemon exits right after it.
+  Pressing Link while `!connected` emits the new `Command::StartDaemon` and sets
+  `link_start_pending`; the frame goes out on `Incoming::Connected` (before it, `cancel_link` clears
+  the pending start and sends no cancel, so a cancelled press never pairs anything). The worker's
+  `Command::StartDaemon` runs an injected `start_daemon` closure — `Worker::spawn` takes it, the app
+  passes `nuncio_client::bus::start_daemon`, the tests pass a counter — so no test can start the real
+  daemon, and a life that is still serving is left alone. Tests: `Settled` replaces the
+  `Option<bool>` in `take_unlink_settled`, five controller tests (lost, the timeout line of F6, the
+  silent cut after a confirmed wipe, the next daemon's word, one start per connect, the cancelled
+  press), one worker test (one ask, serving life untouched) and a GTK smoke test that drives the real
+  Settings window and confirmation through the loss, the first screen, the press and the drawn code.
+  Risk: item 6 (the `Ui::start_worker` wiring of the real bus ask is one expression no test can
+  assert without a session bus). An independent verifier re-ran every gate in a scratch copy (all
+  green, `packaging/check.sh` 92 ok) and probed 11 items: unlinked `chats` is `[]` at the tip and the
+  fixture at the base, the binary lost the fixture name, the store's limit and empty cases, the TUI
+  sentence, the four T14 controller paths (including the base's opposite behaviour), the one-start-
+  per-connect rule and the cancelled press. No blocker. Its advisories: the smoke test's
+  `!view.window.is_visible()` is vacuous because the Settings window is never presented (same as
+  L19's note — the close path is exercised, the assertion is weak); `Ui::start_worker` still wires
+  the real bus (only `Worker::spawn` is injectable, and no smoke presses Link disconnected with a
+  worker); the synthetic `Status` is a transient local claim until the next daemon answers.
+  Review: medium, lenses risk and resilience, approved and acknowledged with its authority burned.
+  Two advisory findings, none blocking: `R1-fabricated-unlinked-status` (the synthetic status, which
+  the next daemon replaces — a comment naming the placeholders would make it clearer) and
+  `R4-session-bus-start-unobserved` (a failed bus activation has no result path: the pending start
+  waits for a connection or a cancel) — both inputs for the next touch of the link screen. F7 is not
+  touched (T15, another session).

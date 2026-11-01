@@ -309,11 +309,19 @@ func TestCloseAnswersWhenAnImportCannotStop(t *testing.T) {
 	if storeClosed.Load() {
 		t.Error("Close closed the store under a running import")
 	}
+	// A wipe retried through the daemon asks again: the same answer while the store stays open,
+	// and nil once the import ended and the store is closed.
+	if err := s.Close(); !errors.Is(err, errImportRunning) {
+		t.Errorf("the second Close = %v, want the same answer", err)
+	}
 	// It ends when the store answers again, and closes the store itself.
 	if err := tx.Rollback(); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
 	waitFor(t, "the import to end and close the store", func() bool { return storeClosed.Load() })
+	if err := s.Close(); err != nil {
+		t.Errorf("Close after the import ended = %v, want nil", err)
+	}
 }
 
 // waitImports waits for the running history imports, failing the test if they do not end within d.

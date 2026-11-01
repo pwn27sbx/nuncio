@@ -1606,6 +1606,43 @@ func TestAWipeStopsTheDaemonWhileAHistoryImportIsRunning(t *testing.T) {
 	r.assertNothingLeft(t)
 }
 
+// stillOpen is a session whose store cannot be closed yet: a history import is still writing to it.
+type stillOpen struct{ fixedSession }
+
+func (stillOpen) Close() error {
+	return errors.New("wa: a history import is still writing to the store")
+}
+
+// A wipe that could not close the store deletes nothing: the data is still being written to, and
+// the retried purge is for when it is not.
+func TestAWipeThatCannotCloseTheStoreDeletesNothing(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "nuncio")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbFile := filepath.Join(dir, store.DBFile)
+	if err := os.WriteFile(dbFile, []byte("synthetic"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	kr := &fakeKeyring{items: map[string]string{}}
+	for _, name := range deviceKeyItems {
+		_ = kr.Set(store.KeyringService, name, "synthetic")
+	}
+	d := newDaemon(stillOpen{}, nil)
+	d.dataDir, d.keyring, d.socket = dir, kr, filepath.Join(shortTempDir(t), "core.sock")
+
+	err := d.Wipe(false)
+	if err == nil || !strings.Contains(err.Error(), "run nuncio purge --confirm to finish") {
+		t.Fatalf("Wipe(false) with a store that cannot close = %v, want the purge hint", err)
+	}
+	if _, err := os.Stat(dbFile); err != nil {
+		t.Errorf("the database is gone after a wipe that could not close the store: %v", err)
+	}
+	if n := kr.count(); n != len(deviceKeyItems) {
+		t.Errorf("keyring holds %d items, want the %d it had", n, len(deviceKeyItems))
+	}
+}
+
 func TestLogoutThatWhatsAppDoesNotConfirmDeletesNothing(t *testing.T) {
 	r := newWipeRig(t, func(r *wipeRig) { r.fake.logoutErr = errors.New("error sending logout request: timed out") })
 	c := dial(t, r.socket)

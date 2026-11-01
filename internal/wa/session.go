@@ -148,6 +148,12 @@ type Session struct {
 	importCtx    context.Context
 	importCancel context.CancelFunc
 	importStop   time.Duration
+	// closeMu serialises Close, and closeRan/closeErr keep what it answered: a wipe retried
+	// through the daemon asks again, and a session that could not close its store answers the same
+	// without waiting a second time.
+	closeMu  sync.Mutex
+	closeRan bool
+	closeErr error
 	// historyMu makes the session import one history-sync blob at a time (see history.go).
 	historyMu sync.Mutex
 	// paceAfter schedules the pause between two drained sends (drainPace) like after; a separate
@@ -530,8 +536,24 @@ var errImportRunning = errors.New("wa: a history import is still writing to the 
 // context before every message, so Close waits for one message at most; the store is closed once
 // no import writes to it, never under one. If the import is still writing after importStopTimeout,
 // Close answers errImportRunning and leaves the close to it (the caller must not delete the data).
+//
+// A second Close answers what the first did and never waits twice: nil once the store is closed
+// (or there never was one), and the first answer while an import still holds it. A wipe retried
+// through the daemon asks again, so the store is deleted only once nothing writes to it.
 func (s *Session) Close() error {
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
 	s.mu.Lock()
+	ran, answered, open := s.closeRan, s.closeErr, s.closeStore != nil
+	s.mu.Unlock()
+	if ran {
+		if !open {
+			return nil
+		}
+		return answered
+	}
+	s.mu.Lock()
+	s.closeRan = true
 	started := s.started
 	s.started = false
 	cancel := s.cancel
@@ -555,16 +577,21 @@ func (s *Session) Close() error {
 	s.publishState()
 	// A running drain finishes (its sends fail fast once disconnected) before the store closes.
 	s.drains.Wait()
+	var err error
 	if !waitWithin(&s.imports, s.importStop) {
 		s.logf("wa: a history import is still writing after %s; it closes the store", s.importStop)
 		go func() {
 			s.imports.Wait()
 			s.closeStoreOnce()
 		}()
-		return errImportRunning
+		err = errImportRunning
+	} else {
+		s.closeStoreOnce()
 	}
-	s.closeStoreOnce()
-	return nil
+	s.mu.Lock()
+	s.closeErr = err
+	s.mu.Unlock()
+	return err
 }
 
 // waitWithin waits for the group, reporting whether it ended within d.

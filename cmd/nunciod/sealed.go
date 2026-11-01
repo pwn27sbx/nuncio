@@ -71,8 +71,8 @@ func openSession(ctx context.Context, dbPath string, kr store.Keyring) (daemonSe
 	if err != nil {
 		return nil, nil, err
 	}
-	g := &gate{db: db, dbPath: dbPath, kr: kr, backoff: wa.NewBackoff(), after: afterFunc, start: (*wa.Session).Start, logf: log.Printf,
-		reason: errOpening, retry: true}
+	g := &gate{db: db, dbPath: dbPath, kr: kr, backoff: wa.NewBackoff(), after: afterFunc, start: (*wa.Session).Start,
+		closeSession: (*wa.Session).Close, logf: log.Printf, reason: errOpening, retry: true}
 	if stored, err := wa.HasStoredDevice(ctx, db); err != nil || stored {
 		return g, db, nil
 	}
@@ -183,7 +183,10 @@ type gate struct {
 	// ((*wa.Session).Start outside tests, which connects).
 	after func(d time.Duration, f func()) (cancel func() bool)
 	start func(*wa.Session) error
-	logf  func(format string, args ...any)
+	// closeSession closes the opened session ((*wa.Session).Close outside tests): only the session
+	// knows whether its store is closed, so a retried Close has to ask it again.
+	closeSession func(*wa.Session) error
+	logf         func(format string, args ...any)
 
 	mu       sync.Mutex
 	live     *wa.Session // the opened session, nil until then
@@ -458,11 +461,19 @@ func (g *gate) CanonicalJID(jid string) string {
 // Close stops the attempts and closes the session, or the store while there is none. It never
 // waits for a running attempt (which may be blocked on the keyring): that attempt closes what it
 // opened, or the store, when it returns. Its error is the session's own (see Session.Close).
+//
+// A retried Close asks the session again instead of answering nil: a wipe retried through the
+// daemon must not delete the data a history import is still writing to, and only the session knows
+// when its store is closed (it answers nil from then on, without waiting).
 func (g *gate) Close() error {
 	g.mu.Lock()
 	if g.closed {
+		live := g.live
 		g.mu.Unlock()
-		return nil
+		if live == nil {
+			return nil
+		}
+		return g.closeLive(live)
 	}
 	g.closed = true
 	cancel := g.cancel
@@ -475,9 +486,17 @@ func (g *gate) Close() error {
 	}
 	switch {
 	case live != nil:
-		return live.Close()
+		return g.closeLive(live)
 	case !inflight:
 		_ = g.db.Close()
 	}
 	return nil
+}
+
+// closeLive closes one opened session: (*wa.Session).Close outside tests.
+func (g *gate) closeLive(s *wa.Session) error {
+	if g.closeSession != nil {
+		return g.closeSession(s)
+	}
+	return s.Close()
 }

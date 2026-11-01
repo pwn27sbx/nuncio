@@ -34,45 +34,30 @@ func TestDaemonSearchesOneChatOfTheStoreNewestFirst(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	d, err := newDaemon(fixedSession(wa.StateLinked), db)
-	if err != nil {
-		t.Fatalf("newDaemon: %v", err)
-	}
+	d := newDaemon(fixedSession(wa.StateLinked), db)
 	got, err := d.Search("15551230001@s.whatsapp.net", "venue", 50)
 	if err != nil || len(got) != 2 || got[0].ID != "A2" || got[0].ReplyTo != "A1" || got[1].ID != "A1" {
 		t.Errorf("Search = %+v, %v; want A2 (quoting A1) then A1", got, err)
 	}
-	none, err := newDaemon(fixedSession(wa.StateUnlinked), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	none := newDaemon(fixedSession(wa.StateUnlinked), nil)
 	if got, err := none.Search("15551230001@s.whatsapp.net", "venue", 50); err != nil || len(got) != 0 {
 		t.Errorf("Search without a store = %+v, %v; want nothing", got, err)
 	}
 }
 
 func TestDaemonReactPassesTheSessionsAnswer(t *testing.T) {
-	d, err := newDaemon(fixedSession(wa.StateUnlinked), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(fixedSession(wa.StateUnlinked), nil)
 	if err := d.React("15551230001@s.whatsapp.net", "A1", "x"); !errors.Is(err, ipc.ErrNotLinked) {
 		t.Errorf("React while unlinked = %v, want ipc.ErrNotLinked", err)
 	}
 }
 
 func TestDaemonMarkReadPassesTheSessionsAnswerAndRefusesAfterAWipe(t *testing.T) {
-	d, err := newDaemon(fixedSession(wa.StateUnlinked), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(fixedSession(wa.StateUnlinked), nil)
 	if _, err := d.MarkRead("15551230001@s.whatsapp.net"); !errors.Is(err, ipc.ErrNotLinked) {
 		t.Errorf("MarkRead while unlinked = %v, want ipc.ErrNotLinked", err)
 	}
-	linked, err := newDaemon(fixedSession(wa.StateLinked), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	linked := newDaemon(fixedSession(wa.StateLinked), nil)
 	if n, err := linked.MarkRead("15551230001@s.whatsapp.net"); err != nil || n != 7 {
 		t.Errorf("MarkRead = %d, %v; want the session's total 7", n, err)
 	}
@@ -100,10 +85,7 @@ func TestMarkReadOverTheSocketSendsTheReceiptAndPublishesTheUnread(t *testing.T)
 	fake.emit(textMessage(ada, "A1", false, t0, "first"))
 	fake.emit(textMessage(grace, "G1", false, t0, "hello"))
 
-	d, err := newDaemon(session, db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(session, db)
 	sock := serveSocket(t, d, events)
 	watcher, wbr := subscriber(t, sock)
 	conn, br := subscriber(t, sock)

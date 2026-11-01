@@ -350,6 +350,7 @@ event that fits is exactly what it was before this rule. Other events are not cu
 | `messages` for a well-formed `jid` with no stored chat | `messages` with an empty list |
 | `messages` or `search` whose messages, even without thumbnails, do not fit in one frame (e.g. 200 texts of 5 KiB) | the reply keeps the newest messages that fit, as many as fit, and leaves the oldest out: it never exceeds the frame limit and the connection stays usable. See "Replies too long for one frame" |
 | `chats` whose chats do not fit in one frame (e.g. 200 chats whose last messages are 6 KiB texts) | the reply keeps the newest chats that fit, as many as fit, each whole (the first alone is cut when it does not fit): it never exceeds the frame limit and the connection stays usable. See "Replies too long for one frame" |
+| `chats` while `unlinked` (no store) | `chats` with an empty list: the daemon serves none of the demo conversations the fixtures carry, so a client shows its own "no device" state |
 | An incoming message whose `event_message` would not fit in one frame (a text or a file name over 1 MiB) | every subscriber receives it with its `text`, then its `media.file_name`, cut on a code point boundary followed by `…`; the subscription and the connection stay open. See "Replies too long for one frame" |
 | `jid` that is not a WhatsApp chat JID in any request | `bad_frame`; the connection stays usable |
 | `send` with empty `text` (or only whitespace) | `bad_frame`; nothing is stored or sent |

@@ -158,10 +158,7 @@ func unreadDaemonWith(t *testing.T, newEmit func(*daemon) unreadEmitter, window 
 	session := wa.NewSession(fake, db, db.Close)
 	t.Cleanup(session.Close)
 	session.SetEvents(ipc.NewBroker())
-	d, err := newDaemon(session, db)
-	if err != nil {
-		t.Fatalf("newDaemon: %v", err)
-	}
+	d := newDaemon(session, db)
 	d.dataDir, d.keyring, d.socket = dataDir, &fakeKeyring{items: map[string]string{}}, filepath.Join(root, "core.sock")
 	runNotifier(t, d.notifyUnread(newEmit(d), window))
 	if err := session.Start(); err != nil {
@@ -261,10 +258,7 @@ func TestAMergeAtStartReachesTheDBusCount(t *testing.T) {
 	}
 	session := wa.NewSession(&lidWAClient{fakeWAClient: &fakeWAClient{}, pn: pn, lid: lid}, db, nil)
 	t.Cleanup(session.Close)
-	d, err := newDaemon(session, db)
-	if err != nil {
-		t.Fatalf("newDaemon: %v", err)
-	}
+	d := newDaemon(session, db)
 	emit := &fakeEmitter{}
 	runNotifier(t, d.notifyUnread(emit, testWindow))
 	if err := session.Start(); err != nil {

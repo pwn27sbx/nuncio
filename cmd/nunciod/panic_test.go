@@ -26,10 +26,7 @@ func (panicOnMarkRead) MarkRead(string) (int, error) {
 // its type only.
 func TestAPanicInOneRequestClosesOnlyItsConnection(t *testing.T) {
 	logs := daemonLog(t)
-	d, err := newDaemon(fixedSession(wa.StateLinked), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(fixedSession(wa.StateLinked), nil)
 	sock := serveSocket(t, panicOnMarkRead{d}, ipc.NewBroker())
 
 	conn, err := net.Dial("unix", sock)

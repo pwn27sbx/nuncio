@@ -233,10 +233,7 @@ func TestDaemonStartMigratesAPlainDatabaseThenServes(t *testing.T) {
 	if !kr.hasDataKey() {
 		t.Error("no data key after the migration")
 	}
-	d, err := newDaemon(s, db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(s, db)
 	if chats := d.Chats(); len(chats) != 0 {
 		t.Errorf("Chats() = %d chats, want the empty store, not the fixture list", len(chats))
 	}
@@ -267,10 +264,7 @@ func TestDaemonWithTheKeyringLockedServesOfflineWritesNothingAndRetries(t *testi
 		t.Fatalf("openSession: %v", err)
 	}
 	g, timers, starts := asGate(t, s)
-	d, err := newDaemon(s, db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(s, db)
 	want := ipc.Status{Daemon: daemonVersion, Linked: true, Session: ipc.SessionOffline}
 	if got := d.Status(); got != want {
 		t.Errorf("Status() = %+v, want %+v", got, want)
@@ -342,7 +336,7 @@ func TestDaemonWithTheKeyringLockedLeavesTheDatabaseBytesUnchanged(t *testing.T)
 				t.Fatalf("openSession: %v", err)
 			}
 			g, timers, _ := asGate(t, s)
-			d, _ := newDaemon(s, db)
+			d := newDaemon(s, db)
 			_ = d.Status()
 			_ = d.Chats()
 			_ = g.Start()
@@ -376,7 +370,7 @@ func TestDaemonWithTheKeyMissingOverSealedDataCreatesNoKey(t *testing.T) {
 	defer g.Close()
 	_ = g.Start()
 	timers.fire()
-	d, _ := newDaemon(s, db)
+	d := newDaemon(s, db)
 	if got := d.Status(); got.Session != ipc.SessionOffline || !got.Linked || got.StopReason != ipc.StopDeviceUnreadable {
 		t.Errorf("Status() = %+v, want offline, linked, stop_reason device_unreadable", got)
 	}
@@ -417,7 +411,7 @@ func TestDaemonWithoutADeviceNeverAsksTheKeyring(t *testing.T) {
 	if _, ok := s.(*wa.Session); !ok {
 		t.Fatalf("openSession answered %T, want a plain session", s)
 	}
-	d, _ := newDaemon(s, db)
+	d := newDaemon(s, db)
 	want := ipc.Status{Daemon: daemonVersion, Session: ipc.SessionUnlinked}
 	if got := d.Status(); got != want {
 		t.Errorf("Status() = %+v, want %+v", got, want)
@@ -474,10 +468,7 @@ func TestStatusAndHelloFramesAreUnchangedWhenLinkedNormally(t *testing.T) {
 		// D4: a locked keyring adds stop_reason to status only; hello_ok never carries it.
 		{"gate locked", &gate{reason: errKeyringLocked}, offlineHello, lockedStatus},
 	} {
-		d, err := newDaemon(c.session, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
+		d := newDaemon(c.session, nil)
 		hello, status := rawFrames(t, serveSocket(t, d, nil))
 		if hello != c.hello || status != c.status {
 			t.Errorf("%s: frames\n %s\n %s\nwant\n %s\n %s", c.name, hello, status, c.hello, c.status)
@@ -591,10 +582,7 @@ func openBlocked(t *testing.T) (*gate, *sql.DB, *blockingKeyring, *atomic.Int64)
 func TestDaemonServesOfflineWhileTheKeyringBlocks(t *testing.T) {
 	g, db, kr, starts := openBlocked(t)
 	defer g.Close()
-	d, err := newDaemon(g, db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(g, db)
 	sock := serveSocket(t, d, nil)
 	const offlineStatus = `{"v":1,"op":"status","daemon":"nunciod/0.2.0","linked":true,"session":"offline","unread":0}`
 	if _, status := rawFrames(t, sock); status != offlineStatus {

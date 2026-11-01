@@ -30,17 +30,11 @@ func TestDaemonServesAPhoneNumberAliasAsItsLIDChat(t *testing.T) {
 		Text: "the venue", Timestamp: t0}); err != nil {
 		t.Fatal(err)
 	}
-	d, err := newDaemon(aliasSession{fixedSession(wa.StateLinked)}, db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(aliasSession{fixedSession(wa.StateLinked)}, db)
 	if got := d.CanonicalJID("15551230001@s.whatsapp.net"); got != "100000000000001@lid" {
 		t.Errorf("CanonicalJID = %s, want the LID chat", got)
 	}
-	plain, err := newDaemon(fixedSession(wa.StateLinked), db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	plain := newDaemon(fixedSession(wa.StateLinked), db)
 	if got := plain.CanonicalJID("15551230001@s.whatsapp.net"); got != "15551230001@s.whatsapp.net" {
 		t.Errorf("CanonicalJID without a resolving session = %s, want it unchanged", got)
 	}
@@ -70,10 +64,7 @@ func TestDaemonListsTheAliasesOfAMergedChat(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	d, err := newDaemon(aliasSession{fixedSession(wa.StateLinked)}, db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(aliasSession{fixedSession(wa.StateLinked)}, db)
 	got := map[string][]string{}
 	for _, c := range d.Chats() {
 		got[c.JID] = c.Aliases
@@ -82,10 +73,7 @@ func TestDaemonListsTheAliasesOfAMergedChat(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("chats = %v, want %v", got, want)
 	}
-	plain, err := newDaemon(fixedSession(wa.StateLinked), db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	plain := newDaemon(fixedSession(wa.StateLinked), db)
 	for _, c := range plain.Chats() {
 		if c.Aliases != nil {
 			t.Errorf("chat %s lists aliases without a session that has them: %q", c.JID, c.Aliases)
@@ -114,10 +102,7 @@ func TestDaemonListsTheMaskedPhoneOfAChat(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	d, err := newDaemon(aliasSession{fixedSession(wa.StateLinked)}, db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(aliasSession{fixedSession(wa.StateLinked)}, db)
 	got := map[string]string{}
 	for _, c := range d.Chats() {
 		got[c.JID] = c.Phone
@@ -126,10 +111,7 @@ func TestDaemonListsTheMaskedPhoneOfAChat(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("phones = %v, want %v", got, want)
 	}
-	plain, err := newDaemon(fixedSession(wa.StateLinked), db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	plain := newDaemon(fixedSession(wa.StateLinked), db)
 	for _, c := range plain.Chats() {
 		if c.Phone != "" {
 			t.Errorf("chat %s carries a phone without a session that has one: %q", c.JID, c.Phone)

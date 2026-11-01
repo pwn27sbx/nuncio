@@ -40,10 +40,7 @@ func TestDaemonServesGroupMessagesWithTheirSender(t *testing.T) {
 		}
 	}
 	asked := 0
-	d, err := newDaemon(senderSession{fixedSession(wa.StateLinked), &asked}, db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(senderSession{fixedSession(wa.StateLinked), &asked}, db)
 	want := map[string]string{"G1": "Ana", "G2": "…0002", "G3": "", "D1": ""}
 	serve := map[string]func(string) ([]ipc.Message, error){
 		"messages": func(jid string) ([]ipc.Message, error) { return d.Messages(jid, 10) },

@@ -58,8 +58,8 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | T4 | S4/S5/S8: the daemon serves it — handler, QR rotation, cancel, fixed failure sentences | inline | done: RED (undefined `LinkStarter`, `LinkCanceller`, `MaxLinkQRSize`, `LinkFailureReason`) → GREEN; `link_start` without consent (false or absent) is refused with `bad_frame` before the daemon opens anything, and the flow gates again with `wa.Gate`; one `link_qr` per code, `size`+`rows` only, at most 177 modules per side; `waiting` → codes → `linked`, and a stop carries exactly `WhatsApp stopped the linking: ask for a new QR`; cancel removes the store and only the key this flow made, and a linked store is refused before the keyring is read; a paired device is handed to the daemon, which serves it without a restart; no frame, log line or error carries the payload | f2cfc78 (wire), 70b44ab (daemon), fixes 261c69a, 0efa996, c1bb599 |
 | T5 | S9: `nuncio link` becomes a thin client of the frames, unchanged from the outside | inline | done: RED (undefined `RenderMatrix`, `Client.LinkStart`/`LinkCancel`/`Subscribe`/`NextEvent`, `linkByQR` — `go vet` refused the three packages) → GREEN; `--qr` subscribes, sends `link_start` with consent, draws each published matrix and stops at `link_state`, opening no store and no keyring; `--phone` keeps the direct path and its refusal; Ctrl-C sends `link_cancel`; three intended output changes recorded (below) | f954648 |
 | T6 | S4/S5: `nuncio-client` parses the frames and exposes the link flow to both clients | inline | done: RED (7th event fixture dropped the connection with `Unexpected { expected: "event", got: "link_qr" }`, then `LinkFlow`/`LinkState`/`LinkUpdate` unresolved at the crate root) → GREEN; `is_event` accepts `link_qr`/`link_state`, every event fixture is received through `next_event`, and one `LinkFlow` folds the flow with `LinkQr` (row-first, bounds-safe `module()`, `Debug` without the matrix) and the daemon's failure sentence verbatim | 4378882 |
-| T7 | S4/S6/S7/S8: the GTK app's link screen — consent, drawn QR, Link, cancel, error states, then the chat list | inline | pending | — |
-| T8 | S10: the TUI's unlinked copy stops pointing at the CLI | inline | pending | — |
+| T7 | S4/S6/S7/S8: the GTK app's link screen — consent, drawn QR, Link, cancel, error states, then the chat list | delegated writer (context backstop) | done: RED (`cargo test -p nuncio-desktop --lib` refused to compile with `LinkFlow: Clone` unsatisfied and the missing renderer API; then the new `a_flow_this_app_did_not_start_is_never_cancelled_by_this_one` failed on the tip with `left: [Send(LinkCancel { v: 1 })]`) → GREEN; the unlinked window opens on the link screen, the only `link_start` is the press, the matrix is drawn from `LinkQr::module` in a monospace label with the 4-module quiet zone, `linked` brings the chats without a restart, `failed` shows the daemon's sentence, `Esc`/close cancels only a flow this app started, D3's keyring sentence appears only after the press with a re-probing Try again | f583d1f, e83b4d7, 7d00ecf |
+| T8 | S10: the TUI's unlinked copy stops pointing at the CLI | inline | done: RED (the new `an_unlinked_app_says_no_device_is_linked_and_points_at_nuncio` failed on the tip, which drew `No chats yet · nuncio link` for an unlinked app) → GREEN; the empty-list hint keys on `Session::Unlinked` (`No device linked · open nuncio to link it`, wrapped so a narrow pane does not cut it), a linked app with no chats keeps `No chats yet`, and the design suite asserts both at 80x24 and 240x60 | 497d9d1 |
 | T9 | S11: unlink from the app with a typed confirmation | inline | pending | — |
 | T10 | S12: `INSTALL.md` for the average user, the CLI into `docs/COMMAND-LINE.md`, CHANGELOG and README | inline | pending | — |
 | T11 | S15: build the package, install it, run the flow from a fresh data dir | inline | pending | — |
@@ -250,3 +250,61 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   nothing: consent is enforced in the daemon (`LinkStart(false)` → `bad_frame`, never reaches the
   handler), the matrix is validated before it reaches a terminal sink and carries no escapes, and
   `NextEvent` copies the reader's buffer before handing it out.
+- L16 (evidence, 2026-10-31, T7) The app's link screen landed in three commits. An unlinked window
+  opens on it instead of empty panes: the title, the consent text, one action button (Link, then
+  Try again after a refusal, then New code after a failure), a cancel, and the place where the
+  code will be. **The code appears when Link is pressed, not before**: the daemon refuses
+  `link_start` without consent and generates nothing until it has it (T4, L6b), so a first screen
+  that already showed a matrix would mean the app linked without the press. That is the one place
+  where S4's literal list ("consent text, a QR and one Link button") is read with S6 and D3 rather
+  than on its own; the screen still is the first thing an unlinked app shows, and D3's meaning is
+  kept (no keyring sentence before the press). The drawn code comes from `LinkQr::module` only,
+  one character per module, two module rows per text row, four modules of margin on every side,
+  in GTK's own `.monospace` class with fixed colours so a dark palette cannot invert it. `linked`
+  asks for the chats at once, so the list appears without a restart (the daemon hands the paired
+  device to itself); `failed` shows the daemon's sentence as text (control characters dropped);
+  `link_qr` that arrives before the `link_started` answer does not take the code off the screen.
+  An independent verifier re-ran every gate in a scratch copy and probed the renderer and the
+  state machine: a 21-module matrix becomes 15 lines of 29 characters (4+21+4) with the four
+  outer lines blank, the half-block mapping is right for both halves, rotation replaces, `linked`
+  sends `chats(200)`, and `quit()` cancels. It found one blocker and one privacy defect, both
+  fixed before the task commit pair closed: closing the window during a started flow did not
+  cancel (with `background=false` the daemon's store, key and pairing client were left running),
+  and `#[derive(Debug)]` on `LinkView`/`LinkShown` printed the matrix. Both now have a
+  hand-written `Debug` (state and booleans, never rows or the sentence) and a test; the close path
+  and `quit()` share one cancel helper. Redone: `cargo fmt --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace` (nuncio-desktop lib 213, `smoke: ok`),
+  `gofmt`, `go vet ./...`, `CGO_ENABLED=0 go test -count=1 ./...`, `packaging/check.sh` green
+  except `systemd-analyze --user verify` (T11).
+- L17 (incident, 2026-10-31, T7) The review's reliability lens raised two BLOCKERs and the refuter
+  corroborated one: `R3-CancelsOtherClientFlow` (any `link_qr` put the screen in `waiting`, and the
+  close path treated that as a flow of its own, so closing this window could cancel a pairing a
+  terminal had started — the readability lens had already noted the doc comment promising a
+  distinction the code did not make). The other, `R3-CancelReplayLost`, was refuted. The bounded
+  correction (`7d00ecf`) records the one thing that makes a flow ours, the press, and clears it on
+  every way a flow can end; the screen still draws another client's code and leaving it only hides
+  it; a controller test fails on the previous tip and passes here. **The review still has no
+  receipt**: its targeted validator was offered the identical slot twice and both captures were
+  refused with `opencode_review_transport_relay_refused (reason: output_refused, cause:
+  validator_result_not_admissible)` — the same defect family as L11 (Gentle
+  AI#4972, open, same contract and runtime), not the request-hash cause L11 hit. The installed
+  build is 4.3.1 stable, so no published fix is claimed and no occurrence was filed: the owner
+  chose to continue without reporting. The correction is verified by the gates above; its
+  authority is not burned, the lineage stays in `correction_required`, and a fresh review of the
+  corrected range can start when the defect is fixed. T8 proceeds.
+- L18 (evidence and review, 2026-10-31, T8) The TUI's empty list no longer points at the CLI. The
+  hint was the empty-chat-list hint: `No chats yet · nuncio link` showed whether or not a device
+  was linked, and named a command after the install stopped asking for one (S10). It keys on the
+  session now: `No device linked · open nuncio to link it` when unlinked, `No chats yet` when
+  linked with no chats, the filter line unchanged, and the sentence wraps so a narrow list pane
+  does not lose its second half (it is 44 characters against a ~34-column pane at 80x24). The
+  README states the same two states. Verified: `cargo fmt --check`, `cargo clippy --workspace
+  --all-targets -- -D warnings`, `cargo test --workspace` (the design suite 23/23), `gofmt`, `go
+  vet ./...`, `CGO_ENABLED=0 go test -count=1 ./...`, `packaging/check.sh` green except
+  `systemd-analyze --user verify` (T11). Review: approved and acknowledged with its authority
+  burned (medium tier, lenses readability and reliability; the reliability lens found nothing).
+  Five advisory findings, none blocking: the three-space indent is string content rather than a
+  layout constant and a wrapped line is flush with the pane, the `S#`/`T#` tags are cited without
+  their document, the README says "on a linked device" where the code tests "not unlinked", and
+  the test's pane split hard-codes the border glyph — all inputs for the next touch of this
+  renderer.

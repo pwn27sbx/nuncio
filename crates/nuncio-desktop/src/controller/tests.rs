@@ -910,3 +910,413 @@ fn switching_chats_shows_each_chats_own_draft_in_the_widget() {
     assert_eq!(c.model().composer().text(), "for ana");
     assert!(!c.take_draft_changed(), "asked once");
 }
+
+/// A daemon answer for a device state.
+fn status(session: nuncio_client::Session) -> DaemonFrame {
+    DaemonFrame::Status {
+        v: PROTOCOL_VERSION,
+        daemon: "nunciod/0.1.1".to_owned(),
+        linked: session == nuncio_client::Session::Linked,
+        session,
+        unread: 0,
+        stop_reason: None,
+    }
+}
+
+/// Connected, and the daemon says no device is linked.
+fn unlinked() -> Controller {
+    let mut c = Controller::new("d");
+    c.incoming(Incoming::Connected);
+    c.incoming(reply(
+        &ClientFrame::status(),
+        status(nuncio_client::Session::Unlinked),
+    ));
+    c
+}
+
+/// A `link_qr` frame of `size` modules per side.
+fn qr(size: u32) -> DaemonFrame {
+    DaemonFrame::EventLinkQr {
+        v: PROTOCOL_VERSION,
+        size,
+        rows: (0..size)
+            .map(|row| {
+                (0..size)
+                    .map(|col| if (row + col) % 2 == 0 { '1' } else { '0' })
+                    .collect()
+            })
+            .collect(),
+    }
+}
+
+fn state(state: nuncio_client::LinkState, reason: Option<&str>) -> DaemonFrame {
+    DaemonFrame::EventLinkState {
+        v: PROTOCOL_VERSION,
+        state,
+        reason: reason.map(str::to_owned),
+    }
+}
+
+#[test]
+fn only_the_link_button_sends_consent() {
+    let mut c = Controller::new("d");
+    let asked = c.incoming(Incoming::Connected);
+    assert!(
+        !asked
+            .iter()
+            .any(|command| matches!(command, Command::Send(ClientFrame::LinkStart { .. }))),
+        "the first connect asks for nothing that links: {asked:?}"
+    );
+    c.incoming(reply(
+        &ClientFrame::status(),
+        status(nuncio_client::Session::Unlinked),
+    ));
+    assert_eq!(
+        c.link_screen(),
+        Some(&LinkScreen::Consent),
+        "an unlinked app asks to link"
+    );
+    assert_eq!(
+        c.start_link(),
+        [Command::Send(ClientFrame::link_start(true))],
+        "the press is the consent, and the only frame it sends"
+    );
+    assert_eq!(c.link_screen(), Some(&LinkScreen::Starting));
+}
+
+#[test]
+fn the_link_screen_shows_only_while_the_daemon_says_unlinked() {
+    let mut c = unlinked();
+    assert_eq!(c.link_screen(), Some(&LinkScreen::Consent));
+    c.incoming(reply(
+        &ClientFrame::status(),
+        status(nuncio_client::Session::Linked),
+    ));
+    assert!(
+        c.link_screen().is_none(),
+        "a paired device shows the chat list"
+    );
+    let mut unknown = Controller::new("d");
+    unknown.incoming(Incoming::Connected);
+    assert!(
+        unknown.link_screen().is_none(),
+        "nothing is known before the daemon answers"
+    );
+}
+
+#[test]
+fn each_code_replaces_the_one_before_it() {
+    let mut c = unlinked();
+    c.start_link();
+    c.incoming(reply(
+        &ClientFrame::link_start(true),
+        DaemonFrame::LinkStarted {
+            v: PROTOCOL_VERSION,
+        },
+    ));
+    assert_eq!(c.link_screen(), Some(&LinkScreen::Starting));
+    c.incoming(Incoming::Event(qr(21)));
+    assert_eq!(c.link_screen(), Some(&LinkScreen::Waiting));
+    assert_eq!(c.link_qr().map(|qr| qr.size()), Some(21));
+    c.incoming(Incoming::Event(qr(25)));
+    assert_eq!(
+        c.link_qr().map(|qr| qr.size()),
+        Some(25),
+        "a later code replaces the one before"
+    );
+    c.incoming(Incoming::Event(state(
+        nuncio_client::LinkState::Failed,
+        Some("WhatsApp stopped the linking: ask for a new QR"),
+    )));
+    assert_eq!(c.link_screen(), Some(&LinkScreen::Failed));
+    assert_eq!(c.link_qr(), None, "a failed flow has nothing left to scan");
+    assert_eq!(
+        c.link_reason().as_deref(),
+        Some("WhatsApp stopped the linking: ask for a new QR")
+    );
+}
+
+#[test]
+fn a_failed_flow_can_ask_for_a_new_code() {
+    let mut c = unlinked();
+    c.start_link();
+    c.incoming(Incoming::Event(state(
+        nuncio_client::LinkState::Failed,
+        Some("WhatsApp stopped the linking: ask for a new QR"),
+    )));
+    assert_eq!(
+        c.start_link(),
+        [Command::Send(ClientFrame::link_start(true))],
+        "a new code is a new flow, from the same screen"
+    );
+    assert_eq!(c.link_screen(), Some(&LinkScreen::Starting));
+    assert_eq!(c.link_qr(), None, "the old code is gone");
+}
+
+#[test]
+fn the_failure_sentence_is_shown_only_while_the_flow_is_failed() {
+    let mut c = unlinked();
+    c.start_link();
+    c.incoming(Incoming::Event(state(
+        nuncio_client::LinkState::Failed,
+        Some("WhatsApp stopped the linking: ask for a new QR"),
+    )));
+    assert!(c.link_reason().is_some());
+    c.incoming(Incoming::Event(state(
+        nuncio_client::LinkState::Waiting,
+        None,
+    )));
+    assert_eq!(c.link_reason(), None, "a later state frame clears it");
+}
+
+#[test]
+fn escape_cancels_the_flow_and_leaves_the_first_screen() {
+    let mut c = unlinked();
+    c.start_link();
+    c.incoming(Incoming::Event(qr(21)));
+    assert_eq!(
+        c.cancel_link(),
+        [Command::Send(ClientFrame::link_cancel())],
+        "the daemon is told to remove what the flow created"
+    );
+    assert_eq!(c.link_screen(), Some(&LinkScreen::Consent));
+    assert_eq!(c.link_qr(), None);
+    assert_eq!(c.link_reason(), None);
+    assert!(
+        c.cancel_link().is_empty(),
+        "nothing to cancel at the first screen"
+    );
+}
+
+#[test]
+fn a_locked_keyring_is_said_after_the_press_and_try_again_probes_first() {
+    let mut c = unlinked();
+    c.start_link();
+    c.incoming(Incoming::Reply {
+        request: ClientFrame::link_start(true),
+        result: Err(ClientError::Daemon {
+            code: "internal".to_owned(),
+            message: "store: the keyring is unavailable".to_owned(),
+        }),
+    });
+    assert_eq!(
+        c.link_screen(),
+        Some(&LinkScreen::Refused(LinkRefusal::Keyring))
+    );
+    assert_eq!(c.model().notice(), None, "the screen says it, not a toast");
+    assert_eq!(
+        c.start_link(),
+        [
+            Command::Send(ClientFrame::status()),
+            Command::Send(ClientFrame::link_start(true)),
+        ],
+        "Try again asks the daemon for its state before a new flow"
+    );
+}
+
+#[test]
+fn another_refusal_is_worded_by_the_daemon() {
+    let mut c = unlinked();
+    c.start_link();
+    c.incoming(Incoming::Reply {
+        request: ClientFrame::link_start(true),
+        result: Err(ClientError::Daemon {
+            code: "internal".to_owned(),
+            message: "a link flow is already running".to_owned(),
+        }),
+    });
+    assert_eq!(
+        c.link_screen(),
+        Some(&LinkScreen::Refused(LinkRefusal::Other(
+            "a link flow is already running".to_owned()
+        )))
+    );
+}
+
+#[test]
+fn a_paired_device_brings_the_chats_without_a_restart() {
+    let mut c = unlinked();
+    c.start_link();
+    let commands = c.incoming(Incoming::Event(state(
+        nuncio_client::LinkState::Linked,
+        None,
+    )));
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::Send(ClientFrame::Chats { .. }))),
+        "the chat list is asked for at once: {commands:?}"
+    );
+    assert!(c.link_screen().is_none(), "the link screen gives way");
+    // The session's own frames follow: they ask for nothing again.
+    let commands = c.incoming(Incoming::Event(DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: nuncio_client::Session::Linked,
+        stop_reason: None,
+    }));
+    assert!(
+        !commands
+            .iter()
+            .any(|command| matches!(command, Command::Send(ClientFrame::Chats { .. }))),
+        "{commands:?}"
+    );
+}
+
+#[test]
+fn a_link_completed_elsewhere_brings_the_chats_too() {
+    let mut c = unlinked();
+    let commands = c.incoming(Incoming::Event(DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: nuncio_client::Session::Linked,
+        stop_reason: None,
+    }));
+    assert!(
+        commands
+            .iter()
+            .any(|command| matches!(command, Command::Send(ClientFrame::Chats { .. }))),
+        "a link another client made shows its chats: {commands:?}"
+    );
+    assert!(c.link_screen().is_none());
+}
+
+// R3-CancelsOtherClientFlow (T7 review, BLOCKER, corroborated by the refuter): the daemon
+// publishes `link_qr` to every subscriber, so a flow a terminal started (`nuncio link --qr`) is on
+// this screen too. Leaving this window must not cancel that one, and must stop showing it.
+#[test]
+fn a_flow_this_app_did_not_start_is_never_cancelled_by_this_one() {
+    let mut c = unlinked();
+    c.incoming(Incoming::Event(qr(21)));
+
+    assert_eq!(
+        c.link_screen(),
+        Some(&LinkScreen::Waiting),
+        "another client's code is worth drawing"
+    );
+    assert_eq!(
+        c.cancel_link(),
+        Vec::new(),
+        "a flow this app did not start is not this app's to cancel"
+    );
+    assert_eq!(c.link_screen(), Some(&LinkScreen::Consent));
+    assert_eq!(c.link_qr(), None);
+}
+
+#[test]
+fn a_cancel_the_worker_could_not_deliver_is_sent_once_connected() {
+    let mut c = unlinked();
+    c.start_link();
+    c.incoming(Incoming::Event(qr(21)));
+    c.incoming(Incoming::Lost(ClientError::Closed));
+    assert_eq!(c.cancel_link(), [Command::Send(ClientFrame::link_cancel())]);
+    c.incoming(Incoming::NotConnected(ClientFrame::link_cancel()));
+    let commands = c.incoming(Incoming::Connected);
+    assert!(
+        commands.contains(&Command::Send(ClientFrame::link_cancel())),
+        "the next connect cancels the flow it could not reach: {commands:?}"
+    );
+}
+
+#[test]
+fn a_logout_brings_the_link_screen_back() {
+    let mut c = unlinked();
+    c.start_link();
+    c.incoming(Incoming::Event(state(
+        nuncio_client::LinkState::Linked,
+        None,
+    )));
+    assert!(c.link_screen().is_none(), "the chat list has the window");
+    c.incoming(Incoming::Event(DaemonFrame::EventConnection {
+        v: PROTOCOL_VERSION,
+        session: nuncio_client::Session::Unlinked,
+        stop_reason: None,
+    }));
+    assert_eq!(
+        c.link_screen(),
+        Some(&LinkScreen::Consent),
+        "after a logout the app asks to link again"
+    );
+    // And the same when the status, not an event, is what says it.
+    c.incoming(Incoming::Event(state(
+        nuncio_client::LinkState::Linked,
+        None,
+    )));
+    c.incoming(reply(
+        &ClientFrame::status(),
+        status(nuncio_client::Session::Unlinked),
+    ));
+    assert_eq!(c.link_screen(), Some(&LinkScreen::Consent));
+}
+
+#[test]
+fn a_code_that_arrives_before_the_start_is_answered_stays_on_the_screen() {
+    let mut c = unlinked();
+    c.start_link();
+    // The events and the reply travel on different connections: the daemon's code can be first.
+    c.incoming(Incoming::Event(state(
+        nuncio_client::LinkState::Waiting,
+        None,
+    )));
+    c.incoming(Incoming::Event(qr(21)));
+    c.incoming(reply(
+        &ClientFrame::link_start(true),
+        DaemonFrame::LinkStarted {
+            v: PROTOCOL_VERSION,
+        },
+    ));
+    assert_eq!(
+        c.link_screen(),
+        Some(&LinkScreen::Waiting),
+        "the answer does not take the code away"
+    );
+}
+
+#[test]
+fn a_cancel_that_could_not_remove_everything_says_so() {
+    let mut c = unlinked();
+    c.start_link();
+    c.incoming(Incoming::Event(qr(21)));
+    c.cancel_link();
+    c.incoming(Incoming::Reply {
+        request: ClientFrame::link_cancel(),
+        result: Err(ClientError::Daemon {
+            code: "internal".to_owned(),
+            message: "remove nuncio.db: permission denied".to_owned(),
+        }),
+    });
+    assert_eq!(c.link_screen(), Some(&LinkScreen::Consent));
+    assert!(
+        c.model()
+            .notice()
+            .is_some_and(|notice| notice.contains("could not remove")),
+        "{:?}",
+        c.model().notice()
+    );
+}
+
+#[test]
+fn a_start_that_never_left_returns_to_the_first_screen() {
+    let mut c = unlinked();
+    c.start_link();
+    c.incoming(Incoming::NotConnected(ClientFrame::link_start(true)));
+    assert_eq!(
+        c.link_screen(),
+        Some(&LinkScreen::Consent),
+        "nothing reached the daemon, so nothing is waiting"
+    );
+    assert_eq!(c.link_qr(), None);
+}
+
+#[test]
+fn escape_after_a_failed_flow_has_nothing_to_cancel() {
+    let mut c = unlinked();
+    c.start_link();
+    c.incoming(Incoming::Event(state(
+        nuncio_client::LinkState::Failed,
+        Some("WhatsApp stopped the linking: ask for a new QR"),
+    )));
+    assert!(
+        c.cancel_link().is_empty(),
+        "the daemon's flow already ended, so there is nothing to stop"
+    );
+    assert_eq!(c.link_screen(), Some(&LinkScreen::Consent));
+}

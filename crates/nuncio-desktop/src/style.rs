@@ -34,6 +34,9 @@ pub fn composer_max_height(line: i32) -> i32 {
 pub const PALETTE_WIDTH: i32 = 560;
 /// The settings' column width (plan §6.7).
 pub const SETTINGS_WIDTH: i32 = 480;
+/// The link screen's column width (S4): the consent text wraps at it; a code wider than it sets
+/// its own.
+pub const LINK_WIDTH: i32 = 480;
 /// A dialog's width (plan §6.8).
 pub const DIALOG_WIDTH: i32 = 480;
 /// The room kept on each side of the palette on a window narrower than it.
@@ -222,6 +225,17 @@ pub fn layout_css(palette: &Palette, radius: u32) -> String {
            padding: 6px 16px;\n  \
            color: {warning};\n  \
            border-bottom: 1px solid {border};\n\
+         }}\n\
+         .{root} .nuncio-link {{\n  \
+           padding: 24px;\n  \
+           background-color: {surface};\n  \
+           color: {text};\n\
+         }}\n\
+         .{root} .nuncio-qr {{\n  \
+           padding: 8px;\n  \
+           background-color: #ffffff;\n  \
+           color: #000000;\n  \
+           font-size: 11px;\n\
          }}\n",
         chrome = palette.surface_chrome().to_hex(),
         surface = palette.surface().to_hex(),
@@ -1279,5 +1293,41 @@ mod tests {
             "never under what it needs"
         );
         assert_eq!(transcript_width(1311, 0, 0), 72, "no font measured yet");
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::layout_css;
+    use crate::ROOT_CLASS;
+    use nuncio_client::{Palette, Rgb};
+
+    /// The body of the first rule whose selector is exactly `selector`.
+    fn rule<'a>(css: &'a str, selector: &str) -> &'a str {
+        let start = css
+            .find(&format!("{selector} {{"))
+            .unwrap_or_else(|| panic!("no rule for {selector} in: {css}"));
+        let body = &css[start + selector.len() + 2..];
+        &body[..body.find('}').expect("a closed rule")]
+    }
+
+    #[test]
+    fn the_link_screens_code_is_black_on_white_in_a_monospace_font() {
+        // A dark palette must not invert the code: a phone scans dark modules on a light ground.
+        let palette = Palette {
+            background: Rgb::new(0x28, 0x28, 0x28),
+            foreground: Rgb::new(0xd4, 0xbe, 0x98),
+            ..Palette::default()
+        };
+        let css = layout_css(&palette, 0);
+        let qr = rule(&css, &format!(".{ROOT_CLASS} .nuncio-qr"));
+        assert!(qr.contains("background-color: #ffffff;"), "{qr}");
+        assert!(qr.contains("color: #000000;"), "{qr}");
+        // The label carries GTK's own `.monospace` class; a theme font never repaints the code.
+        assert!(!qr.contains(&palette.foreground.to_hex()), "{qr}");
+        assert!(!qr.contains(&palette.background.to_hex()), "{qr}");
+        let screen = rule(&css, &format!(".{ROOT_CLASS} .nuncio-link"));
+        assert!(screen.contains("background-color:"), "{screen}");
+        assert!(screen.contains("padding:"), "{screen}");
     }
 }

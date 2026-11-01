@@ -4,14 +4,19 @@
 //! comes back as [`Command`]s. The window calls these methods and draws
 //! [`crate::present`]'s view of the model afterwards.
 
+use std::cell::{Ref, RefCell};
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use nuncio_client::driver::{self, Outcome};
 use nuncio_client::link::{LinkError, parse_link};
 use nuncio_client::model::Effect;
 use nuncio_client::notify::{Notification, ViewState, notification_for};
-use nuncio_client::{ClientFrame, Config, DaemonFrame, Model, Session, Snapshot};
+use nuncio_client::{
+    ClientError, ClientFrame, Config, DaemonFrame, LinkFlow, LinkQr, LinkState, LinkUpdate, Model,
+    Session, Snapshot,
+};
 
 use crate::worker::Incoming;
 
@@ -52,6 +57,34 @@ pub enum Alert {
 /// What "New message" says when the number typed cannot open a chat: the link's own rule
 /// ([`LinkError::BadPhone`]), said of a typed number. It never repeats the number.
 pub const BAD_NUMBER: &str = "the phone number is not 7 to 15 digits";
+
+/// The link screen's state while the app has no device (S4/S6/S8, D3): the consent before
+/// anything is sent, the flow's own states, and the two refusals the first press can meet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkScreen {
+    /// The first screen: the consent text and the one Link button. Nothing has been asked of the
+    /// daemon, so no code exists and no keyring has been touched.
+    Consent,
+    /// Link was pressed and `link_start` went out: the daemon is opening the store and the
+    /// keyring, and has published no code yet.
+    Starting,
+    /// The daemon published a code (a later one replaces it): the screen draws it.
+    Waiting,
+    /// `link_state: failed`: the daemon's one sentence, and a new code can be asked for.
+    Failed,
+    /// The daemon refused to start a flow: one sentence, and one Try again.
+    Refused(LinkRefusal),
+}
+
+/// Why a `link_start` was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkRefusal {
+    /// The daemon could not read the keyring (locked, or no Secret Service at all): D3's sentence
+    /// names both cases and the remedy.
+    Keyring,
+    /// Any other refusal, as the daemon worded it (a flow already running, a device linked).
+    Other(String),
+}
 
 /// The `whatsapp://send?phone=<digits>` link, with no text, that a phone number typed into "New
 /// message" stands for. The number is judged by the link's own rules ([`parse_link`]): every
@@ -96,6 +129,20 @@ pub struct Controller {
     /// Pictures whose full file was asked for again ([`Controller::open_media`]), by chat and
     /// id: one that could not be shown may be decoded once more.
     picture_retries: Vec<(String, String)>,
+    /// The link screen while the app has no device, and what the daemon published for it. Shared
+    /// between clones of one controller (a flow is pairing material, and nothing duplicates it).
+    link: Rc<RefCell<LinkFlow>>,
+    link_screen: LinkScreen,
+    /// A flow paired and the screen is gone, before the session's own frames say `linked`.
+    link_linked: bool,
+    /// A `link_cancel` the worker could not deliver (the link was down): sent on the next
+    /// connect, so a flow the user stopped leaves nothing behind (S7).
+    link_cancel_pending: bool,
+    /// Whether this app sent the `link_start` of the flow the screen is showing. The daemon
+    /// publishes `link_qr`/`link_state` to every subscriber, so a flow another client started
+    /// (`nuncio link --qr` in a terminal) is on this screen too; leaving this window must not
+    /// cancel that one.
+    link_started_here: bool,
 }
 
 fn commands(effect: Option<Effect>) -> Vec<Command> {
@@ -148,6 +195,11 @@ impl Controller {
             waiting: None,
             shown_draft: String::new(),
             picture_retries: Vec::new(),
+            link: Rc::new(RefCell::new(LinkFlow::new())),
+            link_screen: LinkScreen::Consent,
+            link_linked: false,
+            link_cancel_pending: false,
+            link_started_here: false,
         }
     }
 
@@ -186,9 +238,28 @@ impl Controller {
                     self.model.set_connected(true);
                     self.model.resync()
                 };
-                frames.into_iter().map(Command::Send).collect()
+                let mut commands: Vec<Command> = frames.into_iter().map(Command::Send).collect();
+                // A cancel made while the link was down reaches the daemon now, before anything
+                // else, so the flow it stopped leaves nothing behind (S7).
+                if std::mem::take(&mut self.link_cancel_pending) {
+                    commands.insert(0, Command::Send(ClientFrame::link_cancel()));
+                }
+                commands
             }
             Incoming::Reply { request, result } => {
+                if matches!(
+                    request,
+                    ClientFrame::LinkStart { .. } | ClientFrame::LinkCancel { .. }
+                ) {
+                    return self.link_reply(&request, result);
+                }
+                // The daemon's own word on the device decides whether the link screen is still
+                // gone: after a logout (or a daemon restarted without a device) it comes back.
+                if let Ok(DaemonFrame::Status { session, .. }) = &result
+                    && *session == Session::Unlinked
+                {
+                    self.link_linked = false;
+                }
                 let listed = matches!(result, Ok(DaemonFrame::Chats { .. }));
                 if let Ok(DaemonFrame::MarkedRead { jid, .. }) = &result {
                     self.withdraw(jid);
@@ -218,12 +289,45 @@ impl Controller {
                 }
             }
             Incoming::NotConnected(frame) => {
+                if matches!(frame, ClientFrame::LinkStart { .. }) {
+                    // Nothing reached the daemon: no flow was started.
+                    *self.link.borrow_mut() = LinkFlow::new();
+                    self.link_screen = LinkScreen::Consent;
+                    self.link_started_here = false;
+                }
                 driver::not_connected(&mut self.model, &frame, CLIENT);
                 Vec::new()
             }
             Incoming::Event(frame) => {
                 self.notify(&frame);
-                commands(self.model.apply(&frame))
+                if matches!(
+                    &frame,
+                    DaemonFrame::EventConnection {
+                        session: Session::Unlinked,
+                        ..
+                    }
+                ) {
+                    self.link_linked = false;
+                }
+                let mut link = self.fold_link(&frame);
+                // A paired device handed over by the daemon (this app's flow, or a link another
+                // client made) is served at once: ask for the chats, so the list appears without
+                // a restart (S4).
+                if !self.link_linked
+                    && self.model.status().session != Session::Linked
+                    && matches!(
+                        &frame,
+                        DaemonFrame::EventConnection {
+                            session: Session::Linked,
+                            ..
+                        }
+                    )
+                {
+                    self.link_linked = true;
+                    link.extend(self.model.resync().into_iter().map(Command::Send));
+                }
+                link.extend(commands(self.model.apply(&frame)));
+                link
             }
             Incoming::Lost(error) => {
                 driver::lost(&mut self.model, &error);
@@ -234,6 +338,160 @@ impl Controller {
                 self.model
                     .set_notice("too many updates at once; reloading the chats");
                 self.model.resync().into_iter().map(Command::Send).collect()
+            }
+        }
+    }
+
+    /// The link screen, while the app has no device: the daemon says `unlinked` and no flow has
+    /// paired yet (S4). `None` at any other time, and the panes show instead.
+    pub fn link_screen(&self) -> Option<&LinkScreen> {
+        (self.model.connected()
+            && self.model.status().session == Session::Unlinked
+            && !self.link_linked)
+            .then_some(&self.link_screen)
+    }
+
+    /// The code the link screen draws now; `None` before the first one, and once the flow ended.
+    pub fn link_qr(&self) -> Option<LinkQr> {
+        self.flow().qr().cloned()
+    }
+
+    /// The daemon's failure sentence, only while the flow is in its failed state: every state
+    /// frame refreshes it, so an earlier one is never shown (T6 review, L13b).
+    pub fn link_reason(&self) -> Option<String> {
+        let flow = self.flow();
+        (flow.phase() == Some(LinkState::Failed))
+            .then(|| flow.reason().map(str::to_owned))
+            .flatten()
+    }
+
+    fn flow(&self) -> Ref<'_, LinkFlow> {
+        self.link.borrow()
+    }
+
+    /// The link screen's one button: Link (the consent, S6), Try again after a refusal (which
+    /// asks the daemon for its state again first, D3), or a new code after a failed flow.
+    pub fn start_link(&mut self) -> Vec<Command> {
+        // The button press is the consent: this is the only `link_start` carrying `consent:
+        // true`, so nothing links before it.
+        let probe = matches!(self.link_screen, LinkScreen::Refused(_));
+        *self.link.borrow_mut() = LinkFlow::new();
+        self.link_linked = false;
+        self.link_started_here = true;
+        self.link_screen = LinkScreen::Starting;
+        let mut commands: Vec<Command> = Vec::new();
+        if probe {
+            commands.push(Command::Send(ClientFrame::status()));
+        }
+        commands.push(Command::Send(ClientFrame::link_start(true)));
+        commands
+    }
+
+    /// Esc or Cancel: stop a flow the app started and go back to the consent screen; the daemon
+    /// answers once what the flow created is gone (S7). A cancel that cannot be delivered now is
+    /// sent on the next connect.
+    pub fn cancel_link(&mut self) -> Vec<Command> {
+        let running = self.link_started_here
+            && matches!(self.link_screen, LinkScreen::Starting | LinkScreen::Waiting);
+        *self.link.borrow_mut() = LinkFlow::new();
+        self.link_screen = LinkScreen::Consent;
+        self.link_started_here = false;
+        if !running {
+            return Vec::new();
+        }
+        self.link_cancel_pending = true;
+        vec![Command::Send(ClientFrame::link_cancel())]
+    }
+
+    /// Fold one daemon frame into the link screen; returns the frames the change asks for.
+    fn fold_link(&mut self, frame: &DaemonFrame) -> Vec<Command> {
+        let update = self.link.borrow_mut().apply(frame);
+        match update {
+            Some(LinkUpdate::Qr) => {
+                if !self.link_linked {
+                    self.link_screen = LinkScreen::Waiting;
+                }
+                Vec::new()
+            }
+            Some(LinkUpdate::State(LinkState::Waiting)) => {
+                if !self.link_linked {
+                    self.link_screen = LinkScreen::Waiting;
+                }
+                Vec::new()
+            }
+            Some(LinkUpdate::State(LinkState::Failed)) => {
+                // The daemon ended the flow and removed what it created, whoever started it.
+                self.link_started_here = false;
+                self.link_screen = LinkScreen::Failed;
+                Vec::new()
+            }
+            Some(LinkUpdate::State(LinkState::Linked)) => {
+                // The daemon serves the paired device now: the chat list appears without a
+                // restart. A clean first screen is left for a later logout.
+                self.link_linked = true;
+                self.link_started_here = false;
+                *self.link.borrow_mut() = LinkFlow::new();
+                self.link_screen = LinkScreen::Consent;
+                self.model.resync().into_iter().map(Command::Send).collect()
+            }
+            Some(LinkUpdate::State(LinkState::Unknown)) | None => Vec::new(),
+        }
+    }
+
+    /// The answer to a link frame the screen words itself (the model has nothing to say about
+    /// linking, and its notices would repeat the daemon's whole error).
+    fn link_reply(
+        &mut self,
+        request: &ClientFrame,
+        result: Result<DaemonFrame, ClientError>,
+    ) -> Vec<Command> {
+        match result {
+            // The daemon may publish the first code before it answers `link_started` (the two
+            // connections are separate): a code on the screen is not taken away by the answer.
+            Ok(DaemonFrame::LinkStarted { .. }) => {
+                if self.flow().qr().is_none() {
+                    self.link_screen = LinkScreen::Starting;
+                }
+                Vec::new()
+            }
+            Ok(DaemonFrame::LinkCancelled { .. }) => {
+                *self.link.borrow_mut() = LinkFlow::new();
+                self.link_screen = LinkScreen::Consent;
+                self.link_cancel_pending = false;
+                self.link_started_here = false;
+                Vec::new()
+            }
+            Ok(_) => Vec::new(),
+            // A cancel the daemon could not finish removing everything for is never reported as
+            // clean (S7).
+            Err(ClientError::Daemon { message, .. })
+                if matches!(request, ClientFrame::LinkCancel { .. }) =>
+            {
+                *self.link.borrow_mut() = LinkFlow::new();
+                self.link_screen = LinkScreen::Consent;
+                self.link_cancel_pending = false;
+                self.link_started_here = false;
+                self.model.set_notice(format!(
+                    "nuncio could not remove everything linking created: {message}"
+                ));
+                Vec::new()
+            }
+            Err(ClientError::Daemon { message, .. }) => {
+                *self.link.borrow_mut() = LinkFlow::new();
+                // The daemon refused the start: no flow of ours runs.
+                self.link_started_here = false;
+                self.link_screen = if message.to_lowercase().contains("keyring") {
+                    LinkScreen::Refused(LinkRefusal::Keyring)
+                } else {
+                    LinkScreen::Refused(LinkRefusal::Other(message))
+                };
+                Vec::new()
+            }
+            // The connection broke before the answer: the worker reconnects, and the daemon's own
+            // frames arrive on the new subscription if the flow started.
+            Err(error) => {
+                driver::lost(&mut self.model, &error);
+                Vec::new()
             }
         }
     }

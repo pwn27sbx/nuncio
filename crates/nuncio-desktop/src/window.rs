@@ -53,6 +53,7 @@ use crate::pictures::{self, Cache, Decoded, Decoder, Variant};
 use crate::preferences::{Change, IMAGE_PROTOCOLS, Preferences, TITLE_BARS, Takes};
 use crate::present::{self, Bubble, ChatRow, Filter, PictureView};
 use crate::style::{self, LIST_WIDTH, Layout, RAIL_COMPACT_WIDTH, RAIL_WIDTH, SETTINGS_WIDTH};
+use crate::unlink;
 use crate::worker::{Backlog, EVENT_BACKLOG, Incoming, Settings, Worker};
 use crate::{ROOT_CLASS, WINDOW_CLASS};
 use measure::Measure;
@@ -114,6 +115,10 @@ struct Inner {
     palette: RefCell<Option<Rc<PaletteView>>>,
     /// The "New message" dialog while it is open.
     new_message: RefCell<Option<Rc<NewMessageView>>>,
+    /// The unlink confirmation while it is open (S11): the window closes it — and the settings
+    /// window with it — when the daemon answered, and keeps its button disabled while the wipe
+    /// runs.
+    unlink: RefCell<Option<UnlinkView>>,
     /// What dims the panes while the palette is open: the panes themselves, by opacity over a
     /// black backdrop. An overlay above them did not cover the conversation (measured).
     dim: gtk::Widget,
@@ -188,6 +193,13 @@ struct Inner {
     built: RefCell<Vec<Bubble>>,
     /// The last toast shown (tests).
     last_toast: RefCell<Option<String>>,
+    /// The unlinked app's first screen (S4): it replaces the panes until the daemon serves a
+    /// device.
+    link: LinkScreenWidgets,
+    /// The code drawn now, so the label is set only when the drawing changed.
+    shown_qr: RefCell<Option<String>>,
+    /// Whether the link screen was up at the last render (it takes the focus when it appears).
+    link_up: Cell<bool>,
 }
 
 /// The rail's widgets that change: the filters with their counts, the connection line, and what
@@ -316,6 +328,139 @@ impl Rail {
         for icon in &self.icons {
             icon.set_visible(compact);
         }
+    }
+}
+
+/// The unlinked app's first screen (S4/S6/S8): the consent text, the drawn code and its one
+/// button. Nothing here links on its own: the button is the consent.
+struct LinkScreenWidgets {
+    root: gtk::Box,
+    title: gtk::Label,
+    consent: gtk::Label,
+    /// What the code's place says before there is a code, and while the daemon opens the keyring.
+    placeholder: gtk::Label,
+    /// The code itself: half blocks in a monospace label (S5).
+    qr: gtk::Label,
+    /// The daemon's failure sentence, or D3's keyring sentence.
+    sentence: gtk::Label,
+    /// Link, Try again or New code.
+    action: gtk::Button,
+    cancel: gtk::Button,
+}
+
+impl LinkScreenWidgets {
+    fn new() -> Self {
+        let title = gtk::Label::builder()
+            .label(present::LINK_TITLE)
+            .use_markup(false)
+            .wrap(true)
+            .xalign(0.5)
+            .build();
+        title.add_css_class("nuncio-title");
+        let consent = gtk::Label::builder()
+            .label(present::LINK_CONSENT)
+            .use_markup(false)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .xalign(0.0)
+            .build();
+        consent.add_css_class("nuncio-meta");
+        let placeholder = gtk::Label::builder()
+            .use_markup(false)
+            .wrap(true)
+            .xalign(0.5)
+            .build();
+        placeholder.add_css_class("nuncio-meta");
+        let qr = gtk::Label::builder()
+            .use_markup(false)
+            .selectable(false)
+            .build();
+        qr.add_css_class("nuncio-qr");
+        // GTK's own class: a monospace font whose cell is about twice as tall as one module is
+        // wide is what makes the half blocks square (S5).
+        qr.add_css_class("monospace");
+        qr.set_visible(false);
+        qr.update_property(&[Property::Label("Link code")]);
+        let sentence = gtk::Label::builder()
+            .use_markup(false)
+            .wrap(true)
+            .wrap_mode(gtk::pango::WrapMode::WordChar)
+            .xalign(0.5)
+            .visible(false)
+            .build();
+        sentence.add_css_class("nuncio-error");
+        let action = gtk::Button::builder()
+            .label(present::LinkAction::Link.label())
+            .tooltip_text("Link this computer to WhatsApp")
+            .build();
+        action.add_css_class("nuncio-primary");
+        let cancel = gtk::Button::builder()
+            .label("Cancel")
+            .tooltip_text("Cancel linking (Escape)")
+            .visible(false)
+            .build();
+        let buttons = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+        buttons.set_halign(gtk::Align::Center);
+        buttons.append(&action);
+        buttons.append(&cancel);
+        let root = gtk::Box::new(gtk::Orientation::Vertical, 16);
+        root.add_css_class("nuncio-link");
+        root.set_halign(gtk::Align::Center);
+        root.set_valign(gtk::Align::Center);
+        root.set_vexpand(true);
+        root.set_size_request(style::LINK_WIDTH, -1);
+        for child in [
+            title.clone().upcast::<gtk::Widget>(),
+            consent.clone().upcast(),
+            placeholder.clone().upcast(),
+            qr.clone().upcast(),
+            sentence.clone().upcast(),
+            buttons.upcast(),
+        ] {
+            root.append(&child);
+        }
+        root.set_visible(false);
+        Self {
+            root,
+            title,
+            consent,
+            placeholder,
+            qr,
+            sentence,
+            action,
+            cancel,
+        }
+    }
+}
+
+/// What the link screen says and offers as drawn (tests).
+#[derive(Clone, PartialEq, Eq)]
+pub struct LinkShown {
+    pub title: String,
+    pub consent: String,
+    pub placeholder: Option<String>,
+    /// The drawn code, as the label shows it: one character per module.
+    pub qr: Option<String>,
+    pub sentence: Option<String>,
+    pub action: Option<String>,
+    pub cancel: bool,
+    /// The code label draws in a monospace font, which is what keeps its cells square.
+    pub monospace: bool,
+}
+
+impl std::fmt::Debug for LinkShown {
+    /// The code is pairing material: whether one is drawn, never its matrix (L6b, L13c).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LinkShown")
+            .field("title", &self.title)
+            .field("consent", &self.consent)
+            .field("placeholder", &self.placeholder)
+            .field("code", &self.qr.is_some())
+            .field("sentence", &self.sentence.is_some())
+            .field("action", &self.action)
+            .field("cancel", &self.cancel)
+            .field("monospace", &self.monospace)
+            .finish()
     }
 }
 
@@ -651,9 +796,13 @@ impl Ui {
         // (2026-10-23): this dims every pane the same way.
         panes.add_css_class("nuncio-panes");
         let dim: gtk::Widget = panes.clone().upcast();
+        let link = LinkScreenWidgets::new();
         let under = gtk::Box::new(gtk::Orientation::Vertical, 0);
         under.add_css_class("nuncio-under");
         under.append(&panes);
+        // The unlinked app's first screen (S4): it replaces the panes until the daemon serves a
+        // device.
+        under.append(&link.root);
         let toasts = adw::ToastOverlay::new();
         toasts.add_css_class(ROOT_CLASS);
         toasts.set_child(Some(&under));
@@ -691,6 +840,7 @@ impl Ui {
             shortcuts,
             palette: RefCell::new(None),
             new_message: RefCell::new(None),
+            unlink: RefCell::new(None),
             dim,
             config_path: RefCell::new(None),
             toasts,
@@ -737,6 +887,9 @@ impl Ui {
             live: RefCell::new(HashMap::new()),
             built: RefCell::new(Vec::new()),
             last_toast: RefCell::new(None),
+            link,
+            shown_qr: RefCell::new(None),
+            link_up: Cell::new(false),
         }));
         ui.connect(&send_button, &cancel_reply);
         ui.add_breakpoints();
@@ -765,6 +918,11 @@ impl Ui {
                 window.set_visible(false);
                 return glib::Propagation::Stop;
             }
+            // The window is really going (this close, or Quit): a flow the app started does not
+            // outlive it (S7). A hidden window keeps its flow, as it keeps the app running.
+            if let Some(ui) = owner.borrow().as_ref() {
+                ui.cancel_started_link();
+            }
             owner.borrow_mut().take();
             glib::Propagation::Proceed
         });
@@ -788,6 +946,7 @@ impl Ui {
 
     /// Close the window for good, also in background mode: the state and the worker go with it.
     pub fn quit(&self) {
+        self.cancel_started_link();
         self.0.quitting.set(true);
         // `close` only acts on a realized window, and a window started hidden never was.
         WidgetExt::realize(&self.0.window);
@@ -879,9 +1038,88 @@ impl Ui {
         self.run(commands);
     }
 
+    /// Esc or Cancel on the link screen: the daemon stops the flow and removes what it created
+    /// (S7).
+    fn link_cancel(&self) {
+        let commands = self.0.controller.borrow_mut().cancel_link();
+        self.run(commands);
+    }
+
+    /// The window is going for good (Quit, or a close that quits): cancel a flow the app
+    /// started, so the daemon does not keep rotating a code nobody can see and a later start is
+    /// not refused as busy (S7). Nothing is sent for a flow another client started, or for a
+    /// screen that never pressed Link.
+    fn cancel_started_link(&self) {
+        for command in self.0.controller.borrow_mut().cancel_link() {
+            if let Command::Send(frame) = command
+                && let Some(worker) = self.0.worker.borrow().as_ref()
+            {
+                worker.send(frame);
+            }
+        }
+    }
+
+    /// Press the link screen's one button, as a click does (tests).
+    pub fn link_press(&self) {
+        self.0.link.action.emit_clicked();
+    }
+
+    /// The link screen as drawn, while it replaces the panes (tests).
+    pub fn link_screen(&self) -> Option<LinkShown> {
+        let inner = &self.0;
+        inner.link.root.get_visible().then(|| LinkShown {
+            title: inner.link.title.text().to_string(),
+            consent: inner.link.consent.text().to_string(),
+            placeholder: inner
+                .link
+                .placeholder
+                .get_visible()
+                .then(|| inner.link.placeholder.text().to_string()),
+            qr: inner
+                .link
+                .qr
+                .get_visible()
+                .then(|| inner.link.qr.text().to_string()),
+            sentence: inner
+                .link
+                .sentence
+                .get_visible()
+                .then(|| inner.link.sentence.text().to_string()),
+            action: inner.link.action.get_visible().then(|| {
+                inner
+                    .link
+                    .action
+                    .label()
+                    .map(|label| label.to_string())
+                    .unwrap_or_default()
+            }),
+            cancel: inner.link.cancel.get_visible(),
+            monospace: inner.link.qr.has_css_class("monospace"),
+        })
+    }
+
     /// The commands made while no worker was attached, oldest first (tests).
     pub fn take_undelivered(&self) -> Vec<Command> {
         std::mem::take(&mut self.0.undelivered.borrow_mut())
+    }
+
+    /// Whether the unlink confirmation is open (tests).
+    pub fn unlink_open(&self) -> bool {
+        self.0.unlink.borrow().is_some()
+    }
+
+    /// Forget `window` as the open unlink confirmation (it was cancelled or closed); a newer one
+    /// stays tracked.
+    fn forget_unlink(&self, window: &adw::Window) {
+        let mine = self
+            .0
+            .unlink
+            .borrow()
+            .as_ref()
+            .is_some_and(|open| open.window == *window);
+        if mine {
+            self.0.unlink.borrow_mut().take();
+        }
     }
 
     /// The model behind the window (tests).
@@ -989,13 +1227,15 @@ impl Ui {
         self.0.layout.get()
     }
 
-    /// Which of the rail, the chat list and the conversation are shown (tests).
+    /// Which of the rail, the chat list and the conversation are shown (tests). None of them
+    /// while the link screen replaces the panes.
     pub fn panes_shown(&self) -> (bool, bool, bool) {
         let inner = &self.0;
+        let panes = inner.panes.get_visible();
         (
-            inner.rail.root.get_visible(),
-            inner.list_view.get_visible(),
-            inner.content_view.get_visible(),
+            panes && inner.rail.root.get_visible(),
+            panes && inner.list_view.get_visible(),
+            panes && inner.content_view.get_visible(),
         )
     }
 
@@ -1690,6 +1930,40 @@ impl Ui {
                 .unwrap_or(0),
         );
         let toasts = adw::ToastOverlay::new();
+        // The destructive section (S11): an unlink is the one action here that deletes data, so
+        // it sits last, under its own header, and it is not the file's business either way: a
+        // configuration file that does not load says nothing about unlinking. Only a linked
+        // device can be unlinked.
+        let linked = self.0.controller.borrow().model().status().linked;
+        let unlink_row = adw::ActionRow::builder()
+            .title(unlink::ROW)
+            .subtitle(unlink::ROW_DETAIL)
+            .use_markup(false)
+            .activatable(true)
+            .build();
+        // It opens a dialog, and 1.4 draws no chevron of its own.
+        unlink_row.add_suffix(&gtk::Image::from_icon_name("go-next-symbolic"));
+        let open_unlink: Rc<dyn Fn() -> UnlinkView> = {
+            let weak = self.downgrade();
+            let settings = window.clone();
+            Rc::new(move || {
+                // One confirmation at a time, built from the model as it is now.
+                if let Some(inner) = weak.upgrade() {
+                    let previous = inner.0.unlink.borrow_mut().take();
+                    if let Some(previous) = previous {
+                        previous.window.close();
+                    }
+                }
+                let dialog = open_unlink_dialog(&weak, &settings);
+                if let Some(inner) = weak.upgrade() {
+                    *inner.0.unlink.borrow_mut() = Some(dialog.clone());
+                }
+                if settings.get_visible() {
+                    dialog.window.present();
+                }
+                dialog
+            })
+        };
         let mut view = SettingsView {
             window,
             notifications,
@@ -1701,6 +1975,8 @@ impl Ui {
             problem,
             toasts: toasts.clone(),
             headers: Vec::new(),
+            unlink_row: unlink_row.clone(),
+            open_unlink: Rc::clone(&open_unlink),
         };
 
         let editable = view.problem.is_none();
@@ -1737,6 +2013,22 @@ impl Ui {
                 list.append(&row);
             }
             list.set_sensitive(editable);
+            column.append(&header);
+            column.append(&list);
+            view.headers.push(header);
+        }
+        // The destructive section last (S11): not gated on the file, only on a device being linked.
+        {
+            let header = settings_header("This device");
+            let list = gtk::ListBox::builder()
+                .selection_mode(gtk::SelectionMode::None)
+                .accessible_role(gtk::AccessibleRole::List)
+                .build();
+            list.add_css_class("nuncio-settings-list");
+            list.update_property(&[Property::Label("This device")]);
+            unlink_row.add_css_class("nuncio-setting");
+            list.append(&unlink_row);
+            list.set_sensitive(linked);
             column.append(&header);
             column.append(&list);
             view.headers.push(header);
@@ -1843,6 +2135,13 @@ impl Ui {
                 {
                     apply(Change::ImageProtocol(*protocol));
                 }
+            }
+        });
+        // The unlink confirmation (S11): the row opens it, and nothing is sent before the word.
+        view.unlink_row.connect_activated({
+            let open = Rc::clone(&open_unlink);
+            move |_| {
+                let _ = open();
             }
         });
         view
@@ -2017,6 +2316,20 @@ impl Ui {
             move |_| f(())
         });
 
+        // The link screen: the one button gives the consent (or asks again), Cancel stops a flow
+        // the app started, and the daemon removes what it created (S6, S7).
+        inner.link.action.connect_clicked({
+            let f = self.with(|ui, (): ()| {
+                let commands = ui.0.controller.borrow_mut().start_link();
+                ui.run(commands);
+            });
+            move |_| f(())
+        });
+        inner.link.cancel.connect_clicked({
+            let f = self.with(|ui, (): ()| ui.link_cancel());
+            move |_| f(())
+        });
+
         // The conversation's keys act on the focused message.
         let keys = gtk::EventControllerKey::new();
         keys.connect_key_pressed({
@@ -2119,6 +2432,23 @@ impl Ui {
                 } else {
                     glib::Propagation::Proceed
                 }
+            })),
+        ));
+        // Escape on the link screen cancels the flow (S7); everywhere else it is left to the
+        // panes' own keys.
+        let weak = self.weak();
+        inner.shortcuts.add_shortcut(gtk::Shortcut::new(
+            gtk::ShortcutTrigger::parse_string("Escape"),
+            Some(gtk::CallbackAction::new(move |_, _| {
+                let Some(inner) = weak.upgrade() else {
+                    return glib::Propagation::Proceed;
+                };
+                let ui = Ui(inner);
+                if ui.0.controller.borrow().link_screen().is_none() {
+                    return glib::Propagation::Proceed;
+                }
+                ui.link_cancel();
+                glib::Propagation::Stop
             })),
         ));
         // The chat list's keys: `j`/`k` move as Down/Up do; Escape clears the name filter, else
@@ -2798,6 +3128,63 @@ impl Ui {
         let today = local_today();
         let model = controller.model();
 
+        // The unlinked app's first screen (S4): it replaces the panes until the daemon serves a
+        // device. The daemon words a failure; the view only words the screen.
+        let link = controller.link_screen().map(|screen| {
+            let qr = controller.link_qr();
+            let reason = controller.link_reason();
+            present::link_view(screen, qr.as_ref(), reason.as_deref())
+        });
+        match &link {
+            Some(view) => {
+                inner.link.root.set_visible(true);
+                inner.link.title.set_text(view.title);
+                inner.link.consent.set_text(view.consent);
+                inner
+                    .link
+                    .placeholder
+                    .set_text(view.placeholder.unwrap_or_default());
+                inner
+                    .link
+                    .placeholder
+                    .set_visible(view.placeholder.is_some());
+                // A code is large: it is set only when the drawing changed.
+                if *inner.shown_qr.borrow() != view.qr {
+                    inner
+                        .link
+                        .qr
+                        .set_text(view.qr.as_deref().unwrap_or_default());
+                    inner.shown_qr.replace(view.qr.clone());
+                }
+                inner.link.qr.set_visible(view.qr.is_some());
+                inner
+                    .link
+                    .sentence
+                    .set_text(view.sentence.as_deref().unwrap_or_default());
+                inner.link.sentence.set_visible(view.sentence.is_some());
+                match view.action {
+                    Some(action) => {
+                        inner.link.action.set_label(action.label());
+                        inner.link.action.set_visible(true);
+                    }
+                    None => inner.link.action.set_visible(false),
+                }
+                inner.link.cancel.set_visible(view.cancel);
+            }
+            None => inner.link.root.set_visible(false),
+        }
+        inner.panes.set_visible(link.is_none());
+        // The screen takes the focus when it appears, so its button and Escape work at once.
+        if link.is_some() && !inner.link_up.replace(true) {
+            if inner.link.action.get_visible() {
+                inner.link.action.grab_focus();
+            } else {
+                inner.link.cancel.grab_focus();
+            }
+        } else if link.is_none() {
+            inner.link_up.set(false);
+        }
+
         let status = present::rail_status(model);
         inner.rail.connection_word.set_text(&status.word);
         inner.rail.linked_mark.set_visible(status.linked);
@@ -2947,6 +3334,16 @@ impl Ui {
             inner.toasts.add_toast(toast);
             *inner.last_toast.borrow_mut() = Some(notice);
         }
+        // The unlink confirmation (S11): a wipe in flight keeps its button off, whatever the field
+        // says; the daemon's answer closes it, and a confirmed unlink takes the settings window
+        // with it, since the app is the link screen then (S4).
+        let settled = controller.take_unlink_settled();
+        if let Some(dialog) = inner.unlink.borrow().as_ref().cloned() {
+            let running = controller.unlink_running();
+            dialog
+                .unlink
+                .set_sensitive(!running && dialog.entry.text() == unlink::WORD);
+        }
         // Another conversation opened (a notification clicked, a link): the palette's commands
         // were for the one before, so it closes.
         let conversation = open_conversation(controller.model());
@@ -2970,6 +3367,18 @@ impl Ui {
         // Its notify handler closes the model's search, so the model must be free.
         if close_search_bar {
             inner.search_toggle.set_active(false);
+        }
+        // The confirmation's answer landed: it goes, and a confirmed unlink takes the settings
+        // window with it, since the app is the link screen now (S4). It is taken out first: the
+        // windows' own handlers borrow it again as they close.
+        if let Some(unlinked) = settled {
+            let closing = inner.unlink.borrow_mut().take();
+            if let Some(dialog) = closing {
+                dialog.window.close();
+                if unlinked {
+                    dialog.settings.close();
+                }
+            }
         }
     }
 }
@@ -3004,12 +3413,23 @@ pub struct SettingsView {
     pub image_protocol: adw::ComboRow,
     /// Why the file cannot be changed (shown at the top; every row is insensitive).
     pub problem: Option<String>,
+    /// **Unlink this device** (S11), in the destructive section; insensitive while no device is
+    /// linked.
+    pub unlink_row: adw::ActionRow,
+    /// Opens the unlink confirmation over this window.
+    open_unlink: Rc<dyn Fn() -> UnlinkView>,
     toasts: adw::ToastOverlay,
     /// The sections' headers, in order.
     headers: Vec<gtk::Label>,
 }
 
 impl SettingsView {
+    /// Open the unlink confirmation (S11): what the row's press does, and what a test presses.
+    /// One at a time: an open confirmation is closed for the new one.
+    pub fn open_unlink(&self) -> UnlinkView {
+        (self.open_unlink)()
+    }
+
     /// Put every row back to `config`.
     fn show(&self, config: &nuncio_client::Config) {
         self.notifications.set_active(config.notifications.enabled);
@@ -3067,6 +3487,183 @@ fn plain_label(text: &str) -> gtk::Label {
         .build();
     label.update_property(&[Property::Label(text)]);
     label
+}
+
+/// The unlink confirmation (S11): what a wipe does, how much unsent work it would destroy, the
+/// exact word it wants, and Cancel / Unlink. Nothing is sent before the word is typed exactly,
+/// and the word is read from the field on the press and nowhere else: it is never kept, logged or
+/// shown.
+#[derive(Clone)]
+pub struct UnlinkView {
+    pub window: adw::Window,
+    /// The settings window it was opened over: a confirmed unlink takes it too, since the app is
+    /// the link screen then (S4).
+    pub settings: adw::Window,
+    /// What happens, in the app's words.
+    pub body: gtk::Label,
+    /// How much a wipe would destroy, before the field; hidden when there is nothing to lose.
+    pub warning: gtk::Label,
+    /// "Type unlink to confirm": the exact word, stated in the dialog.
+    pub ask: gtk::Label,
+    pub entry: gtk::Entry,
+    pub cancel: gtk::Button,
+    pub unlink: gtk::Button,
+}
+
+impl UnlinkView {
+    /// Type `text` into the field, as a key press does (tests).
+    pub fn typed(&self, text: &str) {
+        self.entry.set_text(text);
+    }
+
+    /// Press Unlink, as a click does (tests).
+    pub fn press(&self) {
+        self.unlink.emit_clicked();
+    }
+}
+
+/// Build the unlink confirmation over `settings` (S11). `Unlink` is sensitive only while the
+/// field holds exactly [`unlink::WORD`], and never while a wipe runs; Cancel closes it and changes
+/// nothing.
+fn open_unlink_dialog(ui: &WeakUi, settings: &adw::Window) -> UnlinkView {
+    let warning = ui
+        .upgrade()
+        .and_then(|inner| inner.0.controller.borrow().unlink_warning());
+    let window = adw::Window::builder()
+        .title(unlink::ROW)
+        .modal(true)
+        .transient_for(settings)
+        .default_width(SETTINGS_WIDTH)
+        .build();
+    window.add_css_class(ROOT_CLASS);
+    window.add_css_class(WINDOW_CLASS);
+    // Escape closes it, as it closes the settings window.
+    let keys = gtk::ShortcutController::new();
+    keys.add_shortcut(gtk::Shortcut::new(
+        gtk::ShortcutTrigger::parse_string("Escape"),
+        Some(gtk::NamedAction::new("window.close")),
+    ));
+    window.add_controller(keys);
+    let body = plain_label(unlink::BODY);
+    body.add_css_class("nuncio-dialog-body");
+    let warning_label = plain_label(warning.as_deref().unwrap_or_default());
+    warning_label.add_css_class("nuncio-error");
+    warning_label.set_visible(warning.is_some());
+    let ask = plain_label(&unlink::ask());
+    let entry = gtk::Entry::builder()
+        .placeholder_text(unlink::WORD)
+        .hexpand(true)
+        .build();
+    entry.add_css_class("nuncio-search");
+    entry.update_property(&[Property::Label(&unlink::ask())]);
+    let cancel = gtk::Button::with_label("Cancel");
+    cancel.add_css_class("flat");
+    let unlink_button = gtk::Button::with_label("Unlink");
+    unlink_button.add_css_class("flat");
+    unlink_button.add_css_class("destructive-action");
+    unlink_button.set_sensitive(false);
+    unlink_button.update_property(&[Property::Label("Unlink this device")]);
+    let actions = gtk::Box::builder()
+        .orientation(gtk::Orientation::Horizontal)
+        .spacing(8)
+        .halign(gtk::Align::End)
+        .margin_top(8)
+        .build();
+    actions.append(&cancel);
+    actions.append(&unlink_button);
+    let column = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    column.set_margin_start(24);
+    column.set_margin_end(24);
+    column.set_margin_top(24);
+    column.set_margin_bottom(24);
+    column.append(&body);
+    column.append(&warning_label);
+    column.append(&ask);
+    column.append(&entry);
+    column.append(&actions);
+    let header_bar = adw::HeaderBar::new();
+    header_bar.add_css_class("nuncio-headerbar");
+    header_bar.add_css_class("nuncio-header");
+    let shell = adw::ToolbarView::new();
+    shell.add_top_bar(&header_bar);
+    shell.set_content(Some(&column));
+    window.set_content(Some(&shell));
+    let view = UnlinkView {
+        window,
+        settings: settings.clone(),
+        body,
+        warning: warning_label,
+        ask,
+        entry,
+        cancel,
+        unlink: unlink_button,
+    };
+    // The handlers hold the view only until the window goes (no cycle keeps it, or the state).
+    let held = Rc::new(RefCell::new(Some(view.clone())));
+    view.window.connect_destroy({
+        let held = Rc::clone(&held);
+        let weak = ui.clone();
+        let window = view.window.clone();
+        move |_| {
+            held.borrow_mut().take();
+            if let Some(inner) = weak.upgrade() {
+                inner.forget_unlink(&window);
+            }
+        }
+    });
+    view.entry.connect_changed({
+        let held = Rc::clone(&held);
+        let weak = ui.clone();
+        move |entry| {
+            let Some(dialog) = held.borrow().as_ref().cloned() else {
+                return;
+            };
+            let running = weak
+                .upgrade()
+                .is_some_and(|inner| inner.0.controller.borrow().unlink_running());
+            dialog
+                .unlink
+                .set_sensitive(!running && entry.text() == unlink::WORD);
+        }
+    });
+    view.cancel.connect_clicked({
+        let held = Rc::clone(&held);
+        let weak = ui.clone();
+        move |_| {
+            let Some(dialog) = held.borrow().as_ref().cloned() else {
+                return;
+            };
+            // Cancel changes nothing: no frame is sent, and the confirmation is gone.
+            if let Some(inner) = weak.upgrade() {
+                inner.forget_unlink(&dialog.window);
+            }
+            dialog.window.close();
+        }
+    });
+    view.unlink.connect_clicked({
+        let held = Rc::clone(&held);
+        let weak = ui.clone();
+        move |_| {
+            let Some(dialog) = held.borrow().as_ref().cloned() else {
+                return;
+            };
+            let Some(inner) = weak.upgrade() else {
+                return;
+            };
+            // The word is read here, from the field, and nowhere else.
+            let commands = inner
+                .0
+                .controller
+                .borrow_mut()
+                .confirm_unlink(&dialog.entry.text());
+            if commands.is_empty() {
+                return;
+            }
+            dialog.unlink.set_sensitive(false);
+            inner.run(commands);
+        }
+    });
+    view
 }
 
 /// The "New message" dialog (plan §6.8): a 480 px `surface` panel with a 1 px border, its title,
@@ -4045,9 +4642,26 @@ fn find_picture(widget: &gtk::Widget) -> Option<gtk::Picture> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ComposerKey, ListKey, PaletteKey, composer_key_action, list_key_action, palette_key_action,
+        ComposerKey, LinkShown, ListKey, PaletteKey, composer_key_action, list_key_action,
+        palette_key_action,
     };
     use gtk::gdk::{Key, ModifierType};
+
+    #[test]
+    fn the_drawn_link_screens_debug_carries_no_matrix() {
+        let shown = LinkShown {
+            title: "Link this device to WhatsApp".to_owned(),
+            consent: "Scan the code.".to_owned(),
+            placeholder: None,
+            qr: Some("█▀█▄ ".repeat(72)),
+            sentence: Some("WhatsApp stopped the linking: ask for a new QR".to_owned()),
+            action: Some("New code".to_owned()),
+            cancel: true,
+            monospace: true,
+        };
+        let debug = format!("{shown:?}");
+        assert!(!debug.contains(['█', '▀', '▄']), "{debug}");
+    }
 
     #[test]
     fn the_palette_moves_with_up_and_down_runs_on_enter_and_closes_on_escape() {

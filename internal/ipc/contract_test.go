@@ -113,27 +113,27 @@ func fixtureCases() []fixtureCase {
 		{
 			file:  "hello_ok_daemon.json",
 			into:  func() any { return &HelloOK{} },
-			build: func() any { return HelloOK{V: 1, Op: OpHelloOK, Daemon: "nunciod/0.1.1", Session: SessionUnlinked} },
+			build: func() any { return HelloOK{V: 1, Op: OpHelloOK, Daemon: "nunciod/0.2.0", Session: SessionUnlinked} },
 		},
 		{
 			file: "status_response.json",
 			into: func() any { return &StatusResponse{} },
 			build: func() any {
-				return StatusResponse{V: 1, Op: OpStatus, Daemon: "nunciod/0.1.1", Session: SessionUnlinked}
+				return StatusResponse{V: 1, Op: OpStatus, Daemon: "nunciod/0.2.0", Session: SessionUnlinked}
 			},
 		},
 		{
 			file: "status_stopped_response.json",
 			into: func() any { return &StatusResponse{} },
 			build: func() any {
-				return StatusResponse{V: 1, Op: OpStatus, Daemon: "nunciod/0.1.1", Session: SessionUnlinked, StopReason: StopLoggedOut}
+				return StatusResponse{V: 1, Op: OpStatus, Daemon: "nunciod/0.2.0", Session: SessionUnlinked, StopReason: StopLoggedOut}
 			},
 		},
 		{
 			file: "status_device_unreadable_response.json",
 			into: func() any { return &StatusResponse{} },
 			build: func() any {
-				return StatusResponse{V: 1, Op: OpStatus, Daemon: "nunciod/0.1.1", Linked: true, Session: SessionOffline,
+				return StatusResponse{V: 1, Op: OpStatus, Daemon: "nunciod/0.2.0", Linked: true, Session: SessionOffline,
 					StopReason: StopDeviceUnreadable}
 			},
 		},
@@ -777,7 +777,7 @@ func TestLinkQRFramesCarryARegularMatrix(t *testing.T) {
 // The largest matrix a QR code can hold (version 40: 177 modules per side) still fits in one frame,
 // with room to spare: a layout, not a payload, is what a link_qr frame carries.
 func TestALargestLinkQRFrameFitsTheFrameLimit(t *testing.T) {
-	const side = 177
+	const side = MaxLinkQRSize
 	rows := make([]string, side)
 	for i := range rows {
 		rows[i] = strings.Repeat("1", side)

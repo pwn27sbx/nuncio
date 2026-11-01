@@ -10,6 +10,8 @@
 //! - [`pictures`]: the pictures inside image and sticker bubbles (boxes, decoding, the cache),
 //!   without GTK;
 //! - [`preferences`]: the settings window's rules over `config.toml`, without GTK;
+//! - [`unlink`]: the Settings row **Unlink this device** and its typed confirmation (S11), the
+//!   words and the count of unsent work a wipe would destroy, without GTK;
 //! - [`worker`]: the daemon connections on their own threads, posting into the main loop;
 //! - [`args`]: the command line and the app id;
 //! - [`hyprland`]: Hyprland's window rounding (`hyprctl`), behind an injectable runner;
@@ -29,6 +31,7 @@ pub mod pictures;
 pub mod preferences;
 pub mod present;
 pub mod style;
+pub mod unlink;
 pub mod window;
 pub mod worker;
 

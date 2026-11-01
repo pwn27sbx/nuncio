@@ -90,7 +90,7 @@ func (n *unreadNotifier) run(ctx context.Context) {
 func (d *daemon) notifyUnread(emit unreadEmitter, window time.Duration) *unreadNotifier {
 	n := newUnreadNotifier(d.unreadCount, emit, d.unread(), window)
 	d.unreadChanged = n.Changed
-	if s, ok := d.session.(interface{ SetUnreadChanged(func()) }); ok {
+	if s, ok := d.sess().(interface{ SetUnreadChanged(func()) }); ok {
 		s.SetUnreadChanged(n.Changed)
 	}
 	return n

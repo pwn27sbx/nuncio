@@ -2,7 +2,7 @@
 //! `TestBackend` buffer at 80×24 and at an odd size, with no terminal and no daemon.
 
 use nuncio_client::{Chat, Message, Palette, Session, Snapshot};
-use nuncio_tui::{App, Pane, Source, fixture_snapshot};
+use nuncio_tui::{App, Pane, Source};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -45,8 +45,57 @@ fn line_with<'a>(screen: &'a str, needle: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no line contains {needle:?} in:\n{screen}"))
 }
 
+/// The shared chat fixture, for rendering only: no production path loads it.
+fn fixture_snapshot() -> Snapshot {
+    Snapshot::from_chats_json(include_str!("../../../proto/fixtures/chats_response.json"))
+        .expect("the embedded chat fixture matches the wire types")
+}
+
 fn fixture_app() -> App {
-    App::new(fixture_snapshot(), Source::Fixture, Palette::default())
+    App::new(fixture_snapshot(), Source::Daemon, Palette::default())
+}
+
+/// An app whose daemon is unreachable (S10/T11): empty, and it says so.
+fn unavailable_app() -> App {
+    App::new(
+        Snapshot {
+            daemon: String::new(),
+            linked: false,
+            session: Session::Unlinked,
+            unread: 0,
+            chats: Vec::new(),
+            stop_reason: None,
+        },
+        Source::Unavailable,
+        Palette::default(),
+    )
+}
+
+// A daemon that is not there must never look like a chat list: the header says NO DAEMON and no
+// chat of the shared fixture appears (T11 found the terminal app showing "Ada Lovelace" while the
+// daemon was down).
+#[test]
+fn an_unreachable_daemon_shows_no_chats_and_says_so() {
+    let mut app = unavailable_app();
+    for (width, height) in [(80u16, 24u16), (120, 40)] {
+        let screen = render(&mut app, width, height);
+        assert!(screen.contains("NO DAEMON"), "{screen}");
+        assert!(
+            screen.contains("nunciod is not running"),
+            "the empty list must name the daemon:\n{screen}"
+        );
+        for name in [
+            "Ada Lovelace",
+            "Grace Hopper",
+            "Omarchy devs",
+            "FIXTURE DATA",
+        ] {
+            assert!(
+                !screen.contains(name),
+                "{name} on an empty screen:\n{screen}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -76,10 +125,10 @@ fn the_fixture_chat_list_renders_at_eighty_by_twenty_four() {
     );
     assert!(screen.contains("17:55"), "its time column:\n{screen}");
 
-    // It says the data is fixture data.
+    // A real daemon's screen carries no demo-data notice.
     assert!(
-        screen.contains("FIXTURE DATA"),
-        "the fixture-data notice:\n{screen}"
+        !screen.contains("FIXTURE DATA") && !screen.contains("NO DAEMON"),
+        "no source notice on a daemon screen:\n{screen}"
     );
 
     // The message pane shows the selected chat's last message.
@@ -92,9 +141,10 @@ fn the_fixture_chat_list_renders_at_eighty_by_twenty_four() {
     let footer = screen.lines().last().unwrap_or_default();
     assert!(footer.contains("Enter open"), "the footer:\n{screen}");
     assert!(footer.contains("? all keys"), "the footer:\n{screen}");
-    // A fixture snapshot has no daemon behind it: the footer's state slot says so.
+    // The snapshot says "unlinked" (the shared fixture is not a linked device), and that is what
+    // the footer's state slot shows: this screen is a daemon's answer, not a fallback.
     assert!(
-        footer.trim_end().ends_with("no daemon"),
+        footer.trim_end().ends_with("not linked"),
         "the footer:\n{screen}"
     );
 }
@@ -211,7 +261,7 @@ fn tab_switches_panes_and_back() {
 #[test]
 fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
     let snapshot = Snapshot {
-        daemon: "nunciod/0.1.1".to_owned(),
+        daemon: "nunciod/0.2.0".to_owned(),
         linked: false,
         session: Session::Unlinked,
         unread: 2,
@@ -259,7 +309,7 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
     app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
     let screen = render(&mut app, 80, 24);
     assert!(
-        screen.contains("nunciod/0.1.1"),
+        screen.contains("nunciod/0.2.0"),
         "the daemon version in the help:\n{screen}"
     );
     assert!(
@@ -271,7 +321,7 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
 #[test]
 fn an_empty_chat_list_renders_at_eighty_by_twenty_four() {
     let snapshot = Snapshot {
-        daemon: "nunciod/0.1.1".to_owned(),
+        daemon: "nunciod/0.2.0".to_owned(),
         linked: false,
         session: Session::Unlinked,
         unread: 0,
@@ -316,7 +366,7 @@ fn a_lid_chat_with_no_name_and_no_phone_never_shows_its_lid_digits() {
         last_message: None,
     };
     let snapshot = Snapshot {
-        daemon: "nunciod/0.1.1".to_owned(),
+        daemon: "nunciod/0.2.0".to_owned(),
         linked: true,
         session: Session::Linked,
         unread: 0,

@@ -4,7 +4,10 @@
 # names this unit).
 [Unit]
 Description=nuncio daemon (WhatsApp linked-device session)
-Documentation=file:///usr/share/doc/nuncio/README.md
+# A page the package installs (package() and MANIFEST; check.sh keeps the three in step): the
+# install line, the app's link screen, uninstall and what to do when something goes wrong. It is
+# shown by `systemctl --user status nunciod`, so it is written for someone with no terminal.
+Documentation=file:///usr/share/doc/nuncio/INSTALL.md
 # The data directory is created 0700 by systemd-tmpfiles (user-tmpfiles.d) before this unit
 # starts: under ProtectSystem=strict the daemon cannot create it, and a ReadWritePaths entry is
 # skipped while the path does not exist. Pulling the service in is what makes the first run work.

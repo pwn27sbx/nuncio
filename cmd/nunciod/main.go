@@ -5,7 +5,9 @@
 // never travel over D-Bus.
 //
 // The daemon, not `nuncio link`, owns the session: if the store holds a linked
-// device it connects; if not it stays unlinked and never starts a link. The
+// device it connects; if not it stays unlinked, and it links a new device only
+// when a client asks for it with the user's explicit consent (link_start), never
+// by itself. The
 // device's keys are sealed under a data key in the Secret Service (ADR 0003): a
 // database an older build left in plain is backed up and sealed at start, and
 // while the keyring is locked the daemon serves offline, connects nothing and
@@ -30,6 +32,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -44,7 +47,7 @@ import (
 )
 
 // daemonVersion is the value of the `daemon` field in every frame.
-const daemonVersion = "nunciod/0.1.1"
+const daemonVersion = "nunciod/0.2.0"
 
 func main() {
 	flag.Parse()
@@ -113,7 +116,11 @@ func run() error {
 	}
 	// What a wipe (nuncio logout or purge) deletes: the keyring items (the data key among them),
 	// the data dir, and finally this socket.
-	d.dataDir, d.keyring, d.socket = filepath.Dir(dbPath), keyring, socket
+	d.dataDir, d.keyring, d.socket, d.dbPath = filepath.Dir(dbPath), keyring, socket, dbPath
+	// The link flow a client drives over link_start: it opens the store and the data key behind
+	// the consent gate and hands the paired device back through linkedDevice.
+	d.events = events
+	d.link = &linkFlow{dbPath: dbPath, kr: keyring, events: events, paired: d.linkedDevice}
 
 	if bus != nil {
 		emit, err := exportDBus(bus, d)
@@ -286,6 +293,16 @@ type daemon struct {
 	// db is the message store, nil while there is no nuncio.db (unlinked).
 	db    *sql.DB
 	chats []ipc.Chat
+	// mu guards session and db: a link flow that pairs hands the daemon a new session and store
+	// while requests are being served (handOver), so every read goes through sess and store.
+	mu sync.RWMutex
+	// events is where the daemon publishes, and what a session it hands over subscribes to.
+	events *ipc.Broker
+	// dbPath is the database the link flow opens and the session a paired device hands over opens
+	// again; it is set with dataDir.
+	dbPath string
+	// link is the device-linking flow; a daemon built without one refuses link_start.
+	link *linkFlow
 
 	// dataDir, keyring and socket are what Wipe deletes; an empty dataDir or socket, or a nil
 	// keyring, is refused by Wipe rather than skipped.
@@ -295,6 +312,9 @@ type daemon struct {
 	// closed is set once Wipe closed the session and its store: from then on nothing is served
 	// from the store, even if the wipe failed and the daemon keeps serving.
 	closed atomic.Bool
+	// wiping is set, under mu, from the moment a wipe owns the daemon until it finishes or gives
+	// up: a link flow that pairs meanwhile must not install a session over data being deleted.
+	wiping bool
 	// unreadChanged, when not nil, flags the D-Bus face that the total unread may have moved
 	// (notifyUnread); it never blocks.
 	unreadChanged func()
@@ -339,6 +359,84 @@ func newDaemon(session sessionState, db *sql.DB) (*daemon, error) {
 	return &daemon{version: daemonVersion, session: session, db: db, chats: chats}, nil
 }
 
+// sess is the session the daemon serves: the one it started with, or the one a link flow handed
+// over once the device was paired.
+func (d *daemon) sess() sessionState {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.session
+}
+
+// store is the message store, nil while there is none.
+func (d *daemon) store() *sql.DB {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	return d.db
+}
+
+// handOver makes the daemon serve s over db from now on, and starts it. A link flow calls it once
+// the device is paired, so a client sees the chats without restarting anything. The session it
+// replaces is closed, which for the unlinked one is a no-op: it holds no client and no store.
+func (d *daemon) handOver(s sessionState, db *sql.DB) {
+	d.mu.Lock()
+	if d.closed.Load() || d.wiping {
+		// A wipe is running or done: the data is being deleted, so the new session is not served.
+		d.mu.Unlock()
+		_ = db.Close()
+		s.Close()
+		return
+	}
+	prev, prevDB := d.session, d.db
+	d.session, d.db = s, db
+	d.mu.Unlock()
+	if prevDB != nil {
+		_ = prevDB.Close()
+	}
+	if prev != nil {
+		prev.Close()
+	}
+}
+
+// LinkStart starts the device-linking flow: the daemon generates the QR codes and publishes them.
+// ServeConn has already refused a frame without the user's explicit consent, and the flow refuses
+// it again before it opens anything.
+func (d *daemon) LinkStart(consent bool) error {
+	if d.link == nil {
+		return errors.New("this daemon cannot link a device")
+	}
+	return d.link.Start(consent)
+}
+
+// LinkCancel stops the flow in progress and answers once what it created is gone.
+func (d *daemon) LinkCancel() error {
+	if d.link == nil {
+		return errors.New("this daemon cannot link a device")
+	}
+	return d.link.Cancel()
+}
+
+// linkedDevice is what a link flow calls once the device is paired: it opens the session over the
+// new device, makes it the one the daemon serves, and starts it. From then on the frames a client
+// receives are the session's own (event_connection with linked, then the chat list), so it shows
+// the chats without restarting. A store that cannot be opened leaves the daemon as it was and the
+// error is the flow's.
+func (d *daemon) linkedDevice() error {
+	s, db, err := openDaemonSession(context.Background(), d.dbPath, d.keyring)
+	if err != nil {
+		return err
+	}
+	s.SetEvents(d.events)
+	if d.unreadChanged != nil {
+		s.SetUnreadChanged(d.unreadChanged)
+	}
+	d.handOver(s, db)
+	if err := s.Start(); err != nil {
+		// The cause's type only: whatsmeow's text can carry the server or proxy address.
+		log.Printf("cannot connect the linked device (%s)", wa.ErrKind(err))
+	}
+	return nil
+}
+
 // Hello records the handshake and answers with the session's current state.
 func (d *daemon) Hello(client string) ipc.Status {
 	// A fixed line: the client's name is its own text, so it is not logged.
@@ -349,16 +447,17 @@ func (d *daemon) Hello(client string) ipc.Status {
 // Status is also the D-Bus method of the same name. Linked means paired, so an
 // offline session is still linked. Unread is the store's total, 0 without one.
 func (d *daemon) Status() ipc.Status {
-	st := d.session.State()
+	s := d.sess()
+	st := s.State()
 	return ipc.Status{Daemon: d.version, Linked: st != wa.StateUnlinked, Session: string(st), Unread: d.unread(),
-		StopReason: d.session.StopKind()}
+		StopReason: s.StopKind()}
 }
 
 func (d *daemon) unread() int {
 	n, err := d.unreadCount()
 	if err != nil {
 		// The error's type only: SQLite's text can quote a value.
-		log.Printf("cannot count the unread messages (%T)", err)
+		log.Printf("cannot count the unread messages (%s)", wa.ErrKind(err))
 		return 0
 	}
 	return n
@@ -367,10 +466,11 @@ func (d *daemon) unread() int {
 // unreadCount is the store's total unread: 0 without a store or once a wipe closed it, and the
 // store's error when it cannot count.
 func (d *daemon) unreadCount() (int, error) {
-	if d.db == nil || d.closed.Load() {
+	db := d.store()
+	if db == nil || d.closed.Load() {
 		return 0, nil
 	}
-	return store.TotalUnread(d.db)
+	return store.TotalUnread(db)
 }
 
 // Chats lists the stored chats, newest message first, each with its name, unread
@@ -378,25 +478,27 @@ func (d *daemon) unreadCount() (int, error) {
 // a store it is the fixture list, the answer while unlinked. A store failure,
 // or a store a wipe closed, is logged and answers no chats.
 func (d *daemon) Chats() []ipc.Chat {
-	if d.db == nil {
+	db := d.store()
+	if db == nil {
 		return d.chats
 	}
 	if d.closed.Load() {
 		log.Print(errClosed)
 		return nil
 	}
-	rows, err := store.ListChats(d.db, ipc.MaxChatLimit)
+	rows, err := store.ListChats(db, ipc.MaxChatLimit)
 	if err != nil {
 		// The error's type only: SQLite's text can quote a value.
-		log.Printf("cannot list the chats (%T)", err)
+		log.Printf("cannot list the chats (%s)", wa.ErrKind(err))
 		return nil
 	}
 	chats := make([]ipc.Chat, 0, len(rows))
 	now := time.Now()
-	aliases, _ := d.session.(interface{ ChatAliases(string) []string })
-	phones, _ := d.session.(interface{ ChatPhone(string) string })
+	sess := d.sess()
+	aliases, _ := sess.(interface{ ChatAliases(string) []string })
+	phones, _ := sess.(interface{ ChatPhone(string) string })
 	for _, r := range rows {
-		c, err := wa.WireChat(d.db, r, now)
+		c, err := wa.WireChat(db, r, now)
 		if err != nil {
 			// The error's type only: SQLite's text can quote a value.
 			log.Printf("cannot read the last message of a chat (%T)", err)
@@ -416,13 +518,14 @@ func (d *daemon) Chats() []ipc.Chat {
 // Messages lists up to limit stored messages of a chat, newest first, each incoming group message
 // with its sender; none without a store or for a chat it has never seen.
 func (d *daemon) Messages(jid string, limit int) ([]ipc.Message, error) {
-	if d.db == nil {
+	db := d.store()
+	if db == nil {
 		return nil, nil
 	}
 	if d.closed.Load() {
 		return nil, errClosed
 	}
-	rows, err := store.ListMessages(d.db, jid, limit)
+	rows, err := store.ListMessages(db, jid, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -436,7 +539,7 @@ func (d *daemon) DownloadMedia(jid, id string) (string, string, error) {
 	if d.closed.Load() {
 		return "", "", errClosed
 	}
-	return d.session.DownloadMedia(jid, id)
+	return d.sess().DownloadMedia(jid, id)
 }
 
 // Send sends one text message through the session's outbox: sent with WhatsApp's id and
@@ -448,7 +551,7 @@ func (d *daemon) Send(jid, text, clientID string) (ipc.Sent, error) {
 	if d.closed.Load() {
 		return ipc.Sent{}, errClosed
 	}
-	return d.session.Send(jid, text, clientID)
+	return d.sess().Send(jid, text, clientID)
 }
 
 // SendReply serves a send with reply_to: like Send, quoting that message of the chat.
@@ -456,7 +559,7 @@ func (d *daemon) SendReply(jid, text, clientID, replyTo string) (ipc.Sent, error
 	if d.closed.Load() {
 		return ipc.Sent{}, errClosed
 	}
-	return d.session.SendReply(jid, text, clientID, replyTo)
+	return d.sess().SendReply(jid, text, clientID, replyTo)
 }
 
 // React serves react: the session sends my reaction once, or answers why it did not.
@@ -464,7 +567,7 @@ func (d *daemon) React(jid, id, emoji string) error {
 	if d.closed.Load() {
 		return errClosed
 	}
-	return d.session.React(jid, id, emoji)
+	return d.sess().React(jid, id, emoji)
 }
 
 // MarkRead serves mark_read, which a UI sends when the user opens a chat: that is the explicit view
@@ -475,19 +578,20 @@ func (d *daemon) MarkRead(jid string) (int, error) {
 	if d.closed.Load() {
 		return 0, errClosed
 	}
-	return d.session.MarkRead(jid)
+	return d.sess().MarkRead(jid)
 }
 
 // Search serves search: up to limit stored messages of a chat that contain every word of query,
 // newest first, with their senders as Messages; none without a store.
 func (d *daemon) Search(jid, query string, limit int) ([]ipc.Message, error) {
-	if d.db == nil {
+	db := d.store()
+	if db == nil {
 		return nil, nil
 	}
 	if d.closed.Load() {
 		return nil, errClosed
 	}
-	rows, err := store.SearchChat(d.db, jid, query, limit)
+	rows, err := store.SearchChat(db, jid, query, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -498,7 +602,7 @@ func (d *daemon) Search(jid, query string, limit int) ([]ipc.Message, error) {
 // the session's resolver, which reads each sender's name once and only locally, or none for a
 // session that has no names.
 func (d *daemon) senders() func(string) string {
-	if names, ok := d.session.(interface{ Senders() func(string) string }); ok {
+	if names, ok := d.sess().(interface{ Senders() func(string) string }); ok {
 		return names.Senders()
 	}
 	return nil
@@ -510,14 +614,14 @@ func (d *daemon) Retry(clientID string) (ipc.Sent, error) {
 	if d.closed.Load() {
 		return ipc.Sent{}, errClosed
 	}
-	return d.session.Retry(clientID)
+	return d.sess().Retry(clientID)
 }
 
 // CanonicalJID serves ipc.ChatResolver: the chat a request naming jid is served and answered as,
 // which is the contact's LID chat for a phone-number JID whose LID the session knows (ADR 0001),
 // and jid itself otherwise, after a wipe too.
 func (d *daemon) CanonicalJID(jid string) string {
-	r, ok := d.session.(interface{ CanonicalJID(string) string })
+	r, ok := d.sess().(interface{ CanonicalJID(string) string })
 	if !ok || d.closed.Load() {
 		return jid
 	}
@@ -538,15 +642,27 @@ func (d *daemon) Wipe(unlink bool) error {
 	if d.dataDir == "" || d.socket == "" || d.keyring == nil {
 		return errors.New("this daemon cannot wipe: it does not know its data dir, keyring or socket")
 	}
+	// The wipe owns the handover from here, under the same lock a link flow takes to install its
+	// session: a pairing that lands in this window is refused rather than served over deleted data.
+	d.mu.Lock()
+	d.wiping = true
+	session := d.session
+	d.mu.Unlock()
 	if unlink {
 		ctx, cancel := context.WithTimeout(context.Background(), logoutTimeout)
 		defer cancel()
-		if err := d.session.Logout(ctx); err != nil {
+		if err := session.Logout(ctx); err != nil {
+			d.mu.Lock()
+			d.wiping = false
+			d.mu.Unlock()
 			return err
 		}
 	}
-	d.session.Close()
+	d.mu.Lock()
 	d.closed.Store(true)
+	d.wiping = false
+	d.mu.Unlock()
+	session.Close()
 	// The store is closed, so the total is 0 from now on: the bar's badge clears even when the
 	// deletion below fails and the daemon keeps serving.
 	if d.unreadChanged != nil {

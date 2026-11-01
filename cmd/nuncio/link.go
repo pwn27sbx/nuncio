@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"os"
+	"os/signal"
 	"time"
 
 	"go.mau.fi/whatsmeow"
@@ -23,16 +26,23 @@ var connectLinked = func(c *whatsmeow.Client) error { return c.Connect() }
 // fake Linker so that no test can reach WhatsApp.
 var prepareLink = wa.Prepare
 
+// watchLink subscribes to the client's pairing and connection events; tests replace it so that a
+// fake linker can report a pairing without a WhatsApp connection.
+var watchLink = watch
+
+// phoneWait bounds how long `--phone` waits for the code to be entered. Tests shorten it.
+var phoneWait = 5 * time.Minute
+
 // linkCommand is the S1–S3 entry point. It is prepared in full — the gate, the device store, the
 // whatsmeow client, both flows and the QR renderer — and it does nothing at all until --consent is
 // passed. Even then the owner is expected to have said yes out loud first.
 func linkCommand(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("nuncio link", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	qr := fs.Bool("qr", false, "link by scanning a QR code in the terminal")
+	qr := fs.Bool("qr", false, "link by scanning a QR code in the terminal (nunciod draws it)")
 	phone := fs.String("phone", "", "link with an 8-digit pairing code for this E.164 number")
 	consentFlag := fs.Bool("consent", false, "you have read the warning and accept the risk")
-	plain := fs.Bool("plain-qr", false, "print only the QR code, frame by frame, for a GUI to draw")
+	plain := fs.Bool("plain-qr", false, "print only the QR code, frame by frame, for a script or a GUI that draws the matrix itself")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -56,12 +66,20 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 	}
 
 	ctx := context.Background()
+	if *qr {
+		// The daemon is the linker: it owns the store, the key and the codes, and it keeps the
+		// session it pairs. Ctrl-C cancels the flow, and the daemon removes what it created.
+		ctx, stop := signal.NotifyContext(ctx, os.Interrupt)
+		defer stop()
+		return linkByQR(ctx, consent, *plain, stdout, stderr)
+	}
 
 	// The daemon owns the session of a linked device, and at start it migrates a plain database
 	// an older build left, as this command does. Checked before the store is opened, so a link
 	// never migrates, creates a key or connects while the daemon may be doing the same: a second
 	// connection of the same device would replace the daemon's stream, and each would take it
-	// back from the other.
+	// back from the other. `--phone` still pairs from here, because no frame carries a pairing
+	// code yet; `--qr` never reaches this point.
 	if daemonAnswers() {
 		fmt.Fprintln(stderr, "nuncio link: nunciod is running and owns this device's session; stop it first. Nothing was linked.")
 		return 1
@@ -106,7 +124,7 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 	client := whatsmeow.NewClient(device, nil)
 	// whatsmeow's own retry has no cap, no jitter and no stop on a ban, so it stays off.
 	client.EnableAutoReconnect = false
-	events := watch(client)
+	events := watchLink(client)
 
 	if device.ID != nil {
 		if *plain {
@@ -125,7 +143,7 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintln(stderr, "nuncio: still not connected after 60 s")
 			return 1
 		}
-		return linked(stdout, device.ID.User)
+		return linked(stdout, device.ID.User, false)
 	}
 
 	prepared, err := prepareLink(consent, client)
@@ -135,45 +153,167 @@ func linkCommand(args []string, stdout, stderr io.Writer) int {
 	}
 	defer client.Disconnect()
 
-	if *qr {
-		if code := runQRLink(ctx, prepared.Linker, stdout, stderr, *plain); code != 0 {
-			return code
-		}
-		user := ""
-		if client.Store.ID != nil {
-			user = client.Store.ID.User
-		}
-		if *plain {
-			return 0
-		}
-		return linked(stdout, user)
-	}
 	code, err := prepared.Linker.Phone(ctx, *phone)
 	if err != nil {
 		fmt.Fprintln(stderr, "nuncio link:", err)
 		return 1
 	}
-	fmt.Fprintf(stdout, "\nOn your phone: Settings → Linked devices → Link a device → Link with phone number instead, then enter:\n\n    %s\n\nWaiting up to 5 minutes...\n", code)
+	fmt.Fprintf(stdout, "\nOn your phone: Settings → Linked devices → Link a device → Link with phone number instead, then enter:\n\n    %s\n\nWaiting up to %d minutes...\n", code, int(phoneWait.Minutes()))
 	select {
 	case id := <-events.paired:
-		return linked(stdout, id)
-	case <-time.After(5 * time.Minute):
+		return linked(stdout, id, false)
+	case <-time.After(phoneWait):
 		fmt.Fprintln(stderr, "nuncio: the code was not entered in time; nothing was linked")
 		return 1
 	}
 }
 
-// linked reports a linked device and how to hand its session to the daemon, and ends the command.
+// linked reports a linked device and how the session continues, and ends the command. With
+// daemonUp the daemon is already running and owns the session (`--qr` pairs it there); otherwise
+// this command held the session and the daemon must be started for the user.
 // nuncio link never sends a message: sending is one explicit action of its own (nuncio send or
 // an app), never a side effect of linking.
-func linked(stdout io.Writer, user string) int {
+func linked(stdout io.Writer, user string, daemonUp bool) int {
 	if user != "" {
 		fmt.Fprintln(stdout, "nuncio: linked as", maskPhone(user))
 	} else {
 		fmt.Fprintln(stdout, "nuncio: linked")
 	}
-	fmt.Fprintln(stdout, "nuncio: start the daemon, which owns the session from now on: systemctl --user start nunciod")
+	if daemonUp {
+		fmt.Fprintln(stdout, "nuncio: nunciod owns the session from now on; open nuncio to see your chats.")
+	} else {
+		fmt.Fprintln(stdout, "nuncio: start the daemon, which owns the session from now on: systemctl --user start nunciod")
+	}
 	return 0
+}
+
+// linkEventTimeout bounds every read of the flow. The daemon publishes a new code before the one
+// on screen expires (every 20 s or so), so a minute of quiet means the flow is gone.
+const linkEventTimeout = time.Minute
+
+// linkByQR asks the running daemon for the device-linking flow and draws each code it publishes
+// until the phone answers. The daemon owns the store, the data key and the codes, so a link from
+// here and one from the app leave exactly the same data behind; nothing here opens the database or
+// the keyring. `plain` keeps stdout to the art alone: a script or a GUI draws the matrix itself and
+// learns the outcome from the exit status.
+func linkByQR(ctx context.Context, consent wa.Consent, plain bool, stdout, stderr io.Writer) int {
+	socket, err := ipc.DefaultSocketPath()
+	if err != nil {
+		fmt.Fprintln(stderr, "nuncio link:", err)
+		return 1
+	}
+	requests, err := ipc.DialTimeout(socket, ipc.ClientName, linkEventTimeout)
+	if err != nil {
+		fmt.Fprintln(stderr, "nuncio link: nunciod is not running; open nuncio, or start nunciod, and try again. Nothing was linked.")
+		return 1
+	}
+	defer func() { _ = requests.Close() }()
+	events, err := ipc.DialTimeout(socket, ipc.ClientName, linkEventTimeout)
+	if err != nil {
+		fmt.Fprintln(stderr, "nuncio link: nunciod stopped answering; open nuncio and try again. Nothing was linked.")
+		return 1
+	}
+	defer func() { _ = events.Close() }()
+
+	// Subscribe before asking: the flow's first code can be published before link_started arrives.
+	if err := events.Subscribe(); err != nil {
+		fmt.Fprintln(stderr, "nuncio link: cannot follow the flow:", err)
+		return 1
+	}
+	if _, err := requests.LinkStart(consent.Granted); err != nil {
+		var refused *ipc.ProtocolError
+		if errors.As(err, &refused) {
+			fmt.Fprintf(stderr, "nuncio link: %s. Nothing was linked.\n", refused.Message)
+			return 1
+		}
+		// The daemon may have started the flow even though its answer never arrived (a keyring
+		// waiting on an unlock is the slow case). Stop it before leaving: a flow left running
+		// refuses the next `link_start` as busy, and this command showed no code to scan.
+		if _, cancelErr := requests.LinkCancel(); cancelErr == nil {
+			fmt.Fprintln(stderr, "nuncio link: the daemon did not answer and the flow was stopped; nothing was linked.")
+			return 1
+		}
+		fmt.Fprintln(stderr, "nuncio link: the daemon did not answer; nothing was linked:", err)
+		return 1
+	}
+
+	type event struct {
+		op    string
+		frame []byte
+		err   error
+	}
+	incoming := make(chan event, 8)
+	go func() {
+		for {
+			op, frame, err := events.NextEvent()
+			select {
+			case incoming <- event{op: op, frame: frame, err: err}:
+			case <-ctx.Done():
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	if !plain {
+		fmt.Fprintln(stdout, "nuncio: scan this code with WhatsApp → Settings → Linked devices → Link a device; it refreshes until your phone answers.")
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			// Interrupted. The daemon removes the store and the data key this flow created, and
+			// answers only once it has, so nothing is left behind.
+			if _, err := requests.LinkCancel(); err != nil {
+				fmt.Fprintln(stderr, "nuncio link: cannot stop the flow, which removes what it made when it ends:", err)
+				return 1
+			}
+			fmt.Fprintln(stderr, "nuncio: linking cancelled; nothing was linked")
+			return 1
+		case ev := <-incoming:
+			if ev.err != nil {
+				fmt.Fprintln(stderr, "nuncio link: lost the flow:", ev.err)
+				return 1
+			}
+			switch ev.op {
+			case ipc.OpLinkQR:
+				var qr ipc.EventLinkQR
+				if err := json.Unmarshal(ev.frame, &qr); err != nil {
+					fmt.Fprintln(stderr, "nuncio link: a malformed link_qr frame:", err)
+					return 1
+				}
+				if err := wa.RenderMatrix(stdout, qr.Size, qr.Rows); err != nil {
+					fmt.Fprintln(stderr, "nuncio link: cannot draw the QR code:", err)
+					return 1
+				}
+				if plain {
+					// One frame per code: a reader knows a new code starts after a blank line.
+					fmt.Fprintln(stdout)
+				}
+			case ipc.OpLinkState:
+				var state ipc.EventLinkState
+				if err := json.Unmarshal(ev.frame, &state); err != nil {
+					fmt.Fprintln(stderr, "nuncio link: a malformed link_state frame:", err)
+					return 1
+				}
+				switch state.State {
+				case ipc.LinkLinked:
+					if plain {
+						return 0
+					}
+					return linked(stdout, "", true)
+				case ipc.LinkFailed:
+					reason := state.Reason
+					if reason == "" {
+						reason = ipc.LinkFailureReason
+					}
+					fmt.Fprintf(stderr, "nuncio: %s; nothing was linked\n", reason)
+					return 1
+				}
+			}
+		}
+	}
 }
 
 type linkEvents struct {
@@ -200,42 +340,6 @@ func watch(client *whatsmeow.Client) linkEvents {
 		},
 	}.Handle)
 	return ev
-}
-
-// runQRLink draws each QR WhatsApp offers until the phone says yes. With `plain`, it writes only
-// the code's own art and nothing else: a GUI (nuncio-desktop's link screen) draws exactly these
-// lines in a monospace label and learns the outcome from the exit status.
-func runQRLink(ctx context.Context, linker wa.Linker, stdout, stderr io.Writer, plain bool) int {
-	codes, err := linker.QR(ctx)
-	if err != nil {
-		fmt.Fprintln(stderr, "nuncio link:", err)
-		return 1
-	}
-	for code := range codes {
-		if code.Text != "" {
-			if !plain {
-				fmt.Fprintf(stdout, "\nScan with WhatsApp → Settings → Linked devices (valid %s):\n\n",
-					code.Timeout.Round(time.Second))
-			}
-			if err := wa.RenderQR(stdout, code.Text); err != nil {
-				fmt.Fprintln(stderr, "nuncio link: cannot draw the QR code:", err)
-				return 1
-			}
-			if plain {
-				// One frame per offer: the reader knows a new code starts after a blank line.
-				fmt.Fprintln(stdout)
-			}
-		}
-		if code.Done() {
-			if code.Event == "success" {
-				return 0
-			}
-			fmt.Fprintf(stderr, "nuncio: link event %s; nothing was linked\n", code.Event)
-			return 1
-		}
-	}
-	fmt.Fprintln(stderr, "nuncio: the QR stream ended without a result")
-	return 1
 }
 
 // daemonAnswers reports whether a daemon completes the handshake on core.sock. It dials the

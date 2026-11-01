@@ -94,7 +94,7 @@ because events were lost; to avoid it, a UI drains every queued event on each ti
 | `event_connection` | `v`, `op`, `session`, `stop_reason` (string or absent, see "`stop_reason`"; added in Q6) | `event_connection.json`, `event_connection_stopped.json`, `event_connection_keyring_locked.json` |
 | `event_unread` | `v`, `op`, `unread` (int, total), `jid`, `chat_unread` (int) | `event_unread.json` |
 | `event_focus` | `v`, `op`, `jid` | `event_focus.json` |
-| `event_chat` | `v`, `op`, `chat` (Chat): published when app-state sync from another device changes a chat's pin, archive or mute; `chat` is the chat as it now is, as `chats` would list it (its unread count and `last_message` included), so a client replaces the chat with the same `jid` or adds it (added in M2). Also published after every merge of a contact's phone-number chat into her LID chat, with `aliases` (T15, see "One chat per contact"): a client then drops or renames the entries named in `aliases`. Also published when a chat's `name` changes (see "Chat names") | `event_chat.json`, `event_chat_aliases.json`, `event_chat_phone.json` |
+| `event_chat` | `v`, `op`, `chat` (Chat): published when app-state sync from another device changes a chat's pin, archive or mute; `chat` is the chat as it now is, as `chats` would list it (its unread count and `last_message` included), so a client replaces the chat with the same `jid` or adds it (added in M2). Also published after every merge of a contact's phone-number chat into her LID chat, with `aliases` (T15, see "One chat per contact"): a client then drops or renames the entries named in `aliases`. Also published when a chat's `name` changes (see "Chat names"). Also published once per chat when the history import stored messages for it (see "History") | `event_chat.json`, `event_chat_aliases.json`, `event_chat_phone.json` |
 | `link_qr` | `v`, `op`, `size` (int: modules per side), `rows` (array of `size` strings, each `size` characters long, every character `0` or `1`, row 0 first; no quiet zone, see "The link flow") (added in the link-from-the-app work) | `event_link_qr.json` |
 | `link_state` | `v`, `op`, `state` (`waiting`, `linked` or `failed`), `reason` (string, present only when `state` is `failed`: one fixed sentence chosen by nuncio); see "The link flow" (added in the link-from-the-app work) | `event_link_state_waiting.json`, `event_link_state_linked.json`, `event_link_state_failed.json` |
 
@@ -117,6 +117,11 @@ on it publishes, to subscribed connections, one `link_qr` per QR code it generat
 `link_cancel` stops a flow in progress and is answered `link_cancelled`; it leaves no device, no
 store and no keyring entry behind. `nuncio link --qr --consent` is a thin client of these same
 frames.
+
+A `link_start` whose `consent` is `false` — or absent, which is Go's zero value — is answered with
+an `error` frame (`bad_frame`): the daemon generates no QR, creates no key and opens no store
+before that refusal. A daemon that cannot link (one built without the flow) answers both frames the
+same way instead of dropping the connection.
 
 Two things a client author cannot infer from the tables:
 
@@ -427,6 +432,28 @@ event that fits is exactly what it was before this rule. Other events are not cu
 | A chat marked read (or unread) on another device | no `event_chat`: a read publishes `event_unread` only, an unread nothing |
 | The WhatsApp connection dies silently while `linked` (a NAT timeout or a network change, no socket error) | once WhatsApp keepalive pings have failed for more than 3 minutes (whatsmeow's own threshold), `event_connection` with `session: "offline"`; the daemon drops the dead connection and reconnects with its usual backoff, then publishes `linked` again. A shorter keepalive blip changes nothing |
 | a frame with an `op` this client does not know (a newer daemon) | the Rust client parses it as `DaemonFrame::Unknown`; nuncio-tui ignores an unknown event and shows an unknown reply in the footer (a send answered that way is shown as not confirmed) |
+
+### History (after linking)
+
+A device that has just been linked knows none of the account's messages: WhatsApp sends them
+afterwards, in blobs of the older conversations. The daemon stores every message of a blob with the
+same row a live delivery produces, and nothing more:
+
+- A historical message is stored **read**. History is old, so it never counts as unread, never
+  lights a badge and publishes no `event_unread`; and nothing is marked read on WhatsApp (no read
+  receipt is ever sent for it).
+- One message per chat and id: WhatsApp resends a blob, and applying one again stores nothing new
+  and publishes nothing.
+- A media message keeps its reference, for a `download_media` on request. Nothing is downloaded, and
+  nothing is asked of WhatsApp: nuncio never requests history on demand.
+- Each chat that received a message is published **once** as `event_chat`, as `chats` would list it
+  now, so an open UI shows its last message without asking again. A historical message is never
+  published as `event_message`.
+- A protocol or system entry, a chat the wire does not carry (`status@broadcast`, a newsletter) and
+  anything else that is not a message are skipped.
+- The import runs off the session's event loop, one blob at a time, so it blocks neither a delivery
+  nor the daemon's start. A message the store refuses is logged by its error type only (its text
+  could quote a message or a JID) and the import goes on.
 
 ### One chat per contact (T15; ADR `docs/adr/0001-one-chat-per-contact.md`)
 

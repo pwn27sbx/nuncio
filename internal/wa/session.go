@@ -137,8 +137,12 @@ type Session struct {
 	// markReadSem (capacity 1) serialises MarkRead, so two UIs opening a chat at once send its
 	// receipts once; a call waits for it only inside its own 4 s bound.
 	markReadSem chan struct{}
-	// drains counts the running outbox drains; Close waits for them before closing the store.
+	// drains counts the work that writes to the store off whatsmeow's event goroutine: the outbox's
+	// drains, the one group-subject query of a Start and the history imports. Close waits for them
+	// before closing the store.
 	drains sync.WaitGroup
+	// historyMu makes the session import one history-sync blob at a time (see history.go).
+	historyMu sync.Mutex
 	// paceAfter schedules the pause between two drained sends (drainPace) like after; a separate
 	// field so the outbox never shows up among the reconnect timers. time.AfterFunc outside tests.
 	paceAfter func(d time.Duration, f func()) (cancel func() bool)
@@ -266,6 +270,7 @@ func (s *Session) Start() error {
 		s.mergeKnownAliases()
 		s.refreshStoredNames()
 		events.Message = s.storeMessage
+		events.HistorySync = s.storeHistory
 		events.ContactName = s.contactChanged
 		events.GroupName = s.groupNamed
 		events.Pin = s.applyPin
@@ -569,7 +574,8 @@ var ErrCleanupPending = errors.New("wa: the old plain keys are not wiped from th
 //     new unpaired device. Nothing of a new device is written until pairing saves it: only then
 //     does its first save create the data key (when the keyring has none), read it back, write
 //     the seal check row, read the keyring again and compare (so a key another process put there
-//     meanwhile is caught) and save the device. A link that never pairs leaves no key and no row.
+//     meanwhile is caught) and save the device. A `nuncio link` that never pairs leaves no key and
+//     no row.
 func OpenDevice(ctx context.Context, db *sql.DB, dbPath string, kr store.Keyring, forLink bool) (*wastore.Device, store.MigrationResult, error) {
 	var res store.MigrationResult
 	stored, err := HasStoredDevice(ctx, db)

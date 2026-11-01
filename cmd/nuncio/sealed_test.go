@@ -121,6 +121,8 @@ func rowsIn(t *testing.T, tables ...string) map[string]int {
 type pairingLinker struct {
 	client *whatsmeow.Client
 	abort  bool
+	// paired is the channel the command reads a pairing from, standing in for wa.Events.
+	paired chan string
 	// saveErr is what the pairing save returned.
 	saveErr error
 }
@@ -132,11 +134,8 @@ func (l *pairingLinker) QR(ctx context.Context) (<-chan wa.Code, error) {
 		close(codes)
 		return codes, nil
 	}
-	jid := types.JID{User: "15550009999", Device: 1, Server: types.DefaultUserServer}
-	l.client.Store.ID = &jid
-	l.client.Store.Account = &waAdv.ADVSignedDeviceIdentity{Details: []byte{1}, AccountSignature: make([]byte, 64),
-		AccountSignatureKey: make([]byte, 32), DeviceSignature: make([]byte, 64)}
-	if l.saveErr = l.client.Store.Save(ctx); l.saveErr != nil {
+	l.pair(ctx)
+	if l.saveErr != nil {
 		codes <- wa.Code{Event: "error"}
 	} else {
 		codes <- wa.Code{Event: "success"}
@@ -145,20 +144,44 @@ func (l *pairingLinker) QR(ctx context.Context) (<-chan wa.Code, error) {
 	return codes, nil
 }
 
-func (l *pairingLinker) Phone(context.Context, string) (string, error) {
-	return "", errors.New("pairingLinker: no phone flow")
+// Phone offers a pairing code and pairs only when abort is false: then it saves the device the way
+// the pair handler does and reports it on the events a fake watchLink hands the command.
+func (l *pairingLinker) Phone(ctx context.Context, _ string) (string, error) {
+	if l.abort {
+		// The code is offered and never entered: the command's own wait ends it.
+		return "12345678", nil
+	}
+	l.pair(ctx)
+	l.paired <- "15550009999"
+	return "12345678", nil
 }
 
-// fakePairing replaces prepareLink with a pairingLinker over the link's own client.
+// pair fills in the device's JID and account and saves it, as whatsmewow's pair handler does.
+func (l *pairingLinker) pair(ctx context.Context) {
+	jid := types.JID{User: "15550009999", Device: 1, Server: types.DefaultUserServer}
+	l.client.Store.ID = &jid
+	l.client.Store.Account = &waAdv.ADVSignedDeviceIdentity{Details: []byte{1}, AccountSignature: make([]byte, 64),
+		AccountSignatureKey: make([]byte, 32), DeviceSignature: make([]byte, 64)}
+	l.saveErr = l.client.Store.Save(ctx)
+}
+
+// fakePairing replaces prepareLink and watchLink with a pairingLinker over the link's own client,
+// so a test can pair without WhatsApp: the linker reports the device on the channel the command
+// reads.
 func fakePairing(t *testing.T, abort bool) *pairingLinker {
 	t.Helper()
-	l := &pairingLinker{abort: abort}
+	l := &pairingLinker{abort: abort, paired: make(chan string, 1)}
 	prepare := prepareLink
 	prepareLink = func(c wa.Consent, client *whatsmeow.Client) (wa.Prepared, error) {
 		l.client = client
 		return wa.Prepared{Linker: l, Consent: c}, nil
 	}
 	t.Cleanup(func() { prepareLink = prepare })
+	watch := watchLink
+	watchLink = func(*whatsmeow.Client) linkEvents {
+		return linkEvents{paired: l.paired, connected: make(chan struct{}, 1)}
+	}
+	t.Cleanup(func() { watchLink = watch })
 	return l
 }
 
@@ -170,7 +193,7 @@ func runLink(t *testing.T) (int, string, string) {
 	}
 	done := make(chan result, 1)
 	go func() {
-		code, out, errOut := runCLI("link", "--qr", "--consent")
+		code, out, errOut := runCLI("link", "--phone", "+15550009999", "--consent")
 		done <- result{code, out, errOut}
 	}()
 	select {
@@ -224,13 +247,17 @@ func TestLinkCreatesTheKeyAndReadsItBackBeforeSavingTheDevice(t *testing.T) {
 	}
 }
 
-// A link that never pairs (the QR code timed out) leaves no data key and no rows.
+// A link that never pairs (the pairing code was not entered in time) leaves no data key and no
+// rows.
 func TestLinkAbortedBeforePairingLeavesNoKeyAndNoRows(t *testing.T) {
 	isolateData(t)
 	t.Setenv("XDG_RUNTIME_DIR", t.TempDir())
 	kr := &memKeyring{items: map[string]string{}}
 	useKeyring(t, kr)
 	fakePairing(t, true)
+	wait := phoneWait
+	phoneWait = 50 * time.Millisecond
+	t.Cleanup(func() { phoneWait = wait })
 
 	code, _, errOut := runLink(t)
 	if code != 1 || !strings.Contains(errOut, "nothing was linked") {

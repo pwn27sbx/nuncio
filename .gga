@@ -1,7 +1,9 @@
 # Gentleman Guardian Angel: pre-commit review for nuncio.
 # Tests are reviewed too: they carry each task's acceptance criteria.
 
-PROVIDER="claude"
+PROVIDER="opencode:opencode-go/deepseek-v4.1-flash#high"
+# A tool-free agent, so the verdict is the first line of the output.
+OPENCODE_AGENT="gga-reviewer"
 FILE_PATTERNS="*.go,*.rs"
 EXCLUDE_PATTERNS="target/*"
 RULES_FILE="AGENTS.md"

@@ -11,18 +11,21 @@ import (
 	"sync"
 	"time"
 
+	wastore "go.mau.fi/whatsmeow/store"
+
 	"github.com/pwn27sbx/nuncio/internal/ipc"
 	"github.com/pwn27sbx/nuncio/internal/store"
 	"github.com/pwn27sbx/nuncio/internal/wa"
 )
 
 // The device's private material is sealed under a data key in the Secret Service (ADR 0003). The
-// daemon never creates that key over a stored device: only `nuncio link` creates it, when pairing
-// saves a new device, and the migration of a database an older build wrote, which holds no
-// sealed data yet. The daemon serves the socket before it first asks the keyring for a stored
-// device (on Linux the Secret Service may wait on an unlock prompt for as long as it likes), and
-// while the device is not open it reports the session offline and opens nothing: no WhatsApp
-// connection and no write.
+// daemon never creates that key over a stored device: `nuncio link` creates it when pairing saves
+// a new device, the daemon's link bootstrap creates it, before pairing, only while the store holds
+// no device (openLinkBootstrap), and the migration of a database an older build wrote, which holds
+// no sealed data yet, creates it too. The daemon serves the socket before it first asks the keyring
+// for a stored device (on Linux the Secret Service may wait on an unlock prompt for as long as it
+// likes), and while the device is not open it reports the session offline and opens nothing: no
+// WhatsApp connection and no write.
 
 // The fixed answers of a daemon whose device is not open: what a request that needs the session
 // gets, and the start log says.
@@ -38,11 +41,17 @@ var (
 type daemonSession interface {
 	sessionState
 	SetEvents(*ipc.Broker)
+	// SetUnreadChanged flags the D-Bus face after every change that may move the total unread.
+	SetUnreadChanged(func())
 	Start() error
 }
 
 // openSessionOn is wa.OpenSessionOn; tests replace it.
 var openSessionOn = wa.OpenSessionOn
+
+// openDaemonSession is openSession; tests replace it to hand the daemon a session that never
+// connects.
+var openDaemonSession = openSession
 
 // openSession opens the daemon's session over the database at dbPath with the data key in kr. A
 // missing database is unlinked and nothing is created. Without a stored device the session is
@@ -76,6 +85,83 @@ func openSession(ctx context.Context, dbPath string, kr store.Keyring) (daemonSe
 }
 
 func afterFunc(d time.Duration, f func()) func() bool { return time.AfterFunc(d, f).Stop }
+
+// errLinkRefused reports a link flow over a store that already holds a device. Nothing of a linked
+// device is opened, asked of the keyring or replaced, so the flow's cancel has nothing of its own to
+// undo.
+var errLinkRefused = errors.New("nunciod already holds a linked WhatsApp device")
+
+// linkBootstrap is what one link flow works over: the store it opened and an unpaired device to
+// pair. createdKey reports that this call put the data key in the keyring, so a cancel removes the
+// key only when the flow made it.
+type linkBootstrap struct {
+	db         *sql.DB
+	device     *wastore.Device
+	createdKey bool
+}
+
+// openLinkBootstrap opens or creates the store at dbPath and the data key in kr for one link flow,
+// and answers an unpaired device to pair. A caller reaches it only after the flow's consent gate
+// (wa.Gate) has passed, and never at daemon start: nothing here links anything by itself. It
+// refuses with errLinkRefused, before it even reads the keyring, while the store already holds a
+// device, and with store.ErrKeyringUnavailable while the keyring cannot be read (as `nuncio link`
+// refuses today): no key is created and no device is touched, and the empty store it opened is left
+// for the flow's cancel to remove. The key is created once, so pairing has one under which to save
+// the device; an existing key is reused and never reported as this flow's own, so a cancel cannot
+// delete a key it found.
+func openLinkBootstrap(ctx context.Context, dbPath string, kr store.Keyring) (*linkBootstrap, error) {
+	db, err := store.Open(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	// nuncio's own tables, before anything can query the store: the flow's database has to be
+	// complete from the moment it exists, or a request served during the handover answers
+	// "no such table: outbox" (T11 saw exactly that toast right after a real link).
+	if err := store.EnsureSchema(db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	fail := func(err error) (*linkBootstrap, error) {
+		_ = db.Close()
+		return nil, err
+	}
+	stored, err := wa.HasStoredDevice(ctx, db)
+	if err != nil {
+		return fail(err)
+	}
+	if stored {
+		return fail(errLinkRefused)
+	}
+	// The read that decides whether this call creates the key: a locked keyring stops here, before
+	// anything is generated or written.
+	var createdKey []byte
+	key, err := store.LoadDataKey(kr, false)
+	switch {
+	case err == nil:
+		clear(key)
+	case errors.Is(err, store.ErrDataKeyMissing):
+		if createdKey, err = store.LoadDataKey(kr, true); err != nil {
+			return fail(err)
+		}
+	default:
+		return fail(err)
+	}
+	// The migration result is not reported: without a stored device there is nothing to seal, so
+	// it carries no notice (a cleanup a previous run left pending comes back as the error below).
+	device, _, err := wa.OpenDevice(ctx, db, dbPath, kr, true)
+	if err != nil {
+		if createdKey != nil {
+			// Nothing was paired under the key this call made: it goes with the failed bootstrap,
+			// so a later flow never finds a key its own cancel would have to leave alone.
+			_ = store.ForgetDataKey(kr, createdKey)
+			clear(createdKey)
+		}
+		return fail(err)
+	}
+	created := createdKey != nil
+	clear(createdKey)
+	return &linkBootstrap{db: db, device: device, createdKey: created}, nil
+}
 
 // gate is the daemon's session while the stored device is not open. It reports offline (a device
 // is stored: linked, not connected) and answers every request that needs the session with the

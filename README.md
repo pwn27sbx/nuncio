@@ -44,13 +44,14 @@ curl -L -o /tmp/nuncio.pkg.tar.zst https://github.com/pwn27sbx/nuncio/releases/l
 ```
 
 Run the same line to update; `sudo pacman -R nuncio` to uninstall. [INSTALL.md](INSTALL.md) says
-what happens on the first run (linking a device), what the package does not do for you, and where
+how the first run links the device from the app, what the package does not do for you, and where
 your data lives.
 
 `packaging/install.sh` is the alternative for an offline install or a scripted one: it downloads
 `nuncio-<version>-1-x86_64.pkg.tar.zst` and `SHA256SUMS` from the GitHub release, **checks the
-package's SHA-256 and stops on a mismatch**, runs `sudo pacman -U` and enables the daemon's user
-unit (`--no-enable` skips that). It never pipes a download into a shell and does nothing outside
+package's SHA-256 and stops on a mismatch**, and runs `sudo pacman -U`. It also enables the
+daemon's user unit (`--no-enable` skips that), which the app does by itself on first launch
+anyway. It never pipes a download into a shell and does nothing outside
 Arch. `bash install.sh --uninstall` removes it, and with it the Omarchy bar widget and hotkey if
 you installed them and did not change them
 ([contrib/omarchy/README.md](contrib/omarchy/README.md)).
@@ -64,49 +65,41 @@ You need `base-devel`, `git`, `go` (1.26 or later), `rust` (1.92 or later) and `
 packaging/package-source.sh            # fills packaging/PKGBUILD.in into .local/package/
 cd .local/package
 makepkg --cleanbuild --force -si       # offline build, runs the tests, installs with pacman
-systemctl --user enable --now nunciod.service
 ```
 
 Only `prepare()` touches the network (`go mod download`, `cargo fetch --locked`); the build and the
-tests run offline. See [packaging/README.md](packaging/README.md) for what the package installs and
-how to uninstall it.
+tests run offline. Then open **nuncio** from your launcher: it starts the daemon through D-Bus
+activation and adds it to your login items, so there is no `systemctl` step. See
+[packaging/README.md](packaging/README.md) for what the package installs and how to uninstall it.
 
 ## First run
 
-1. Link this machine as a device. The daemon must not be running while you link, and nothing links
-   without `--consent` (without it the command prints the ban warning and does nothing):
+1. Open **nuncio** from your launcher. With no device linked it opens on **Link this device to
+   WhatsApp**: press **Link**, then scan the code with your phone (WhatsApp → **Settings → Linked
+   devices → Link a device**). The chat list appears as soon as the phone accepts it, without a
+   restart, and the app adds the daemon to your login items. `Esc` cancels and leaves nothing
+   behind: no device, no data, no keyring entry. [INSTALL.md](INSTALL.md) is the same path, with
+   the trouble-shooting.
 
-   ```sh
-   systemctl --user stop nunciod
-   nuncio link --qr --consent              # or: nuncio link --phone <E.164 number> --consent
-   ```
+2. The power-user alternative is the terminal, a client of the same daemon:
+   `nuncio link --qr --consent` asks the **running** daemon for the code (open **nuncio**, or any
+   other command, to start it; the daemon owns the store and the session it pairs), while
+   `nuncio link --phone <E.164 number> --consent` still pairs from the command itself, so it needs
+   the daemon **stopped**. Nothing links without `--consent`: without it the command prints the
+   ban warning and does nothing. Both are in
+   [docs/COMMAND-LINE.md](docs/COMMAND-LINE.md#nuncio-link).
 
-   `--qr` draws a QR code in the terminal for Settings → Linked devices → Link a device
-   (`--plain-qr` prints only the code, frame by frame, for the desktop app's link screen, and
-   nothing at all when a device is already linked);
-   `--phone` prints an 8-digit pairing code to enter on the phone instead. Once the phone accepts
-   it, the command prints `nuncio: linked as …` (the number masked to its last four digits), says
-   how to start the daemon, and exits. It never sends a message.
+3. Both apps then open on your chats: **nuncio** (the desktop app) and **nuncio (terminal)**.
 
-2. Start the daemon again and check it:
-
-   ```sh
-   systemctl --user start nunciod
-   nuncio status
-   nuncio chats
-   ```
-
-3. Open `nuncio-tui` in a terminal or `nuncio-desktop` (the launcher entry "nuncio").
-
-To unlink and delete everything: `nuncio logout --confirm` (see [CLI](#cli) and
+To unlink and delete everything: **Settings → This device → Unlink this device** in the app, or
+`nuncio logout --confirm` (see [docs/COMMAND-LINE.md](docs/COMMAND-LINE.md#nuncio-logout) and
 [SECURITY.md](SECURITY.md#wiping-the-device)).
 
 ## CLI
 
-`nuncio` is a thin client of the running daemon (`status`, `chats`, `send`, `retry` and `focus`
-start it through D-Bus activation when it is not running). It has no automation surface: `send`
-takes exactly one recipient and one message per invocation, `retry` exactly one client_id, and
-neither reads stdin; `chats` and `status` only read.
+`nuncio` is a thin client of the running daemon and the terminal way to do what the apps do with a
+window. Linking a device is done in the app ([INSTALL.md](INSTALL.md)). Every command, what it
+prints and what it exits with is in [docs/COMMAND-LINE.md](docs/COMMAND-LINE.md).
 
 ```
 nuncio status                 print the daemon's session status (also: nuncio alone)
@@ -114,64 +107,15 @@ nuncio chats                  list the chats: name, unread count, pinned/archive
 nuncio send <jid> <message>   send one message to one chat; quote the message, it is one argument
 nuncio retry <client_id>      send again, once, a message that ended not sent (or not confirmed)
 nuncio focus <jid>            ask the running UI to open that chat
-nuncio link --qr              link by scanning a QR code (needs --consent)
+nuncio link --qr              link by scanning a QR code nunciod draws (needs --consent)
 nuncio link --phone N         link with an 8-digit pairing code (needs --consent)
 nuncio logout --confirm       unlink this device from WhatsApp, delete all local data, backups and keys, stop nunciod
 nuncio purge --confirm        the same without contacting WhatsApp, for a device already removed on the phone
 ```
 
-A `<jid>` is a WhatsApp chat: `15551230001@s.whatsapp.net` (a person) or
-`120363000000000000@g.us` (a group).
-
-- `chats` never prints message text. A chat is shown by its name (a group's subject, else the
-  contact's address-book, business or push name); without one, by its number masked to the last
-  four digits (`…0001`), or `hidden number` when the number is not known (a LID chat): a LID's
-  digits are never printed. The TUI does the same, and shows `unnamed group` for a group with no
-  subject ([ADR 0002](docs/adr/0002-chat-names.md)).
-- `send` prints `sent`, `queued`, `not sent: <reason>` or, when WhatsApp did not acknowledge in
-  time, `not confirmed: …; it may have been delivered`, and exits 1 unless the message was sent or
-  queued. With no linked device it says so and exits 1. While the session is offline, or when the
-  connection drops before WhatsApp acknowledges the message, it is queued and sent once when the
-  session reconnects (one pass, oldest first, one second apart, same message id). A connection
-  that dies silently still counts as linked for up to 3 minutes, until its keepalive fails, so a
-  send in that window ends `not confirmed` rather than queued. A send whose answer from nunciod
-  does not come in time ends not confirmed too, in the CLI and in both apps, never not sent:
-  nunciod may already have handed it to WhatsApp. Nothing else is ever retried on
-  its own: a message that ends `not sent` or `not confirmed` stays listed as not sent, and `send`
-  prints its client_id.
-- `retry <client_id>` sends that one message again, once, under the same WhatsApp message id, so it
-  is the same message again, never a second one with a new id; a message that is queued or sent is
-  only reported.
-- `focus` prints how many running UIs got the request; 0 means no UI is running, and that is not
-  an error.
-- `link` exits as soon as the device is linked, and never sends a message. Run on a device that is
-  already linked, it connects it once to check that WhatsApp still accepts it, reports it and
-  exits. It refuses to run at all while `nunciod` answers on `core.sock`, before it opens the
-  database: the daemon owns that session. `link` needs the keyring (Secret Service) unlocked: it
-  creates the data key only when pairing saves the new device, reads it back before the device is
-  saved, and a link that never pairs leaves no key and no device behind. A `nuncio.db` an older
-  build left in plain is backed up (`nuncio.db.pre-t17-<UTC time>.bak`, which still holds the keys
-  in plain: delete it once nuncio works) and sealed first, by `link` or by `nunciod` at start.
-- With the keyring locked or absent, `nunciod` stays up and answers `offline`, never connects to
-  WhatsApp and writes nothing; it tries again on the session's backoff. When the data key is gone
-  but a sealed device is stored, nothing creates a new one: the device cannot be read, and the way
-  out is `nuncio purge --confirm`, then `nuncio link`. The apps show either state in their header
-  (`keyring locked: unlock it to connect`, or `the stored key does not open this device: see
-  SECURITY.md`); see [SECURITY.md](SECURITY.md#a-locked-keyring-or-an-unreadable-device).
-- `logout` and `purge` without `--confirm` only list what they would delete and exit 2. With it,
-  the teardown runs in this order: (1) WhatsApp unlinks the device (`logout` only), (2) the
-  keyring items under the service `nuncio` are deleted (the data key `store.data_key` among them),
-  (3) `nuncio.db` with its `-wal` and `-shm` files, every migration backup
-  (`nuncio.db.pre-t17-*.bak`), the `media` cache and the `exports` in `$XDG_DATA_HOME/nuncio` are
-  deleted (the
-  directory too, when nothing else is in it and the sandbox allows it), (4) `nunciod` removes its
-  socket and exits. `logout` needs a running `nunciod`, because only the daemon's session may talk
-  to WhatsApp for the device; when WhatsApp does not confirm, nothing is deleted. `purge` never
-  contacts WhatsApp: it asks a running daemon to do the same, or deletes the local data itself when
-  no daemon runs.
-
-One chat per contact: a contact's phone-number chat is merged into her hidden-id (`@lid`) chat
-when whatsmeow knows the pair ([ADR 0001](docs/adr/0001-one-chat-per-contact.md)).
+It has no automation surface: `send` takes exactly one recipient and one message per invocation,
+`retry` exactly one client_id, and neither reads stdin; `chats` and `status` only read. Nothing
+links without `--consent`.
 
 ## The terminal app
 
@@ -252,7 +196,7 @@ crates/nuncio-desktop/ GTK 4 + libadwaita desktop client
 proto/                 the wire contract (wire.md) + shared fixtures
 packaging/             PKGBUILD, systemd unit, desktop entries, installer
 contrib/omarchy/       Hyprland hotkey and Quickshell bar widget
-docs/                  config reference and ADRs
+docs/                  config reference, the command line and ADRs
 odd/tasks/             the build plan of record
 ```
 
@@ -260,6 +204,8 @@ odd/tasks/             the build plan of record
 
 - [SECURITY.md](SECURITY.md): what is stored where, what never leaves the machine, ban-risk rules,
   how to report a vulnerability.
+- [INSTALL.md](INSTALL.md): install, link the device from the app, update, uninstall.
+- [docs/COMMAND-LINE.md](docs/COMMAND-LINE.md): every `nuncio` command, its output and exit codes.
 - [INTEGRATIONS.md](INTEGRATIONS.md): Omarchy, Hyprland, D-Bus, systemd.
 - [docs/config.md](docs/config.md): the configuration file.
 - [docs/adr/](docs/adr/): design decisions

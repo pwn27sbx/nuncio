@@ -26,10 +26,9 @@ const usage = `usage:
   nuncio send <jid> <message>   send one message to one chat; quote the message, it is one argument
   nuncio retry <client_id>      send again, once, a message that ended not sent (or not confirmed)
   nuncio focus <jid>            ask the running UI to open that chat
-  nuncio link --qr              link by scanning a QR code (needs --consent; --plain-qr draws
-                                only the code for a GUI, and nothing when a device is
-                                already linked)
-  nuncio link --phone N         link with an 8-digit pairing code (needs --consent)
+  nuncio link --qr              link by scanning a QR code nunciod draws (needs --consent;
+                                --plain-qr draws only the matrix, for a script or a GUI)
+  nuncio link --phone N         link with an 8-digit pairing code, from this command (needs --consent)
   nuncio logout --confirm       unlink this device from WhatsApp, delete all local data, backups and keys, stop nunciod
   nuncio purge --confirm        the same without contacting WhatsApp, for a device already removed on the phone
   nuncio --help
@@ -44,8 +43,11 @@ ever retried on its own: unless it was sent, send prints the message's
 client_id, and nuncio retry <client_id> sends it again under the same WhatsApp message id, so it
 cannot arrive twice.
 Nothing links a device without --consent. link never sends a message: once linked it says so and
-exits; then start nunciod (systemctl --user start nunciod). link needs the keyring unlocked: the
-device's keys are sealed under a data key kept there, created only when pairing saves the device. logout and purge without --confirm only list what they
+exits. --qr asks the running nunciod for the flow, which owns the store, the data key and the
+codes, and keeps the session it pairs; --phone still pairs from this command, so it needs nunciod
+stopped and the keyring unlocked, because it opens the store itself and creates the data key when
+pairing saves the device. Ctrl-C during --qr cancels the flow, and nunciod removes what it created.
+logout and purge without --confirm only list what they
 would delete. logout needs a running nunciod (it unlinks through the daemon's session); purge works
 with or without one.`
 

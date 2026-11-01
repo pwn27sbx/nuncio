@@ -524,15 +524,73 @@ fn the_help_sits_on_a_solid_surface_scrim_with_its_keys_right_aligned_and_muted(
     assert!(!text(&buffer).contains("Grace Hopper"));
 }
 
+/// An app that has no device linked at all (S10).
+fn app_unlinked() -> App {
+    App::new(
+        Snapshot {
+            daemon: "nunciod/0.1.1".to_owned(),
+            linked: false,
+            session: Session::Unlinked,
+            unread: 0,
+            chats: Vec::new(),
+            stop_reason: None,
+        },
+        Source::Daemon,
+        Palette::default(),
+    )
+}
+
+// S10: an unlinked app says what is missing and points at nuncio, never at the command line.
+#[test]
+fn an_unlinked_app_says_no_device_is_linked_and_points_at_nuncio() {
+    let muted = colour(Palette::default().text_muted());
+    let mut app = app_unlinked();
+    for (width, height) in SIZES {
+        let buffer = draw(&mut app, width, height);
+        // The list pane wraps the sentence in a narrow window: read that pane's own lines.
+        let list = (0..height)
+            .map(|y| {
+                let line = row(&buffer, y);
+                match line.split_once('│') {
+                    Some((left, _)) => left.to_owned(),
+                    None => line,
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            list.contains("No device linked · open nuncio to link it"),
+            "an unlinked app must say what is missing: {list}"
+        );
+        let (x, y) = find(&buffer, "No device linked");
+        assert_eq!(buffer[(x, y)].fg, muted);
+        for forbidden in ["nuncio link", "systemctl", "--qr", "--consent"] {
+            assert!(
+                !text(&buffer).contains(forbidden),
+                "an unlinked app must not name {forbidden}: {}",
+                text(&buffer)
+            );
+        }
+    }
+}
+
 #[test]
 fn empty_states_are_one_muted_line_with_the_key_hint() {
     let muted = colour(Palette::default().text_muted());
-    // No chats: the list says so, the conversation too.
+    // No chats on a linked device: the list and the conversation say so, in muted text, and
+    // nothing points at the command line any more (T8).
     let mut app = app_with(Vec::new());
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
         let (x, y) = find(&buffer, "No chats yet");
-        assert!(row(&buffer, y).contains("nuncio link"), "{}", text(&buffer));
+        assert!(
+            !row(&buffer, y).contains("nuncio link"),
+            "{}",
+            text(&buffer)
+        );
         assert_eq!(buffer[(x, y)].fg, muted);
         let (x, y) = find(&buffer, "No chat open");
         assert_eq!(buffer[(x, y)].fg, muted);

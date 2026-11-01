@@ -137,8 +137,12 @@ type Session struct {
 	// markReadSem (capacity 1) serialises MarkRead, so two UIs opening a chat at once send its
 	// receipts once; a call waits for it only inside its own 4 s bound.
 	markReadSem chan struct{}
-	// drains counts the running outbox drains; Close waits for them before closing the store.
+	// drains counts the work that writes to the store off whatsmeow's event goroutine: the outbox's
+	// drains, the one group-subject query of a Start and the history imports. Close waits for them
+	// before closing the store.
 	drains sync.WaitGroup
+	// historyMu makes the session import one history-sync blob at a time (see history.go).
+	historyMu sync.Mutex
 	// paceAfter schedules the pause between two drained sends (drainPace) like after; a separate
 	// field so the outbox never shows up among the reconnect timers. time.AfterFunc outside tests.
 	paceAfter func(d time.Duration, f func()) (cancel func() bool)
@@ -266,6 +270,7 @@ func (s *Session) Start() error {
 		s.mergeKnownAliases()
 		s.refreshStoredNames()
 		events.Message = s.storeMessage
+		events.HistorySync = s.storeHistory
 		events.ContactName = s.contactChanged
 		events.GroupName = s.groupNamed
 		events.Pin = s.applyPin

@@ -38,6 +38,9 @@ type Events struct {
 	// connect. reason is a short description (codes and expiry only, no personal data).
 	Stopped func(reason string)
 	Message func(*waevents.Message)
+	// HistorySync: the phone sent a blob of older messages (see history.go). It runs off this
+	// dispatch, so a large blob blocks neither a delivery nor the session's start.
+	HistorySync func(*waevents.HistorySync)
 	// The app-state changes made on another device (see appstate.go).
 	Pin            func(*waevents.Pin)
 	Archive        func(*waevents.Archive)
@@ -95,6 +98,10 @@ func (e Events) Handle(raw any) {
 	case *waevents.Message:
 		if e.Message != nil {
 			e.Message(v)
+		}
+	case *waevents.HistorySync:
+		if e.HistorySync != nil {
+			e.HistorySync(v)
 		}
 	case *waevents.Pin:
 		if e.Pin != nil {

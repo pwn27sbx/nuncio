@@ -3,6 +3,15 @@
 One section per release; the tag equals the version (`v0.1.0` → `pkgver=0.1.0`), and the section
 becomes the release notes.
 
+## Unreleased — the message history
+
+- **Your chats arrive with their messages.** After a device is linked, the daemon imports the
+  message history WhatsApp sends it, so a conversation is not empty the first time it is opened
+  and the chat list shows its last message. The imported messages are stored read (an old message
+  never counts as unread and never lights the badge), a blob applied twice stores nothing twice,
+  and each chat is refreshed in an open app as its messages land. Nothing is downloaded, no history
+  is requested and no read receipt is sent.
+
 ## v0.2.0 — link a device inside the app
 
 The wire and the first-run flow changed, so the version moves. The tag follows the home acceptance

@@ -53,10 +53,7 @@ func waitForLog(buf *lockedBuffer, want string) string {
 // The client names itself in hello; that name is the client's own text and is not logged.
 func TestHelloIsLoggedWithoutTheClientsName(t *testing.T) {
 	logs := daemonLog(t)
-	d, err := newDaemon(fixedSession(wa.StateUnlinked), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(fixedSession(wa.StateUnlinked), nil)
 	d.Hello("Ada Lovelace\x1b[2J")
 	assertNoLeak(t, logs.String(), "a client said hello", "Ada", "\x1b")
 }
@@ -64,10 +61,7 @@ func TestHelloIsLoggedWithoutTheClientsName(t *testing.T) {
 // A store that cannot count the unread total nor list the chats is logged by its error's type.
 func TestFailedStoreReadsOfTheDaemonAreLoggedByTheirTypeOnly(t *testing.T) {
 	db := openTestStore(t)
-	d, err := newDaemon(fixedSession(wa.StateLinked), db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(fixedSession(wa.StateLinked), db)
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -94,10 +88,7 @@ func TestAChatWhoseLastMessageCannotBeReadIsLoggedByItsTypeOnly(t *testing.T) {
 	if _, err := db.Exec(`DROP TABLE outbox_replies`); err != nil {
 		t.Fatal(err)
 	}
-	d, err := newDaemon(fixedSession(wa.StateLinked), db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(fixedSession(wa.StateLinked), db)
 	logs := daemonLog(t)
 	if chats := d.Chats(); chats != nil {
 		t.Errorf("Chats = %+v, want none when a chat cannot be read", chats)
@@ -109,10 +100,7 @@ func TestAChatWhoseLastMessageCannotBeReadIsLoggedByItsTypeOnly(t *testing.T) {
 // A connection refused for a malformed first frame is logged without the refusal's text, which
 // quotes what the client sent.
 func TestARefusedConnectionIsLoggedByItsTypeOnly(t *testing.T) {
-	d, err := newDaemon(fixedSession(wa.StateUnlinked), nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(fixedSession(wa.StateUnlinked), nil)
 	logs := daemonLog(t)
 	sock := serveSocket(t, d, nil)
 	conn, err := net.Dial("unix", sock)

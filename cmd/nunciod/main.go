@@ -110,10 +110,7 @@ func run() error {
 	// connection changes) through this broker.
 	events := ipc.NewBroker()
 	session.SetEvents(events)
-	d, err := newDaemon(session, db)
-	if err != nil {
-		return err
-	}
+	d := newDaemon(session, db)
 	// What a wipe (nuncio logout or purge) deletes: the keyring items (the data key among them),
 	// the data dir, and finally this socket.
 	d.dataDir, d.keyring, d.socket, d.dbPath = filepath.Dir(dbPath), keyring, socket, dbPath
@@ -291,8 +288,7 @@ type daemon struct {
 	version string
 	session sessionState
 	// db is the message store, nil while there is no nuncio.db (unlinked).
-	db    *sql.DB
-	chats []ipc.Chat
+	db *sql.DB
 	// mu guards session and db: a link flow that pairs hands the daemon a new session and store
 	// while requests are being served (handOver), so every read goes through sess and store.
 	mu sync.RWMutex
@@ -351,12 +347,8 @@ type sessionState interface {
 
 // newDaemon serves session and, when db is not nil, the chats, messages and
 // unread counts stored in db.
-func newDaemon(session sessionState, db *sql.DB) (*daemon, error) {
-	chats, err := fixtureChats()
-	if err != nil {
-		return nil, err
-	}
-	return &daemon{version: daemonVersion, session: session, db: db, chats: chats}, nil
+func newDaemon(session sessionState, db *sql.DB) *daemon {
+	return &daemon{version: daemonVersion, session: session, db: db}
 }
 
 // sess is the session the daemon serves: the one it started with, or the one a link flow handed
@@ -475,12 +467,12 @@ func (d *daemon) unreadCount() (int, error) {
 
 // Chats lists the stored chats, newest message first, each with its name, unread
 // count, flags (muted only while its mute lasts), aliases, masked phone and last message. Without
-// a store it is the fixture list, the answer while unlinked. A store failure,
+// a store it answers no chats at all: an unlinked daemon invents none. A store failure,
 // or a store a wipe closed, is logged and answers no chats.
 func (d *daemon) Chats() []ipc.Chat {
 	db := d.store()
 	if db == nil {
-		return d.chats
+		return nil
 	}
 	if d.closed.Load() {
 		log.Print(errClosed)

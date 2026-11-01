@@ -25,10 +25,7 @@ func gateServed(t *testing.T, path string, kr store.Keyring) (*gate, *manualTime
 	t.Cleanup(g.Close)
 	events := ipc.NewBroker()
 	g.SetEvents(events)
-	d, err := newDaemon(g, db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(g, db)
 	ui, uiR := subscriber(t, serveSocket(t, d, events))
 	return g, timers, starts, d, ui, uiR
 }

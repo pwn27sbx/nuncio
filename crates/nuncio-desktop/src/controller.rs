@@ -35,6 +35,8 @@ pub enum Command {
     Send(ClientFrame),
     /// Open this downloaded media file with the desktop's opener.
     Open(PathBuf),
+    /// Ask the session bus for the daemon: pressing Link with none serving starts it (F6).
+    StartDaemon,
 }
 
 /// The application action a notification's `default` action names, with the chat JID as its
@@ -76,6 +78,21 @@ pub enum LinkScreen {
     Failed,
     /// The daemon refused to start a flow: one sentence, and one Try again.
     Refused(LinkRefusal),
+}
+
+/// The answer to a wipe this app sent, until the window closed the confirmation on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Settled {
+    /// The daemon confirmed it: the device is unlinked and nuncio's data is deleted, so the app
+    /// ends on the link screen with one line (S4, S11).
+    Unlinked,
+    /// The daemon answered without confirming it (WhatsApp did not, or the deletion failed): it
+    /// said why, nothing is claimed, and Settings stays where it was.
+    Unconfirmed,
+    /// The connection broke before the answer, because the daemon that held the wipe went away:
+    /// whether it happened is the next daemon's word (S11), so nothing is said about the device,
+    /// but the dialogs go (F5) and the cut is not reported as an error (F6).
+    Lost,
 }
 
 /// Why a `link_start` was refused.
@@ -145,15 +162,19 @@ pub struct Controller {
     /// (`nuncio link --qr` in a terminal) is on this screen too; leaving this window must not
     /// cancel that one.
     link_started_here: bool,
+    /// A `link_start` the daemon never received (the link was down): sent on the next connect, so
+    /// pressing Link with no daemon serving still pairs once the bus has started one (F6).
+    link_start_pending: bool,
+    /// A `wipe` this app sent has no answer yet, or its answer was lost with the daemon that held
+    /// it: a cut while it is set is the unlink's own, never an error.
+    unlink_pending: bool,
     /// A `wipe` the app sent is in flight: a second one is never sent (S11).
     unlink_running: bool,
-    /// The daemon answered the app's `wipe` with `unlinked: true` (S11): the device is gone and
-    /// so is nuncio's data, so the first screen belongs on the screen even while the daemon that
-    /// replaces it starts.
+    /// The daemon answered the app's `wipe` (S11): the device is gone and so is nuncio's data, so
+    /// the first screen belongs on the screen even while the daemon that replaces it starts.
     wiped: bool,
-    /// The answer to the app's wipe, until the window closed the confirmation on it: `true` when
-    /// the device is unlinked and the data is deleted.
-    unlink_settled: Option<bool>,
+    /// The answer to the app's wipe, until the window closed the confirmation on it.
+    unlink_settled: Option<Settled>,
 }
 
 fn commands(effect: Option<Effect>) -> Vec<Command> {
@@ -211,6 +232,8 @@ impl Controller {
             link_linked: false,
             link_cancel_pending: false,
             link_started_here: false,
+            link_start_pending: false,
+            unlink_pending: false,
             unlink_running: false,
             wiped: false,
             unlink_settled: None,
@@ -258,6 +281,14 @@ impl Controller {
                 if std::mem::take(&mut self.link_cancel_pending) {
                     commands.insert(0, Command::Send(ClientFrame::link_cancel()));
                 }
+                // A Link pressed while nothing served goes out now: the daemon is there, so the
+                // flow the press asked for starts (F6).
+                if std::mem::take(&mut self.link_start_pending) {
+                    commands.push(Command::Send(ClientFrame::link_start(true)));
+                }
+                // A new daemon is the word on the device the lost wipe left open (S11): from here
+                // its status decides, not the lost connection.
+                self.unlink_pending = false;
                 commands
             }
             Incoming::Reply { request, result } => {
@@ -316,11 +347,13 @@ impl Controller {
                     *self.link.borrow_mut() = LinkFlow::new();
                     self.link_screen = LinkScreen::Consent;
                     self.link_started_here = false;
+                    self.link_start_pending = false;
                 }
                 if matches!(frame, ClientFrame::Wipe { .. }) {
                     // Nothing reached the daemon, so nothing was deleted, and the confirmation
                     // can be pressed again.
                     self.unlink_running = false;
+                    self.unlink_pending = false;
                 }
                 driver::not_connected(&mut self.model, &frame, CLIENT);
                 Vec::new()
@@ -360,8 +393,7 @@ impl Controller {
             Incoming::Lost(error) => {
                 // Whether a wipe the connection carried happened is the daemon's word on the next
                 // connection, never this client's: nothing is claimed here (S11).
-                self.unlink_running = false;
-                driver::lost(&mut self.model, &error);
+                self.lost(&error);
                 Vec::new()
             }
             // Events were dropped: ask again for what they would have said.
@@ -402,33 +434,45 @@ impl Controller {
     }
 
     /// The link screen's one button: Link (the consent, S6), Try again after a refusal (which
-    /// asks the daemon for its state again first, D3), or a new code after a failed flow.
+    /// asks the daemon for its state again first, D3), or a new code after a failed flow. With no
+    /// daemon serving (the one that held the unlink stopped with it), the press is what asks the
+    /// session bus for one, and the start waits for that connection (F6).
     pub fn start_link(&mut self) -> Vec<Command> {
         // The button press is the consent: this is the only `link_start` carrying `consent:
         // true`, so nothing links before it.
         let probe = matches!(self.link_screen, LinkScreen::Refused(_));
+        let connected = self.model.connected();
         *self.link.borrow_mut() = LinkFlow::new();
         self.link_linked = false;
         self.link_started_here = true;
         self.link_screen = LinkScreen::Starting;
         let mut commands: Vec<Command> = Vec::new();
-        if probe {
-            commands.push(Command::Send(ClientFrame::status()));
+        if connected {
+            if probe {
+                commands.push(Command::Send(ClientFrame::status()));
+            }
+            commands.push(Command::Send(ClientFrame::link_start(true)));
+        } else {
+            // Nothing to talk to: the daemon is started first, and the flow the press asked for
+            // goes out on the connection that follows.
+            self.link_start_pending = true;
+            commands.push(Command::StartDaemon);
         }
-        commands.push(Command::Send(ClientFrame::link_start(true)));
         commands
     }
 
     /// Esc or Cancel: stop a flow the app started and go back to the consent screen; the daemon
     /// answers once what the flow created is gone (S7). A cancel that cannot be delivered now is
-    /// sent on the next connect.
+    /// sent on the next connect. A press that never reached the daemon sent nothing, so there is
+    /// nothing to cancel and no flow to start later.
     pub fn cancel_link(&mut self) -> Vec<Command> {
         let running = self.link_started_here
             && matches!(self.link_screen, LinkScreen::Starting | LinkScreen::Waiting);
+        let unsent = std::mem::take(&mut self.link_start_pending);
         *self.link.borrow_mut() = LinkFlow::new();
         self.link_screen = LinkScreen::Consent;
         self.link_started_here = false;
-        if !running {
+        if !running || unsent {
             return Vec::new();
         }
         self.link_cancel_pending = true;
@@ -486,6 +530,7 @@ impl Controller {
             return Vec::new();
         }
         self.unlink_running = true;
+        self.unlink_pending = true;
         vec![Command::Send(ClientFrame::wipe(true))]
     }
 
@@ -494,9 +539,8 @@ impl Controller {
         self.unlink_running
     }
 
-    /// The answer to a wipe the user confirmed, until the window closed the confirmation on it:
-    /// `true` when the device is unlinked and nuncio's data is deleted.
-    pub fn take_unlink_settled(&mut self) -> Option<bool> {
+    /// The answer to a wipe the user confirmed, until the window closed the confirmation on it.
+    pub fn take_unlink_settled(&mut self) -> Option<Settled> {
         self.unlink_settled.take()
     }
 
@@ -507,7 +551,8 @@ impl Controller {
         self.unlink_running = false;
         match result {
             Ok(DaemonFrame::Wiped { unlinked: true, .. }) => {
-                self.unlink_settled = Some(true);
+                self.unlink_pending = false;
+                self.unlink_settled = Some(Settled::Unlinked);
                 // The daemon deleted its data, its socket and exited: this app is unlinked, and
                 // the first screen belongs here without a restart. What the daemon that replaces
                 // it reports says the same.
@@ -531,20 +576,23 @@ impl Controller {
             Ok(DaemonFrame::Wiped {
                 unlinked: false, ..
             }) => {
-                self.unlink_settled = Some(false);
+                self.unlink_pending = false;
+                self.unlink_settled = Some(Settled::Unconfirmed);
                 self.model.set_notice(unlink::UNCONFIRMED.to_owned());
                 Vec::new()
             }
             // The daemon refused the wipe (a logout WhatsApp did not confirm, a deletion that
             // failed): its own sentence, and nothing changes here.
             Err(ClientError::Daemon { message, .. }) => {
-                self.unlink_settled = Some(false);
+                self.unlink_pending = false;
+                self.unlink_settled = Some(Settled::Unconfirmed);
                 self.model.set_notice(message);
                 Vec::new()
             }
             // An answer to a wipe that says something else: nothing is claimed for it.
             Ok(other) => {
-                self.unlink_settled = Some(false);
+                self.unlink_pending = false;
+                self.unlink_settled = Some(Settled::Unconfirmed);
                 self.model
                     .set_notice(format!("nunciod answered `{}` to the unlink", other.op()));
                 Vec::new()
@@ -552,10 +600,43 @@ impl Controller {
             // The connection broke before the answer: whether the wipe happened is the daemon's
             // word on the next connection, never this client's.
             Err(error) => {
-                driver::lost(&mut self.model, &error);
+                self.lost(&error);
                 Vec::new()
             }
         }
+    }
+
+    /// The connection broke with `error`. The cut an unlink causes is expected, because the
+    /// daemon that held the device stops with it: it is not painted as an error (F6). While the
+    /// wipe still has no answer, the confirmation and Settings close instead of waiting for one
+    /// (F5) and the app shows its first screen while nothing serves it. Nothing is said about the
+    /// device (S11): the status of the daemon that replaces it replaces the state set here.
+    fn lost(&mut self, error: &ClientError) {
+        self.unlink_running = false;
+        if !self.unlink_pending && !self.wiped {
+            driver::lost(&mut self.model, error);
+            return;
+        }
+        self.model.set_connected(false);
+        if !self.unlink_pending {
+            // Already answered: no dialog is waiting for it any more.
+            return;
+        }
+        self.unlink_settled = Some(Settled::Lost);
+        self.wiped = true;
+        self.link_linked = false;
+        self.link_screen = LinkScreen::Consent;
+        self.link_started_here = false;
+        *self.link.borrow_mut() = LinkFlow::new();
+        let daemon = self.model.status().daemon.clone();
+        self.model.apply(&DaemonFrame::Status {
+            v: PROTOCOL_VERSION,
+            daemon,
+            linked: false,
+            session: Session::Unlinked,
+            unread: 0,
+            stop_reason: None,
+        });
     }
 
     /// Fold one daemon frame into the link screen; returns the frames the change asks for.
@@ -1038,7 +1119,7 @@ mod unlink_tests {
         assert_eq!(c.model().status().session, Session::Unlinked);
         assert!(!c.model().status().linked, "the device is gone");
         assert!(!c.unlink_running());
-        assert_eq!(c.take_unlink_settled(), Some(true));
+        assert_eq!(c.take_unlink_settled(), Some(Settled::Unlinked));
         assert_eq!(c.take_unlink_settled(), None, "said once");
     }
 
@@ -1054,7 +1135,7 @@ mod unlink_tests {
             "the device stays linked: the panes stay"
         );
         assert_eq!(c.model().status().session, Session::Linked);
-        assert_eq!(c.take_unlink_settled(), Some(false));
+        assert_eq!(c.take_unlink_settled(), Some(Settled::Unconfirmed));
     }
 
     #[test]
@@ -1074,7 +1155,7 @@ mod unlink_tests {
         assert_eq!(c.model().status().session, Session::Linked);
         assert!(c.model().status().linked);
         assert!(c.link_screen().is_none());
-        assert_eq!(c.take_unlink_settled(), Some(false));
+        assert_eq!(c.take_unlink_settled(), Some(Settled::Unconfirmed));
         assert_eq!(c.confirm_unlink(WORD).len(), 1, "the user may try again");
     }
 
@@ -1097,13 +1178,129 @@ mod unlink_tests {
     }
 
     #[test]
-    fn a_lost_connection_does_not_claim_the_device_is_gone() {
+    fn a_wipe_whose_daemon_dies_closes_its_dialogs_without_an_error() {
         let mut c = linked();
         c.confirm_unlink(WORD);
         c.incoming(Incoming::Lost(ClientError::Closed));
-        assert!(!c.unlink_running(), "the confirmation can be pressed again");
-        assert_eq!(c.take_unlink_settled(), None, "nothing is claimed");
-        assert!(c.link_screen().is_none());
+        assert!(!c.unlink_running(), "nothing is in flight any more");
+        assert_eq!(
+            c.take_unlink_settled(),
+            Some(Settled::Lost),
+            "the confirmation and Settings go even though the answer never came (F5)"
+        );
+        assert_eq!(
+            c.take_notice(),
+            None,
+            "the cut our own unlink causes is not painted as an error (F6)"
+        );
+        assert!(
+            !c.model().connected(),
+            "the rail still says the app is reconnecting"
+        );
+        assert_eq!(
+            c.link_screen(),
+            Some(&LinkScreen::Consent),
+            "the first screen belongs here while the daemon that held the wipe is gone"
+        );
+        assert_eq!(c.model().status().session, Session::Unlinked);
+    }
+
+    #[test]
+    fn a_wipe_whose_answer_never_comes_is_the_same_expected_cut() {
+        let mut c = linked();
+        c.confirm_unlink(WORD);
+        // The daemon stops with the wipe and the read hits its bound: F6's own line, which the
+        // app no longer paints as an error.
+        c.incoming(Incoming::Reply {
+            request: ClientFrame::wipe(true),
+            result: Err(ClientError::Timeout(std::time::Duration::from_secs(5))),
+        });
+        assert_eq!(c.take_unlink_settled(), Some(Settled::Lost));
+        assert_eq!(c.take_notice(), None, "not painted as an error (F6)");
+        assert_eq!(c.link_screen(), Some(&LinkScreen::Consent));
+    }
+
+    #[test]
+    fn the_cut_after_a_confirmed_unlink_is_not_an_error_either() {
+        let mut c = linked();
+        c.confirm_unlink(WORD);
+        c.incoming(wiped(true));
+        assert_eq!(c.take_notice().as_deref(), Some(UNLINKED));
+        // The daemon exits right after its answer, as the wipe does: the cut is expected.
+        c.incoming(Incoming::Lost(ClientError::Closed));
+        assert_eq!(c.take_notice(), None, "not painted as an error (F6)");
+        assert_eq!(c.link_screen(), Some(&LinkScreen::Consent));
+    }
+
+    #[test]
+    fn the_next_daemons_word_replaces_the_first_screen_the_lost_wipe_showed() {
+        let mut c = linked();
+        c.confirm_unlink(WORD);
+        c.incoming(Incoming::Lost(ClientError::Closed));
+        // The daemon that replaces it still has the device, because the wipe never ran: its own
+        // status says so, and the panes come back. Nothing was claimed.
+        c.incoming(Incoming::Reply {
+            request: ClientFrame::status(),
+            result: Ok(DaemonFrame::Status {
+                v: PROTOCOL_VERSION,
+                daemon: "nunciod/test".to_owned(),
+                linked: true,
+                session: Session::Linked,
+                unread: 0,
+                stop_reason: None,
+            }),
+        });
+        assert_eq!(c.link_screen(), None, "the device is still linked");
+        assert!(c.model().status().linked);
+    }
+
+    #[test]
+    fn pressing_link_with_no_daemon_asks_for_one_and_starts_the_flow_once_it_answers() {
+        let mut c = linked();
+        c.confirm_unlink(WORD);
+        c.incoming(Incoming::Lost(ClientError::Closed));
+        assert_eq!(
+            c.start_link(),
+            [Command::StartDaemon],
+            "the press is what asks the bus for the daemon our unlink stopped (F6)"
+        );
+        assert_eq!(c.link_screen(), Some(&LinkScreen::Starting));
+        let commands = c.incoming(Incoming::Connected);
+        assert!(
+            commands.contains(&Command::Send(ClientFrame::link_start(true))),
+            "the flow starts as soon as the daemon answers: {commands:?}"
+        );
+        assert_eq!(
+            commands
+                .iter()
+                .filter(|command| matches!(command, Command::Send(ClientFrame::LinkStart { .. })))
+                .count(),
+            1,
+            "one start, and only once: {commands:?}"
+        );
+        let again = c.incoming(Incoming::Connected);
+        assert!(
+            !again.contains(&Command::Send(ClientFrame::link_start(true))),
+            "a later reconnect does not start a second flow: {again:?}"
+        );
+    }
+
+    #[test]
+    fn a_press_that_never_reached_the_daemon_is_cancelled_without_a_frame() {
+        let mut c = linked();
+        c.confirm_unlink(WORD);
+        c.incoming(Incoming::Lost(ClientError::Closed));
+        assert_eq!(c.start_link(), [Command::StartDaemon]);
+        assert!(
+            c.cancel_link().is_empty(),
+            "there is no flow to stop, so nothing is sent"
+        );
+        let commands = c.incoming(Incoming::Connected);
+        assert!(
+            !commands.contains(&Command::Send(ClientFrame::link_start(true))),
+            "a cancelled press never pairs the device behind the user: {commands:?}"
+        );
+        assert_eq!(c.link_screen(), Some(&LinkScreen::Consent));
     }
 
     #[test]

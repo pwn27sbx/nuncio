@@ -3,8 +3,17 @@
 One section per release; the tag equals the version (`v0.1.0` → `pkgver=0.1.0`), and the section
 becomes the release notes.
 
-## Unreleased — the message history
+## Unreleased — the message history, and no demo chats
 
+- **The daemon never serves demo chats.** Without a linked device, `chats` answers an empty list
+  instead of the fixtures' invented conversations (*Ada Lovelace*, *Grace Hopper*, *Omarchy devs*),
+  which misread as the user's own; the terminal app then says `No device linked · open nuncio to
+  link it`. The demo data stays test and `nuncio-demo` material only, so this is a visible change
+  in what the wire answers.
+- **The unlink closes its dialogs, and the daemon stopping with it is not an error.** Confirming
+  **Unlink this device** closes the confirmation and Settings even when the daemon goes away before
+  it can answer, and the cut that follows a wipe is no longer shown as a connection error: the app
+  lands on the link screen, and **Link** starts the daemon again when nothing is serving it.
 - **Your chats arrive with their messages.** After a device is linked, the daemon imports the
   message history WhatsApp sends it, so a conversation is not empty the first time it is opened
   and the chat list shows its last message. The imported messages are stored read (an old message

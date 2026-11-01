@@ -112,6 +112,8 @@ enum Command {
     EventsLost(u64, ClientError),
     /// The outbox of life `life` posted this (boxed: a reply is far larger than the others).
     Posted(u64, Box<Posted>),
+    /// Ask the session bus for the daemon, because nothing is serving the socket.
+    StartDaemon,
     /// The handle was dropped: close both connections and end.
     Stop,
 }
@@ -144,13 +146,19 @@ pub struct Settings {
 }
 
 impl Worker {
-    /// Start the threads: the first connect is tried at once.
-    pub fn spawn(settings: Settings, post: impl Fn(Incoming) + Send + Clone + 'static) -> Self {
+    /// Start the threads: the first connect is tried at once. `start_daemon` asks the session bus
+    /// for the daemon ([`nuncio_client::bus::start_daemon`] in the app); it is a parameter so a
+    /// test proves the ask without a bus behind it.
+    pub fn spawn(
+        settings: Settings,
+        post: impl Fn(Incoming) + Send + Clone + 'static,
+        start_daemon: impl Fn() + Send + Clone + 'static,
+    ) -> Self {
         let (commands, inbox) = mpsc::channel();
         let back = commands.clone();
         thread::Builder::new()
             .name("nuncio-requests".to_owned())
-            .spawn(move || run(settings, inbox, back, post))
+            .spawn(move || run(settings, inbox, back, post, start_daemon))
             .expect("spawn the request thread");
         Self { commands }
     }
@@ -160,6 +168,12 @@ impl Worker {
     pub fn send(&self, frame: ClientFrame) {
         // The thread only ends when this handle is dropped.
         let _ = self.commands.send(Command::Request(frame));
+    }
+
+    /// Ask the session bus for the daemon: the app's own unlink stops the one that served it, so
+    /// pressing Link is what starts the next (F6). Best effort, like the first connect.
+    pub fn start_daemon(&self) {
+        let _ = self.commands.send(Command::StartDaemon);
     }
 }
 
@@ -183,6 +197,7 @@ fn run(
     inbox: mpsc::Receiver<Command>,
     back: mpsc::Sender<Command>,
     post: impl Fn(Incoming) + Send + Clone + 'static,
+    start_daemon: impl Fn() + Send + Clone + 'static,
 ) {
     let mut reconnect = Reconnect::new(settings.backoff.clone());
     let mut lives = 0_u64;
@@ -268,6 +283,10 @@ fn run(
                     post(Incoming::LateReply { request, result });
                 }
             },
+            // The link screen's Link while nothing serves the socket: the package's activation
+            // file starts the daemon through the session bus, and the reconnect schedule below
+            // dials the socket it opens. A daemon already serving keeps serving.
+            Some(Command::StartDaemon) => start_daemon(),
             // Dropping the life closes the request connection and ends its event thread.
             Some(Command::Stop) => return,
             Some(Command::EventsLost(..)) | None => {}

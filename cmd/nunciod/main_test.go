@@ -229,30 +229,6 @@ func assertSocketPermissions(t *testing.T, socket string) {
 	}
 }
 
-func assertFixtureChats(t *testing.T, chats []ipc.Chat) {
-	t.Helper()
-	if len(chats) != 3 {
-		t.Fatalf("got %d chats, want the 3 of the fixture", len(chats))
-	}
-	first := chats[0]
-	if first.JID != "15551230001@s.whatsapp.net" || first.Name != "Ada Lovelace" {
-		t.Errorf("first chat = %+v, want Ada Lovelace", first)
-	}
-	if first.Unread != 2 || !first.Pinned || first.Archived {
-		t.Errorf("first chat flags = %+v, want unread 2, pinned, not archived", first)
-	}
-	if first.LastMessage == nil || first.LastMessage.Text != "See you at 18:00" || first.LastMessage.Timestamp != "2026-10-18T17:55:04Z" {
-		t.Errorf("first chat last message = %+v", first.LastMessage)
-	}
-	if second := chats[1]; second.LastMessage == nil || !second.LastMessage.FromMe {
-		t.Errorf("second chat last message = %+v, want a message from me", chats[1].LastMessage)
-	}
-	third := chats[2]
-	if third.JID != "120363000000000000@g.us" || !third.Archived || !third.Muted || third.Unread != 17 || third.LastMessage != nil {
-		t.Errorf("group chat = %+v, want an archived, muted group with 17 unread and no last message", third)
-	}
-}
-
 func TestDaemonServesProtocolOnSocket(t *testing.T) {
 	rt := shortTempDir(t)
 	startDaemon(t, rt, noBus(t))
@@ -270,19 +246,14 @@ func TestDaemonServesProtocolOnSocket(t *testing.T) {
 		t.Fatalf("Status() = %+v, want %+v", st, want)
 	}
 
+	// No device, no store: the daemon invents no chats, so the list is the empty wire list and
+	// never the fixtures' demo conversations (F8).
 	chats, err := c.Chats(40)
 	if err != nil {
 		t.Fatalf("Chats: %v", err)
 	}
-	assertFixtureChats(t, chats.Chats)
-
-	// The limit really is applied by the daemon, not just by the fixture.
-	limited, err := c.Chats(1)
-	if err != nil {
-		t.Fatalf("Chats(1): %v", err)
-	}
-	if len(limited.Chats) != 1 || limited.Chats[0].JID != "15551230001@s.whatsapp.net" {
-		t.Fatalf("Chats(1) = %+v, want only the first chat", limited.Chats)
+	if chats.Chats == nil || len(chats.Chats) != 0 {
+		t.Fatalf("Chats() while unlinked = %+v, want an empty list", chats.Chats)
 	}
 }
 
@@ -356,10 +327,7 @@ func TestStatusReportsTheSessionState(t *testing.T) {
 		{wa.StateLinked, true},
 		{wa.StateOffline, true},
 	} {
-		d, err := newDaemon(fixedSession(tc.state), nil)
-		if err != nil {
-			t.Fatalf("newDaemon: %v", err)
-		}
+		d := newDaemon(fixedSession(tc.state), nil)
 		want := ipc.Status{Daemon: daemonVersion, Linked: tc.linked, Session: string(tc.state)}
 		if got := d.Status(); got != want {
 			t.Errorf("Status() with a %s session = %+v, want %+v", tc.state, got, want)
@@ -934,10 +902,7 @@ func TestDaemonServesChatsMessagesAndUnreadFromTheStore(t *testing.T) {
 	fake.emit(textMessage(ada, "A2", false, t0.Add(2*time.Minute), "second"))
 	fake.emit(textMessage(ada, "A3", true, t0.Add(3*time.Minute), "mine"))
 
-	d, err := newDaemon(session, db)
-	if err != nil {
-		t.Fatalf("newDaemon: %v", err)
-	}
+	d := newDaemon(session, db)
 	c := serveInProcess(t, d)
 
 	st, err := c.Status()
@@ -960,6 +925,15 @@ func TestDaemonServesChatsMessagesAndUnreadFromTheStore(t *testing.T) {
 	}
 	if !reflect.DeepEqual(chats.Chats, wantChats) {
 		t.Errorf("Chats() = %s, want %s", jsonOf(t, chats.Chats), jsonOf(t, wantChats))
+	}
+
+	// The limit is applied by the daemon, here over the store's own chats.
+	limited, err := c.Chats(1)
+	if err != nil {
+		t.Fatalf("Chats(1): %v", err)
+	}
+	if len(limited.Chats) != 1 || limited.Chats[0].JID != ada.String() {
+		t.Errorf("Chats(1) = %+v, want only the newest chat", limited.Chats)
 	}
 
 	msgs, err := c.Messages(ada.String(), 2)
@@ -1014,10 +988,7 @@ func TestDaemonChatsReplyCarriesTheAppStateFlags(t *testing.T) {
 	fake.emit(&waevents.Mute{JID: group, Action: &waSyncAction.MuteAction{
 		Muted: proto.Bool(true), MuteEndTimestamp: proto.Int64(-1)}})
 
-	d, err := newDaemon(session, db)
-	if err != nil {
-		t.Fatalf("newDaemon: %v", err)
-	}
+	d := newDaemon(session, db)
 	chats, err := serveInProcess(t, d).Chats(40)
 	if err != nil {
 		t.Fatalf("Chats: %v", err)
@@ -1036,17 +1007,16 @@ func TestDaemonChatsReplyCarriesTheAppStateFlags(t *testing.T) {
 	}
 }
 
-func TestDaemonWithoutStoreServesTheFixtureChatsAndNoMessages(t *testing.T) {
-	d, err := newDaemon(fixedSession(wa.StateUnlinked), nil)
-	if err != nil {
-		t.Fatalf("newDaemon: %v", err)
-	}
+func TestDaemonWithoutStoreServesNoChatsAndNoMessages(t *testing.T) {
+	d := newDaemon(fixedSession(wa.StateUnlinked), nil)
 	c := serveInProcess(t, d)
 	chats, err := c.Chats(40)
 	if err != nil {
 		t.Fatalf("Chats: %v", err)
 	}
-	assertFixtureChats(t, chats.Chats)
+	if chats.Chats == nil || len(chats.Chats) != 0 {
+		t.Errorf("Chats() while unlinked = %+v, want an empty list", chats.Chats)
+	}
 	msgs, err := c.Messages("15551230001@s.whatsapp.net", 50)
 	if err != nil {
 		t.Fatalf("Messages: %v", err)
@@ -1057,10 +1027,7 @@ func TestDaemonWithoutStoreServesTheFixtureChatsAndNoMessages(t *testing.T) {
 }
 
 func TestDaemonAnswersEmptyMessagesForAChatNotInTheStore(t *testing.T) {
-	d, err := newDaemon(fixedSession(wa.StateLinked), openTestStore(t))
-	if err != nil {
-		t.Fatalf("newDaemon: %v", err)
-	}
+	d := newDaemon(fixedSession(wa.StateLinked), openTestStore(t))
 	c := serveInProcess(t, d)
 	msgs, err := c.Messages("15551239999@s.whatsapp.net", 50)
 	if err != nil {
@@ -1136,10 +1103,7 @@ func TestTwoSubscribedClientsBothReceiveAStoredMessage(t *testing.T) {
 	if err := session.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	d, err := newDaemon(session, db)
-	if err != nil {
-		t.Fatalf("newDaemon: %v", err)
-	}
+	d := newDaemon(session, db)
 	sock := serveSocket(t, d, events)
 	first, firstR := subscriber(t, sock)
 	second, secondR := subscriber(t, sock)
@@ -1171,12 +1135,9 @@ func TestTwoSubscribedClientsBothReceiveAStoredMessage(t *testing.T) {
 
 func TestDaemonSendWhileUnlinkedAnswersNotLinked(t *testing.T) {
 	session := wa.NewSession(nil, nil, nil)
-	d, err := newDaemon(session, nil)
-	if err != nil {
-		t.Fatalf("newDaemon: %v", err)
-	}
+	d := newDaemon(session, nil)
 	c := serveInProcess(t, d)
-	_, err = c.Send("15551230001@s.whatsapp.net", "On my way", "c-1")
+	_, err := c.Send("15551230001@s.whatsapp.net", "On my way", "c-1")
 	var perr *ipc.ProtocolError
 	if !errors.As(err, &perr) || perr.Code != ipc.CodeNotLinked {
 		t.Errorf("Send while unlinked = %v, want a %s error", err, ipc.CodeNotLinked)
@@ -1196,10 +1157,7 @@ func linkedDaemon(t *testing.T) (*wa.Session, *fakeWAClient, string) {
 	if err := session.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	d, err := newDaemon(session, db)
-	if err != nil {
-		t.Fatalf("newDaemon: %v", err)
-	}
+	d := newDaemon(session, db)
 	return session, fake, serveSocket(t, d, events)
 }
 
@@ -1481,10 +1439,7 @@ func newWipeRig(t *testing.T, configure func(*wipeRig)) *wipeRig {
 	if err := session.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	d, err := newDaemon(session, db)
-	if err != nil {
-		t.Fatalf("newDaemon: %v", err)
-	}
+	d := newDaemon(session, db)
 	d.dataDir, d.keyring, d.socket = r.dataDir, r.keyring, r.socket
 	if err := os.MkdirAll(filepath.Dir(r.socket), 0o700); err != nil {
 		t.Fatal(err)
@@ -1803,10 +1758,7 @@ func TestDaemonDownloadMediaCorners(t *testing.T) {
 		}
 	})
 	t.Run("unlinked", func(t *testing.T) {
-		d, err := newDaemon(wa.NewSession(nil, nil, nil), nil)
-		if err != nil {
-			t.Fatalf("newDaemon: %v", err)
-		}
+		d := newDaemon(wa.NewSession(nil, nil, nil), nil)
 		c := serveInProcess(t, d)
 		if code, _ := codeOf(downloadErr(c, ada.String(), "3EB0AAA0")); code != ipc.CodeNotLinked {
 			t.Errorf("DownloadMedia while unlinked = %s, want %s", code, ipc.CodeNotLinked)
@@ -1852,10 +1804,7 @@ func TestDaemonServesImageThumbnailsInMessagesAndSearchWithoutDownloading(t *tes
 	if err != nil || len(msgs.Messages) != 1 || !reflect.DeepEqual(msgs.Messages[0], want) {
 		t.Fatalf("Messages = %s, %v; want only %s", jsonOf(t, msgs.Messages), err, jsonOf(t, want))
 	}
-	d, err := newDaemon(session, session.Store())
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(session, session.Store())
 	hits, err := d.Search(ada.String(), "venue", 10)
 	if err != nil || len(hits) != 1 || !reflect.DeepEqual(hits[0], want) {
 		t.Fatalf("Search = %s, %v; want only %s", jsonOf(t, hits), err, jsonOf(t, want))
@@ -1919,10 +1868,7 @@ func TestThumbnailsNeverPushAMessagesReplyOverTheFrameLimit(t *testing.T) {
 	}
 
 	// search answers with the same frame, so it keeps under the limit the same way.
-	d, err := newDaemon(session, session.Store())
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(session, session.Store())
 	hits, err := d.Search(ada.String(), "venue", 200)
 	if err != nil || len(hits) != 200 {
 		t.Fatalf("Search = %d, %v; want all 200", len(hits), err)

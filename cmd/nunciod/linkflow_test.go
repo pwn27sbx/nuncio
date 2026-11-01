@@ -449,10 +449,7 @@ func TestADaemonServesTheDeviceALinkFlowPaired(t *testing.T) {
 
 	events := ipc.NewBroker()
 	session := wa.NewSession(nil, nil, nil)
-	d, err := newDaemon(session, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(session, nil)
 	d.dbPath, d.keyring, d.events = path, kr, events
 	if got := d.Status(); got.Session != ipc.SessionUnlinked {
 		t.Fatalf("before pairing: session %q, want unlinked", got.Session)

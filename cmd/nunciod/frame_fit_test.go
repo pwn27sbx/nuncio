@@ -46,10 +46,7 @@ func TestAMessagesReplyTooLongForOneFrameKeepsTheConnection(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	d, err := newDaemon(fixedSession(wa.StateLinked), db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(fixedSession(wa.StateLinked), db)
 	conn, br := subscriber(t, serveSocket(t, d, ipc.NewBroker()))
 
 	reply := ask(t, conn, br, `{"v":1,"op":"messages","jid":"`+chat+`","limit":200}`)
@@ -118,10 +115,7 @@ func TestATrimmedReplyWithAnOldPhotoKeepsTheDaemonServing(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	d, err := newDaemon(fixedSession(wa.StateLinked), db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(fixedSession(wa.StateLinked), db)
 	conn, br := subscriber(t, serveSocket(t, d, ipc.NewBroker()))
 	reply := ask(t, conn, br, `{"v":1,"op":"messages","jid":"`+chat+`","limit":200}`)
 	if len(reply) > ipc.MaxFrameLen || !strings.Contains(reply, `"id":"word199"`) || strings.Contains(reply, `"id":"photo"`) {
@@ -145,10 +139,7 @@ func TestAChatsReplyTooLongForOneFrameKeepsTheConnection(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	d, err := newDaemon(fixedSession(wa.StateLinked), db)
-	if err != nil {
-		t.Fatal(err)
-	}
+	d := newDaemon(fixedSession(wa.StateLinked), db)
 	conn, br := subscriber(t, serveSocket(t, d, ipc.NewBroker()))
 
 	reply := ask(t, conn, br, `{"v":1,"op":"chats","limit":200}`)

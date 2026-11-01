@@ -2,8 +2,9 @@
 
 The ratatui terminal client. It talks to `nunciod` over `$XDG_RUNTIME_DIR/nuncio/core.sock`
 (wire v1, `proto/wire.md`): one connection for requests and one subscribed connection for live
-events. With no daemon it still starts, shows `proto/fixtures/chats_response.json` and says
-`FIXTURE DATA`; a send then shows as not sent.
+events. With no daemon it still starts, with an empty list that says
+`nunciod is not running · open nuncio to start it` and `NO DAEMON` in the header; a send then
+shows as not sent. It never shows demo chats a user could take for their own.
 
 If the daemon goes away later (it restarted, a read hit the 5 s bound, a send's answer the 25 s
 one), the footer's right slot says
@@ -130,7 +131,7 @@ nuncio-tui [--image <png>]
   says `· Tab` so the other pane is one key away. The mouse map is rebuilt on every draw, so a
   click can never land on a pane that is not on screen.
 - **Status line**: the header is only the app's name plus one right-aligned datum, the unread
-  count in the accent when there is one (`3 unread`), or `FIXTURE DATA` with no daemon. The
+  count in the accent when there is one (`3 unread`), or `NO DAEMON` with no daemon. The
   daemon's build, the session and the picture protocol are in `?`.
 - **Footer**: one line. Its right slot is the session state — `linked`, `reconnecting…`,
   `offline`, `not linked`, `unknown`, `no daemon` — in the warning tone whenever it is not

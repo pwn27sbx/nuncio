@@ -3,7 +3,7 @@
 One section per release; the tag equals the version (`v0.1.0` → `pkgver=0.1.0`), and the section
 becomes the release notes.
 
-## Unreleased — the message history, and no demo chats
+## v0.2.1 — the message history, no demo chats, and a readable window
 
 - **The daemon never serves demo chats.** Without a linked device, `chats` answers an empty list
   instead of the fixtures' invented conversations (*Ada Lovelace*, *Grace Hopper*, *Omarchy devs*),
@@ -25,6 +25,15 @@ becomes the release notes.
   bus name with nothing serving the socket and every client failed. Closing the session now stops
   the import at its next message and closes the store once nothing is writing to it, so a wipe
   right after linking exits the daemon as it should.
+- **The conversation takes the room it has.** The transcript no longer stops at a 72-character
+  measure: it fills its pane up to a broad maximum and the bubbles sit at the two ends, while the
+  chat list keeps its fixed width, the way WhatsApp Web lays it out.
+- **One type scale, one step denser.** Every size the window paints comes from a single table (the
+  transcript's measure reads it too), so the same conversation fits more lines and nothing is
+  clipped: title 14, body 12, label 11, meta 10.
+- **A drawn photo no longer says `[image]` next to it.** A bubble whose picture or sticker is
+  drawn drops the bracketed label; the label stays as the fallback when there is nothing drawn,
+  and a document keeps its row. Video is unchanged: the wire carries no thumbnail for it yet.
 
 ## v0.2.0 — link a device inside the app
 

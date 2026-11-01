@@ -13,7 +13,8 @@
 // while the keyring is locked the daemon serves offline, connects nothing and
 // writes nothing, trying again on the session's backoff. With a
 // nuncio.db it stores incoming text and media messages and answers chats, messages and
-// unread counts from it; without one it answers the shared fixture chat list.
+// unread counts from it; without one it answers no chats at all, so an unlinked app shows nothing
+// rather than someone else's demo conversations.
 // Attachments are downloaded only on a download_media request, into the private
 // media cache $XDG_DATA_HOME/nuncio/media. It searches the stored messages of a
 // chat without contacting WhatsApp, sends a reply that quotes a stored message,
@@ -47,7 +48,7 @@ import (
 )
 
 // daemonVersion is the value of the `daemon` field in every frame.
-const daemonVersion = "nunciod/0.2.0"
+const daemonVersion = "nunciod/0.2.1"
 
 func main() {
 	flag.Parse()

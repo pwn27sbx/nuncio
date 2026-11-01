@@ -8,6 +8,7 @@ import (
 	"log"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 	waevents "go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
 
@@ -225,6 +226,18 @@ func fitReply(jid string, msgs []ipc.Message, limit int) []ipc.Message {
 	return msgs
 }
 
+// canonicalRow is the store-side rule shared by a live delivery and the history import: it puts the
+// row in the chat its message belongs to (CanonicalJID, so one contact has one chat) and names the
+// author of a direct message by that canonical chat.
+func (s *Session) canonicalRow(m store.Message, chat types.JID) store.Message {
+	m.ChatJID = s.CanonicalJID(m.ChatJID)
+	if m.Sender == chat.ToNonAD().String() && m.Sender != m.ChatJID && !isGroupChat(m.ChatJID) {
+		m.Sender = m.ChatJID
+	}
+	s.mergeAliasOf(m.ChatJID)
+	return m
+}
+
 // storeMessage saves one incoming or own message and publishes it with any reactions that arrived
 // before it, followed by the new unread counts when it is incoming; a reaction is stored on its
 // target instead (see storeReaction). A repeated event is ignored by the store and publishes
@@ -240,11 +253,7 @@ func (s *Session) storeMessage(evt *waevents.Message) {
 	}
 	// One chat per contact: a message addressed by phone number goes to her LID chat when whatsmeow
 	// knows it, and a message in a LID chat brings along what is still stored under her number.
-	m.ChatJID = s.CanonicalJID(m.ChatJID)
-	if m.Sender == evt.Info.Chat.ToNonAD().String() && m.Sender != m.ChatJID && !evt.Info.IsGroup {
-		m.Sender = m.ChatJID
-	}
-	s.mergeAliasOf(m.ChatJID)
+	m = s.canonicalRow(m, evt.Info.Chat)
 	// A store failure is logged by its error type only: SQLite's text could quote a value.
 	inserted, err := store.InsertMessage(s.db, m)
 	if err != nil {

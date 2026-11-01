@@ -171,7 +171,7 @@ func TestAFailedStartAfterALogoutStaysUnlinked(t *testing.T) {
 	c := logoutOnConnect{&fakeClient{device: true}}
 	s := NewSession(c, nil, nil)
 	s.logf = t.Logf
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	events := eventsOf(t, s)
 	if err := s.Start(); err == nil {
 		t.Fatal("Start = nil, want the connect error")

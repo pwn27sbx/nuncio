@@ -200,7 +200,7 @@ func (f *fakeClient) emit(e any) {
 func TestSessionWithoutDeviceStaysUnlinkedAndNeverConnects(t *testing.T) {
 	fake := &fakeClient{device: false}
 	s := NewSession(fake, nil, nil)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestSessionWithoutDeviceStaysUnlinkedAndNeverConnects(t *testing.T) {
 func TestSessionWithDeviceConnectsOnceAndReportsLinked(t *testing.T) {
 	fake := &fakeClient{device: true}
 	s := NewSession(fake, nil, nil)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestSessionWithDeviceConnectsOnceAndReportsLinked(t *testing.T) {
 func TestSessionDisconnectEventReportsOffline(t *testing.T) {
 	fake := &fakeClient{device: true}
 	s := NewSession(fake, nil, nil)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestSessionDisconnectEventReportsOffline(t *testing.T) {
 func TestSessionFailedConnectReportsOffline(t *testing.T) {
 	fake := &fakeClient{device: true, connectErr: errors.New("no network")}
 	s := NewSession(fake, nil, nil)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(); err == nil {
 		t.Error("Start returned nil after a failed connect, want the error")
 	}
@@ -330,7 +330,7 @@ func TestSessionEndEventsLeaveLinked(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeClient{device: true}
 			s := NewSession(fake, nil, nil)
-			t.Cleanup(s.Close)
+			t.Cleanup(func() { _ = s.Close() })
 			if err := s.Start(); err != nil {
 				t.Fatalf("Start: %v", err)
 			}
@@ -358,7 +358,7 @@ func TestEventsWithNilHandlersIgnoreSessionEndEvents(t *testing.T) {
 func TestSessionPublishesEachConnectionChangeOnce(t *testing.T) {
 	fake := &fakeClient{device: true}
 	s := NewSession(fake, nil, nil)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	events := eventsOf(t, s)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -379,7 +379,7 @@ func TestSessionWithoutEventsStillRuns(t *testing.T) {
 	db := openTestStore(t)
 	fake := &fakeClient{device: true}
 	s := NewSession(fake, db, nil)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -449,7 +449,7 @@ func reconnectingSession(t *testing.T, fake *fakeClient) (*Session, *fakeTimers,
 	s.logf = t.Logf
 	s.backoff.Rand = rand.New(rand.NewPCG(1, 2)).Float64
 	s.backoff.Now = func() time.Time { return now }
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -486,7 +486,7 @@ func TestFailedStartSchedulesAReconnect(t *testing.T) {
 	s := NewSession(fake, nil, nil)
 	timers := &fakeTimers{}
 	s.after = timers.after
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(); err == nil {
 		t.Fatal("Start returned nil after a failed connect, want the error")
 	}
@@ -647,7 +647,7 @@ func TestAStopIsLoggedOnceWithItsReason(t *testing.T) {
 			s := NewSession(fake, nil, nil)
 			var lines []string
 			s.logf = func(format string, args ...any) { lines = append(lines, fmt.Sprintf(format, args...)) }
-			t.Cleanup(s.Close)
+			t.Cleanup(func() { _ = s.Close() })
 			if err := s.Start(); err != nil {
 				t.Fatalf("Start: %v", err)
 			}

@@ -36,7 +36,7 @@ func offlineSession(t *testing.T) (*Session, *fakeClient, func() []string, *fake
 	s.paceAfter = instantPace
 	s.logf = t.Logf
 	events := eventsOf(t, s)
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
 	}

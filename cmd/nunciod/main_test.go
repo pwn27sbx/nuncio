@@ -25,8 +25,11 @@ import (
 
 	"github.com/godbus/dbus/v5"
 	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/proto/waHistorySync"
 	"go.mau.fi/whatsmeow/proto/waSyncAction"
+	"go.mau.fi/whatsmeow/proto/waWeb"
 	"go.mau.fi/whatsmeow/types"
 	waevents "go.mau.fi/whatsmeow/types/events"
 	"google.golang.org/protobuf/proto"
@@ -309,7 +312,7 @@ func (s fixedSession) Retry(string) (ipc.Sent, error) {
 func (s fixedSession) Logout(context.Context) error {
 	return errors.New("a fixed session cannot log out")
 }
-func (s fixedSession) Close() {}
+func (s fixedSession) Close() error { return nil }
 
 func (s fixedSession) DownloadMedia(string, string) (string, string, error) {
 	if wa.State(s) == wa.StateUnlinked {
@@ -1151,7 +1154,7 @@ func linkedDaemon(t *testing.T) (*wa.Session, *fakeWAClient, string) {
 	db := openTestStore(t)
 	fake := &fakeWAClient{sendID: "3EB0BBB1", sendTime: time.Date(2026, 10, 18, 17, 56, 10, 0, time.UTC)}
 	session := wa.NewSession(fake, db, nil)
-	t.Cleanup(session.Close)
+	t.Cleanup(func() { _ = session.Close() })
 	events := ipc.NewBroker()
 	session.SetEvents(events)
 	if err := session.Start(); err != nil {
@@ -1377,6 +1380,8 @@ var deviceKeyItems = []string{"device.noise_key", "device.identity_key", "device
 type wipeRig struct {
 	fake    *fakeWAClient
 	keyring *fakeKeyring
+	// db is the message store the session writes to, until a wipe closes it.
+	db      *sql.DB
 	dataDir string
 	runtime string
 	socket  string
@@ -1415,6 +1420,7 @@ func newWipeRig(t *testing.T, configure func(*wipeRig)) *wipeRig {
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
+	r.db = db
 	if err := store.EnsureSchema(db); err != nil {
 		t.Fatalf("EnsureSchema: %v", err)
 	}
@@ -1433,7 +1439,7 @@ func newWipeRig(t *testing.T, configure func(*wipeRig)) *wipeRig {
 		configure(r)
 	}
 	session := wa.NewSession(r.fake, db, db.Close)
-	t.Cleanup(session.Close)
+	t.Cleanup(func() { _ = session.Close() })
 	events := ipc.NewBroker()
 	session.SetEvents(events)
 	if err := session.Start(); err != nil {
@@ -1541,6 +1547,61 @@ func TestPurgeThroughTheDaemonNeverCallsTheNetworkAndLeavesNothingBehind(t *test
 	}
 	if n := r.fake.logouts.Load(); n != 0 {
 		t.Errorf("client Logout called %d times by a purge, want 0", n)
+	}
+	r.assertNothingLeft(t)
+}
+
+// historySyncOf is a history-sync event of n text messages in one conversation, as the phone sends
+// a full sync. It is deliberately bigger than an import may take: a wipe must never wait for one.
+func historySyncOf(chat string, n int) *waevents.HistorySync {
+	conv := &waHistorySync.Conversation{ID: proto.String(chat)}
+	for i := 0; i < n; i++ {
+		conv.Messages = append(conv.Messages, &waHistorySync.HistorySyncMsg{Message: &waWeb.WebMessageInfo{
+			Key:              &waCommon.MessageKey{RemoteJID: proto.String(chat), ID: proto.String(fmt.Sprintf("H%d", i))},
+			Message:          &waE2E.Message{Conversation: proto.String("history")},
+			MessageTimestamp: proto.Uint64(uint64(1759000000 + i)),
+		}})
+	}
+	return &waevents.HistorySync{Data: &waHistorySync.HistorySync{
+		SyncType:      waHistorySync.HistorySync_FULL.Enum(),
+		Conversations: []*waHistorySync.Conversation{conv},
+	}}
+}
+
+// A wipe that lands while the history import is still running must still stop the daemon. The
+// owner unlinked right after linking, with his 943 messages coming in, and the process stayed
+// alive holding the bus name with no socket. The blob here is far bigger, so a wipe that waited
+// for the import would be visible as such.
+func TestAWipeStopsTheDaemonWhileAHistoryImportIsRunning(t *testing.T) {
+	r := newWipeRig(t, nil)
+	chat := types.NewJID("15551230001", types.DefaultUserServer)
+	r.fake.emit(historySyncOf(chat.String(), 60000))
+	// The import is running once its first message is stored.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		var n int
+		if err := r.db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&n); err == nil && n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the history import never stored a message")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	c := dial(t, r.socket)
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.Wipe(false)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Wipe(false) while the history import runs: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the wipe waited for the history import instead of stopping it")
 	}
 	r.assertNothingLeft(t)
 }

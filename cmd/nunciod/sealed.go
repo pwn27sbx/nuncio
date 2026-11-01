@@ -457,12 +457,12 @@ func (g *gate) CanonicalJID(jid string) string {
 
 // Close stops the attempts and closes the session, or the store while there is none. It never
 // waits for a running attempt (which may be blocked on the keyring): that attempt closes what it
-// opened, or the store, when it returns.
-func (g *gate) Close() {
+// opened, or the store, when it returns. Its error is the session's own (see Session.Close).
+func (g *gate) Close() error {
 	g.mu.Lock()
 	if g.closed {
 		g.mu.Unlock()
-		return
+		return nil
 	}
 	g.closed = true
 	cancel := g.cancel
@@ -475,8 +475,9 @@ func (g *gate) Close() {
 	}
 	switch {
 	case live != nil:
-		live.Close()
+		return live.Close()
 	case !inflight:
 		_ = g.db.Close()
 	}
+	return nil
 }

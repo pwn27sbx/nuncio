@@ -35,7 +35,7 @@ func TestEachStopPublishesItsFixedReason(t *testing.T) {
 			fake := &fakeClient{device: true}
 			s := NewSession(fake, nil, nil)
 			s.logf = t.Logf
-			t.Cleanup(s.Close)
+			t.Cleanup(func() { _ = s.Close() })
 			events := eventsOf(t, s)
 			if err := s.Start(); err != nil {
 				t.Fatalf("Start: %v", err)
@@ -53,7 +53,7 @@ func TestALogoutOnRequestPublishesLoggedOut(t *testing.T) {
 	fake := &fakeClient{device: true}
 	s := NewSession(fake, nil, nil)
 	s.logf = t.Logf
-	t.Cleanup(s.Close)
+	t.Cleanup(func() { _ = s.Close() })
 	events := eventsOf(t, s)
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)

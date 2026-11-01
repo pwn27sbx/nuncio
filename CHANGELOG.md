@@ -3,10 +3,10 @@
 One section per release; the tag equals the version (`v0.1.0` → `pkgver=0.1.0`), and the section
 becomes the release notes.
 
-## Unreleased — link a device inside the app
+## v0.2.0 — link a device inside the app
 
-This becomes **v0.2.0** when the home acceptance run passes: the wire and the first-run flow
-changed, so the version moves.
+The wire and the first-run flow changed, so the version moves. The tag follows the home acceptance
+run that installs this package and scans a code from a spare phone.
 
 - **Linking happens in the app.** An unlinked **nuncio** opens on **Link this device to WhatsApp**
   with the warning, one **Link** button and the code drawn once you press it; scan it and the chat

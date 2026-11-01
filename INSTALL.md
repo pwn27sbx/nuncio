@@ -1,7 +1,8 @@
 # Installing nuncio
 
 nuncio is a WhatsApp client for **Omarchy** (or Arch Linux) on x86_64. This page is the whole
-story: install, first run, update, uninstall, and what to do when something goes wrong.
+story for the app: install, link your phone, update, uninstall, and what to do when something goes
+wrong. The terminal commands are in [docs/COMMAND-LINE.md](docs/COMMAND-LINE.md).
 
 nuncio is an unofficial client and WhatsApp's Terms of Service forbid it. Accounts have been
 banned for using clients like this one. **Use a spare number**, never the number that carries
@@ -19,9 +20,10 @@ curl -L -o /tmp/nuncio.pkg.tar.zst https://github.com/pwn27sbx/nuncio/releases/l
 in an official repository, so the package is unsigned. It comes over HTTPS from this project's
 release page.
 
-The package installs four programs (`nunciod`, `nuncio`, `nuncio-tui`, `nuncio-desktop`), two
-launchers, the daemon's `systemd --user` unit and its D-Bus activations, and an autostart entry
-for the desktop app.
+**That is the last terminal step.** The package installs four programs (`nunciod`, `nuncio`,
+`nuncio-tui`, `nuncio-desktop`), two launchers, the daemon's `systemd --user` unit and its D-Bus
+activations, and an autostart entry for the desktop app. Everything after this line happens in the
+app's window.
 
 ### On Arch without Omarchy
 
@@ -31,52 +33,31 @@ The package needs GTK 4, libadwaita and glibc, and a **Secret Service** to hold 
 sudo pacman -S gnome-keyring
 ```
 
-Omarchy ships one already. Without it, linking a device fails with
-`the keyring (Secret Service) is locked or unavailable`.
+Omarchy ships one already. Without it, pressing **Link** fails with the keyring sentence below.
 
-## First run
+## Link this device
 
-Open **nuncio** from your launcher. That is all: the app asks the session bus for the daemon, the
-bus starts it, and the app enables the daemon's login item for you, so it comes back after a
-logout without you typing a thing. No `systemctl`, no terminal.
+1. Open **nuncio** from your launcher. With no device linked, its first screen says **Link this
+   device to WhatsApp**, says what linking gives this computer access to, and offers one button,
+   **Link**. Nothing is asked of your keyring until you press it.
+2. Press **Link**. A QR code appears, and a new one replaces it while your phone has not answered.
+3. On your phone: **WhatsApp → Settings → Linked devices → Link a device**, and scan the code.
 
-Linking a device is still done from the command line in this version:
+The chat list appears the moment your phone accepts the code. Nothing to restart, nothing else to
+do. You link once per computer.
 
-```sh
-nuncio link --qr --consent
-```
+- **The code links a device to your account** while it is on screen: do not let anyone else scan it.
+- **Cancel** (or `Esc`, or closing the window) stops waiting and leaves nothing behind: no device,
+  no data, no keyring entry. The screen stays, and **Link** asks for a new code.
+- **The code expired or WhatsApp refused it**: the screen says so and offers **New code**.
 
-`--consent` is required: linking a device is the one action that needs your explicit yes, and
-without it the command only prints the warning. A QR code appears; scan it from WhatsApp on your
-phone (**Linked devices → Link a device**). A future version links from inside the app.
+After that, both apps open on your chats:
 
-Then open either app:
-
-- **nuncio** (the GTK app) from your launcher — the chat list;
+- **nuncio** (the GTK app) from your launcher;
 - **nuncio (terminal)** from your launcher, or **`nuncio-tui`** in a terminal.
 
-If `nuncio link` refuses because `nunciod is running`, stop it first:
-
-```sh
-systemctl --user stop nunciod
-```
-
-### The Omarchy hotkey and bar badge (optional, not packaged)
-
-These are files in your own `~/.config`, so no package can install them:
-
-```sh
-base=https://raw.githubusercontent.com/pwn27sbx/nuncio/v0.1.0/contrib/omarchy
-curl -fsSL -o ~/.config/hypr/nuncio.lua --create-dirs "$base/hypr/nuncio.lua"
-echo 'require("hypr.nuncio")' >> ~/.config/hypr/bindings.lua
-mkdir -p ~/.config/omarchy/plugins/pwn27sbx.nuncio-unread
-curl -fsSL -o ~/.config/omarchy/plugins/pwn27sbx.nuncio-unread/manifest.json "$base/bar-widget/manifest.json"
-curl -fsSL -o ~/.config/omarchy/plugins/pwn27sbx.nuncio-unread/BarWidget.qml "$base/bar-widget/BarWidget.qml"
-hyprctl reload
-```
-
-`packaging/install.sh --uninstall` knows how to remove both if you installed them unchanged. The
-details, and the key they bind, are in `contrib/omarchy/README.md` of the same tag.
+The desktop app adds the daemon to your login items, so it comes back after a logout without you
+typing anything. No `systemctl`, no terminal.
 
 ## Update
 
@@ -87,42 +68,54 @@ if `pacman -Qi nuncio` shows the version you just installed over, wait and run t
 
 ## Uninstall
 
+**Unlink first**, from the app: **Settings** (Ctrl+,) → **This device** → **Unlink this device**,
+then type `unlink`. That tells WhatsApp to unlink this computer, and deletes nuncio's data on it:
+the database, the media it downloaded and the keys in your keyring. If the device is already gone
+from your phone's **Linked devices**, `nuncio purge --confirm` deletes the same local data without
+contacting WhatsApp.
+
+Then remove the package:
+
 ```sh
 sudo pacman -R nuncio
 ```
 
-That removes the programs, the launchers, the units and the autostart entry. **Your messages stay**
-in `~/.local/share/nuncio` (the database and the media), and the device stays linked on your
-phone.
+That removes the programs, the launchers, the units and the autostart entry. It does not touch what
+your account holds; three paths are worth naming:
 
-To unlink the device from WhatsApp and delete everything first:
+- **`~/.local/share/nuncio`** — the folder the daemon kept your data in. The unlink empties it; the
+  folder itself stays, because the daemon's sandbox cannot remove it. Delete it if it is empty. If
+  you removed the package without unlinking, your database and media are still in it.
+- **the keyring item `nuncio` / `store.data_key`** — the key that opens the database. The unlink
+  deletes it; skipped that step, it is still there, and so is your data above.
+- **`~/.config/systemd/user/default.target.wants/nunciod.service`** — the link the app wrote when it
+  added the daemon to your login items. It now points at a unit that is gone; delete it.
 
-```sh
-nuncio logout --confirm
-```
-
-`logout` talks to WhatsApp (the phone stops showing the device) and wipes the database, the media,
-the backups and the keyring entry. `nuncio purge --confirm` does the same locally, without
-contacting WhatsApp, for a device you already removed on the phone. Both need `nunciod` running,
-so run them **before** `pacman -R`.
+The device stays linked on your phone until you unlink it (from the app, or from the phone's
+**Linked devices** list). Unlinking deletes your data: to keep a copy, do it before you unlink —
+the folder alone is useless without the keyring item.
 
 ## If something goes wrong
 
-- **`the keyring (Secret Service) is locked or unavailable`**: unlock your login keyring (it
-  normally unlocks with your session), or install a Secret Service (see above).
-- **`nunciod is running` when linking**: `systemctl --user stop nunciod`, link, then open the app
-  again (it starts the daemon).
-- **The apps start but show `reconnecting…`**: `systemctl --user status nunciod` says why. A
-  session WhatsApp stopped (logged out, banned, another device replaced it) is shown in the app's
-  status line, in fixed text.
-- **Logs**: `journalctl --user -u nunciod`. They never contain message text, full phone numbers or
-  keys.
-- **Your data**: `~/.local/share/nuncio` (directory `0700`, files `0600`). Back it up by copying
-  that folder while `nunciod` is stopped, plus the keyring entry (the sealed database is useless
-  without it).
+- **`nuncio could not reach the keyring: unlock it, or on plain Arch install gnome-keyring (Omarchy
+  ships a Secret Service).`** The link screen says this after you press **Link**. Unlock your login
+  keyring (it normally unlocks with your session), then press **Try again**.
+- **`WhatsApp stopped the linking: ask for a new QR`**: WhatsApp ended the pairing — usually an
+  expired code, sometimes the account was logged out or banned. Press **New code**. If it keeps
+  happening, stop: do not retry with the number that carries your two-factor authentication.
+- **The app opens on the link screen although this computer was linked**: the daemon has no device
+  any more (the data was removed, or `nuncio purge` ran). Link again.
+- **The app says `offline` or `reconnecting…`**: it cannot reach the daemon. Open **nuncio** again:
+  it asks the session bus for the daemon, and the bus starts it. If it stays offline, log out of
+  your desktop session and back in; the login item starts it. Your messages are not lost.
+- **A full log**: it needs a terminal. [docs/COMMAND-LINE.md](docs/COMMAND-LINE.md#when-something-goes-wrong)
+  has the command, and every message the CLI prints. Logs never contain message text, full phone
+  numbers or keys.
+- **Your data**: `~/.local/share/nuncio` (directory `0700`, files `0600`). The database is sealed
+  under the key in your keyring, and the sealed database is useless without it.
 
 ## Building from source instead
 
-See [packaging/README.md](../packaging/README.md): `base-devel`, `go` 1.26+, `rust` 1.92+,
+See [packaging/README.md](packaging/README.md): `base-devel`, `go` 1.26+, `rust` 1.92+,
 `pkgconf`, then `packaging/package-source.sh` and `makepkg`. This is for contributors; the
 install line above needs no toolchain.

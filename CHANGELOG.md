@@ -3,6 +3,30 @@
 One section per release; the tag equals the version (`v0.1.0` → `pkgver=0.1.0`), and the section
 becomes the release notes.
 
+## v0.2.0 — link a device inside the app
+
+The wire and the first-run flow changed, so the version moves. The tag follows the home acceptance
+run that installs this package and scans a code from a spare phone.
+
+- **Linking happens in the app.** An unlinked **nuncio** opens on **Link this device to WhatsApp**
+  with the warning, one **Link** button and the code drawn once you press it; scan it and the chat
+  list appears without a restart. `Esc` cancels and leaves no device, no data and no keyring entry.
+- **The daemon is the linker.** Six frames (`link_start`, `link_cancel`, `link_started`,
+  `link_cancelled`, `link_qr`, `link_state`) carry the flow, with fixtures and both contract
+  suites. `nunciod` owns the store, the data key and the codes; it refuses a start without
+  consent, rotates the codes, and removes only what its own flow created.
+- **`nuncio link --qr` is a client of those frames**: it draws each code the daemon publishes, and
+  it needs the daemon running instead of stopped. `--phone` keeps its own pairing path (and its
+  refusal while the daemon answers) until a frame can carry a pairing code.
+- **Unlink from Settings**: **This device → Unlink this device**, with the word `unlink` typed,
+  sends the daemon's existing wipe and lands on the link screen without a restart.
+- **The terminal app's unlinked copy** says `No device linked · open nuncio to link it` instead of
+  naming the CLI.
+- **Docs**: [INSTALL.md](INSTALL.md) is now the whole user story (install line, open, press Link,
+  scan, uninstall) and carries no `systemctl` step; the CLI reference moved to
+  [docs/COMMAND-LINE.md](docs/COMMAND-LINE.md) and the README keeps the command list and a
+  pointer. The package ships `INSTALL.md` and the daemon's unit points its `Documentation=` at it.
+
 ## v0.1.1 — the apps start the daemon
 
 - **No more `systemctl`.** The terminal and desktop clients now ask the session bus for the

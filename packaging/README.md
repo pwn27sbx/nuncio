@@ -33,8 +33,11 @@ packaging files must be committed: the tarball is `git archive HEAD`.
 packaging/package-source.sh            # writes .local/package/{nuncio-<version>.tar.gz,PKGBUILD}
 cd .local/package
 makepkg --cleanbuild --force -si       # builds, runs the tests, installs with pacman
-systemctl --user enable --now nunciod.service
 ```
+
+Then open **nuncio** from the launcher: it asks the session bus for the daemon and enables the
+login item itself (P1), so no `systemctl` step is needed. `packaging/install.sh` is the alternative
+that enables the unit from the terminal.
 
 With Rust from rustup's own installer (not a pacman package), add `--nodeps` to `makepkg`, as for
 Sealwax: makepkg's check of the build dependencies fails, pacman still checks the runtime ones.
@@ -68,14 +71,22 @@ build: `bash install.sh --dir .local/package` (with a `SHA256SUMS` next to the p
 
 ```sh
 bash install.sh --uninstall             # or by hand:
-systemctl --user disable --now nunciod.service
 sudo pacman -R nuncio
 ```
 
-Disable the service **before** `pacman -R`: otherwise `~/.config/systemd/user/default.target.wants/`
-keeps a dangling link. Your messages and keys are not package files: `nuncio purge --confirm`
-(before uninstalling) or deleting `~/.local/share/nuncio` removes them. `MANIFEST` lists every
-package file; after `pacman -R` none of them may exist.
+**Unlink first**, from the app (**Settings → This device → Unlink this device**) or with
+`nuncio logout --confirm`: that is what removes the device from the account and deletes the local
+database, media and keyring items. `pacman -R` removes the package files and nothing else. Three
+paths in the user's account are not package files, and are worth naming:
+
+- `~/.local/share/nuncio` (emptied by the unlink; the daemon's sandbox cannot remove the folder);
+- the keyring item `nuncio` / `store.data_key` (deleted by the unlink; still there if the package was
+  removed without one);
+- `~/.config/systemd/user/default.target.wants/nunciod.service`, the login item's link, which now
+  points at a unit that is gone. `install.sh --uninstall` disables the unit first, so it leaves no
+  dangling link; `systemctl --user disable --now nunciod.service` does the same by hand.
+
+`MANIFEST` lists every package file; after `pacman -R` none of them may exist.
 
 After the package, `--uninstall` also removes the Omarchy bar widget and hotkey that
 `contrib/omarchy/README.md` installs (disable the widget first:
@@ -110,7 +121,8 @@ and `systemd-analyze` present. It stores no package: what a release ships is sti
   clients can connect. `Restart=on-failure` only (a clean exit, such as after `nuncio logout`, is
   never restarted), 30 s doubling to 10 min between restarts and at most 4 starts in 30 min: each
   restart is a new WhatsApp connection (ban-risk rule). The package does not enable it for every
-  user; `install.sh` asks and enables it for you. `StartLimitBurst=4` per 30 min counts every
+  user: the desktop app enables it on first run (no terminal, no root), and `install.sh` offers to
+  as well. `StartLimitBurst=4` per 30 min counts every
   start, manual (`systemctl --user start`) and D-Bus-activated ones too, not only restarts:
   during first-time setup (link, stop, start again), if it refuses to start, run
   `systemctl --user reset-failed nunciod` and start it again.

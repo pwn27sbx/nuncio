@@ -11,7 +11,8 @@
 #      vVERSION (or takes both from DIR, e.g. makepkg's output and a SHA256SUMS you wrote);
 #   2. checks the package's SHA-256 against its line in SHA256SUMS and stops on a mismatch;
 #   3. runs `sudo pacman -U` on that file (pacman asks again and shows the dependencies);
-#   4. unless --no-enable: `systemctl --user enable --now nunciod.service` for you.
+#   4. unless --no-enable: enables the login item for you (the app enables it by itself the first
+#      time it starts, so this is only for a machine whose app is never opened).
 # --uninstall runs `systemctl --user disable --now nunciod.service`, then `sudo pacman -R
 # nuncio`, then removes the Omarchy bar widget and hotkey that contrib/omarchy/README.md copies
 # by hand, only where they are still what nuncio ships, and lists the data it leaves (your
@@ -335,4 +336,4 @@ if ((enable)); then
 	systemctl --user enable --now nunciod.service
 	say "nunciod is running: systemctl --user status nunciod.service"
 fi
-say "Done. Link this device with 'nuncio link' (stop the daemon first: systemctl --user stop nunciod)."
+say "Done. Open nuncio from the launcher, press Link and scan the code with your phone."

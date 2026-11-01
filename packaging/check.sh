@@ -6,8 +6,9 @@
 # 1. PKGBUILD.in holds the required build options (Sealwax-style offline build).
 # 2. package() installs every path in MANIFEST, and MANIFEST lists every path package() installs.
 # 3. Every file package() copies from the source tree exists in this checkout.
-# 4. The unit, D-Bus service and desktop entries carry the lines nuncio depends on; the app icon
-#    is valid, clean SVG, installed, and named by every Icon=.
+# 4. The unit, D-Bus service and desktop entries carry the lines nuncio depends on, and the unit's
+#    Documentation= names a page the package installs; the app icon is valid, clean SVG,
+#    installed, and named by every Icon=.
 # 5. The shell scripts parse (bash -n), and shellcheck passes when it is installed; every curl in
 #    install.sh carries --proto '=https' --proto-redir '=https'.
 # 6. The code agrees with the packaging: the desktop APP_ID, and the D-Bus names (bus, object,
@@ -119,6 +120,14 @@ tmpfiles=$here/nuncio-tmpfiles.conf
 has "$tmpfiles" 'd %h/.local/share/nuncio 0700 - - -' "tmpfiles: creates the data dir 0700"
 has "$unit" 'Wants=systemd-tmpfiles-setup.service' "unit: pulls in systemd-tmpfiles"
 has "$unit" 'After=systemd-tmpfiles-setup.service' "unit: starts after systemd-tmpfiles created the dir"
+# Documentation= is what `systemctl --user status nunciod` shows the user, so it has to name a page
+# package() installs: MANIFEST is that list (checked against package() just above).
+documented=$(sed -n 's|^Documentation=file://||p' "$unit")
+if [[ -n $documented ]] && grep -qxF -- "$documented" <<<"$manifest"; then
+	pass "unit: Documentation= names an installed page ($documented)"
+else
+	fail "unit: Documentation= must be one file:// path that MANIFEST lists (found: ${documented:-none})"
+fi
 # The daemon's name in the code and in the packaging files must be the same string.
 code_name=$(sed -n 's/^[[:space:]]*DaemonName = "\(.*\)"$/\1/p' "$root/internal/ipc/connect.go")
 has "$here/io.github.pwn27sbx.nuncio.service" "Name=$code_name" "D-Bus service: Name= is the code's DaemonName ($code_name)"

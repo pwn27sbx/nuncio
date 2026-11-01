@@ -129,6 +129,9 @@ package() {
   # guidelines); CREDITS.md names the third-party code the static binaries carry.
   install -Dm644 CREDITS.md "$pkgdir/usr/share/licenses/nuncio/CREDITS.md"
   install -Dm644 README.md "$pkgdir/usr/share/doc/nuncio/README.md"
+  # The page the unit's Documentation= names: install, link, update and uninstall in the language
+  # of the person using the app (check.sh pins the two together).
+  install -Dm644 INSTALL.md "$pkgdir/usr/share/doc/nuncio/INSTALL.md"
   install -Dm644 docs/config.md "$pkgdir/usr/share/doc/nuncio/config.md"
   install -Dm644 crates/nuncio-desktop/README.md "$pkgdir/usr/share/doc/nuncio/nuncio-desktop.md"
   install -Dm644 packaging/README.md "$pkgdir/usr/share/doc/nuncio/PACKAGING.md"

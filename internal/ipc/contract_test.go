@@ -777,7 +777,7 @@ func TestLinkQRFramesCarryARegularMatrix(t *testing.T) {
 // The largest matrix a QR code can hold (version 40: 177 modules per side) still fits in one frame,
 // with room to spare: a layout, not a payload, is what a link_qr frame carries.
 func TestALargestLinkQRFrameFitsTheFrameLimit(t *testing.T) {
-	const side = 177
+	const side = MaxLinkQRSize
 	rows := make([]string, side)
 	for i := range rows {
 		rows[i] = strings.Repeat("1", side)

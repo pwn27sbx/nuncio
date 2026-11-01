@@ -118,6 +118,11 @@ on it publishes, to subscribed connections, one `link_qr` per QR code it generat
 store and no keyring entry behind. `nuncio link --qr --consent` is a thin client of these same
 frames.
 
+A `link_start` whose `consent` is `false` — or absent, which is Go's zero value — is answered with
+an `error` frame (`bad_frame`): the daemon generates no QR, creates no key and opens no store
+before that refusal. A daemon that cannot link (one built without the flow) answers both frames the
+same way instead of dropping the connection.
+
 Two things a client author cannot infer from the tables:
 
 - **No quiet zone.** `link_qr` carries the matrix only: `rows[0]` is the first module row and

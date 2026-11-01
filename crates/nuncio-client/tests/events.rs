@@ -21,7 +21,7 @@ const STATUS: &str = include_str!("../../../proto/fixtures/status_response.json"
 const REFUSED: &str = include_str!("../../../proto/fixtures/error_version_mismatch.json");
 
 /// Every event fixture, so a new event kind without a client test is noticed here.
-const EVENT_FIXTURES: [(&str, &str); 5] = [
+const EVENT_FIXTURES: [(&str, &str); 7] = [
     (
         "event_message",
         include_str!("../../../proto/fixtures/event_message.json"),
@@ -41,6 +41,14 @@ const EVENT_FIXTURES: [(&str, &str); 5] = [
     (
         "event_chat",
         include_str!("../../../proto/fixtures/event_chat.json"),
+    ),
+    (
+        "link_qr",
+        include_str!("../../../proto/fixtures/event_link_qr.json"),
+    ),
+    (
+        "link_state",
+        include_str!("../../../proto/fixtures/event_link_state_waiting.json"),
     ),
 ];
 

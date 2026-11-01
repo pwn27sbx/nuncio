@@ -118,6 +118,11 @@ const (
 	LinkFailed = "failed"
 )
 
+// LinkFailureReason is the one sentence a failed flow carries: WhatsApp stopped the pairing (a
+// ban, a logout, an expired code or another refusal), so the client shows this and offers a new
+// QR. It says nothing about a device that was already linked, and it is not a stop_reason.
+const LinkFailureReason = "WhatsApp stopped the linking: ask for a new QR"
+
 // Error codes.
 const (
 	CodeVersionMismatch = "version_mismatch"
@@ -161,10 +166,13 @@ var (
 )
 
 // MaxQueryLen bounds a search query in bytes; MaxEmojiLen bounds a reaction's emoji in bytes (a
-// long ZWJ sequence with skin tones fits easily).
+// long ZWJ sequence with skin tones fits easily). MaxLinkQRSize bounds a link_qr matrix per side:
+// 177 modules is a version 40 QR code, the largest there is, so a daemon never publishes a frame a
+// client cannot draw.
 const (
-	MaxQueryLen = 1024
-	MaxEmojiLen = 64
+	MaxQueryLen   = 1024
+	MaxEmojiLen   = 64
+	MaxLinkQRSize = 177
 )
 
 // Hello is the first frame a client sends. The daemon refuses anything else.
@@ -653,6 +661,27 @@ type MarkReader interface {
 	MarkRead(jid string) (unread int, err error)
 }
 
+// LinkStarter starts the device-linking flow: the daemon generates the QR codes and publishes them,
+// the client only draws them. It is optional, like Searcher, so a Handler written before it still
+// compiles; ServeConn answers link_start with bad_frame when its Handler lacks it. ServeConn has
+// already refused a frame without the user's explicit consent, so a call always starts a flow.
+// The daemon publishes the flow's link_qr and link_state frames itself; any error is an internal
+// error whose message is the error's text, so it must carry no secret.
+type LinkStarter interface {
+	// LinkStart starts a flow and returns once it runs, or the error that stopped it from
+	// starting: a device that is already linked, a flow that is already running, a keyring that
+	// cannot be read.
+	LinkStart(consent bool) error
+}
+
+// LinkCanceller stops a device-linking flow in progress and leaves no device, store or keyring
+// entry behind. It is optional, like Searcher: ServeConn answers link_cancel with bad_frame when
+// its Handler lacks it.
+type LinkCanceller interface {
+	// LinkCancel stops the flow; with none running it does nothing and is not an error.
+	LinkCancel() error
+}
+
 // ChatResolver names the chat a request's jid stands for (ADR 0001, one chat per contact): a
 // contact's phone-number JID is an alias of her LID chat once the daemon knows the pair. ServeConn
 // asks it for the jid of every request that names a chat (messages, send, search, react, mark_read,
@@ -975,6 +1004,14 @@ func ServeConnEvents(conn io.ReadWriteCloser, h Handler, events *Broker) (err er
 			if err := WriteFrame(out, serveRetry(line, h)); err != nil {
 				return err
 			}
+		case OpLinkStart:
+			if err := WriteFrame(out, serveLinkStart(line, h)); err != nil {
+				return err
+			}
+		case OpLinkCancel:
+			if err := WriteFrame(out, serveLinkCancel(line, h)); err != nil {
+				return err
+			}
 		case OpFocus:
 			var req FocusRequest
 			if err := json.Unmarshal(line, &req); err != nil || !ValidJID(req.JID) {
@@ -1057,6 +1094,43 @@ func serveSend(line []byte, h Handler) any {
 	}
 	sent, err := h.Send(req.JID, req.Text, req.ClientID)
 	return sendReply(req.ClientID, sent, err)
+}
+
+// serveLinkStart checks a link_start frame and asks h to start the flow, returning the reply frame.
+// Without the user's explicit consent nothing starts: the refusal is here, before the daemon
+// generates a QR, creates a key or opens a store, so a frame without consent can never link.
+func serveLinkStart(line []byte, h Handler) any {
+	var req LinkStartRequest
+	if err := json.Unmarshal(line, &req); err != nil {
+		return badFrame("malformed link_start frame")
+	}
+	s, ok := h.(LinkStarter)
+	switch {
+	case !ok:
+		return badFrame("this daemon cannot link a device")
+	case !req.Consent:
+		return badFrame("link_start needs the user's explicit consent")
+	}
+	if err := s.LinkStart(req.Consent); err != nil {
+		return Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()}
+	}
+	return LinkStarted{V: Version, Op: OpLinkStarted}
+}
+
+// serveLinkCancel checks a link_cancel frame and asks h to stop the flow, returning the reply frame.
+func serveLinkCancel(line []byte, h Handler) any {
+	var req LinkCancelRequest
+	if err := json.Unmarshal(line, &req); err != nil {
+		return badFrame("malformed link_cancel frame")
+	}
+	c, ok := h.(LinkCanceller)
+	if !ok {
+		return badFrame("this daemon cannot link a device")
+	}
+	if err := c.LinkCancel(); err != nil {
+		return Error{V: Version, Op: OpError, Code: CodeInternal, Message: err.Error()}
+	}
+	return LinkCancelled{V: Version, Op: OpLinkCancelled}
 }
 
 // serveSearch checks a search frame and asks h for the matches, returning the reply frame. A

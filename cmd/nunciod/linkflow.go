@@ -135,25 +135,12 @@ func (f *linkFlow) Cancel() error {
 // serve runs one flow until it pairs, fails or is cancelled, and removes what it created when it
 // does not pair.
 func (f *linkFlow) serve(ctx context.Context, r *linkRun, consent bool) {
-	paired := false
 	// Whatever the linker started ends with the flow: its QR producer waits on this context.
 	defer r.cancel()
 	defer func() {
 		if r.client != nil {
 			r.client.Disconnect()
 		}
-		if !paired {
-			r.cleanupErr = f.discard(r.boot)
-			if r.cleanupErr != nil {
-				log.Printf("the link flow could not remove everything it created: %v", r.cleanupErr)
-			}
-		}
-		// Last, so no link_start can start a new flow over the files this one is still removing.
-		f.mu.Lock()
-		if f.run == r {
-			f.run = nil
-		}
-		f.mu.Unlock()
 		close(r.done)
 	}()
 
@@ -164,12 +151,12 @@ func (f *linkFlow) serve(ctx context.Context, r *linkRun, consent bool) {
 	// The consent Start gated on, threaded to the call that touches WhatsApp.
 	prepared, err := prepareLink(wa.Consent{Granted: consent}, client)
 	if err != nil {
-		f.failed(err)
+		f.failed(r, err)
 		return
 	}
 	codes, err := prepared.Linker.QR(ctx)
 	if err != nil {
-		f.failed(err)
+		f.failed(r, err)
 		return
 	}
 	f.publishState(ipc.LinkWaiting, "")
@@ -179,7 +166,7 @@ func (f *linkFlow) serve(ctx context.Context, r *linkRun, consent bool) {
 			if err != nil {
 				// The payload never goes into a log or an error: it is the secret that pairs the
 				// account (proto/wire.md, "The link flow").
-				f.failed(err)
+				f.failed(r, err)
 				return
 			}
 			f.events.Publish(ipc.EventLinkQR{V: ipc.Version, Op: ipc.OpLinkQR, Size: size, Rows: rows})
@@ -190,22 +177,23 @@ func (f *linkFlow) serve(ctx context.Context, r *linkRun, consent bool) {
 		if ctx.Err() != nil {
 			// A cancel stopped the flow: the client that asked for it gets link_cancelled and no
 			// failure sentence, which would say WhatsApp stopped something the user stopped.
+			f.finish(r, true)
 			return
 		}
 		if code.Event == "success" {
-			paired = true
 			f.linked(r)
 			return
 		}
 		// WhatsApp stopped the pairing (a ban, a logout, an expired code): one fixed sentence, and
 		// the client offers a new QR.
-		f.failed(fmt.Errorf("link event %s", code.Event))
+		f.failed(r, fmt.Errorf("link event %s", code.Event))
 		return
 	}
 	if ctx.Err() != nil {
+		f.finish(r, true)
 		return
 	}
-	f.failed(errors.New("the QR stream ended without a result"))
+	f.failed(r, errors.New("the QR stream ended without a result"))
 }
 
 // linked hands the paired device to the daemon, which opens and starts the session it serves, and
@@ -221,18 +209,39 @@ func (f *linkFlow) linked(r *linkRun) {
 	r.boot.db = nil
 	if err := f.paired(); err != nil {
 		// The device is paired but this daemon cannot serve it; status is the truth about the
-		// device, and the flow reports its own outcome.
-		f.failed(err)
+		// device, and the flow reports its own outcome. Nothing of it is removed: the device is
+		// WhatsApp's now.
+		f.finish(r, false)
+		f.publishState(ipc.LinkFailed, ipc.LinkFailureReason)
 		return
 	}
+	f.finish(r, false)
 	f.publishState(ipc.LinkLinked, "")
 }
 
 // failed publishes the one fixed sentence a failed flow carries. cause is logged by its type only:
 // it can quote a server address, and the flow's failure is never a secret.
-func (f *linkFlow) failed(cause error) {
+func (f *linkFlow) failed(r *linkRun, cause error) {
 	log.Printf("the link flow stopped without linking (%T)", cause)
+	f.finish(r, true)
 	f.publishState(ipc.LinkFailed, ipc.LinkFailureReason)
+}
+
+// finish takes the flow out of the running slot, removing what it created when discard is set,
+// before the state a client reacts to is published: a link_start that answers that state starts a
+// new flow instead of hearing that one is already running.
+func (f *linkFlow) finish(r *linkRun, discard bool) {
+	if discard {
+		r.cleanupErr = f.discard(r.boot)
+		if r.cleanupErr != nil {
+			log.Printf("the link flow could not remove everything it created: %v", r.cleanupErr)
+		}
+	}
+	f.mu.Lock()
+	if f.run == r {
+		f.run = nil
+	}
+	f.mu.Unlock()
 }
 
 func (f *linkFlow) publishState(state, reason string) {

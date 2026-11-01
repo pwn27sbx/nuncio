@@ -47,6 +47,21 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   without consent.
 - S15 End to end: the package builds, installs on this machine and the flow works from a fresh
   data directory with `nunciod` neither running nor enabled.
+- S16 (owner, 2026-10-31, verbatim): "Tu tarea es **T12: importar el historial de WhatsApp**, que
+  hoy no existe. Verificado en la base real del dueño: 20 chats, 1 dispositivo y **0 mensajes**; la
+  app muestra todos los chats vacíos porque nuncio nunca pide los mensajes, solo la lista." Scope,
+  verbatim: "Manejar `events.HistorySync` ... en la sesión del demonio", "Recorrer
+  `Data.Conversations[].Messages[].Message` (cada uno es un `*waWeb.WebMessageInfo`) y guardar los
+  mensajes con el mismo camino que ya usa `storeMessage`: mismo store, mismas reglas de privacidad,
+  mismas claves", "**Deduplicar por id**: aplicar el mismo sync dos veces no puede duplicar filas",
+  "**No marcarlos como no leídos**: el historial viejo no debe encender el badge", "Ignorar mensajes
+  de protocolo/sistema y lo que el store ya sabe descartar", "El sync no puede bloquear la sesión ni
+  el arranque: si un blob falla, se registra el tipo de error y se sigue". Out of scope, verbatim:
+  "pedir historial bajo demanda (`BuildHistorySyncRequest`) y descargar media del historial".
+  Acceptance, verbatim: "tras vincular, `messages` > 0 y la app muestra la conversación; un test
+  prueba que un segundo sync no duplica; otro prueba que el historial no enciende el contador de no
+  leídos". Rules: synthetic blobs only, no WhatsApp, no real keyring, "Los logs nunca llevan texto
+  de mensajes, números completos ni material de claves".
 
 ## Tasks
 
@@ -63,6 +78,7 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | T9 | S11: unlink from the app with a typed confirmation | delegated writer (context backstop) | done: RED (34 compile errors for the five missing `Controller` methods, then the smoke `Cancel closes the confirmation` failed on a real defect: `window.close()` does nothing on an unrealized window) → GREEN; Settings gains a destructive section with **Unlink this device**, a confirmation that spells out the deletion, counts drafts and queued sends before the field, and keeps **Unlink** insensitive until exactly `unlink` is typed; confirming sends one `wipe(true)` (no new frame), only `wiped{unlinked:true}` claims it, and the app lands on the link screen without a restart | fde0c50 |
 | T10 | S12: `INSTALL.md` for the average user, the CLI into `docs/COMMAND-LINE.md`, CHANGELOG and README | delegated writer (context backstop) | done: `INSTALL.md` = the one install line → open nuncio → press Link → scan → chat list, then uninstall (unlink first, `pacman -R nuncio`, the three leftovers named) and no-terminal trouble-shooting, with no `systemctl` in any command block; the CLI moved into `docs/COMMAND-LINE.md` (README keeps a pointer and the one-line list); CHANGELOG `Unreleased` says the release becomes 0.2.0 when the home run passes; the package now installs `/usr/share/doc/nuncio/INSTALL.md` and the unit's `Documentation=` names it, pinned by `check.sh` and `MANIFEST`; `packaging/tests/docs.sh` refuses a page that names an `install.sh` flag the script rejects | 46e9cc3 |
 | T11 | S15: build the package, install it, run the flow from a fresh data dir | owner (needs `pacman`/`sudo` and a spare phone) | pending: the **0.2.0** release candidate is built and reviewed (`2dd85ba`), and the runbook is `~/Documents/ObsidianVault/nuncio/2026-10-31-home-acceptance-run/README.md` | 2dd85ba |
+| T12 | S16: handle `events.HistorySync` in the daemon's session and store the messages with the `storeMessage` path, deduped by id, read (no badge), protocol/system skipped, off the event goroutine and per-blob failure contained | inline | done: RED (the new tests failed on the tip: 0 messages stored, no `event_chat`, no log line) → GREEN; `internal/wa/history.go` + `internal/wa/history_test.go`, `canonicalRow` extracted from `storeMessage`, `proto/wire.md` "History (after linking)" and the `event_chat` cause, CHANGELOG `Unreleased` | 06a7968 |
 
 ## Log
 
@@ -378,3 +394,39 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   needs `sudo`/`pacman` to install the package and a spare phone to scan, and neither is something
   an agent may do (the owner's rules forbid `sudo`, the real data dir and real numbers). The runbook
   is in the vault. When it passes: tag `v0.2.0`, publish the release, and close T11.
+- L22 (evidence, 2026-10-31, T12) The history import landed in one commit on
+  `feat/history-import` (from `fix/link-runtime@5c13620`). `internal/wa/history.go` registers
+  `events.HistorySync` in the session's one event switch (set only when the session has a store):
+  each conversation's `WebMessageInfo`s become the same `waevents.Message` a live delivery has
+  (same chat, sender, timestamp and `UnwrapRaw` rules) and go through `messageRow`, the
+  `canonicalRow` extracted from `storeMessage` (one contact, one chat) and `store.InsertMessage`,
+  so the store's `(chat, id)` conflict keeps one row per message: an identical blob applied again
+  stores nothing and publishes nothing. Rows are stored `Read: true`, so the total and per-chat
+  unread stay 0, no `event_unread` is published and no read receipt is sent. Each chat that stored
+  something is published **once** as `event_chat` (as `chats` lists it, `last_message` included)
+  and never as `event_message`. Protocol and system entries, non-chat conversations
+  (`status@broadcast`), ids that do not parse and anything `messageRow` rejects are skipped; media
+  keeps its reference and nothing is downloaded or requested. The import runs off whatsmeow's event
+  goroutine, one blob at a time (`historyMu`), counted in `drains` under the lock `Close` uses to
+  end the session, so `Close` waits for it before closing the store; a refused insert is logged by
+  its error type only (no text, no JID) and the import goes on, and a panic is contained the same
+  way. Five tests with synthetic blobs only (`internal/wa/history_test.go`): the stored rows and
+  their chat, a blob applied twice, no unread and no broadcast, protocol/system/unroutable skipped,
+  and a store failure (a SQLite trigger refusing one chat) logged by type while the next
+  conversation is still stored. Verified: `gofmt -l cmd internal` empty, `go vet ./...`,
+  `CGO_ENABLED=0 go build ./...`, `CGO_ENABLED=0 go test -count=1 ./...` and `go test -race
+  -count=1 ./...` green; `packaging/` untouched. Docs: `proto/wire.md` gains "History (after
+  linking)" and the `event_chat` row's new cause; CHANGELOG gains an `Unreleased` section. The GGA
+  hook passed with observations only. Nothing is tagged or published (T11/0.2.0 belong to the
+  other session).
+- L23 (review, 2026-10-31, T12) Approved (medium tier, lenses risk, resilience and reliability;
+  the resilience lens found nothing) and acknowledged with its authority burned on the first
+  relay. Three advisory findings, none blocking and none reopening the candidate; all three are
+  inputs for the next touch of `history.go`: (a) risk R1-HISTORY-BLOB-QUEUE — each event starts a
+  goroutine that keeps its whole decoded blob while it waits on `historyMu`, a queue nuncio does
+  not bound and that `Close` waits behind; (b) reliability R3-history-live-race — if a live
+  delivery and a history row for the same id interleave at the link boundary, the history insert
+  can win and leave the message read (and the live `event_message` unpublished); (c) reliability
+  R3-history-timestamp-bounds — the `uint64` timestamp is converted without bounds, so a missing
+  one lands the message in 1970. The owner chose to review this candidate (consent relayed, not
+  answered here).

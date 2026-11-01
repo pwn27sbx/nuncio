@@ -10,8 +10,9 @@ use gtk::subclass::prelude::*;
 
 use crate::style;
 
-/// The message text's size (`.nuncio-text` in [`crate::style`]): the measure counts its characters.
-const TEXT_PX: f64 = 13.0;
+/// The message text's size (`.nuncio-text` in [`crate::style`], from its one type scale): the
+/// measure counts characters of it, so a text size changes the measure in the same proportion.
+const TEXT_PX: f64 = style::TypeScale::DESIGN.text_px();
 
 glib::wrapper! {
     /// Holds its one child at the left, at most the transcript's measure wide.

@@ -79,6 +79,31 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   y sin toast de error; pulsar **Link** arranca el demonio y da un QR." Scope limit (owner, verbatim):
   "No arregles F7: el demonio que se queda sin socket es T15 y va en otra sesión ... Tú solo haces
   que la app se comporte bien cuando el demonio desaparece."
+- S19 (owner, approved plan 2026-11-01, T16, verbatim from the plan's T16): "La conversación llena
+  la ventana (F2) · 0.3.0 · riesgo medio — Fuera el `Measure` de 72 caracteres; ancho disponible con
+  máximo amplio; lista de ancho fijo. **Aceptación:** con la ventana maximizada la conversación crece
+  y la lista no se estira; con la ventana estrecha la lista sigue usable; burbujas alineadas a los
+  extremos. **Tests:** `style.rs:1283-1295` (medida) y `tests/smoke.rs`." D2 (approved): "La
+  conversación llena la ventana. Fuera el `Measure` de 72 caracteres; ancho disponible con un máximo
+  amplio; la lista mantiene ancho fijo, como WhatsApp Web."
+- S20 (owner, approved plan 2026-11-01, T17, verbatim from the plan's T17): "Densidad tipográfica
+  (F3) · 0.3.0 · riesgo medio-bajo — Escala única en `style.rs`; `measure.rs:13` lee la misma
+  constante. **Aceptación (medible, no 'se ve mejor'):** la tabla de tamaños es la única fuente
+  (ningún literal suelto), y con la ventana a 1280×800 ninguna etiqueta de la lista ni de la cabecera
+  se corta con puntos suspensivos; el ancho medido de la conversación cambia en la misma proporción
+  que la fuente." D3 (approved): "Una sola escala tipográfica. Tabla de tamaños en `style.rs` y
+  `measure.rs:13` leyendo la misma constante." Context (owner, verbatim, `README.md` F3): "el tamaño
+  del texto está muy grande" / "Esperado: densidad de WhatsApp Web. Bajar el tamaño base (y el de la
+  letra pequeña de horas y remitentes en la misma proporción), sin romper la legibilidad ni el
+  escalado del sistema."
+- S21 (owner, approved plan 2026-11-01, T18, verbatim from the plan's T18): "Quitar la etiqueta que
+  acompaña a la foto (F4) · 0.3.0 · riesgo medio-bajo — El dibujo ya existe; se retira `[kind]` de la
+  burbuja cuando hay imagen o sticker (`window.rs:4308-4318`; en el TUI, `lib.rs:1930`). Se conserva
+  `[kind]` **solo** cuando no hay miniatura (respaldo) y para documentos, que ya se dibujan como
+  documento (`present.rs:669`, `window.rs:4422`). **Vídeo queda fuera:** no hay miniatura en el wire
+  (`internal/wa/messages.go:119-140`). **Aceptación:** una foto y un sticker se ven sin texto entre
+  corchetes; un mensaje sin miniatura muestra el respaldo; ningún test de `smoke.rs:1157` se rompe."
+  Scope limit (owner, verbatim): "en el TUI `lib.rs:1930`, no lo toques."
 
 ## Tasks
 
@@ -98,6 +123,9 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
 | T12 | S16: handle `events.HistorySync` in the daemon's session and store the messages with the `storeMessage` path, deduped by id, read (no badge), protocol/system skipped, off the event goroutine and per-blob failure contained | inline | done: RED (the new tests failed on the tip: 0 messages stored, no `event_chat`, no log line) → GREEN; `internal/wa/history.go` + `internal/wa/history_test.go`, `canonicalRow` extracted from `storeMessage`, `proto/wire.md` "History (after linking)" and the `event_chat` cause, CHANGELOG `Unreleased` | 06a7968 |
 | T13 | S17: an unlinked `nunciod` serves no chats — `Chats()` answers an empty list without a store, `newDaemon` no longer loads the fixture and the fixture's Go copy is test-only; the two tests that asserted the fixture are rewritten, the `limit` clamp is pinned over the store, CHANGELOG and the wire's corners table say it | inline | done: RED (the two rewritten tests failed on the tip with the three fixture chats) → GREEN; the socket and in-memory tests expect the empty list (`[]`, never `null`), the drift test still ties the test copy to `proto/fixtures/chats_response.json`, and the binary no longer carries any fixture name; the TUI's unlinked sentence was already drawn for an empty list (`design.rs`, 23/23) | 2389965 |
 | T14 | S18: the unlink closes its dialogs even when the daemon dies with it — a cut while this app's wipe has no answer settles the confirmation and Settings, paints no error, shows the first screen and leaves the device's word to the next daemon (S11); Link with nothing serving asks the bus for one and sends its `link_start` once the connection comes up | inline | done: RED (the new tests and the rewritten `a_lost_connection_does_not_claim_the_device_is_gone` refused to compile against the tip: no `Settled`, `Command::StartDaemon` or `Worker::start_daemon`) → GREEN; the bus ask is a `Worker::spawn` parameter, so the worker test proves exactly one ask per press without a bus, and `cancel_link` never sends a cancelled press later | 27d0729 |
+| T16 | S19: the conversation takes all of its pane, up to a broad maximum, while the chat list keeps its fixed 360 px; the bubbles stay at the two ends | inline | done: RED (the new smoke check `widest >= 1360` failed with the 72-character measure: 72 × the measured 8 px) → GREEN; `TRANSCRIPT_MAX_CHARS = 240` (1920 px at the owner's font, so a maximized 1920 window is never cut back), no font measured yet means all of the pane, `Measure::room_for` and `Ui::transcript_width`/`pane_widths`/`transcript_drawn_width`/`bubble_halign` make it assertable, and the paned's `resize_start_child(false)` keeps the list at `LIST_WIDTH` | 3b905e7 |
+| T17 | S20: one table of sizes in `style.rs`, read by the three sheets and by `measure.rs`, one step denser | inline | done: RED (with an odd injected scale, a single `font-size: 11px` left in `.nuncio-media` failed `every_font_size_the_sheets_paint_comes_from_the_one_scale`) → GREEN; `TypeScale` (`title` 14, `body` 12, `label` 11, `meta` 10, `chip` 9, formerly 15/13/12/11/10) is the only place a size is chosen, `sheets()` takes it as a parameter so the test proves every rule reads it, `.nuncio-text` and `measure.rs`'s `TEXT_PX` both come from `TypeScale::DESIGN`, and the transcript's widest width scales with the character width in the same proportion | ea4c63a |
+| T18 | S21: a bubble with a drawn picture drops its `[kind]` label; the label stays as the fallback for a media message with nothing drawn, and a document keeps its row | inline | done: RED (`draws_picture` forced false failed "a drawn photo carries no [image]") → GREEN; `draws_picture` is the picture's `thumb` or `full`, `present::DOWNLOADING` replaces the three copies of the progress word, and a smoke test drives a photo, a sticker, a photo with no thumbnail (`[image]`), a video (`[video]`) and a document (its row, no label) | 749b75d |
 
 ## Log
 
@@ -502,3 +530,65 @@ count stays under ~400 authored lines; otherwise chained). Test runners:
   `R4-session-bus-start-unobserved` (a failed bus activation has no result path: the pending start
   waits for a connection or a cancel) — both inputs for the next touch of the link screen. F7 is not
   touched (T15, another session).
+- L26 (evidence and review, 2026-11-01, T16) On branch `feat/ui-density` (from `feat/f8-unlink`).
+  The transcript's 72-character measure is gone: it takes all of its pane and `TRANSCRIPT_MAX_CHARS`
+  (240) only bounds a line on a screen wide enough to run it across the monitor (1920 px in the
+  owner's font, so the pane of a maximized 1920 window — 1360 px — is never cut back). No font
+  measured yet (char width 0) now means all of the pane instead of one pixel a character, so a first
+  pass cannot pinch the layout. The chat list was already fixed (`LIST_WIDTH` 360 in a paned with
+  `resize_start_child(false)`) and the bubbles were already at the two ends; both are now asserted
+  (`Ui::bubble_halign`, `Ui::list_width`). Tests: `style.rs` (the measure over five pane widths, and
+  the width scaling with the character width) and a smoke test that measures the transcript in the
+  real font (`widest >= 1360` fails on the tip, which is the RED), checks the drawn transcript fills
+  its pane (`Ui::transcript_drawn_width` against `Ui::pane_widths`) and the two alignments.
+  Verified: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` (25 suites, desktop lib 236, `smoke: ok`). Risk: none (layout only; no
+  data, no security, no wire). Review: medium, lenses readability and reliability, approved and
+  acknowledged with its authority burned. No blocker; advisories only, all outside this change (the
+  left-over over-indentation in `overlays_css`, a dead branch in a test helper, `SEND_TOOLTIP`
+  omitting Ctrl+Enter, `apply_layout` snapping a dragged seam back, three 480 px width constants
+  that can drift) — inputs for the next touch of `style.rs`.
+- L27 (evidence and review, 2026-11-01, T17) One type scale. `TypeScale` in `style.rs` holds the five
+  sizes the app paints — `title` 14, `body` 12, `label` 11, `meta` 10, `chip` 9, one step under the
+  loose 15/13/12/11/10 it carried — and `layout_css` builds the sheets through a private
+  `sheets(palette, radius, fonts)` that takes it, so the test can paint a scale nobody designed and
+  prove no rule picks a size of its own (`every_font_size_the_sheets_paint_comes_from_the_one_scale`;
+  one leftover `font-size: 11px` fails it, which is the RED). `.nuncio-text` and `measure.rs`'s
+  `TEXT_PX` both come from `TypeScale::DESIGN` (`text_px()`), which closes the duplicated 13 in
+  `measure.rs:13`, and the transcript's widest width changes in the same proportion as the character
+  width (asserted). **The second half of S20's acceptance — no list or header label cut with an
+  ellipsis at 1280×800 — is not automated, and this is why:** the smoke suite runs without the
+  app's CSS (`apply_to_display` is never called), so every label is measured in the theme font and
+  the numbers say nothing about the scale; presenting the window does not help either, because the
+  tiler decides its size (a `set_size_request(1280, 800)` does pin it at 1280×800, but the labels'
+  allocations there come from libadwaita's own `AdwGizmo` and do not move with the font at all). It
+  stays a visual acceptance: the scale is denser, so a label that fitted before cannot be cut by
+  it. Verified: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` (25 suites, desktop lib 236, `smoke: ok`). Risk: none (the CSS is
+  generated from the palette and the scale; no data, no security, no wire). Review: medium, lenses
+  readability and reliability, approved and acknowledged with its authority burned. No blocker; three
+  advisories: the `TypeScale` field docs read as an exhaustive list of selectors but miss
+  `.nuncio-reaction-emoji` (body) and `.nuncio-dialog-error` (meta); the "one step denser" assertion
+  restates the retired numbers instead of naming them once; and the test only bounds the scale from
+  above, so an accidentally tiny scale would still pass.
+- L28 (evidence and review, 2026-11-01, T18) A drawn picture no longer carries a bracketed label. The
+  thumbnail already painted; the bubble also painted the message's kind beside it. `draws_picture`
+  (`PictureView::thumb` or a fetched `full`) decides it, and `[kind]` is drawn only when the bubble
+  draws nothing else: a photo whose message embeds no thumbnail keeps `[image]`, video keeps
+  `[video]` (no thumbnail in the wire, `internal/wa/messages.go:119-140`), and a document keeps its
+  row without `[document]` (unchanged). A drawn picture that is downloading shows the progress line
+  alone, as a document already did, and `present::DOWNLOADING` is the one copy of that word. The TUI
+  was not touched (`lib.rs:1930`). Tests: a smoke test drives five messages (photo, sticker,
+  no-thumbnail photo, video, document) and asserts the label each bubble carries; forcing
+  `draws_picture` to false is the RED. `smoke.rs:1158` (the pictures test) stays green, and its doc
+  comment was corrected: a thumbnail that does not decode now leaves its box empty with no label.
+  Verified: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace` (25 suites, desktop lib 236, `smoke: ok`). Risk: none (presentation only;
+  no data, no security, no wire). Review: medium, lenses readability and reliability, approved and
+  acknowledged with its authority burned; the candidate covered T17 and T18 together because the
+  preflight re-fixed the base at T16's commit. No blocker; advisories, two of them real and kept for
+  the next touch of this renderer: `draws_picture` and the unconditional `if let Some(picture)` below
+  it are two notions of "draws a picture" (the fallback case still appends an empty picture box), and
+  a thumbnail that fails to decode leaves the bubble with no label at all (the reliability lens; kept
+  on purpose, since the acceptance calls the label a fallback for *no thumbnail*, not for a decode
+  failure — clicking such a bubble still fetches the full picture).

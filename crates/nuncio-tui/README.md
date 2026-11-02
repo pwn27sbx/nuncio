@@ -86,10 +86,15 @@ nuncio-tui [--image <png>]
   side of a daylight-saving change shows an hour off until the next start). If the offset cannot
   be read, times are UTC and the footer says so.
 - **Conversation** (right): the selected chat, newest message at the bottom. Before a chat is
-  opened it shows the chat's last message only. One line per message: the author in bold and
-  the time muted, then the text (a message's further lines get rows of their own). Each day starts
-  with its local date in muted caps (`SUN 18 OCT 2026`) after a blank line; the messages of one
-  author follow each other with no blank line, and the next author starts after one. With no
+  opened it shows the chat's last message only. Every message is a bubble: an incoming one starts
+  at the pane's first column, an outgoing one ends at its last usable column (the free last column
+  is the scroll gutter), and none is wider than 65 % of the pane. The text wraps inside the bubble
+  and the time sits in it, bottom right, in the faint role — with the send's state where the
+  delivery ticks would go: a small clock `◷` while it is queued, a `!` in the danger role when it
+  was not sent (delivered and read receipts are not in the protocol, so they are never invented).
+  Nothing repeats the author over a message: the side a bubble is on says whose it is. Each day
+  starts with its local date in muted caps (`SUN 18 OCT 2026`) after a blank line, and one blank
+  row separates two bubbles. With no
   message it says `No messages yet · i writes the first one`, with no chats `No chats yet`
   (its title is then `Conversation`, so the focus still shows). The transcript opens with a
   muted `Beginning of conversation` line, which is what you see when the top is on screen; when

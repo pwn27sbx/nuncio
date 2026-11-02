@@ -194,8 +194,8 @@ fn a_conversation_renders_at_eighty_by_twenty_four_and_at_two_forty_by_sixty() {
             "Grace Hopper",
             "Are we still on?",
             "Yes, see you at 18:00",
-            "you · 17:02",
-            "Ada Lovelace · 17:01",
+            "17:02",
+            "17:01",
             "? all keys",
         ] {
             assert!(
@@ -360,7 +360,7 @@ fn two_hundred_messages_scroll_to_the_top_and_back_quickly() {
 
     // Select the newest (it stays in view), then page by page, then all the way.
     let after_k = timed(&mut app, KeyCode::Char('k'));
-    assert!(after_k.contains("▌ Ada Lovelace ·") && after_k.contains("message 199"));
+    assert!(after_k.contains("message 199"), "{after_k}");
     timed(&mut app, KeyCode::PageUp);
     let top = timed(&mut app, KeyCode::Char('g'));
     assert!(top.contains("message 000"), "top:\n{top}");
@@ -452,7 +452,7 @@ fn the_keyboard_flow_sends_one_message_that_goes_from_queued_to_sent() {
         1,
         "one message:\n{screen}"
     );
-    assert!(screen.contains("you · 17:07"), "{screen}");
+    assert!(screen.contains("17:07"), "{screen}");
     assert!(
         !screen.contains("queued") && !screen.contains("sending"),
         "{screen}"
@@ -479,7 +479,7 @@ fn a_send_answered_sent_or_failed_shows_that_state() {
         timestamp: Some("2026-10-18T17:09:00Z".to_owned()),
     });
     let screen = render(&mut app, 80, 24).text();
-    assert!(screen.contains("you · 17:09"), "{screen}");
+    assert!(screen.contains("17:09"), "{screen}");
     assert!(!screen.contains("sending"), "{screen}");
 
     app.handle_key(key(KeyCode::Char('i')));
@@ -743,7 +743,7 @@ fn the_daemon_driver_sends_and_follows_events() {
     loop {
         daemon.drain_events(&mut app).expect("drain");
         let screen = render(&mut app, 80, 24).text();
-        if screen.contains("you · 17:30") {
+        if screen.contains("17:30") {
             assert!(!screen.contains("queued"), "{screen}");
             break;
         }
@@ -781,7 +781,7 @@ fn a_reply_quotes_the_selected_message_and_the_transcript_shows_the_quote() {
     assert_eq!(app.handle_key(key(KeyCode::Char('k'))), None);
     assert_eq!(app.handle_key(key(KeyCode::Char('k'))), None);
     let screen = render(&mut app, 80, 24).conversation();
-    assert!(screen.contains("▌ Ada Lovelace · 17:01"), "{screen}");
+    assert!(screen.contains("Are we still on?"), "{screen}");
     assert_eq!(app.handle_key(key(KeyCode::Char('r'))), None);
     assert_eq!(app.pane(), Pane::Compose);
     let screen = render(&mut app, 80, 24).conversation();
@@ -819,7 +819,11 @@ fn a_reply_quotes_the_selected_message_and_the_transcript_shows_the_quote() {
     let screen = render(&mut app, 80, 24).conversation();
     let row_of = |needle: &str| screen.lines().position(|l| l.contains(needle));
     let quote = row_of("> Are we still on?").unwrap_or_else(|| panic!("the quote:\n{screen}"));
-    assert_eq!(row_of("you · 17:03"), Some(quote - 1), "{screen}");
+    let time = row_of("17:03").unwrap_or_else(|| panic!("the reply's time:\n{screen}"));
+    assert!(
+        quote < time,
+        "the quote is inside the reply's bubble:\n{screen}"
+    );
     assert_eq!(
         screen.matches("> ").count(),
         1,
@@ -951,7 +955,7 @@ fn search_sends_search_lists_results_newest_first_and_esc_closes() {
     assert_eq!(app.handle_key(key(KeyCode::Enter)), None);
     let screen = render(&mut app, 80, 24).text();
     assert!(!screen.contains("Search"), "{screen}");
-    assert!(screen.contains("▌ Ada Lovelace · 17:01"), "{screen}");
+    assert!(screen.contains("Are we still on?"), "{screen}");
     assert_eq!(app.pane(), Pane::Messages);
     // The conversation was not replaced by the results.
     app.handle_key(key(KeyCode::Char('/')));
@@ -1162,7 +1166,7 @@ fn a_search_result_far_up_the_conversation_is_scrolled_into_view() {
     });
     app.handle_key(key(KeyCode::Enter));
     let screen = render(&mut app, 80, 24).conversation();
-    assert!(screen.contains("▌ Ada Lovelace · 17:05"), "{screen}");
+    assert!(screen.contains("17:05"), "{screen}");
     assert!(screen.contains("message 005"), "{screen}");
     assert!(!screen.contains("message 199"), "{screen}");
 }
@@ -1276,8 +1280,8 @@ fn message_times_are_shown_in_the_local_time_zone() {
         ],
     );
     let screen = render(&mut app, 80, 24).conversation();
-    assert!(screen.contains("Ada Lovelace · 15:36"), "{screen}");
-    assert!(screen.contains("you · 22:10"), "{screen}");
+    assert!(screen.contains("15:36"), "{screen}");
+    assert!(screen.contains("22:10"), "{screen}");
     // With no offset given, times stay UTC (what every other test renders).
     let mut utc = two_chats();
     open_first(
@@ -1286,7 +1290,7 @@ fn message_times_are_shown_in_the_local_time_zone() {
         vec![at("A1", "Are we still on?", false, "2026-10-19T20:36:00Z")],
     );
     let screen = render(&mut utc, 80, 24).conversation();
-    assert!(screen.contains("Ada Lovelace · 20:36"), "{screen}");
+    assert!(screen.contains("20:36"), "{screen}");
 }
 
 #[test]
@@ -1762,7 +1766,7 @@ fn a_not_confirmed_send_says_so_and_r_retries_it_under_the_same_client_id() {
     app.handle_key(key(KeyCode::Esc));
     let screen = render(&mut app, 80, 24).conversation();
     assert!(!screen.contains("not confirmed"), "{screen}");
-    assert!(screen.contains("you · "), "{screen}");
+    assert!(screen.contains("17:06"), "{screen}");
 
     // Any other refusal of a send is still not sent.
     app.handle_key(key(KeyCode::Char('i')));
@@ -2082,18 +2086,24 @@ fn alt_enter_and_ctrl_j_insert_a_newline_and_enter_sends_the_text_with_its_newli
         )))
     );
     assert_eq!(app.composer(), "");
-    // The transcript draws each line of the message on its own row: the first after its author
-    // and time, the others from the pane's first column.
+    // The transcript draws each line of the message on its own row, all inside one bubble.
     let screen = render(&mut app, 80, 24).conversation();
     let rows: Vec<&str> = screen
         .lines()
         .filter(|l| l.contains("first") || l.contains("second") || l.contains("third"))
         .collect();
     assert_eq!(rows.len(), 3, "{screen}");
-    assert!(rows[0].starts_with("you · "), "{screen}");
-    assert!(rows[0].contains("  first "), "{screen}");
-    assert!(rows[1].starts_with("second "), "{screen}");
-    assert!(rows[2].starts_with("third "), "{screen}");
+    assert!(rows[0].contains("first"), "{screen}");
+    assert!(rows[1].contains("second"), "{screen}");
+    assert!(rows[2].contains("third"), "{screen}");
+    // One bubble, so its rows start at the same column, and it sits on the right.
+    let left = |row: &str| row.len() - row.trim_start().len();
+    assert_eq!(left(rows[0]), left(rows[1]), "{screen}");
+    assert_eq!(left(rows[1]), left(rows[2]), "{screen}");
+    assert!(
+        left(rows[0]) > 0,
+        "an outgoing bubble sits right:\n{screen}"
+    );
 }
 
 #[test]

@@ -131,10 +131,10 @@ fn the_fixture_chat_list_renders_at_eighty_by_twenty_four() {
         "no source notice on a daemon screen:\n{screen}"
     );
 
-    // The message pane shows the selected chat's last message.
+    // The message pane shows the selected chat's last message, its time inside the bubble.
     assert!(
-        screen.contains("Ada Lovelace · 17:55"),
-        "the message pane header:\n{screen}"
+        screen.contains("17:55"),
+        "the message pane follows the selection:\n{screen}"
     );
 
     // The footer: the primary key, the way to every other key, and the session state.
@@ -158,13 +158,14 @@ fn the_layout_survives_an_odd_size() {
     assert!(screen.contains("Chats (3) · Tab"), "{screen}");
     assert!(line_with(&screen, "★").contains("Ada"), "{screen}");
     assert!(
-        !screen.contains("Ada Lovelace · 17:55"),
+        !screen.contains("Beginning of conversation"),
         "the conversation is not drawn here:\n{screen}"
     );
     // `Tab` swaps it in, filling the width.
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     let screen = render(&mut app, 37, 11);
-    assert!(screen.contains("Ada Lovelace · 17:55"), "{screen}");
+    assert!(screen.contains("Beginning of conversation"), "{screen}");
+    assert!(screen.contains("17:55"), "{screen}");
 }
 
 #[test]
@@ -210,7 +211,7 @@ fn navigation_moves_the_selection_and_the_message_pane_follows() {
     assert_eq!(app.selected(), 1);
     let screen = render(&mut app, 80, 24);
     assert!(
-        screen.contains("you · 16:02"),
+        screen.contains("16:02"),
         "the message pane followed the selection:\n{screen}"
     );
     assert!(

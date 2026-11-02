@@ -37,6 +37,12 @@ impl Palette {
         mix(self.surface_chrome(), self.text(), 0.06)
     }
 
+    /// An outgoing message's bubble: `surface` 18 % toward `accent`, the faint accent tint that
+    /// tells our messages from theirs without a second accent-coloured surface.
+    pub fn bubble_outgoing(&self) -> Rgb {
+        mix(self.surface(), self.accent(), 0.18)
+    }
+
     /// The selected row and the active tab: `surface_chrome` 10 % toward `text`.
     pub fn surface_active(&self) -> Rgb {
         mix(self.surface_chrome(), self.text(), 0.10)
@@ -322,6 +328,11 @@ light_foreground = "#5c5f77"
         let active = luminance(palette.surface_active());
         let text = luminance(palette.text());
         assert!(chrome < hover && hover < active && active < text);
+        // The outgoing bubble is a tint of the accent, on the surface's side of the text.
+        let outgoing = palette.bubble_outgoing();
+        assert_ne!(outgoing, palette.surface());
+        assert_ne!(outgoing, palette.surface_chrome());
+        assert!(outgoing.b > outgoing.r, "the accent is the cooler hue");
     }
 
     #[test]

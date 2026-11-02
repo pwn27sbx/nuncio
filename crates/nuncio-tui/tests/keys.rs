@@ -243,18 +243,21 @@ fn j_k_and_the_arrows_select_messages_in_the_conversation_and_shift_k_j_do_nothi
     open_ada(&mut app, three());
     assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
     assert_eq!(app.pane(), Pane::Messages);
-    // The conversation row of the selected message, marked by the `▌` bar: its text.
+    // The conversation row of the selected message, on the active surface: its text.
+    let active = {
+        let rgb = Palette::default().surface_active();
+        Color::Rgb(rgb.r, rgb.g, rgb.b)
+    };
     let selected = |app: &mut App| -> Option<String> {
         let screen = render(app, 80, 24);
         let right = split(&screen);
-        let conversation = |y: u16| -> String {
-            (right + 1..screen.area.width)
-                .map(|x| screen[(x, y)].symbol())
-                .collect()
-        };
-        (0..screen.area.height)
-            .find(|&y| conversation(y).starts_with("▌ "))
-            .map(conversation)
+        (2..screen.area.height - 1)
+            .find(|&y| screen[(right + 2, y)].bg == active)
+            .map(|y| {
+                (right + 1..screen.area.width)
+                    .map(|x| screen[(x, y)].symbol())
+                    .collect()
+            })
     };
 
     // Shift-K / Shift-J are gone: they select nothing.
@@ -445,10 +448,16 @@ fn a_click_in_the_conversation_focuses_it_and_selects_the_clicked_message() {
     let at = find(&screen, "second words");
     assert_eq!(click(&mut app, at), None);
     assert_eq!(app.pane(), Pane::Messages);
-    let shown = text(&render(&mut app, 80, 24));
-    assert!(
-        shown.contains("▌ you · 17:02"),
-        "the clicked message:\n{shown}"
+    let after = render(&mut app, 80, 24);
+    let active = {
+        let rgb = Palette::default().surface_active();
+        Color::Rgb(rgb.r, rgb.g, rgb.b)
+    };
+    assert_eq!(
+        after[(at.0, at.1)].bg,
+        active,
+        "the clicked message:\n{}",
+        text(&after)
     );
     // `r` now replies to it.
     app.handle_key(key(KeyCode::Char('r')));
@@ -460,14 +469,19 @@ fn a_click_in_the_conversation_focuses_it_and_selects_the_clicked_message() {
     };
     assert_eq!(reply_to.as_deref(), Some("A2"));
 
-    // A click on a header row selects that message too.
+    // A click on another message's own row selects that message too.
     app.handle_key(key(KeyCode::Tab));
     let screen = render(&mut app, 80, 24);
-    let at = find(&screen, "Ada Lovelace · 17:01");
+    let at = find(&screen, "first words");
     click(&mut app, at);
     assert_eq!(app.pane(), Pane::Messages);
-    let shown = text(&render(&mut app, 80, 24));
-    assert!(shown.contains("▌ Ada Lovelace · 17:01"), "{shown}");
+    let after = render(&mut app, 80, 24);
+    assert_eq!(
+        after[(at.0, at.1)].bg,
+        active,
+        "the clicked message:\n{}",
+        text(&after)
+    );
 }
 
 #[test]

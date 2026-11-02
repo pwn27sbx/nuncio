@@ -62,14 +62,13 @@ fn a_group_message_header_names_its_sender_and_falls_back_to_the_group() {
         ],
     });
     let screen = render(&mut app);
-    assert!(screen.contains("Ana · 17:01"), "the sender:\n{screen}");
+    // U2: no per-message header at all — the side of a bubble says whose it is, and U3 brings
+    // the sender's name back, once per run, in its own colour.
+    assert!(screen.contains("rope?"), "{screen}");
+    assert!(screen.contains("an old one"), "{screen}");
+    assert!(screen.contains("mine"), "{screen}");
     assert!(
-        screen.contains("Climbing · 17:02"),
-        "no sender: the group's name, as before:\n{screen}"
-    );
-    assert!(screen.contains("you · 17:03"), "mine:\n{screen}");
-    assert!(
-        !screen.contains("Climbing · 17:01"),
-        "the group's name instead of the sender:\n{screen}"
+        !screen.contains("Ana ·") && !screen.contains("Climbing ·") && !screen.contains("you ·"),
+        "no author header over a bubble:\n{screen}"
     );
 }

@@ -152,6 +152,15 @@ fn list_width(width: u16) -> u16 {
 
 /// How many lines PageUp/PageDown scroll.
 const PAGE: usize = 10;
+/// A message's bubble takes at most this share of the conversation's columns; the rest is the
+/// gap that shows which side a message came from.
+const BUBBLE_SHARE: u32 = 65;
+/// The narrowest a bubble gets, so a one-word message still reads as a bubble around its time.
+const BUBBLE_MIN: u16 = 12;
+/// The clock on a queued outgoing bubble, where the delivery ticks would go.
+const CLOCK: char = '◷';
+/// The `!` on an outgoing bubble that was not sent.
+const NOT_SENT: char = '!';
 /// The reactions the picker offers (the shared set), on keys `1`..`6`; `x` removes mine.
 pub use nuncio_client::model::REACTIONS;
 /// How many characters of a quoted message are shown.
@@ -1587,46 +1596,29 @@ impl App {
             self.map.message_area = area;
             return;
         }
-        let (lines, selected, owners, boxes) = self.conversation_lines(area.width);
+        let layout = self.conversation_layout(area.width);
+        let total = layout.rows.len();
         let visible = usize::from(area.height);
-        if let Some(start) = selected.filter(|_| self.reveal) {
-            // Scroll so the selected message's header is on screen.
-            let below = Paragraph::new(lines[start..].to_vec())
-                .wrap(Wrap { trim: false })
-                .line_count(area.width);
+        if let Some(start) = layout.selected.filter(|_| self.reveal) {
+            // Scroll so the selected message's first row is on screen.
+            let below = total.saturating_sub(start);
             self.scroll = self
                 .scroll
                 .clamp(below.saturating_sub(visible), below.saturating_sub(1));
         }
         self.reveal = false;
-        // How many rows each line wraps to, and which message each row belongs to (the mouse).
-        let heights: Vec<usize> = lines
-            .iter()
-            .map(|line| {
-                Paragraph::new(line.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(area.width)
-            })
-            .collect();
-        let wrapped: Vec<Option<usize>> = heights
-            .iter()
-            .zip(&owners)
-            .flat_map(|(&rows, owner)| std::iter::repeat_n(*owner, rows))
-            .collect();
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-        let total = paragraph.line_count(area.width);
         let top = total.saturating_sub(visible);
         self.scroll = self.scroll.min(top);
         self.map.message_area = area;
         self.map.message_rows = if total < visible {
             let mut rows = vec![None; visible - total];
-            rows.extend(wrapped);
+            rows.extend(layout.rows.iter().map(|row| row.owner));
             rows
         } else {
-            wrapped
-                .into_iter()
-                .skip(top - self.scroll)
+            layout.rows[top - self.scroll..]
+                .iter()
                 .take(visible)
+                .map(|row| row.owner)
                 .collect()
         };
         // The transcript row drawn on the area's first row (negative: a short one sits low).
@@ -1635,17 +1627,24 @@ impl App {
         } else {
             (top - self.scroll) as i64
         };
-        if total < visible {
-            // Newest at the bottom: a short conversation sits on the composer.
-            let area = Rect {
-                y: area.y + (visible - total) as u16,
-                height: total as u16,
-                ..area
-            };
-            frame.render_widget(paragraph, area);
-        } else {
-            let offset = u16::try_from(top - self.scroll).unwrap_or(u16::MAX);
-            frame.render_widget(paragraph.scroll((offset, 0)), area);
+        let first = first_row.max(0) as usize;
+        let last = (first_row + visible as i64).clamp(0, total as i64) as usize;
+        {
+            let buffer = frame.buffer_mut();
+            for (index, row) in layout.rows.iter().enumerate().take(last).skip(first) {
+                let y = area.y + (index as i64 - first_row) as u16;
+                // A bubble's background covers its whole block, padding included.
+                if let Some(background) = row.bubble {
+                    let block = Rect {
+                        x: area.x + row.x.saturating_sub(1),
+                        y,
+                        width: row.width + 2,
+                        height: 1,
+                    };
+                    buffer.set_style(block, Style::default().bg(background));
+                }
+                buffer.set_line(area.x + row.x, y, &row.line, row.width);
+            }
         }
         // The selected message's rows, the whole width, on the active surface: its picture box
         // and reactions included (a picture draws its own cells over the box after this).
@@ -1656,6 +1655,7 @@ impl App {
             .filter(|_| self.pane != Pane::Chats)
         {
             let active = Style::default().bg(rgb(self.palette.surface_active()));
+            let buffer = frame.buffer_mut();
             for (y, owner) in self.map.message_rows.iter().enumerate() {
                 if *owner == Some(cursor) {
                     let row = Rect {
@@ -1663,7 +1663,7 @@ impl App {
                         height: 1,
                         ..area
                     };
-                    frame.buffer_mut().set_style(row, active);
+                    buffer.set_style(row, active);
                 }
             }
         }
@@ -1678,7 +1678,7 @@ impl App {
                 .buffer_mut()
                 .set_string(gutter, area.y + area.height - 1, "▼", muted);
         }
-        self.draw_pictures(frame, area, &boxes, &heights, first_row);
+        self.draw_pictures(frame, area, &layout.boxes, first_row);
     }
 
     /// Draw each picture box that is at least partly on screen, over the blank rows reserved for
@@ -1692,7 +1692,6 @@ impl App {
         frame: &mut Frame,
         area: Rect,
         boxes: &[PictureBox],
-        heights: &[usize],
         first_row: i64,
     ) {
         let label_style = self.muted();
@@ -1723,18 +1722,12 @@ impl App {
                 images.request(key, images::Origin::File(path.to_owned()), None);
             }
         }
-        let mut starts = Vec::with_capacity(heights.len());
-        let mut row = 0;
-        for height in heights {
-            starts.push(row);
-            row += height;
-        }
         let visible = i64::from(area.height);
         for picture in boxes {
             let Some(message) = messages.get(picture.index) else {
                 continue;
             };
-            let y = starts.get(picture.line).map_or(0, |&s| s as i64) - first_row;
+            let y = picture.line as i64 - first_row;
             if y >= visible || y + i64::from(picture.size.height) <= 0 {
                 continue;
             }
@@ -1836,26 +1829,32 @@ impl App {
     }
 
     /// The selected chat's conversation, oldest first, laid out `columns` wide; before it is
-    /// loaded, its last message. Also the index of the selected message's first line, for each
-    /// line the index of the loaded message it belongs to, and the picture boxes (blank lines the
-    /// pictures are drawn over).
+    /// loaded, its last message. Each message is a bubble: incoming ones start at the pane's
+    /// first column, outgoing ones end at its last usable one (the free last column is the scroll
+    /// gutter), and none is wider than [`BUBBLE_SHARE`] percent of the pane. The time sits inside,
+    /// bottom right, in `text_faint`; nothing repeats the author, because whose a message is the
+    /// side says.
     ///
-    /// One line per message (plan §9.4): the author in bold and the time muted, then the text. A
-    /// day starts with its label in muted caps, after a blank line; an author's run of messages has
-    /// no blank line in it, and the next author starts after one.
-    fn conversation_lines(&self, columns: u16) -> ConversationLines {
+    /// The rows are laid out here, one per screen row, so the scroll, the selection and the mouse
+    /// use the same geometry the bubbles are drawn with (no `Paragraph` wraps them a second time).
+    /// A day starts with its label in muted caps, after a blank row; every bubble after one ends
+    /// after a blank row of its own.
+    fn conversation_layout(&self, columns: u16) -> ConversationLayout {
+        let hint = |text: &str| ConversationLayout {
+            rows: vec![Row::plain(
+                Line::from(Span::styled(text.to_owned(), self.muted())),
+                columns,
+            )],
+            selected: None,
+            boxes: Vec::new(),
+        };
         let Some(chat) = self.model.selected_chat() else {
-            let hint = if self.chats().is_empty() {
+            let text = if self.chats().is_empty() {
                 "No chats yet"
             } else {
                 "No chat open · Enter opens the selected one"
             };
-            return (
-                vec![Line::from(Span::styled(hint, self.muted()))],
-                None,
-                vec![None],
-                Vec::new(),
-            );
+            return hint(text);
         };
         let loaded = self.model.transcript().conversation(&chat.jid);
         let messages: Vec<&Message> = match loaded {
@@ -1863,66 +1862,51 @@ impl App {
             None => chat.last_message.iter().collect(),
         };
         if messages.is_empty() {
-            return (
-                vec![Line::from(Span::styled(
-                    "No messages yet · i writes the first one",
-                    self.muted(),
-                ))],
-                None,
-                vec![None],
-                Vec::new(),
-            );
+            return hint("No messages yet · i writes the first one");
         }
         let body = Style::default().fg(rgb(self.palette.text()));
         let name = body.add_modifier(Modifier::BOLD);
-        let mut lines = Vec::with_capacity(messages.len() * 2 + 1);
+        // The last column is the scroll gutter; a bubble may use every column before it.
+        let usable = columns.saturating_sub(1);
+        let share = (u32::from(usable) * BUBBLE_SHARE / 100) as u16;
+        let max_width = share.max(BUBBLE_MIN.min(usable)).min(usable);
+        let inner_max = max_width.saturating_sub(2);
+        let incoming = rgb(self.palette.surface_chrome());
+        let outgoing = rgb(self.palette.bubble_outgoing());
+        let mut rows = Vec::with_capacity(messages.len() * 3 + 1);
         // The top of the conversation is a place too: it says so when it is on screen, which
         // is where a short transcript leaves the eye with nothing to hold on to (R7).
-        lines.push(Line::from(Span::styled(
-            "Beginning of conversation",
-            self.muted(),
-        )));
-        let mut owners = Vec::with_capacity(messages.len() * 2 + 1);
+        rows.push(Row::plain(
+            Line::from(Span::styled("Beginning of conversation", self.muted())),
+            columns,
+        ));
         let mut selected = None;
         let mut boxes = Vec::new();
-        // The day whose label was drawn last, and the author of the message before.
+        // The day whose label was drawn last, and whether a message was drawn already.
         let mut labelled: Option<time::Date> = None;
-        let mut previous: Option<String> = None;
+        let mut started = false;
         for (index, message) in messages.iter().enumerate() {
             let owner = loaded.is_some().then_some(index);
             let chosen = loaded.is_some() && self.model.transcript().cursor() == Some(index);
-            let who = author(Some(chat), message);
             // A message with no readable time (a send not answered yet) stays in its day.
             match local_day(message, self.utc_offset).filter(|day| labelled != Some(*day)) {
                 Some(day) => {
-                    // A blank line before a day, except right under the start marker.
-                    if lines.len() > 1 {
-                        lines.push(Line::default());
+                    if started {
+                        rows.push(Row::plain(Line::default(), columns));
                     }
-                    lines.push(Line::from(Span::styled(day_label(day), self.muted())));
+                    rows.push(Row::plain(
+                        Line::from(Span::styled(day_label(day), self.muted())),
+                        columns,
+                    ));
                     labelled = Some(day);
                 }
-                None if previous.as_ref().is_some_and(|before| *before != who) => {
-                    lines.push(Line::default());
-                }
+                // One blank row between two bubbles, whatever their authors.
+                None if started => rows.push(Row::plain(Line::default(), columns)),
                 None => {}
             }
-            owners.resize(lines.len(), None);
-            previous = Some(who.clone());
-            let first = lines.len();
+            started = true;
             if chosen {
-                selected = Some(first);
-            }
-            let mut meta = format!(
-                " · {}",
-                meta_of(
-                    message,
-                    self.utc_offset,
-                    self.model.transcript().is_unconfirmed(message)
-                )
-            );
-            if self.model.transcript().is_sending(message) {
-                meta.push_str(" · sending");
+                selected = Some(rows.len());
             }
             let text = if message.kind == "text" {
                 message.text.clone()
@@ -1935,95 +1919,132 @@ impl App {
                 };
                 format!("[{}]{marker} {}", message.kind, message.text)
             };
-            let bar = if chosen { "▌ " } else { "" };
-            // A reply's quote goes between its author and time and its text, so the author and
-            // time get a row of their own there; otherwise the text's first line follows them.
-            let quote = message.reply_to.as_ref().map(|quoted_id| {
+            // A caption being fetched says so on its last row, never wrapping it to more rows
+            // (the box under it never moves).
+            let text = if message.kind != "text" && self.fetching(&chat.jid, message, columns) {
+                downloading(&text, inner_max)
+            } else {
+                text
+            };
+            let mut content: Vec<String> = text.lines().map(plain).collect();
+            if content.is_empty() {
+                content.push(String::new());
+            }
+            if let Some(quote) = message.reply_to.as_ref().map(|quoted_id| {
                 match quoted(messages.iter().copied(), quoted_id) {
                     Some(original) => snippet(original),
                     None => "(a message not loaded)".to_owned(),
                 }
-            });
-            let head = if quote.is_some() {
-                format!("{bar}{who}{meta}")
+            }) {
+                content.insert(0, format!("> {quote}"));
+            }
+            let content: Vec<String> = content
+                .iter()
+                .flat_map(|line| wrap_text(line, usize::from(inner_max)))
+                .collect();
+            let footer = self.bubble_footer(message);
+            let footer_width: usize = footer.iter().map(Span::width).sum();
+            let widest = content
+                .iter()
+                .map(|line| display_width(line))
+                .max()
+                .unwrap_or(0);
+            // A short message keeps its time on its last row, as WhatsApp does; a longer one
+            // gives the time a row of its own, so no word is ever cut to make it fit.
+            let inline = widest + 1 + footer_width <= usize::from(inner_max);
+            let inner = if inline {
+                widest + 1 + footer_width
             } else {
-                format!("{bar}{who}{meta}  ")
+                widest.max(footer_width).min(usize::from(inner_max))
             };
-            // The text's further lines get rows of their own. A caption being fetched says so
-            // on its last row, never wrapping it to more rows (the box under it never moves).
-            let mut rows: Vec<String> = text.lines().map(plain).collect();
-            if rows.is_empty() {
-                rows.push(String::new());
-            }
-            if quote.is_some() {
-                rows.insert(0, head.clone());
+            let width = u16::try_from(inner + 2).unwrap_or(usable).min(usable);
+            let room = width.saturating_sub(2);
+            let background = if message.from_me { outgoing } else { incoming };
+            let x = if message.from_me {
+                usable.saturating_sub(width)
             } else {
-                rows[0].insert_str(0, &head);
-            }
-            if message.kind != "text" && self.fetching(&chat.jid, message, columns) {
-                let last = rows.len() - 1;
-                rows[last] = downloading(&rows[last], columns);
-            }
-            let meta_style = match message.state {
-                Some(MessageState::NotSent) => Style::default().fg(rgb(self.palette.warning())),
-                _ => self.muted(),
+                0
             };
-            let mut rows = rows.into_iter();
-            let line = rows.next().unwrap_or_default();
-            let mut spans = Vec::new();
-            if chosen {
-                spans.push(Span::styled(
-                    "▌",
-                    Style::default().fg(rgb(self.palette.accent())),
-                ));
-                spans.push(Span::raw(" "));
-            }
-            match line.strip_prefix(head.as_str()) {
-                Some(shown) => {
-                    spans.push(Span::styled(who.clone(), name));
-                    spans.push(Span::styled(meta, meta_style));
-                    if quote.is_none() {
-                        spans.push(Span::raw("  "));
-                        spans.push(Span::styled(shown.to_owned(), body));
-                    }
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            let last = content.len().saturating_sub(1);
+            for (row, text) in content.iter().enumerate() {
+                let mut spans = vec![Span::styled(text.clone(), body)];
+                if inline && row == last {
+                    let pad = usize::from(room).saturating_sub(display_width(text) + footer_width);
+                    spans.push(Span::raw(" ".repeat(pad)));
+                    spans.extend(footer.iter().cloned());
                 }
-                // Cut into the author and time by a very narrow pane: drawn as one muted run.
-                None => spans.push(Span::styled(
-                    line.strip_prefix(bar).unwrap_or(&line).to_owned(),
-                    meta_style,
-                )),
+                lines.push(Line::from(spans));
             }
-            lines.push(Line::from(spans));
-            if let Some(quote) = quote {
-                lines.push(Line::from(Span::styled(format!("> {quote}"), self.muted())));
-            }
-            lines.extend(rows.map(|row| Line::from(Span::styled(row, body))));
-            if let Some(size) = loaded
-                .is_some()
-                .then(|| self.picture_box(&chat.jid, message, columns))
-                .flatten()
-            {
-                boxes.push(PictureBox {
-                    line: lines.len(),
-                    size,
-                    index,
-                });
-                lines.extend(std::iter::repeat_n(
-                    Line::default(),
-                    usize::from(size.height),
-                ));
+            if !inline {
+                let pad = usize::from(room).saturating_sub(footer_width);
+                let mut spans = vec![Span::raw(" ".repeat(pad))];
+                spans.extend(footer.iter().cloned());
+                lines.push(Line::from(spans));
             }
             if !message.reactions.is_empty() {
-                let mut spans = vec![Span::raw("  ")];
+                let mut spans = Vec::new();
                 for reaction in &message.reactions {
                     let style = if reaction.from_me { name } else { body };
                     spans.push(Span::styled(format!("{} ", plain(&reaction.emoji)), style));
                 }
                 lines.push(Line::from(spans));
             }
-            owners.resize(lines.len(), owner);
+            for line in lines {
+                rows.push(Row {
+                    line,
+                    x: x.saturating_add(1),
+                    width: room,
+                    bubble: Some(background),
+                    owner,
+                });
+            }
+            if let Some(size) = loaded
+                .is_some()
+                .then(|| self.picture_box(&chat.jid, message, columns))
+                .flatten()
+            {
+                boxes.push(PictureBox {
+                    line: rows.len(),
+                    size,
+                    index,
+                });
+                rows.extend((0..size.height).map(|_| Row {
+                    line: Line::default(),
+                    x: 0,
+                    width: columns,
+                    bubble: None,
+                    owner,
+                }));
+            }
         }
-        (lines, selected, owners, boxes)
+        ConversationLayout {
+            rows,
+            selected,
+            boxes,
+        }
+    }
+
+    /// The time inside a bubble, in the faint role, carrying the state where the ticks would go:
+    /// a small clock while the send is queued and a `danger` `!` when it was not sent. Delivery
+    /// and read receipts are not in the protocol, so they are never invented.
+    fn bubble_footer(&self, message: &Message) -> Vec<Span<'static>> {
+        let faint = Style::default().fg(rgb(self.palette.text_faint()));
+        let unconfirmed = self.model.transcript().is_unconfirmed(message);
+        let mut meta = meta_of(message, self.utc_offset, unconfirmed);
+        if self.model.transcript().is_sending(message) {
+            meta.push_str(" · sending");
+        }
+        let mut spans = vec![Span::styled(meta, faint)];
+        match message.state {
+            Some(MessageState::Queued) => spans.push(Span::styled(format!(" {CLOCK}"), faint)),
+            Some(MessageState::NotSent) if !unconfirmed => spans.push(Span::styled(
+                format!(" {NOT_SENT}"),
+                Style::default().fg(rgb(self.palette.danger())),
+            )),
+            _ => {}
+        }
+        spans
     }
 
     /// Meta text: the `text_muted` role, the only tone with a 4.5:1 floor on both surfaces.
@@ -2039,14 +2060,39 @@ impl App {
     }
 }
 
-/// The transcript as laid out: its lines, the selected message's header line, each line's
-/// message, and the picture boxes.
-type ConversationLines = (
-    Vec<Line<'static>>,
-    Option<usize>,
-    Vec<Option<usize>>,
-    Vec<PictureBox>,
-);
+/// The transcript as laid out: one [`Row`] per screen row, the selected message's first row, and
+/// the picture boxes.
+struct ConversationLayout {
+    rows: Vec<Row>,
+    selected: Option<usize>,
+    boxes: Vec<PictureBox>,
+}
+
+/// One row of the transcript: what it draws, where its bubble sits, and whose message it is.
+struct Row {
+    line: Line<'static>,
+    /// The text's first column, counted from the pane's left edge.
+    x: u16,
+    /// The columns the text may use; a bubble's block is one column wider on each side.
+    width: u16,
+    /// The background of the bubble this row is part of.
+    bubble: Option<Color>,
+    /// The loaded message the row belongs to (the selection and the mouse).
+    owner: Option<usize>,
+}
+
+impl Row {
+    /// A row of plain transcript: no bubble, the pane's whole width.
+    fn plain(line: Line<'static>, columns: u16) -> Self {
+        Self {
+            line,
+            x: 0,
+            width: columns,
+            bubble: None,
+            owner: None,
+        }
+    }
+}
 
 /// A picture's box in the transcript: its first (blank) line, its size in cells, and the index of
 /// its loaded message.
@@ -2080,6 +2126,47 @@ fn downloading(caption: &str, columns: u16) -> String {
         Some(head) => format!("{head}\n{line}"),
         None => line,
     }
+}
+
+/// `text` broken into rows of at most `width` terminal columns: at the last space that fits,
+/// or between graphemes when a single word is wider than the row. Every row keeps a column.
+///
+/// This is the transcript's own wrapping (bubbles are laid out by hand, not by a `Paragraph`),
+/// by the same widths ratatui draws with, so the geometry the scroll and the mouse use is the
+/// geometry on screen.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    for line in text.split('\n') {
+        let mut row = String::new();
+        let mut used = 0;
+        // Where the current row may break: the byte and column just after its last space.
+        let mut space: Option<(usize, usize)> = None;
+        for grapheme in line.graphemes(true) {
+            let w = display_width(grapheme);
+            if used > 0 && used + w > width {
+                match space.take().filter(|_| !grapheme.trim().is_empty()) {
+                    // Carry the word being written over to the next row.
+                    Some((byte, column)) => {
+                        let rest = row.split_off(byte);
+                        rows.push(std::mem::replace(&mut row, rest));
+                        used -= column;
+                    }
+                    None => {
+                        rows.push(std::mem::take(&mut row));
+                        used = 0;
+                    }
+                }
+            }
+            row.push_str(grapheme);
+            used += w;
+            if grapheme.trim().is_empty() {
+                space = Some((row.len(), used));
+            }
+        }
+        rows.push(row);
+    }
+    rows
 }
 
 /// A draft as drawn: its rows, and the cursor's row and column in them.

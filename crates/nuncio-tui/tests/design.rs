@@ -3,6 +3,7 @@
 //! one primary hint, one line per message with day labels, a one-line footer, a scrim behind the
 //! overlays, and one-line empty states. Checked on `TestBackend` buffers at 80x24 and 240x60.
 
+use nuncio_client::wire::MessageState;
 use nuncio_client::{Chat, DaemonFrame, Message, Palette, Session, Snapshot};
 use nuncio_tui::images::Graphics;
 use nuncio_tui::{App, Pane, Source};
@@ -339,9 +340,14 @@ fn the_tones_are_the_palette_roles() {
     // The bar runs down both rows of the selected chat.
     assert_eq!(buffer[(0, ada)].symbol(), "▌");
     assert_eq!(buffer[(0, ada + 1)].symbol(), "▌");
-    // The transcript is on `surface`, the line between the panes in `border`.
+    // The transcript is on `surface`, an incoming bubble on its neutral tone, the line between
+    // the panes in `border`, and the free last column still `surface`.
     let (x, y) = find(&buffer, "good morning");
-    assert_eq!(buffer[(x, y)].bg, colour(palette.surface()));
+    assert_eq!(
+        buffer[(x, y)].bg,
+        colour(palette.surface_chrome()),
+        "an incoming bubble"
+    );
     assert_eq!(
         buffer[(width_of(&buffer) - 2, y)].bg,
         colour(palette.surface())
@@ -353,44 +359,175 @@ fn width_of(buffer: &Buffer) -> u16 {
     buffer.area.width
 }
 
+/// U2: each message is a bubble with its text and, inside it, its time in the faint role. No
+/// author header is drawn: the side a bubble sits on says whose it is.
 #[test]
-fn each_message_is_one_line_with_its_author_and_time_muted_then_its_text() {
+fn a_bubble_carries_its_text_and_its_time_inside_it() {
     let palette = Palette::default();
-    let muted = colour(palette.text_muted());
+    let faint = colour(palette.text_faint());
+    let body = colour(palette.text());
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
-        for (meta, said) in [
-            ("Ada Lovelace · 17:01", "hello there"),
-            ("Ada Lovelace · 17:02", "how are you"),
-            ("you · 17:03", "fine, thanks"),
-            ("Ada Lovelace · 09:15", "good morning"),
+        for (said, time) in [
+            ("hello there", "17:01"),
+            ("how are you", "17:02"),
+            ("fine, thanks", "17:03"),
+            ("good morning", "09:15"),
         ] {
-            let (x, y) = find(&buffer, meta);
             let (text_x, text_y) = find(&buffer, said);
-            assert_eq!(
-                text_y,
-                y,
-                "{meta} and {said} share a row:\n{}",
+            let (x, y) = find(&buffer, time);
+            assert_eq!(text_y, y, "the time is inside the {said:?} row");
+            assert!(x > text_x, "{said:?} then its time:\n{}", text(&buffer));
+            assert_eq!(buffer[(text_x, text_y)].fg, body, "{said:?}");
+            assert_eq!(buffer[(x, y)].fg, faint, "the time of {said:?}");
+            // The time is on the bubble, not on the pane behind it.
+            assert_ne!(
+                buffer[(x, y)].bg,
+                colour(palette.surface()),
+                "the time of {said:?} is outside its bubble:\n{}",
                 text(&buffer)
             );
-            assert!(text_x > x);
-            // The name in bold, the time dim, the text neither.
-            assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD), "{meta}");
-            let time = find(&buffer, meta).0 + meta.find('·').expect("a dot") as u16;
-            let time = (time..x + meta.chars().count() as u16)
-                .find(|&x| buffer[(x, y)].symbol().chars().all(|c| c.is_ascii_digit()))
-                .expect("the time");
-            assert_eq!(buffer[(time, y)].fg, muted, "{meta}");
-            assert_eq!(buffer[(text_x, y)].fg, colour(palette.text()));
-            assert!(!buffer[(text_x, y)].modifier.contains(Modifier::BOLD));
         }
     }
 }
 
+/// U2: an incoming bubble starts at the pane's first column, an outgoing one ends at its last
+/// usable column (the free last column is the scroll gutter), and neither is wider than 65 % of
+/// the pane.
 #[test]
-fn an_authors_run_has_no_blank_line_and_the_next_author_starts_after_one() {
+fn a_bubble_sits_on_its_side_and_takes_at_most_sixty_five_percent() {
+    let palette = Palette::default();
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    for (width, height) in SIZES {
+        let buffer = draw(&mut app, width, height);
+        let sep = separator(&buffer);
+        // The conversation pane, its free last column and the gutter before it.
+        let left = sep + 1;
+        let right = width - 1;
+        let usable = (right - left - 1) as f64;
+        let most = (usable * 0.65).ceil() as u16;
+        // Incoming: the pane's first column is on the bubble.
+        let (_, incoming) = find(&buffer, "hello there");
+        assert_ne!(
+            buffer[(left, incoming)].bg,
+            colour(palette.surface()),
+            "an incoming bubble starts at the first column:\n{}",
+            text(&buffer)
+        );
+        let run = (left..right)
+            .take_while(|&x| buffer[(x, incoming)].bg != colour(palette.surface()))
+            .count();
+        assert!((1..=usize::from(most)).contains(&run), "incoming run {run}");
+        // Outgoing: it ends at the last usable column, and never wider than the most.
+        let outgoing = colour(palette.bubble_outgoing());
+        let (_, mine) = find(&buffer, "fine, thanks");
+        assert_eq!(
+            buffer[(right - 2, mine)].bg,
+            outgoing,
+            "an outgoing bubble ends at the last usable column:\n{}",
+            text(&buffer)
+        );
+        assert_eq!(buffer[(right - 1, mine)].bg, colour(palette.surface()));
+        let run = (left..=right - 2)
+            .rev()
+            .take_while(|&x| buffer[(x, mine)].bg == outgoing)
+            .count();
+        assert!((1..=usize::from(most)).contains(&run), "outgoing run {run}");
+    }
+}
+
+/// U2: a message longer than a bubble wraps inside it, on rows that all belong to the bubble.
+#[test]
+fn a_long_message_wraps_inside_its_bubble() {
+    let long = "the quick brown fox jumps over the lazy dog and keeps running ".repeat(4);
+    let mut app = two_chats();
+    open(
+        &mut app,
+        ADA,
+        vec![message("L1", long.trim(), false, "2026-10-17T17:01:00Z")],
+    );
+    let buffer = draw(&mut app, 80, 24);
+    let surface = colour(Palette::default().surface());
+    let sep = separator(&buffer);
+    let left = sep + 1;
+    let (_, first) = find(&buffer, "the quick brown");
+    let mut rows = 0;
+    for y in first..24 {
+        if (left..79).all(|x| buffer[(x, y)].bg == surface) {
+            break;
+        }
+        rows += 1;
+    }
+    assert!(rows > 1, "the long message wraps:\n{}", text(&buffer));
+    assert!(
+        text(&buffer).contains("keeps running"),
+        "the last words are still drawn:\n{}",
+        text(&buffer)
+    );
+    // The bubble never takes more than 65 % of the pane (46 columns wide: at most 29).
+    let run = (left..79)
+        .take_while(|&x| buffer[(x, first)].bg != surface)
+        .count();
+    assert!(
+        run <= 29,
+        "a 46-column pane gives the bubble at most 29: {run}"
+    );
+    assert_eq!(run, 29, "the long message takes the whole share");
+}
+
+/// U2: no author header is repeated over the messages: the conversation never says `you`, `them`
+/// or the chat's name again.
+#[test]
+fn the_author_is_never_repeated_over_the_bubbles() {
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    for (width, height) in SIZES {
+        let buffer = draw(&mut app, width, height);
+        let sep = separator(&buffer);
+        let conversation = (3..height - 1)
+            .map(|y| {
+                (sep + 1..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for gone in ["you ·", "them ·", "Ada Lovelace ·", "Ada Lovelace"] {
+            assert!(
+                !conversation.contains(gone),
+                "{gone:?} over a bubble:\n{conversation}"
+            );
+        }
+    }
+}
+
+/// U2, correction §8.2: the outgoing state the protocol does have is drawn where the ticks would
+/// go — a small clock while a send is queued, a `danger` `!` when it was not sent.
+#[test]
+fn a_queued_bubble_shows_a_clock_and_a_not_sent_one_a_bang() {
+    let palette = Palette::default();
+    let danger = colour(palette.danger());
+    let mut app = two_chats();
+    let mut queued = message("M1", "on my way", true, "2026-10-17T17:01:00Z");
+    queued.state = Some(MessageState::Queued);
+    let mut lost = message("M2", "did you get this", true, "2026-10-17T17:02:00Z");
+    lost.state = Some(MessageState::NotSent);
+    open(&mut app, ADA, vec![queued, lost]);
+    let buffer = draw(&mut app, 80, 24);
+    let (x, y) = find(&buffer, "◷");
+    assert_eq!(buffer[(x, y)].fg, colour(palette.text_faint()));
+    // The queued bubble says it in words too, so the clock is never the only cue.
+    assert_eq!(row_of(&buffer, "queued"), y, "{}", text(&buffer));
+    let (x, y) = find(&buffer, "!");
+    assert_eq!(buffer[(x, y)].fg, danger, "{}", text(&buffer));
+    assert_eq!(row_of(&buffer, "not sent"), y, "{}", text(&buffer));
+}
+
+#[test]
+fn one_blank_row_separates_two_bubbles() {
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
     for (width, height) in SIZES {
@@ -402,11 +539,12 @@ fn an_authors_run_has_no_blank_line_and_the_next_author_starts_after_one() {
         let mine = row_of(&buffer, "fine, thanks");
         assert_eq!(
             second,
-            first + 1,
-            "one author, no blank line:\n{}",
+            first + 2,
+            "one blank row between two bubbles:\n{}",
             text(&buffer)
         );
-        assert_eq!(mine, second + 2, "a new author after one blank line");
+        assert!(blank(first + 1), "{}", text(&buffer));
+        assert_eq!(mine, second + 2, "and after the next one");
         assert!(blank(second + 1), "{}", text(&buffer));
     }
 }
@@ -457,12 +595,19 @@ fn senders_are_not_colour_coded() {
     let mine = message("G3", "third", true, "2026-10-18T17:03:00Z");
     open(&mut app, GROUP, vec![one, two, mine]);
     let buffer = draw(&mut app, 80, 24);
-    let fg = |needle: &str| {
+    // Two members of one group, and one of mine: the side says whose, never a colour.
+    let ink = |needle: &str| {
         let (x, y) = find(&buffer, needle);
         (buffer[(x, y)].fg, buffer[(x, y)].modifier)
     };
-    assert_eq!(fg("Ada ·"), fg("Grace ·"), "{}", text(&buffer));
-    assert_eq!(fg("Ada ·"), fg("you ·"));
+    assert_eq!(ink("first"), ink("second"), "{}", text(&buffer));
+    assert_eq!(ink("first"), ink("third"), "{}", text(&buffer));
+    // Both members' bubbles share the one incoming tone.
+    let incoming = colour(Palette::default().surface_chrome());
+    for who in ["first", "second"] {
+        let (x, y) = find(&buffer, who);
+        assert_eq!(buffer[(x, y)].bg, incoming, "no sender gets its own tone");
+    }
 }
 
 #[test]
@@ -604,7 +749,7 @@ fn empty_states_are_one_muted_line_with_the_key_hint() {
 }
 
 #[test]
-fn a_reply_shows_its_quote_between_its_header_and_its_text_inside_an_authors_run() {
+fn a_reply_shows_its_quote_inside_the_bubble_before_its_text() {
     let mut app = two_chats();
     let mut reply = message("A2", "line one\nline two", false, "2026-10-17T17:02:00Z");
     reply.reply_to = Some("A1".to_owned());
@@ -624,26 +769,24 @@ fn a_reply_shows_its_quote_between_its_header_and_its_text_inside_an_authors_run
     let palette = Palette::default();
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
-        let header = row_of(&buffer, "Ada Lovelace · 17:02");
         let quote = row_of(&buffer, "> the question");
         let one = row_of(&buffer, "line one");
         let two = row_of(&buffer, "line two");
-        let next = row_of(&buffer, "Ada Lovelace · 17:03");
+        let next = row_of(&buffer, "afterwards");
         assert_eq!(
-            (quote, one, two, next),
-            (header + 1, header + 2, header + 3, header + 4),
-            "header, quote, text, then the next message of the run:\n{}",
+            (one, two),
+            (quote + 1, quote + 2),
+            "quote, then the text:\n{}",
             text(&buffer)
         );
-        assert!(!row(&buffer, header).contains("line one"));
+        assert_eq!(next, two + 2, "a blank row, then the next bubble");
+        assert!(!row(&buffer, quote).contains("line one"));
         // The quote is part of the selected reply, not of the next message.
-        let sep = separator(&buffer);
         let active = colour(palette.surface_active());
-        for y in [header, quote, one, two] {
+        for y in [quote, one, two] {
             assert_eq!(buffer[(width - 2, y)].bg, active, "row {y}");
         }
         assert_ne!(buffer[(width - 2, next)].bg, active);
-        assert!(sep < width);
     }
 }
 
@@ -732,13 +875,18 @@ fn meta_is_the_muted_role_and_no_text_is_dimmed() {
             }
         }
     }
-    // Meta is that role: a message's time, the day label, a footer key and an empty state.
+    // Meta is that role: the day label, a footer key and an empty state; a bubble's time is the
+    // faint role (U2), which is a decoration inside the bubble, never body text.
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
     app.handle_key(key(KeyCode::Esc));
     let buffer = draw(&mut app, 80, 24);
     let (x, y) = find(&buffer, "17:01");
-    assert_eq!(buffer[(x, y)].fg, muted, "a message's time");
+    assert_eq!(
+        buffer[(x, y)].fg,
+        colour(palette.text_faint()),
+        "a message's time"
+    );
     let (x, y) = find(&buffer, "SAT 17 OCT 2026");
     assert_eq!(buffer[(x, y)].fg, muted, "the day label");
     let (x, y) = find(&buffer, "? all keys");

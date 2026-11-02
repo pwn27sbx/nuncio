@@ -262,11 +262,12 @@ fn a_box_is_reserved_before_the_thumbnail_is_ready_and_the_thumbnail_fills_it() 
     );
     let before = draw(&mut app, 80, 24);
     let caption = row_of(&before, "[image] the view").expect("the caption line");
-    let after_row = row_of(&before, "Ada Lovelace · 17:02").expect("the next message");
+    let after_row = row_of(&before, "17:02").expect("the next message");
     // 320x240 at a 10x20 font in 46 columns: 32 columns, 12 rows, right under the caption.
+    // The caption bubble, its twelve blank rows, then one blank row before the next bubble.
     assert_eq!(
         after_row - caption - 1,
-        12,
+        13,
         "the box is reserved at once:\n{}",
         screen(&before)
     );
@@ -278,13 +279,13 @@ fn a_box_is_reserved_before_the_thumbnail_is_ready_and_the_thumbnail_fills_it() 
     assert!(app.wait_for_images(WAIT), "the thumbnail is encoded");
     let ready = draw(&mut app, 80, 24);
     assert_eq!(
-        row_of(&ready, "Ada Lovelace · 17:02"),
+        row_of(&ready, "17:02"),
         Some(after_row),
         "nothing moves when the thumbnail is drawn"
     );
     assert_eq!(
         rows_in(&ready, RED),
-        ((caption + 1)..after_row).collect::<Vec<_>>(),
+        ((caption + 1)..(after_row - 1)).collect::<Vec<_>>(),
         "the thumbnail fills the box:\n{}",
         screen(&ready)
     );
@@ -302,7 +303,7 @@ fn a_picture_with_no_size_gets_no_box_and_no_thumbnail() {
     );
     let buffer = draw(&mut app, 80, 24);
     let caption = row_of(&buffer, "[image] the view").expect("the caption line");
-    assert_eq!(row_of(&buffer, "Ada Lovelace · 17:02"), Some(caption + 1));
+    assert_eq!(row_of(&buffer, "17:02"), Some(caption + 2));
 }
 
 #[test]
@@ -310,36 +311,36 @@ fn a_partially_visible_picture_is_cut_at_the_top_and_at_the_bottom() {
     // Cut at the top: ten one-row messages after the photo scroll its first rows away.
     let mut app = pictures_app();
     let mut messages = vec![photo("IMG1", 1)];
-    messages.extend(texts("after", 10, 10));
+    messages.extend(texts("after", 5, 10));
     open_ada(&mut app, messages);
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
     let top_cut = draw(&mut app, 80, 24);
-    // 2 + 12 + 10 rows in 19: the day label, the caption line and 3 picture rows are above the
-    // view.
+    // Every bubble takes a row and a blank one, so the caption and four picture rows are above
+    // the view: the box is cut at the pane's first row.
     assert_eq!(
         rows_in(&top_cut, RED),
         (2..11).collect::<Vec<_>>(),
         "{}",
         screen(&top_cut)
     );
-    assert_eq!(row_of(&top_cut, "after line 0"), Some(11));
+    assert_eq!(row_of(&top_cut, "after line 0"), Some(12));
 
     // Cut at the bottom: the same photo after eight messages, scrolled to the oldest.
     let mut app = pictures_app();
-    let mut messages = texts("before", 8, 1);
+    let mut messages = texts("before", 5, 1);
     messages.push(photo("IMG1", 9));
     open_ada(&mut app, messages);
     app.handle_key(key(KeyCode::Char('g')));
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
     let bottom_cut = draw(&mut app, 80, 24);
-    // The start marker costs one row: 8 picture rows fit before the composer.
+    // The start marker costs one row: six picture rows fit before the composer.
     assert_eq!(row_of(&bottom_cut, "Beginning of conversation"), Some(2));
     assert_eq!(row_of(&bottom_cut, "before line 0"), Some(4));
     assert_eq!(
         rows_in(&bottom_cut, RED),
-        (13..21).collect::<Vec<_>>(),
+        (15..21).collect::<Vec<_>>(),
         "{}",
         screen(&bottom_cut)
     );
@@ -377,7 +378,7 @@ fn a_corrupt_thumbnail_keeps_the_box_with_a_label_and_never_panics() {
     // The sticker's caption is on its message line; its box starts on the next row.
     let sticker_box = text
         .lines()
-        .skip_while(|line| !line.contains("Ada Lovelace · 17:02"))
+        .skip_while(|line| !line.contains("17:02"))
         .nth(1)
         .unwrap_or_default();
     assert!(
@@ -387,10 +388,11 @@ fn a_corrupt_thumbnail_keeps_the_box_with_a_label_and_never_panics() {
     // The boxes keep their height: 12 rows each, so the last message is far below.
     let rows = text.lines().collect::<Vec<_>>();
     let caption = rows.iter().position(|l| l.contains("[image] the view"));
-    let sticker_header = rows.iter().position(|l| l.contains("Ada Lovelace · 17:02"));
+    let sticker_header = rows.iter().position(|l| l.contains("17:02"));
+    // Twelve box rows and the blank row between two bubbles.
     assert_eq!(
         sticker_header.zip(caption).map(|(s, c)| s - c - 1),
-        Some(12)
+        Some(13)
     );
 }
 
@@ -552,7 +554,7 @@ fn o_on_a_photo_fetches_the_full_picture_into_the_same_box_and_opens_nothing() {
     let thumb = draw(&mut app, 80, 24);
     let red = rows_in(&thumb, RED);
     assert_eq!(red.len(), 12);
-    let next = row_of(&thumb, "Ada Lovelace · 17:02");
+    let next = row_of(&thumb, "17:02");
 
     app.handle_key(key(KeyCode::Char('k')));
     app.handle_key(key(KeyCode::Char('k')));
@@ -562,7 +564,7 @@ fn o_on_a_photo_fetches_the_full_picture_into_the_same_box_and_opens_nothing() {
     assert_eq!(frame, ClientFrame::download_media(ADA, "IMG1"));
     let downloading = draw(&mut app, 80, 24);
     assert!(
-        row_text(&downloading, red[0] - 1).contains("Downloading…"),
+        screen(&downloading).contains("Downloading…"),
         "{}",
         screen(&downloading)
     );
@@ -583,11 +585,7 @@ fn o_on_a_photo_fetches_the_full_picture_into_the_same_box_and_opens_nothing() {
         screen(&replaced)
     );
     assert!(rows_in(&replaced, RED).is_empty());
-    assert_eq!(
-        row_of(&replaced, "Ada Lovelace · 17:02"),
-        next,
-        "nothing moved"
-    );
+    assert_eq!(row_of(&replaced, "17:02"), next, "nothing moved");
     assert!(!screen(&replaced).contains("Downloading…"));
     // Redraws reuse the encoded full picture.
     let encodes = app.image_encodes();
@@ -743,11 +741,11 @@ fn a_sticker_shows_its_first_frame_and_an_animated_one_a_marker() {
     let lines: Vec<&str> = text.lines().collect();
     let still = lines
         .iter()
-        .position(|l| l.contains("Ada Lovelace · 17:01"))
+        .position(|l| l.contains("17:01"))
         .expect("the first sticker");
     let moving = lines
         .iter()
-        .position(|l| l.contains("Ada Lovelace · 17:02"))
+        .position(|l| l.contains("17:02"))
         .expect("the second sticker");
     assert!(
         lines[still].contains("[sticker]") && !lines[still].contains('▶'),
@@ -932,7 +930,7 @@ fn a_picture_with_no_thumbnail_says_its_label_once_and_its_box_stays_empty() {
     for minute in 1..=3 {
         let header = lines
             .iter()
-            .position(|l| l.contains(&format!("Ada Lovelace · 17:0{minute}")))
+            .position(|l| l.contains(&format!("17:0{minute}")))
             .expect("the header");
         assert!(
             lines[header].contains("[sticker]") || lines[header].contains("[image]"),
@@ -1169,12 +1167,12 @@ fn kitty_placeholders_follow_their_own_picture_across_a_scroll() {
         ids
     };
     let (bottom, _) = frame(&mut app);
-    let still = ids_of(&bottom, "Ada Lovelace · 17:02");
-    let moving = ids_of(&bottom, "Ada Lovelace · 17:03");
+    let still = ids_of(&bottom, "17:02");
+    let moving = ids_of(&bottom, "17:03");
     assert_eq!(still.len(), 1, "{}", screen(&bottom));
     assert_eq!(moving.len(), 1, "{}", screen(&bottom));
     assert_ne!(still, moving, "two stickers, two kitty images");
-    assert!(ids_of(&bottom, "Ada Lovelace · 17:04").is_empty());
+    assert!(ids_of(&bottom, "17:04").is_empty());
 
     for _ in 0..3 {
         app.handle_key(key(KeyCode::PageUp));
@@ -1184,10 +1182,7 @@ fn kitty_placeholders_follow_their_own_picture_across_a_scroll() {
             screen(&fresh),
             "the terminal shows what was drawn"
         );
-        for (header, want) in [
-            ("Ada Lovelace · 17:02", &still),
-            ("Ada Lovelace · 17:03", &moving),
-        ] {
+        for (header, want) in [("17:02", &still), ("17:03", &moving)] {
             let got = ids_of(&shown, header);
             assert!(
                 got.is_empty() || &got == want,
@@ -1195,7 +1190,7 @@ fn kitty_placeholders_follow_their_own_picture_across_a_scroll() {
             );
         }
         assert!(
-            ids_of(&shown, "Ada Lovelace · 17:04").is_empty(),
+            ids_of(&shown, "17:04").is_empty(),
             "the sticker without a thumbnail draws no picture"
         );
     }
@@ -1359,7 +1354,7 @@ fn downloading_never_moves_the_box() {
     );
     let before = draw(&mut app, 80, 24);
     // Bottom-aligned: a caption that grows a row moves the photo's header up.
-    let next = row_of(&before, "Ada Lovelace · 17:01");
+    let next = row_of(&before, "17:01");
     assert!(next.is_some());
     app.handle_key(key(KeyCode::Char('k')));
     app.handle_key(key(KeyCode::Char('k')));
@@ -1373,7 +1368,7 @@ fn downloading_never_moves_the_box() {
         screen(&downloading)
     );
     assert_eq!(
-        row_of(&downloading, "Ada Lovelace · 17:01"),
+        row_of(&downloading, "17:01"),
         next,
         "nothing moved:\n{}",
         screen(&downloading)

@@ -402,55 +402,65 @@ fn a_bubble_carries_its_text_and_its_time_inside_it() {
     }
 }
 
-/// U2: an incoming bubble starts at the pane's first column, an outgoing one ends at its last
-/// usable column (the free last column is the scroll gutter), and neither is wider than 65 % of
-/// the pane.
+/// C: an incoming slab's ear sits on the band's left edge and its tinted block one cell inside it;
+/// an outgoing one puts its ear on the band's right edge. A slab keeps at most 66 % of the band for
+/// its block (the ear is outside it), and the gutter column stays free.
 #[test]
-fn a_bubble_sits_on_its_side_and_takes_at_most_sixty_five_percent() {
+fn a_slab_lives_on_its_side_within_its_share() {
     let palette = Palette::default();
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
-    for (width, height) in SIZES {
-        let buffer = draw(&mut app, width, height);
+    for (width, _height) in SIZES {
+        let buffer = draw(&mut app, width, 24);
+        let surface = colour(palette.surface());
         let sep = separator(&buffer);
-        // The conversation pane, its free last column and the gutter before it.
-        let left = sep + 1;
-        let right = width - 1;
-        let usable = (right - left - 1) as f64;
-        let most = (usable * 0.65).ceil() as u16;
-        // Incoming: the pane's first column is on the bubble.
+        let left = sep + 1; // the conversation area's first column
+        let usable = width - 2 - left; // the area minus the free last column, gutter included
+        let band = usable - 2; // one margin on each side
+        let most = (band as u32 * 66 / 100) as u16;
+        // Incoming: the ear is the band's first column, the tinted block starts one cell later.
         let (_, incoming) = find(&buffer, "hello there");
-        assert_ne!(
-            buffer[(left, incoming)].bg,
-            colour(palette.surface()),
-            "an incoming bubble starts at the first column:\n{}",
-            text(&buffer)
-        );
-        let run = (left..right)
-            .take_while(|&x| buffer[(x, incoming)].bg != colour(palette.surface()))
-            .count();
-        assert!((1..=usize::from(most)).contains(&run), "incoming run {run}");
-        // Outgoing: it ends at the last usable column, and never wider than the most.
-        let outgoing = colour(palette.bubble_outgoing());
-        let (_, mine) = find(&buffer, "fine, thanks");
+        assert_eq!(buffer[(left + 1, incoming)].symbol(), "▐");
         assert_eq!(
-            buffer[(right - 2, mine)].bg,
-            outgoing,
-            "an outgoing bubble ends at the last usable column:\n{}",
+            buffer[(left + 1, incoming)].fg,
+            colour(palette.bubble_ear_incoming()),
+            "{}",
             text(&buffer)
         );
-        assert_eq!(buffer[(right - 1, mine)].bg, colour(palette.surface()));
-        let run = (left..=right - 2)
-            .rev()
-            .take_while(|&x| buffer[(x, mine)].bg == outgoing)
+        assert_eq!(
+            buffer[(left, incoming)].bg,
+            surface,
+            "the margin stays free"
+        );
+        assert_ne!(
+            buffer[(left + 2, incoming)].bg,
+            surface,
+            "the block is tinted"
+        );
+        let run = (left + 2..left + 1 + band)
+            .take_while(|&x| buffer[(x, incoming)].bg != surface)
             .count();
-        assert!((1..=usize::from(most)).contains(&run), "outgoing run {run}");
+        // The ear takes one column of the share; the block is the rest.
+        assert!(run >= 3 && run < usize::from(most), "{run} < {most}");
+        // Outgoing: the ear is the band's last column, the block ends one cell before it.
+        let (_, mine) = find(&buffer, "fine, thanks");
+        let ear = left + band;
+        assert_eq!(buffer[(ear, mine)].symbol(), "▌");
+        assert_eq!(buffer[(ear, mine)].fg, colour(palette.accent()));
+        assert_eq!(buffer[(ear + 1, mine)].bg, surface, "the margin stays free");
+        assert_eq!(buffer[(ear + 2, mine)].bg, surface, "the gutter stays free");
+        let run = (left + 2..ear)
+            .rev()
+            .take_while(|&x| buffer[(x, mine)].bg == colour(palette.bubble_outgoing()))
+            .count();
+        assert!(run >= 3 && run < usize::from(most), "{run} < {most}");
     }
 }
 
-/// U2: a message longer than a bubble wraps inside it, on rows that all belong to the bubble.
+/// C: a message longer than its share wraps inside the slab, whose block never passes 66 % of the
+/// band; the ear runs its whole height.
 #[test]
-fn a_long_message_wraps_inside_its_bubble() {
+fn a_long_message_wraps_inside_its_slab() {
     let long = "the quick brown fox jumps over the lazy dog and keeps running ".repeat(4);
     let mut app = two_chats();
     open(
@@ -462,13 +472,21 @@ fn a_long_message_wraps_inside_its_bubble() {
     let surface = colour(Palette::default().surface());
     let sep = separator(&buffer);
     let left = sep + 1;
+    let band = 80 - 2 - left - 2;
+    let most = (band as u32 * 66 / 100) as u16;
     let (_, first) = find(&buffer, "the quick brown");
     let mut rows = 0;
     for y in first..24 {
-        if (left..79).all(|x| buffer[(x, y)].bg == surface) {
+        if (left..80).all(|x| buffer[(x, y)].bg == surface) {
             break;
         }
         rows += 1;
+        assert_eq!(
+            buffer[(left + 1, y)].symbol(),
+            "▐",
+            "the ear runs the whole height:\n{}",
+            text(&buffer)
+        );
     }
     assert!(rows > 1, "the long message wraps:\n{}", text(&buffer));
     assert!(
@@ -476,15 +494,19 @@ fn a_long_message_wraps_inside_its_bubble() {
         "the last words are still drawn:\n{}",
         text(&buffer)
     );
-    // The bubble never takes more than 65 % of the pane (46 columns wide: at most 29).
-    let run = (left..79)
+    let run = (left + 2..left + 1 + band)
         .take_while(|&x| buffer[(x, first)].bg != surface)
         .count();
+    // The ear takes one column of the share, so the block keeps one less.
     assert!(
-        run <= 29,
-        "a 46-column pane gives the bubble at most 29: {run}"
+        run < usize::from(most),
+        "a {band}-column band gives the slab at most {most}: {run} + the ear"
     );
-    assert_eq!(run, 29, "the long message takes the whole share");
+    assert_eq!(
+        run + 1,
+        usize::from(most),
+        "the long message takes the share"
+    );
 }
 
 /// U2: no author header is repeated over the messages: the conversation never says `you`, `them`
@@ -1169,7 +1191,7 @@ fn the_composer_has_a_field_with_a_placeholder_and_the_keys_are_said_once() {
     let buffer = draw(&mut app, 80, 24);
     let shown = text(&buffer);
     assert!(!shown.contains("Write a message"), "{shown}");
-    let rule = row_of(&buffer, "▌");
+    let rule = row_of(&buffer, "hi") - 1;
     assert_eq!(buffer[(79, rule)].symbol(), "─", "{shown}");
 
     // With a reply's quote the rule carries it and still reaches the last column.

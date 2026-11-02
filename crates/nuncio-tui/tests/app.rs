@@ -825,7 +825,7 @@ fn a_reply_quotes_the_selected_message_and_the_transcript_shows_the_quote() {
         "the quote is inside the reply's bubble:\n{screen}"
     );
     assert_eq!(
-        screen.matches("▌ ").count(),
+        screen.matches("▌ Are we still on?").count(),
         1,
         "only the reply quotes:\n{screen}"
     );

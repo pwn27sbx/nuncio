@@ -97,24 +97,24 @@ nuncio-tui [--image <png>]
   side of a daylight-saving change shows an hour off until the next start). If the offset cannot
   be read, times are UTC and the footer says so.
 - **Conversation** (right): the selected chat, newest message at the bottom. Before a chat is
-  opened it shows the chat's last message only. Every message is a bubble: an incoming one starts
-  at the pane's first column, an outgoing one ends at its last usable column (the free last column
-  is the scroll gutter), and none is wider than 65 % of the pane. The text wraps inside the bubble
-  and the time sits in it, bottom right, in the faint role — with the send's state where the
-  delivery ticks would go: a small clock `◷` while it is queued, a `!` in the danger role when it
-  was not sent (delivered and read receipts are not in the protocol, so they are never invented).
-  Consecutive messages from one author are one group: no gap between their bubbles and, in a
-  group chat, the sender's name once at the top of the run, in the accent and bold (a one-to-one
-  chat names nobody: the side a bubble is on says whose it is). One blank row separates two
-  groups. Each day starts with a centred separator in muted text: `Today`, `Yesterday`, or the
-  date in caps (`SUN 18 OCT 2026`) for any older day. With no
-  message it says `No messages yet · i writes the first one`, with no chats `No chats yet`
-  (its title is then `Conversation`, so the focus still shows). The transcript opens with a
-  muted `Beginning of conversation` line, which is what you see when the top is on screen; when
-  there is more above or below, the free column on the right says so with `▲` or `▼`. With no
-  chat at all it says `No chat open · Tab switches panes`; an empty list says `No chats yet` on a
-  linked device and `No device linked · open nuncio to link it` when no device is linked, which
-  points at the app and never at a command line (S10).
+  opened it shows the chat's last message only. Every message is a tinted slab: one column of
+  margin from the pane edges, a **full-height ear** on the sender's side (`▐` theirs in the theme's
+  cyan, `▌` ours in the accent, on every row of the message), one cell of padding, then the text.
+  A run of one author shares one width — at most 66 % of the band for the slab, which the time and
+  the send's state may push up to the band, so a state word is never cut. The text wraps inside;
+  the time sits at the slab's right edge in the faint role, with the send's state where delivery
+  ticks would go: a small clock `◷` while it is queued and a `!` in the danger role when it was
+  not sent (delivered and read receipts are not in the protocol, so they are never invented). One
+  blank row separates two runs; nothing repeats the author over a 1:1 chat, and in a group the
+  sender is named once at the top of its run. Each day starts with a centred separator in muted
+  text: `Today`, `Yesterday`, or the date (`17 OCT 2026`) for any older day. With no message it
+  says `No messages yet · i writes the first one`, with no chats `No chats yet` (its title is then
+  `Conversation`, so the focus still shows). The transcript opens with a muted `Beginning of
+  conversation` line, which is what you see when the top is on screen; when there is more above or
+  below, the free column on the right says so with `▲` or `▼`. With no chat at all it says `No chat
+  open · Tab switches panes`; an empty list says `No chats yet` on a linked device and `No device
+  linked · open nuncio to link it` when no device is linked, which points at the app and never at a
+  command line (S10).
 - **Read**: opening a chat that has unread messages marks it read, here and on WhatsApp too, as
   the official clients do: your other devices clear it and the sender sees blue ticks, unless read
   receipts are off in WhatsApp's privacy settings (then only your own devices clear it). A new

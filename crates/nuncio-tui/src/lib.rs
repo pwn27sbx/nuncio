@@ -157,9 +157,9 @@ fn list_width(width: u16) -> u16 {
 const PAGE: usize = 10;
 /// A message's bubble takes at most this share of the conversation's columns; the rest is the
 /// gap that shows which side a message came from.
-const BUBBLE_SHARE: u32 = 65;
+const BUBBLE_SHARE: u32 = 66;
 /// The narrowest a bubble gets, so a one-word message still reads as a bubble around its time.
-const BUBBLE_MIN: u16 = 12;
+const BUBBLE_MIN: u16 = 11;
 /// The clock on a queued outgoing bubble, where the delivery ticks would go.
 const CLOCK: char = '◷';
 /// The `!` on an outgoing bubble that was not sent.
@@ -1489,8 +1489,7 @@ impl App {
             let chat = &self.chats()[listed[position]];
             paint_avatar(
                 frame.buffer_mut(),
-                rows.x + 1,
-                first,
+                Rect { y: first, ..rows },
                 &plain(&chat_title(chat)),
                 &self.palette,
             );
@@ -1785,6 +1784,13 @@ impl App {
                         height: 1,
                     };
                     buffer.set_style(block, Style::default().bg(background));
+                }
+                if let Some((ear_x, ear, colour)) = row.ear {
+                    let glyph = match ear {
+                        Ear::Incoming => "▐",
+                        Ear::Outgoing => "▌",
+                    };
+                    buffer.set_stringn(area.x + ear_x, y, glyph, 1, Style::default().fg(colour));
                 }
                 buffer.set_line(area.x + row.x, y, &row.line, row.width);
             }
@@ -2088,55 +2094,44 @@ impl App {
         let sender = Style::default()
             .fg(rgb(self.palette.accent()))
             .add_modifier(Modifier::BOLD);
-        // The last column is the scroll gutter; a bubble may use every column before it.
+        // The last column is the scroll gutter, then one margin on each side: a slab uses the
+        // columns in between and its ear sits on the margin.
         let usable = columns.saturating_sub(1);
-        let share = (u32::from(usable) * BUBBLE_SHARE / 100) as u16;
-        let max_width = share.max(BUBBLE_MIN.min(usable)).min(usable);
-        let inner_max = usize::from(max_width.saturating_sub(2));
+        let band = usable.saturating_sub(2);
+        let share = (u32::from(band) * BUBBLE_SHARE / 100) as u16;
+        let max_width = share.max(BUBBLE_MIN.min(band)).min(band);
+        let inner_max = usize::from(max_width.saturating_sub(3));
         let incoming = rgb(self.palette.surface_chrome());
         let outgoing = rgb(self.palette.bubble_outgoing());
-        let mut rows = Vec::with_capacity(messages.len() * 3 + 1);
-        // The top of the conversation is a place too: it says so when it is on screen, which
-        // is where a short transcript leaves the eye with nothing to hold on to (R7).
-        rows.push(Row::plain(
-            Line::from(Span::styled("Beginning of conversation", self.muted())),
-            columns,
-        ));
-        let mut selected = None;
-        let mut boxes = Vec::new();
-        // The day whose separator was drawn last, the author of the message before, and whether
-        // a message was drawn already.
-        let mut labelled: Option<time::Date> = None;
-        let mut previous: Option<String> = None;
-        let mut started = false;
+        let ear_incoming = rgb(self.palette.bubble_ear_incoming());
+        let ear_outgoing = rgb(self.palette.bubble_ear_outgoing());
+
+        // What a message needs, before the run it belongs to fixes the width they all share.
+        struct Prepared {
+            index: usize,
+            chosen: bool,
+            who: String,
+            day: Option<time::Date>,
+            content: Vec<(String, Part)>,
+            picture_at: usize,
+            footer: Vec<Span<'static>>,
+            footer_width: usize,
+            inline: bool,
+            needs: usize,
+            picture: Option<ratatui::layout::Size>,
+            reactions: Vec<Span<'static>>,
+        }
+        let mut prepared: Vec<Prepared> = Vec::with_capacity(messages.len());
         for (index, message) in messages.iter().enumerate() {
-            let owner = loaded.is_some().then_some(index);
             let chosen = loaded.is_some() && self.model.transcript().cursor() == Some(index);
             let who = author(Some(chat), message);
-            let first_of_run = previous.as_ref() != Some(&who);
-            // A new day gets a centred separator, after a blank row; the next author after a
-            // blank row; one author's run follows itself with no gap at all.
-            match local_day(message, self.utc_offset).filter(|day| labelled != Some(*day)) {
-                Some(day) => {
-                    if started {
-                        rows.push(Row::plain(Line::default(), columns));
-                    }
-                    rows.push(Row::centred(
-                        Line::from(Span::styled(day_label(day, self.today), self.muted())),
-                        columns,
-                    ));
-                    labelled = Some(day);
-                }
-                None if started && first_of_run => rows.push(Row::plain(Line::default(), columns)),
-                None => {}
-            }
-            started = true;
-            previous = Some(who);
-            if chosen {
-                selected = Some(rows.len());
-            }
+            let day = local_day(message, self.utc_offset);
+            // A run starts with a new author or a new day.
+            let first_of_run = prepared
+                .last()
+                .is_none_or(|before: &Prepared| before.who != who || before.day != day);
             // The picture, when the terminal draws them and the message states a size (or its
-            // full picture gave one): it sits inside the bubble, above the caption, and the
+            // full picture gave one): it sits inside the slab, above the caption, and the
             // `[kind]` label is then not written at all.
             let box_size = loaded
                 .is_some()
@@ -2171,8 +2166,8 @@ impl App {
             } else {
                 text
             };
-            // The bubble's own rows: the sender's name on the first message of a run in a group,
-            // the quote where it replies to one, then the picture and the caption.
+            // The slab's rows: the sender's name on the first message of a run in a group, the
+            // quote where it replies to one, then the picture and the caption.
             let mut content: Vec<(String, Part)> = Vec::new();
             if first_of_run
                 && !message.from_me
@@ -2190,7 +2185,6 @@ impl App {
                     None => "(a message not loaded)".to_owned(),
                 }
             }) {
-                // The bar takes two columns of every quoted row.
                 content.extend(
                     wrap_text(&quote, inner_max.saturating_sub(2))
                         .into_iter()
@@ -2222,82 +2216,179 @@ impl App {
             // A short message keeps its time on its last row, as WhatsApp does; a longer one
             // gives the time a row of its own, so no word is ever cut to make it fit.
             let inline = captioned && caption_width + 1 + footer_width <= inner_max;
-            let inner = if inline {
+            let needs = if inline {
                 caption_width + 1 + footer_width
             } else {
                 caption_width.max(footer_width)
             }
             .max(box_width)
             .min(inner_max);
-            let width = u16::try_from(inner + 2).unwrap_or(usable).min(usable);
-            let room = width.saturating_sub(2);
-            let background = if message.from_me { outgoing } else { incoming };
-            let x = if message.from_me {
-                usable.saturating_sub(width)
-            } else {
-                0
-            };
-            let line = |text: &str, part: Part| {
-                Line::from(match part {
-                    Part::Name => vec![Span::styled(text.to_owned(), sender)],
-                    Part::Quote => vec![
-                        Span::styled("▌ ", Style::default().fg(rgb(self.palette.accent()))),
-                        Span::styled(text.to_owned(), self.muted()),
-                    ],
-                    Part::Text => vec![Span::styled(text.to_owned(), body)],
-                })
-            };
-            let mut lines: Vec<Line<'static>> = Vec::new();
-            for (text, part) in &content[..picture_at] {
-                lines.push(line(text, *part));
-            }
-            // The picture's own rows: the bubble's background, ready for the image to be drawn
-            // over them once it is encoded.
-            let picture_line = rows.len() + lines.len();
-            if let Some(size) = box_size {
-                lines.extend((0..size.height).map(|_| Line::default()));
-            }
-            let last = content.len().saturating_sub(1);
-            for (index, (text, part)) in content.iter().enumerate().skip(picture_at) {
-                let mut spans = line(text, *part).spans;
-                if inline && index == last {
-                    let pad = usize::from(room).saturating_sub(display_width(text) + footer_width);
-                    spans.push(Span::raw(" ".repeat(pad)));
-                    spans.extend(footer.iter().cloned());
-                }
-                lines.push(Line::from(spans));
-            }
-            if !inline {
-                let pad = usize::from(room).saturating_sub(footer_width);
-                let mut spans = vec![Span::raw(" ".repeat(pad))];
-                spans.extend(footer.iter().cloned());
-                lines.push(Line::from(spans));
-            }
-            if !message.reactions.is_empty() {
-                let mut spans = Vec::new();
-                for reaction in &message.reactions {
+            let reactions = message
+                .reactions
+                .iter()
+                .map(|reaction| {
                     let style = if reaction.from_me { name } else { body };
-                    spans.push(Span::styled(format!("{} ", plain(&reaction.emoji)), style));
+                    Span::styled(format!("{} ", plain(&reaction.emoji)), style)
+                })
+                .collect();
+            prepared.push(Prepared {
+                index,
+                chosen,
+                who,
+                day,
+                content,
+                picture_at,
+                footer,
+                footer_width,
+                inline,
+                needs,
+                picture: box_size,
+                reactions,
+            });
+        }
+
+        let mut rows = Vec::with_capacity(messages.len() * 3 + 1);
+        // The top of the conversation is a place too: it says so when it is on screen, which
+        // is where a short transcript leaves the eye with nothing to hold on to (R7).
+        rows.push(Row::plain(
+            Line::from(Span::styled("Beginning of conversation", self.muted())),
+            columns,
+        ));
+        let mut selected = None;
+        let mut boxes = Vec::new();
+        // The day whose separator was drawn last, and whether a run was drawn already.
+        let mut labelled: Option<time::Date> = None;
+        let mut started = false;
+        let mut start = 0;
+        while start < prepared.len() {
+            // A run: the messages of one author inside one day. They share one width.
+            let mut end = start + 1;
+            while end < prepared.len()
+                && prepared[end].who == prepared[start].who
+                && prepared[end].day == prepared[start].day
+            {
+                end += 1;
+            }
+            let run = &prepared[start..end];
+            // A run shares one width. The time and state may take a slab past the share it keeps
+            // for its text (never past the band), so a state word is never cut in half.
+            let ceiling = usize::from(band).saturating_sub(3).max(3);
+            let inner = run
+                .iter()
+                .map(|message| message.needs)
+                .max()
+                .unwrap_or(0)
+                .max(
+                    run.iter()
+                        .map(|message| message.footer_width)
+                        .max()
+                        .unwrap_or(0),
+                )
+                .clamp(3, ceiling);
+            let room = u16::try_from(inner).unwrap_or(0);
+            // A new day gets a centred separator, after a blank row; the next author after a
+            // blank row; one author's run follows itself with no gap at all.
+            match run[0].day.filter(|day| labelled != Some(*day)) {
+                Some(day) => {
+                    if started {
+                        rows.push(Row::plain(Line::default(), columns));
+                    }
+                    rows.push(Row::centred(
+                        Line::from(Span::styled(day_label(day, self.today), self.muted())),
+                        columns,
+                    ));
+                    labelled = Some(day);
                 }
-                lines.push(Line::from(spans));
+                None if started => rows.push(Row::plain(Line::default(), columns)),
+                None => {}
             }
-            for line in lines {
-                rows.push(Row {
-                    line,
-                    x: x.saturating_add(1),
-                    width: room,
-                    bubble: Some(background),
-                    owner,
-                });
+            started = true;
+            for message in run {
+                let source = messages[message.index];
+                let owner = loaded.is_some().then_some(message.index);
+                if message.chosen {
+                    selected = Some(rows.len());
+                }
+                let background = if source.from_me { outgoing } else { incoming };
+                let (ear_side, ear_colour) = if source.from_me {
+                    (Ear::Outgoing, ear_outgoing)
+                } else {
+                    (Ear::Incoming, ear_incoming)
+                };
+                // The ear sits on the margin (the band's left for theirs, its right for ours) and
+                // runs the whole height of the message; the slab starts one cell inside it.
+                let ear_x = if source.from_me { band } else { 1 };
+                let text_x = if source.from_me {
+                    band.saturating_sub(room).saturating_sub(1)
+                } else {
+                    3
+                };
+                let line = |text: &str, part: Part| {
+                    Line::from(match part {
+                        Part::Name => vec![Span::styled(text.to_owned(), sender)],
+                        Part::Quote => vec![
+                            Span::styled("▌ ", Style::default().fg(rgb(self.palette.accent()))),
+                            Span::styled(text.to_owned(), self.muted()),
+                        ],
+                        Part::Text => vec![Span::styled(text.to_owned(), body)],
+                    })
+                };
+                let mut lines: Vec<Line<'static>> = Vec::new();
+                for (text, part) in &message.content[..message.picture_at] {
+                    lines.push(line(text, *part));
+                }
+                // The picture's own rows: the slab's background, ready for the image to be drawn
+                // over them once it is encoded.
+                let picture_line = rows.len() + lines.len();
+                if let Some(size) = message.picture {
+                    lines.extend((0..size.height).map(|_| Line::default()));
+                }
+                let last = message.content.len().saturating_sub(1);
+                for (index, (text, part)) in
+                    message.content.iter().enumerate().skip(message.picture_at)
+                {
+                    let mut spans = line(text, *part).spans;
+                    if message.inline && index == last {
+                        let pad = usize::from(room)
+                            .saturating_sub(display_width(text) + message.footer_width);
+                        spans.push(Span::raw(" ".repeat(pad)));
+                        spans.extend(message.footer.iter().cloned());
+                    }
+                    lines.push(Line::from(spans));
+                }
+                if !message.inline {
+                    let pad = usize::from(room).saturating_sub(message.footer_width);
+                    let mut spans = vec![Span::raw(" ".repeat(pad))];
+                    spans.extend(message.footer.iter().cloned());
+                    lines.push(Line::from(spans));
+                }
+                if !message.reactions.is_empty() {
+                    let mut spans = Vec::new();
+                    for reaction in &message.reactions {
+                        spans.push(reaction.clone());
+                    }
+                    lines.push(Line::from(spans));
+                }
+                for line in lines {
+                    rows.push(Row {
+                        line,
+                        x: text_x,
+                        width: room,
+                        bubble: Some(background),
+                        ear: Some((ear_x, ear_side, ear_colour)),
+                        owner,
+                    });
+                }
+                if let Some(size) = message.picture {
+                    boxes.push(PictureBox {
+                        line: picture_line,
+                        size,
+                        index: message.index,
+                        x: text_x,
+                    });
+                }
             }
-            if let Some(size) = box_size {
-                boxes.push(PictureBox {
-                    line: picture_line,
-                    size,
-                    index,
-                    x: x.saturating_add(1),
-                });
-            }
+            start = end;
         }
         ConversationLayout {
             rows,
@@ -2354,12 +2445,22 @@ struct Row {
     line: Line<'static>,
     /// The text's first column, counted from the pane's left edge.
     x: u16,
-    /// The columns the text may use; a bubble's block is one column wider on each side.
+    /// The columns the text may use; the slab is one column wider on each side, and its ear sits
+    /// one column further, on the margin.
     width: u16,
-    /// The background of the bubble this row is part of.
+    /// The background of the slab this row is part of.
     bubble: Option<Color>,
+    /// The slab's ear on this row: its column, side and tone. Full height, every row.
+    ear: Option<(u16, Ear, Color)>,
     /// The loaded message the row belongs to (the selection and the mouse).
     owner: Option<usize>,
+}
+
+/// Which side a slab's ear sits on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ear {
+    Incoming,
+    Outgoing,
 }
 
 impl Row {
@@ -2370,6 +2471,7 @@ impl Row {
             x: 0,
             width: columns,
             bubble: None,
+            ear: None,
             owner: None,
         }
     }
@@ -2638,9 +2740,11 @@ fn avatar_initials(title: &str) -> [char; 2] {
             c
         }
     };
-    let mut words = title
-        .split_whitespace()
-        .filter_map(|word| word.chars().find(|c| c.is_alphanumeric()));
+    // Only a narrow character: a wide one (a CJK ideograph) would push the columns after it.
+    let mut words = title.split_whitespace().filter_map(|word| {
+        word.chars()
+            .find(|c| c.is_alphanumeric() && char_width(*c) == 1)
+    });
     let first = upper(words.next().unwrap_or('?'));
     let second = match words.next() {
         Some(letter) => upper(letter),
@@ -2648,7 +2752,7 @@ fn avatar_initials(title: &str) -> [char; 2] {
         None => upper(
             title
                 .chars()
-                .filter(|c| c.is_alphanumeric())
+                .filter(|c| c.is_alphanumeric() && char_width(*c) == 1)
                 .nth(1)
                 .unwrap_or(' '),
         ),
@@ -2689,12 +2793,13 @@ fn avatar_spans(title: &str, palette: &Palette, row: usize) -> Vec<Span<'static>
 
 /// Draw a chat's avatar over `(x, y)`, two rows tall: what the open chat's row fill would
 /// otherwise erase.
-fn paint_avatar(buffer: &mut Buffer, x: u16, y: u16, title: &str, palette: &Palette) {
+fn paint_avatar(buffer: &mut Buffer, rows: Rect, title: &str, palette: &Palette) {
+    let (x, y) = (rows.x + 1, rows.y);
     for (index, (glyph, style)) in avatar_cells(title, palette).iter().enumerate() {
         let column = x + u16::try_from(index % 3).unwrap_or(0);
         let row = y + u16::try_from(index / 3).unwrap_or(0);
-        // A list cut by a very small terminal would put the cells outside the buffer.
-        if column < buffer.area.width && row < buffer.area.height {
+        // A list cut by a very small terminal would put the cells outside its own rectangle.
+        if column < rows.right() && row < rows.bottom() {
             buffer.set_stringn(column, row, glyph.to_string(), 1, *style);
         }
     }

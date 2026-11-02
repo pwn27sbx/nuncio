@@ -66,7 +66,9 @@ nuncio-tui [--image <png>]
   `surface_active` (with the keys or without them, so the list always says which chat is open).
   The accent marks the unread count's pill and the one primary key in the footer (`Enter`, or
   `1-6` in the reaction picker); names are bold, times and other meta use the `text_muted` role,
-  and senders are never colour-coded. The colours are sent as 24-bit RGB, as before.
+  and senders are never colour-coded. No colour is ever named in the crate: every tone comes
+  from a palette role, through the one `rgb()` helper (a test reads the sources to keep it so).
+  The colours are sent as 24-bit RGB, as before.
 - **Chat list** (left): three fixed rows per chat — its name, its last message, and a thin `─`
   rule in the border role that separates it from the next one. Row one: the name, then only the
   markers it has — `★` pinned, `🔕` muted, `▤` archived, in that order, right after the name —

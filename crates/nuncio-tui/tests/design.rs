@@ -1133,6 +1133,111 @@ fn the_composer_has_a_field_with_a_placeholder_and_the_keys_are_said_once() {
     }
 }
 
+/// U7: every element the redesign added takes its colour from the theme's roles — checked cell by
+/// cell, since a literal and a role can be the same colour in one buffer.
+#[test]
+fn each_new_element_uses_its_exact_role() {
+    let palette = Palette::default();
+    let role = colour;
+    let mut app = two_chats();
+    let mut lost = message("M2", "did you get this", true, "2026-10-17T17:02:00Z");
+    lost.state = Some(MessageState::NotSent);
+    open(
+        &mut app,
+        ADA,
+        vec![
+            message("A1", "hello there", false, "2026-10-17T17:01:00Z"),
+            lost,
+        ],
+    );
+    let buffer = draw(&mut app, 80, 24);
+    // An incoming bubble on the chrome, its time and the `!` where the ticks would go.
+    let (x, y) = find(&buffer, "hello there");
+    assert_eq!(buffer[(x, y)].bg, role(palette.surface_chrome()));
+    assert_eq!(buffer[(x, y)].fg, role(palette.text()));
+    let (x, y) = find(&buffer, "17:01");
+    assert_eq!(buffer[(x, y)].fg, role(palette.text_faint()));
+    assert_eq!(buffer[(x, y)].bg, role(palette.surface_chrome()));
+    let (x, y) = find(&buffer, "did you get this");
+    assert_eq!(buffer[(x, y)].bg, role(palette.bubble_outgoing()));
+    let (x, y) = find(&buffer, "!");
+    assert_eq!(buffer[(x, y)].fg, role(palette.danger()));
+    // The unread pill: the accent as its background, `accent_on` as its text.
+    let sep = separator(&buffer);
+    let (_, grace) = find(&buffer, "Grace Hopper");
+    let preview = grace - 2;
+    let pill = (0..sep)
+        .find(|&x| buffer[(x, preview)].bg == role(palette.accent()))
+        .expect("the pill");
+    assert_eq!(buffer[(pill + 1, preview)].fg, role(palette.accent_on()));
+    // The filter chip in force: the same pair.
+    let chip = (0..sep)
+        .find(|&x| buffer[(x, 2)].bg == role(palette.accent()))
+        .expect("the chip");
+    assert_eq!(buffer[(chip + 1, 2)].fg, role(palette.accent_on()));
+    // The selected chat's rows on the active surface, the rule between chats in the border role.
+    assert_eq!(buffer[(1, grace - 3)].bg, role(palette.surface_active()));
+    assert_eq!(buffer[(2, grace - 1)].fg, role(palette.border()));
+    // The placeholder in the faint role, the prompt before it muted.
+    let (x, y) = find(&buffer, "Write a message");
+    assert_eq!(buffer[(x, y)].fg, role(palette.text_faint()));
+    assert_eq!(buffer[(x - 2, y)].fg, role(palette.text_muted()));
+    // The day separator muted.
+    let (x, y) = find(&buffer, "SAT 17 OCT 2026");
+    assert_eq!(buffer[(x, y)].fg, role(palette.text_muted()));
+}
+
+/// U7: the crate never names a colour itself. The one legitimate `Color::Rgb(` is the palette
+/// helper's body; a literal (hex or digits) anywhere else fails, and so does losing the helper.
+#[test]
+fn the_only_colour_the_crate_names_is_the_palette_helper() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    let mut pending = vec![root];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("the crate's sources") {
+            let path = entry.expect("a source file").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    assert!(!files.is_empty(), "the crate has sources");
+    let helper = "Color::Rgb(colour.r, colour.g, colour.b)";
+    let mut helpers = 0;
+    let mut offenders = Vec::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file).expect("read a source file");
+        for (number, line) in text.lines().enumerate() {
+            let Some(at) = line.find("Color::Rgb(") else {
+                continue;
+            };
+            let before = &line[..at];
+            // A comment may name it; code may not.
+            if before.trim_start().starts_with("//") {
+                continue;
+            }
+            if line.trim() == helper {
+                helpers += 1;
+                continue;
+            }
+            offenders.push(format!(
+                "{}:{}: {}",
+                file.display(),
+                number + 1,
+                line.trim()
+            ));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a colour is named outside the palette helper: {offenders:?}"
+    );
+    assert_eq!(helpers, 1, "the palette helper is the one site");
+}
+
 #[test]
 fn the_overlays_share_one_width_rule() {
     let chrome = colour(Palette::default().surface_chrome());

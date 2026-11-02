@@ -28,7 +28,7 @@ use ratatui_image::{FilterType, FontSize, Resize};
 /// The environment variable that chooses the protocol instead of asking the terminal.
 pub const OVERRIDE: &str = "NUNCIO_IMAGE_PROTOCOL";
 /// The tallest a picture's box gets, in rows.
-pub const IMAGE_ROWS: u16 = 12;
+pub const IMAGE_ROWS: u16 = 5;
 /// How many encoded pictures the cache keeps.
 pub const CACHE_ENTRIES: usize = 48;
 /// About how many bytes the encoded pictures in the cache may take (estimated as the pixels drawn,

@@ -675,6 +675,63 @@ fn senders_are_not_colour_coded() {
     }
 }
 
+/// C5: the quote is one inset row inside the slab — a bar, the quoted text clamped with `…`, on
+/// `quote_inset` — the reply's text follows, and the reactions are a chip row under the slab.
+#[test]
+fn a_quote_is_one_inset_row_and_reactions_sit_under_the_slab() {
+    let palette = Palette::default();
+    let mut app = two_chats();
+    let mut reply = message("A2", "thanks", false, "2026-10-17T17:02:00Z");
+    reply.reply_to = Some("A1".to_owned());
+    reply.reactions = vec![nuncio_client::Reaction {
+        emoji: "👍".to_owned(),
+        from_me: false,
+    }];
+    open(
+        &mut app,
+        ADA,
+        vec![
+            message(
+                "A1",
+                "the question, long enough to be clamped with an ellipsis and then some more",
+                false,
+                "2026-10-17T17:01:00Z",
+            ),
+            reply,
+        ],
+    );
+    let buffer = draw(&mut app, 80, 24);
+    let sep = separator(&buffer);
+    let (x, quote) = (sep + 2..80)
+        .find(|&x| buffer[(x, row_of(&buffer, "▌ the question"))].symbol() == "▌")
+        .map(|x| (x, row_of(&buffer, "▌ the question")))
+        .expect("the quote's bar");
+    // The inset: the accent bar, the muted quote, on the quote tone over the slab's own.
+    assert_eq!(buffer[(x, quote)].fg, colour(palette.accent()));
+    assert_eq!(buffer[(x + 2, quote)].fg, colour(palette.text_muted()));
+    let inset = palette.quote_inset(palette.surface_chrome());
+    assert_eq!(buffer[(x + 2, quote)].bg, colour(inset));
+    assert!(row(&buffer, quote).contains('…'), "{}", text(&buffer));
+    // The reply's own text follows on the next row, on the slab's tone.
+    let (_, said) = find(&buffer, "thanks");
+    assert_eq!(said, quote + 1);
+    assert_eq!(
+        buffer[(x + 2, said)].bg,
+        colour(palette.surface_chrome()),
+        "{}",
+        text(&buffer)
+    );
+    // The reactions are a chip row under the slab, on the hover tone, with no ear.
+    let chip = row_of(&buffer, "👍");
+    assert_eq!(chip, said + 1, "{}", text(&buffer));
+    assert_eq!(buffer[(x, chip)].bg, colour(palette.surface_hover()));
+    assert_eq!(
+        buffer[(sep + 1, chip)].symbol(),
+        " ",
+        "no ear under the slab"
+    );
+}
+
 #[test]
 fn the_footer_is_one_line_of_muted_keys_with_the_session_state_on_the_right() {
     let muted = colour(Palette::default().text_muted());

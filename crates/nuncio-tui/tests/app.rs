@@ -1401,7 +1401,7 @@ fn emoji_sequences_render_as_cells_every_terminal_draws_at_the_same_width() {
             }
         }
         let text = screen.text();
-        for needle in ["Family", "flag!", "🌈", "👨", "👋", "▌ Bring the", "❤"] {
+        for needle in ["Family", "flag!", "🌈", "👨", "👋", "▌", "❤"] {
             assert!(
                 text.contains(needle),
                 "{needle:?} at {width}x{height}:\n{text}"

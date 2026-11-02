@@ -175,11 +175,14 @@ nuncio-tui [--image <png>]
   that was sent) can be replied or reacted to: on one still `sending`, `queued` or `not sent`,
   `r`/`e` send nothing and the footer says `that message was not sent, so it cannot be replied
   to` (or `reacted to`).
-- **Quotes and reactions**: a reply opens its bubble with a coloured bar (`▌`) and the start of
-  the message it quotes (or `(a message not loaded)`), muted, and then its own text; reactions
-  show inside the bubble under the text, mine in bold. The selected message's
-  rows (its picture box and reactions included) are on `surface_active`. A reaction the daemon refuses (offline, unknown sender, ...) shows its error in the
-  footer and changes nothing. Reactions are never queued: react again once linked.
+- **Quotes and reactions**: a reply opens its slab with one inset row — a `▌` bar in the accent, the
+  quoted author's name when it is not obvious (a group, or one of mine) and the start of what they
+  said, muted, clamped to the row with `…`, on the quote tone over the slab's — and then its own
+  text; a quote whose target is not loaded says `(a message not loaded)`. Reactions are a chip row
+  under the slab on the hover tone, mine in bold. The selected message is marked by one accent bar
+  on the conversation's left margin, over its rows (its picture and reactions included). A reaction
+  the daemon refuses (offline, unknown sender, ...) shows its error in the footer and changes
+  nothing. Reactions are never queued: react again once linked.
 - **Search** (`/`): searches the open chat through the daemon; the results are listed newest
   first, and `Enter` on one closes the search and selects that message in the conversation
   (scrolled into view) when it is among the loaded messages; otherwise the footer says so.

@@ -2110,6 +2110,7 @@ impl App {
             who: String,
             day: Option<time::Date>,
             content: Vec<(String, Part)>,
+            quote: Option<(Option<String>, String)>,
             picture_at: usize,
             footer: Vec<Span<'static>>,
             footer_width: usize,
@@ -2176,18 +2177,18 @@ impl App {
                         .map(|row| (row, Part::Name)),
                 );
             }
-            if let Some(quote) = message.reply_to.as_ref().map(|quoted_id| {
+            // The quote is one inset row: the start of what was said, and who said it when that
+            // is not obvious (a group, or one of mine) — a 1:1 message needs no name.
+            let quote = message.reply_to.as_ref().map(|quoted_id| {
                 match quoted(messages.iter().copied(), quoted_id) {
-                    Some(original) => snippet(original),
-                    None => "(a message not loaded)".to_owned(),
+                    Some(original) => (
+                        (original.from_me || original.sender.is_some())
+                            .then(|| author(Some(chat), original)),
+                        snippet(original),
+                    ),
+                    None => (None, "(a message not loaded)".to_owned()),
                 }
-            }) {
-                content.extend(
-                    wrap_text(&quote, inner_max.saturating_sub(2))
-                        .into_iter()
-                        .map(|row| (row, Part::Quote)),
-                );
-            }
+            });
             // Where the picture goes: after the name and the quote, before the caption.
             let picture_at = content.len();
             // A caption that is only the picture's own kind has nothing left to say once the
@@ -2253,7 +2254,11 @@ impl App {
                 .iter()
                 .map(|reaction| {
                     let style = if reaction.from_me { name } else { body };
-                    Span::styled(format!("{} ", plain(&reaction.emoji)), style)
+                    // A chip: the hover tone behind the emoji, under the slab.
+                    Span::styled(
+                        format!("{} ", plain(&reaction.emoji)),
+                        style.bg(rgb(self.palette.surface_hover())),
+                    )
                 })
                 .collect();
             prepared.push(Prepared {
@@ -2262,6 +2267,7 @@ impl App {
                 who,
                 day,
                 content,
+                quote,
                 picture_at,
                 footer,
                 footer_width,
@@ -2334,6 +2340,11 @@ impl App {
                     selected = Some(rows.len());
                 }
                 let background = if source.from_me { outgoing } else { incoming };
+                let tone = if source.from_me {
+                    self.palette.bubble_outgoing()
+                } else {
+                    self.palette.surface_chrome()
+                };
                 let (ear_side, ear_colour) = if source.from_me {
                     (Ear::Outgoing, ear_outgoing)
                 } else {
@@ -2350,22 +2361,39 @@ impl App {
                 let line = |text: &str, part: Part| {
                     Line::from(match part {
                         Part::Name => vec![Span::styled(text.to_owned(), sender)],
-                        Part::Quote => vec![
-                            Span::styled("▌ ", Style::default().fg(rgb(self.palette.accent()))),
-                            Span::styled(text.to_owned(), self.muted()),
-                        ],
                         Part::Text => vec![Span::styled(text.to_owned(), body)],
                     })
                 };
-                let mut lines: Vec<Line<'static>> = Vec::new();
+                // Each row with its own background: the slab's tone, but the quote's inset.
+                let mut lines: Vec<(Line<'static>, Color)> = Vec::new();
                 for (text, part) in &message.content[..message.picture_at] {
-                    lines.push(line(text, *part));
+                    lines.push((line(text, *part), background));
                 }
-                // The picture's own rows: the slab's background, ready for the image to be drawn
-                // over them once it is encoded.
+                // The quote: one inset row, a bar and the quoted author in the accent, then the
+                // start of what they said in the muted role, clamped with `…`.
+                if let Some((who, said)) = &message.quote {
+                    let accent = Style::default().fg(rgb(self.palette.accent()));
+                    let room_left = usize::from(room).saturating_sub(2);
+                    // A name never takes more than half the row: the quoted text matters more.
+                    let head = who
+                        .as_ref()
+                        .map(|who| fit(&format!("{who}:"), room_left / 2))
+                        .unwrap_or_default();
+                    let rest = room_left
+                        .saturating_sub(display_width(&head) + usize::from(!head.is_empty()));
+                    let body = fit(said, rest);
+                    let mut spans = vec![Span::styled("▌ ", accent)];
+                    if !head.is_empty() {
+                        spans.push(Span::styled(head, accent.add_modifier(Modifier::BOLD)));
+                        spans.push(Span::raw(" "));
+                    }
+                    spans.push(Span::styled(body, self.muted()));
+                    lines.push((Line::from(spans), rgb(self.palette.quote_inset(tone))));
+                }
+                // The picture's own rows, ready for the image to be drawn over them.
                 let picture_line = rows.len() + lines.len();
                 if let Some(size) = message.picture {
-                    lines.extend((0..size.height).map(|_| Line::default()));
+                    lines.extend((0..size.height).map(|_| (Line::default(), background)));
                 }
                 let last = message.content.len().saturating_sub(1);
                 for (index, (text, part)) in
@@ -2378,27 +2406,20 @@ impl App {
                         spans.push(Span::raw(" ".repeat(pad)));
                         spans.extend(message.footer.iter().cloned());
                     }
-                    lines.push(Line::from(spans));
+                    lines.push((Line::from(spans), background));
                 }
                 if !message.inline {
                     let pad = usize::from(room).saturating_sub(message.footer_width);
                     let mut spans = vec![Span::raw(" ".repeat(pad))];
                     spans.extend(message.footer.iter().cloned());
-                    lines.push(Line::from(spans));
+                    lines.push((Line::from(spans), background));
                 }
-                if !message.reactions.is_empty() {
-                    let mut spans = Vec::new();
-                    for reaction in &message.reactions {
-                        spans.push(reaction.clone());
-                    }
-                    lines.push(Line::from(spans));
-                }
-                for line in lines {
+                for (line, tint) in lines {
                     rows.push(Row {
                         line,
                         x: text_x,
                         width: room,
-                        bubble: Some(background),
+                        bubble: Some(tint),
                         ear: Some((ear_x, ear_side, ear_colour)),
                         owner,
                     });
@@ -2409,6 +2430,27 @@ impl App {
                         size,
                         index: message.index,
                         x: text_x,
+                    });
+                }
+                // Reactions sit under the slab, as a chip row of their own.
+                if !message.reactions.is_empty() {
+                    let width: usize = message.reactions.iter().map(Span::width).sum();
+                    let pad = usize::from(room).saturating_sub(width);
+                    let mut spans = Vec::new();
+                    if source.from_me {
+                        spans.push(Span::raw(" ".repeat(pad)));
+                    }
+                    spans.extend(message.reactions.iter().cloned());
+                    if !source.from_me {
+                        spans.push(Span::raw(" ".repeat(pad)));
+                    }
+                    rows.push(Row {
+                        line: Line::from(spans),
+                        x: text_x,
+                        width: room,
+                        bubble: None,
+                        ear: None,
+                        owner,
                     });
                 }
             }
@@ -2516,12 +2558,11 @@ impl Row {
     }
 }
 
-/// What a row inside a bubble is: a group sender's name, the start of the message it quotes, or
-/// the message's own text.
+/// What a row inside a slab is: a group sender's name, or the message's own text. The quote has
+/// a row of its own (an inset) and is not a [`Part`].
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Part {
     Name,
-    Quote,
     Text,
 }
 

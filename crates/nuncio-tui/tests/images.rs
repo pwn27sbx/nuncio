@@ -292,7 +292,7 @@ fn a_box_is_reserved_before_the_thumbnail_is_ready_and_the_thumbnail_fills_it() 
     // 320x240 in a 27-column bubble: eleven rows reserved, ten of them the picture (its box keeps
     // the aspect, so a row can be padding).
     assert!(
-        (8..=13).contains(&(caption - first)),
+        (4..=8).contains(&(caption - first)),
         "the box is eleven rows above its caption:\n{}",
         screen(&ready)
     );
@@ -389,13 +389,13 @@ fn a_corrupt_thumbnail_keeps_the_box_with_a_label_and_never_panics() {
     let image = line_of(&text, "[image]");
     assert_eq!(
         line_of(&text, "the view"),
-        image + 12,
+        image + 5,
         "the image box keeps its label:\n{text}"
     );
     let sticker = line_of(&text, "[sticker]");
     assert_eq!(
         line_of(&text, "17:02"),
-        sticker + 12,
+        sticker + 5,
         "the sticker box keeps its height:\n{text}"
     );
 }
@@ -860,7 +860,7 @@ fn half_blocks_draw_a_transparent_corner_in_the_conversation_background() {
         assert!(app.wait_for_images(WAIT));
         let buffer = draw(app, 80, 24);
         // The picture's first cell: inside its bubble, which pads it by one column.
-        let top = row_of(&buffer, "17:01").expect("the time") - 12;
+        let top = row_of(&buffer, "17:01").expect("the time") - 5;
         let cell = buffer
             .cell((COLUMNS.start + 3, top))
             .expect("the corner")
@@ -1127,10 +1127,11 @@ fn a_query_that_ran_out_its_timeout_without_an_answer_leaves_stdin_unsafe() {
 #[test]
 fn the_box_size_follows_the_picture_and_absurd_sizes_are_clamped() {
     let font = FontSize::new(10, 20);
-    assert_eq!(box_size(320, 240, 46, font), Size::new(32, 12));
+    // Five rows at most (C5): a 4:3 photo in 46 columns shrinks to keep its shape.
+    assert_eq!(box_size(320, 240, 46, font), Size::new(14, 5));
     // Wide: the columns cap it; tall: the rows cap it and the columns shrink with them.
-    assert_eq!(box_size(4000, 1000, 46, font), Size::new(46, 6));
-    assert_eq!(box_size(1000, 4000, 46, font), Size::new(6, 12));
+    assert_eq!(box_size(4000, 1000, 46, font), Size::new(40, 5));
+    assert_eq!(box_size(1000, 4000, 46, font), Size::new(3, 5));
     // Never wider than the column, never taller than IMAGE_ROWS, never empty.
     for (width, height) in [
         (1, 16_384),

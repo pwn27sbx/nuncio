@@ -921,3 +921,26 @@ fn the_reaction_picker_stacks_its_keys_when_it_is_narrow() {
         text(&buffer)
     );
 }
+
+/// U1: the chat list takes 30 % of the body, never under `LIST` and never over `LIST_MAX`; the
+/// conversation gets the rest. Below `NARROW` only the focused pane is drawn, as before.
+#[test]
+fn the_chat_list_takes_thirty_percent_within_its_bounds() {
+    for (width, height, want) in [(240u16, 60u16, 48u16), (80, 24, 32)] {
+        let mut app = app_with(vec![chat("15551230001@s.whatsapp.net", "Ada", 0)]);
+        let buffer = draw(&mut app, width, height);
+        let got = separator(&buffer);
+        assert_eq!(
+            got, want,
+            "at {width}x{height} the list is {got} columns, want {want}"
+        );
+    }
+    // 40 columns is under NARROW: one pane, so no separator at all.
+    let mut app = app_with(vec![chat("15551230001@s.whatsapp.net", "Ada", 0)]);
+    let buffer = draw(&mut app, 40, 20);
+    assert!(
+        !text(&buffer).contains('│'),
+        "narrow mode draws a single pane:\n{}",
+        text(&buffer)
+    );
+}

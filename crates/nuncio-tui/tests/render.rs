@@ -168,7 +168,7 @@ fn the_layout_survives_an_odd_size() {
 }
 
 #[test]
-fn the_chat_list_breaks_at_sixty_and_one_hundred_columns() {
+fn the_chat_list_takes_thirty_percent_between_thirty_two_and_forty_eight_columns() {
     let mut app = fixture_app();
     let split = |screen: &str| -> Option<usize> {
         screen
@@ -176,11 +176,11 @@ fn the_chat_list_breaks_at_sixty_and_one_hundred_columns() {
             .nth(1)
             .and_then(|row| row.chars().position(|symbol| symbol == '┬'))
     };
-    // Wide: 40 % of 120 columns, and exactly at the breakpoint too.
-    assert_eq!(split(&render(&mut app, 120, 20)), Some(48));
-    assert_eq!(split(&render(&mut app, 100, 20)), Some(40));
-    // Middle: a fixed 32 columns, whatever the width, the breakpoint included.
-    assert_eq!(split(&render(&mut app, 99, 20)), Some(32));
+    // 30 % of the body, never under 32 columns and never over 48.
+    assert_eq!(split(&render(&mut app, 240, 20)), Some(48));
+    assert_eq!(split(&render(&mut app, 160, 20)), Some(48));
+    assert_eq!(split(&render(&mut app, 120, 20)), Some(36));
+    assert_eq!(split(&render(&mut app, 100, 20)), Some(32));
     assert_eq!(split(&render(&mut app, 80, 20)), Some(32));
     assert_eq!(split(&render(&mut app, 60, 20)), Some(32));
     // Narrow: no split at all, one pane on the whole width.

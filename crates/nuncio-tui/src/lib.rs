@@ -137,12 +137,18 @@ const MUTED: char = '⊘';
 /// Marks an archived chat.
 const ARCHIVED: char = '▤';
 
-/// At or above this width the chat list takes 40 % of the screen (R6).
-const WIDE: u16 = 100;
-/// Between this width and `WIDE` the chat list is a fixed 32 columns.
+/// The chat list's least width: 30 % of a narrow body would be unreadable.
 const LIST: u16 = 32;
+/// The chat list's most width: past this the conversation is the one that suffers.
+const LIST_MAX: u16 = 48;
 /// Below this width only the focused pane is drawn, and `Tab` swaps it (R6).
 const NARROW: u16 = 60;
+/// The chat list's share of the body: 30 % of it, never under [`LIST`] and never over
+/// [`LIST_MAX`]. The conversation takes everything else.
+fn list_width(width: u16) -> u16 {
+    (width * 30 / 100).clamp(LIST, LIST_MAX)
+}
+
 /// How many lines PageUp/PageDown scroll.
 const PAGE: usize = 10;
 /// The reactions the picker offers (the shared set), on keys `1`..`6`; `x` removes mine.
@@ -852,13 +858,12 @@ impl App {
                 self.draw_messages(frame, body);
             }
         } else {
-            let list = if body.width >= WIDE {
-                Constraint::Percentage(40)
-            } else {
-                Constraint::Length(LIST)
-            };
-            let [chats, line, messages] =
-                Layout::horizontal([list, Constraint::Length(1), Constraint::Min(0)]).areas(body);
+            let [chats, line, messages] = Layout::horizontal([
+                Constraint::Length(list_width(body.width)),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(body);
             self.draw_separator(frame, line);
             self.draw_chats(frame, chats);
             // The line between the panes is part of the chat pane for the mouse.

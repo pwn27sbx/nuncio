@@ -793,6 +793,15 @@ fn the_conversation_header_names_the_chat_and_what_it_is() {
     let header = row(&buffer, 1);
     assert!(header.contains("Design team · group"), "{header}");
     assert!(!header.contains("contact"), "{header}");
+    // A narrow window draws one pane, so the header keeps the way back even when the subtitle
+    // has to give way: the name and the subtitle never push `· Tab` off the rule.
+    let buffer = draw(&mut app, 28, 20);
+    let header = row(&buffer, 1);
+    assert!(header.contains("Design team"), "{header}");
+    assert!(
+        header.contains("· Tab"),
+        "the way back survives: {header:?}"
+    );
 }
 
 #[test]

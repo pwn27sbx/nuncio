@@ -158,6 +158,10 @@ const PAGE: usize = 10;
 /// A message's bubble takes at most this share of the conversation's columns; the rest is the
 /// gap that shows which side a message came from.
 const BUBBLE_SHARE: u32 = 66;
+
+/// What a narrow window's only visible pane says about returning to the other one. It is the
+/// first thing the header keeps: without it a narrow window has no way back but the keys.
+const NARROW_HINT: &str = " · Tab";
 /// The narrowest a bubble gets, so a one-word message still reads as a bubble around its time.
 const BUBBLE_MIN: u16 = 11;
 /// The clock on a queued outgoing bubble, where the delivery ticks would go.
@@ -992,6 +996,13 @@ impl App {
         };
         let mut spans = vec![Span::styled("─", self.line_style())];
         let mut used = 1;
+        // A narrow window draws one pane, so its header always ends with how to switch panes:
+        // the name and the subtitle leave that hint its columns.
+        let reserved = if self.narrow {
+            display_width(NARROW_HINT)
+        } else {
+            0
+        };
         match self.model.selected_chat() {
             Some(chat) => {
                 let title = plain(&chat_title(chat));
@@ -1007,12 +1018,12 @@ impl App {
                 ));
                 spans.push(Span::styled("▖", Style::default().fg(tint)));
                 used += 4;
-                let room = width.saturating_sub(used + 1);
+                let room = width.saturating_sub(used + 1 + reserved);
                 let name = fit(&format!(" {title}"), room);
                 used += display_width(&name);
                 spans.push(Span::styled(name, name_style));
                 if let Some(subtitle) = chat_subtitle(chat) {
-                    let room = width.saturating_sub(used + 1);
+                    let room = width.saturating_sub(used + 1 + reserved);
                     let subtitle = fit(&format!(" · {subtitle}"), room);
                     used += display_width(&subtitle);
                     spans.push(Span::styled(subtitle, self.muted()));
@@ -1022,7 +1033,7 @@ impl App {
             None => {
                 let mut title = " Conversation".to_owned();
                 if self.narrow {
-                    title.push_str(" · Tab");
+                    title.push_str(NARROW_HINT);
                 }
                 used += display_width(&title);
                 spans.push(Span::styled(title, name_style));
@@ -1030,7 +1041,7 @@ impl App {
         }
         if self.narrow && self.model.selected_chat().is_some() {
             let room = width.saturating_sub(used + 1);
-            let suffix = fit(" · Tab", room);
+            let suffix = fit(NARROW_HINT, room);
             used += display_width(&suffix);
             spans.push(Span::styled(suffix, self.muted()));
         }

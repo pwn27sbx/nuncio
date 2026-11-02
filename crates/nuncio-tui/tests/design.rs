@@ -1071,52 +1071,66 @@ fn the_scroll_gutter_says_what_is_hidden() {
 }
 
 #[test]
-fn the_composer_says_what_enter_does_and_marks_its_rule_when_focused() {
+fn the_composer_has_a_field_with_a_placeholder_and_the_keys_are_said_once() {
     let palette = Palette::default();
     let muted = colour(palette.text_muted());
+    let faint = colour(palette.text_faint());
     let accent = colour(palette.accent());
     let mut app = two_chats();
-    // With nothing to send, the placeholder says how to write at all.
+    // With nothing to send and no keys on it, the composer says how to write at all.
     let buffer = draw(&mut app, 80, 24);
     let (x, y) = find(&buffer, "i or Enter to write");
     assert_eq!(buffer[(x, y)].fg, muted);
-    assert!(!text(&buffer).contains("Enter sends"));
+    assert!(!text(&buffer).contains("Write a message"));
 
-    // With a draft, the rule says what Enter does and starts with the accent bar.
+    // Opened, the field is empty and says so with a placeholder, in the faint role, with the
+    // caret where the first letter goes.
     open(&mut app, ADA, conversation());
+    let buffer = draw(&mut app, 80, 24);
+    let (x, y) = find(&buffer, "Write a message");
+    assert_eq!(buffer[(x, y)].fg, faint);
+    assert_eq!(buffer[(x - 2, y)].symbol(), "›");
+    // The field is closed by a hairline under it, and the accent marks its rule while it holds
+    // the keys.
+    let floor = row_of(&buffer, "Write a message") + 1;
+    assert_eq!(buffer[(40, floor)].symbol(), "─");
+    assert_eq!(buffer[(33, y - 1)].symbol(), "▌");
+    assert_eq!(buffer[(33, y - 1)].fg, accent);
+
+    // The keys are said once: the footer, never again on the rule.
+    let shown = text(&buffer);
+    assert_eq!(shown.matches("Enter send").count(), 1, "once:\n{shown}");
+    assert_eq!(shown.matches("Alt-Enter").count(), 1, "once:\n{shown}");
+    assert!(!shown.contains("Enter sends"), "{shown}");
+
+    // A draft replaces the placeholder, and the rule still reaches the last column.
     app.handle_key(key(KeyCode::Char('h')));
     app.handle_key(key(KeyCode::Char('i')));
     let buffer = draw(&mut app, 80, 24);
     let shown = text(&buffer);
-    assert!(shown.contains("Enter sends · Alt-Enter newline"), "{shown}");
-    let rule = row_of(&buffer, "Enter sends");
-    assert_eq!(buffer[(33, rule)].symbol(), "▌");
-    assert_eq!(buffer[(33, rule)].fg, accent);
-    // The hint ends in the pane's last column: the fill reached it, not a column short.
-    let hint = "Enter sends · Alt-Enter newline ";
-    let (x, _) = find(&buffer, hint.trim_end());
-    assert_eq!(usize::from(x) + hint.chars().count(), 80);
+    assert!(!shown.contains("Write a message"), "{shown}");
+    let rule = row_of(&buffer, "▌");
+    assert_eq!(buffer[(79, rule)].symbol(), "─", "{shown}");
 
-    // The same rule with a reply's quote: the fill still reaches the hint.
+    // With a reply's quote the rule carries it and still reaches the last column.
     app.handle_key(key(KeyCode::Esc));
     app.handle_key(key(KeyCode::Char('k')));
     app.handle_key(key(KeyCode::Char('r')));
-    // Wide enough for the quote and the hint: the rule still reaches the last column.
-    let buffer = draw(&mut app, 240, 24);
-    let rule = row_of(&buffer, "Enter sends");
-    assert!(
-        row(&buffer, rule).contains("replying to:"),
-        "{}",
-        text(&buffer)
-    );
-    let (x, _) = find(&buffer, hint.trim_end());
-    assert_eq!(usize::from(x) + hint.chars().count(), 240);
-
-    // At a narrow width the quote takes the rule, so the hint gives way instead of overflowing.
-    let buffer = draw(&mut app, 40, 20);
-    let shown = text(&buffer);
-    assert!(shown.contains("replying to:"), "{shown}");
-    assert!(!shown.contains("Enter sends"), "{shown}");
+    for width in [80, 240] {
+        let buffer = draw(&mut app, width, 24);
+        let rule = row_of(&buffer, "replying to:");
+        assert!(
+            row(&buffer, rule).contains("replying to:"),
+            "{}",
+            text(&buffer)
+        );
+        assert_eq!(
+            buffer[(width - 1, rule)].symbol(),
+            "─",
+            "the rule reaches the last column:\n{}",
+            text(&buffer)
+        );
+    }
 }
 
 #[test]

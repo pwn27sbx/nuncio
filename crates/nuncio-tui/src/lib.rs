@@ -1580,10 +1580,11 @@ impl App {
         let height = draft
             .as_ref()
             .map_or(1, |(rows, _)| rows.len().min(COMPOSER_ROWS));
-        let [text_area, rule, composer] = Layout::vertical([
+        let [text_area, rule, composer, floor] = Layout::vertical([
             Constraint::Min(0),
             Constraint::Length(1),
             Constraint::Length(height as u16),
+            Constraint::Length(1),
         ])
         .areas(rest);
         self.draw_conversation(frame, text_area);
@@ -1613,25 +1614,12 @@ impl App {
                 used += 2 + display_width(&quoted);
                 spans.push(Span::styled(quoted, self.muted()));
             }
-            // What Enter does here, where it does it, while there is something to send and the
-            // room exists: a reply's quote can take the whole rule at a narrow width.
-            let candidate = "Enter sends · Alt-Enter newline ";
-            let sends = if draft.is_some()
-                && self.pane == Pane::Compose
-                && used + display_width(candidate) <= width
-            {
-                candidate
-            } else {
-                ""
-            };
-            let sends_width = display_width(sends);
+            // The keys under the composer are said once, in the footer: the rule only carries
+            // the reply's quote.
             spans.push(Span::styled(
-                "─".repeat(width.saturating_sub(used + sends_width)),
+                "─".repeat(width.saturating_sub(used)),
                 self.line_style(),
             ));
-            if !sends.is_empty() {
-                spans.push(Span::styled(sends, self.muted()));
-            }
             frame.render_widget(
                 Paragraph::new(Line::from(spans)),
                 Rect {
@@ -1647,7 +1635,17 @@ impl App {
                 cell.set_symbol("├");
             }
         }
-        self.map.composer = rule.union(composer);
+        // The floor rule closes the composer's field.
+        if !floor.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    "─".repeat(usize::from(floor.width)),
+                    self.line_style(),
+                ))),
+                floor,
+            );
+        }
+        self.map.composer = rule.union(composer).union(floor);
         self.draw_composer(frame, composer, draft);
     }
 
@@ -1673,6 +1671,21 @@ impl App {
             frame.render_widget(Paragraph::new(hint), area);
             return;
         };
+        // Nothing written yet: the field says what to do (the keys are in the footer).
+        if self.pane == Pane::Compose && rows.len() == 1 && rows[0].is_empty() {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("› ", self.muted()),
+                    Span::styled(
+                        "Write a message",
+                        Style::default().fg(rgb(self.palette.text_faint())),
+                    ),
+                ])),
+                area,
+            );
+            frame.set_cursor_position((area.x + 2, area.y));
+            return;
+        }
         // The rows shown: from the first, or scrolled so the cursor's row is the last one.
         let visible = usize::from(area.height);
         let top = (row + 1).saturating_sub(visible);

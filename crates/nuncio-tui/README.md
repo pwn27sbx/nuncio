@@ -116,9 +116,11 @@ nuncio-tui [--image <png>]
   message arriving in the open chat is marked read the same way. The unread counts clear when the
   daemon answers; if it refuses (offline, not linked, ...) the footer shows why, the chat stays
   unread, and nothing retries on its own: opening the chat again does.
-- **Composer**: the last rows of the conversation, under its own rule: with nothing to send the
-  rule is plain and the row says `i or Enter to write`; with the keys in it the rule starts with
-  the accent bar, and with a draft it ends with `Enter sends · Alt-Enter newline`. `Enter` sends; `Alt-Enter` or `Ctrl-J` starts a
+- **Composer**: the last rows of the conversation, a field closed by a hairline above and another
+  below. With nothing to send and no keys on it the row says `i or Enter to write`; opened and
+  still empty it shows the placeholder `Write a message` with the caret where the first letter
+  goes, and while it has the keys its rule starts with the accent bar (and a reply's quote). The
+  keys are said once, in the footer, never again on the rule. `Enter` sends; `Alt-Enter` or `Ctrl-J` starts a
   new line (use `Ctrl-J` where the terminal keeps `Alt-Enter`, as macOS terminals do unless
   Option is set to act as Alt), and the message is sent with its line breaks. `←`/`→` move the
   cursor one character (a whole emoji sequence or accented letter is one step), `Home`/`End` to

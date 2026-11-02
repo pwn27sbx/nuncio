@@ -303,7 +303,7 @@ fn the_link_screen_draws_the_code_and_gives_way_to_the_chats() {
         request: ClientFrame::status(),
         result: Ok(DaemonFrame::Status {
             v: PROTOCOL_VERSION,
-            daemon: "nunciod/0.2.1".to_owned(),
+            daemon: "nunciod/0.3.0".to_owned(),
             linked: false,
             session: nuncio_client::Session::Unlinked,
             unread: 0,
@@ -1844,7 +1844,7 @@ fn the_settings_unlink_asks_for_the_word_and_sends_one_wipe() {
         request: ClientFrame::status(),
         result: Ok(DaemonFrame::Status {
             v: PROTOCOL_VERSION,
-            daemon: "nunciod/0.2.1".to_owned(),
+            daemon: "nunciod/0.3.0".to_owned(),
             linked: true,
             session: nuncio_client::Session::Linked,
             unread: 0,
@@ -1965,7 +1965,7 @@ fn the_settings_unlink_asks_for_the_word_and_sends_one_wipe() {
         request: ClientFrame::status(),
         result: Ok(DaemonFrame::Status {
             v: PROTOCOL_VERSION,
-            daemon: "nunciod/0.2.1".to_owned(),
+            daemon: "nunciod/0.3.0".to_owned(),
             linked: false,
             session: nuncio_client::Session::Unlinked,
             unread: 0,
@@ -1993,7 +1993,7 @@ fn a_unlink_whose_daemon_dies_closes_its_dialogs_and_offers_link() {
         request: ClientFrame::status(),
         result: Ok(DaemonFrame::Status {
             v: PROTOCOL_VERSION,
-            daemon: "nunciod/0.2.1".to_owned(),
+            daemon: "nunciod/0.3.0".to_owned(),
             linked: true,
             session: nuncio_client::Session::Linked,
             unread: 0,

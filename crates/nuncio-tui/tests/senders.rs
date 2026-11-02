@@ -56,7 +56,7 @@ fn a_group_names_its_sender_once_per_run_and_a_chat_never_names_anyone() {
     }))
     .expect("a chat");
     let snapshot = Snapshot {
-        daemon: "nunciod/0.2.1".to_owned(),
+        daemon: "nunciod/0.3.0".to_owned(),
         linked: true,
         session: Session::Linked,
         unread: 0,
@@ -128,7 +128,7 @@ fn a_group_names_its_sender_once_per_run_and_a_chat_never_names_anyone() {
     // A one-to-one chat names nobody: the side says whose a message is.
     let mut app = App::new(
         Snapshot {
-            daemon: "nunciod/0.2.1".to_owned(),
+            daemon: "nunciod/0.3.0".to_owned(),
             linked: true,
             session: Session::Linked,
             unread: 0,
@@ -191,7 +191,7 @@ fn a_quotes_prefix_names_its_author_and_says_you_for_mine() {
         .expect("a chat");
         let mut app = App::new(
             Snapshot {
-                daemon: "nunciod/0.2.1".to_owned(),
+                daemon: "nunciod/0.3.0".to_owned(),
                 linked: true,
                 session: Session::Linked,
                 unread: 0,

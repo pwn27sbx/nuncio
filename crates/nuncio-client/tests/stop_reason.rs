@@ -91,7 +91,7 @@ fn frames_without_a_stop_serialize_as_before() {
     assert_fixture(&event, "event_connection.json");
     let status = DaemonFrame::Status {
         v: PROTOCOL_VERSION,
-        daemon: "nunciod/0.2.1".to_owned(),
+        daemon: "nunciod/0.3.0".to_owned(),
         linked: false,
         session: Session::Unlinked,
         unread: 0,

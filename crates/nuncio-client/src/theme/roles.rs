@@ -43,6 +43,52 @@ impl Palette {
         mix(self.surface(), self.accent(), 0.18)
     }
 
+    /// The ear of an incoming message's slab: the theme's cyan, the one hue that says "them".
+    /// When cyan sits too close to the chrome to read as a graphic (under 1.5:1), the accent is
+    /// used instead, so the ear is never invisible.
+    pub fn bubble_ear_incoming(&self) -> Rgb {
+        const MIN_CONTRAST: f64 = 1.5;
+        if contrast(self.cyan, self.surface_chrome()) >= MIN_CONTRAST {
+            self.cyan
+        } else {
+            self.accent()
+        }
+    }
+
+    /// The ear of an outgoing message's slab: the accent, the same mark the focus uses.
+    pub fn bubble_ear_outgoing(&self) -> Rgb {
+        self.accent()
+    }
+
+    /// A quote's inset inside a bubble of `tint`: 30 % of the way toward the surface behind it, so
+    /// it reads as a recess on a dark theme and as a lighter panel on a light one.
+    pub fn quote_inset(&self, tint: Rgb) -> Rgb {
+        mix(tint, self.surface(), 0.30)
+    }
+
+    /// An avatar's tint for `seed`: 35 % of one of four palette hues into the chrome, so every
+    /// chat gets a stable colour and no tone is invented.
+    pub fn avatar_tint(&self, seed: u8) -> Rgb {
+        let hue = match seed % 4 {
+            0 => self.accent,
+            1 => self.cyan,
+            2 => self.green,
+            _ => self.yellow,
+        };
+        mix(self.surface_chrome(), hue, 0.35)
+    }
+
+    /// The letter on [`Palette::avatar_tint`]: whichever of `text` and `surface` contrasts more
+    /// with it, so an avatar stays readable on every theme.
+    pub fn avatar_ink(&self, seed: u8) -> Rgb {
+        let tint = self.avatar_tint(seed);
+        if contrast(tint, self.text()) >= contrast(tint, self.surface()) {
+            self.text()
+        } else {
+            self.surface()
+        }
+    }
+
     /// The selected row and the active tab: `surface_chrome` 10 % toward `text`.
     pub fn surface_active(&self) -> Rgb {
         mix(self.surface_chrome(), self.text(), 0.10)
@@ -441,6 +487,41 @@ light_foreground = "#5c5f77"
         // Moved toward the text, and the text itself is untouched.
         assert!(contrast(muted, palette.text()) < contrast(given, palette.text()));
         assert_eq!(palette.text(), hex("#c2c2b0"));
+    }
+
+    /// Direction C's roles keep their recipes on both themes, and the text that sits on them
+    /// stays readable.
+    #[test]
+    fn the_direction_c_roles_hold_on_dark_and_light_themes() {
+        for fixture in [GRUVBOX, FLEXOKI_LIGHT] {
+            let palette = parse(fixture);
+            // The incoming ear is a graphic: it reads against the chrome it sits on.
+            let ear = palette.bubble_ear_incoming();
+            let ear_on_chrome = contrast(ear, palette.surface_chrome());
+            assert!(
+                ear_on_chrome >= 1.5,
+                "the ear reads on the chrome: {ear_on_chrome:.2}"
+            );
+            // The outgoing ear is the accent, the same mark the focus uses.
+            assert_eq!(palette.bubble_ear_outgoing(), palette.accent());
+            // A quote stays readable inside a bubble of either tone.
+            for tint in [palette.surface_chrome(), palette.bubble_outgoing()] {
+                let inset = palette.quote_inset(tint);
+                assert_ne!(inset, tint, "the inset is its own tone");
+                let on_inset = contrast(palette.text(), inset);
+                assert!(on_inset >= 4.5, "text on the quote inset: {on_inset:.2}");
+            }
+            // Four distinct, stable avatar tints, each with an ink that reads on it.
+            let mut tints = Vec::new();
+            for seed in 0..4 {
+                let tint = palette.avatar_tint(seed);
+                assert_eq!(tint, palette.avatar_tint(seed), "stable for a seed");
+                assert!(!tints.contains(&tint), "distinct for the four seeds");
+                let ink = contrast(palette.avatar_ink(seed), tint);
+                assert!(ink >= 3.0, "the initials read on the tint: {ink:.2}");
+                tints.push(tint);
+            }
+        }
     }
 
     #[test]

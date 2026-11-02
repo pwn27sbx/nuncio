@@ -576,17 +576,18 @@ fn chat_markers_follow_the_name_in_their_own_order() {
                 .unwrap_or_else(|| panic!("no {needle:?} row at {width}x{height}:\n{shown}"))
                 .clone()
         };
-        // Only the markers the chat has, right after its name.
+        // Only the markers the chat has, right after its name, in the pinned, muted, archived
+        // order (the muted one is the bell with a slash).
         let run =
-            |row: &str| -> String { row.chars().filter(|c| "★⊘▤".contains(*c)).collect() };
+            |row: &str| -> String { row.chars().filter(|c| "★🔕▤".contains(*c)).collect() };
         assert_eq!(run(&row("Family")), "★", "{width}x{height}:\n{shown}");
-        assert_eq!(run(&row("Bo")), "★⊘▤", "{width}x{height}:\n{shown}");
-        // The muted chat is the only row with a ⊘ and nothing else.
+        assert_eq!(run(&row("Bo")), "★🔕▤", "{width}x{height}:\n{shown}");
+        // The muted chat is the only row with a bell and nothing else.
         let muted = rows
             .iter()
-            .find(|row| row.contains('⊘'))
+            .find(|row| row.contains('🔕'))
             .unwrap_or_else(|| panic!("no muted row:\n{shown}"));
-        assert_eq!(run(muted), "⊘", "{width}x{height}:\n{shown}");
+        assert_eq!(run(muted), "🔕", "{width}x{height}:\n{shown}");
         // On the name row, never on the preview row.
         assert!(!row("(no messages)").contains('★'), "{width}x{height}");
     }

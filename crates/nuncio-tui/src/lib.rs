@@ -102,8 +102,9 @@ pub enum Target {
     Composer,
 }
 
-/// Rows one chat takes in the list: its name, then its last message.
-pub const CHAT_ROWS: u16 = 2;
+/// Rows one chat takes in the list: its name, its last message, then the thin rule that
+/// separates it from the next one.
+pub const CHAT_ROWS: u16 = 3;
 
 /// What is drawn at `(column, row)` on the screen `map` describes, if anything the mouse acts on.
 pub fn hit_test(map: &ScreenMap, column: u16, row: u16) -> Option<Target> {
@@ -133,8 +134,8 @@ const WHEEL: usize = 3;
 
 /// Marks a pinned chat.
 const PINNED: char = '★';
-/// Marks a muted chat.
-const MUTED: char = '⊘';
+/// Marks a muted chat: a bell with a slash, not the old `⊘` that read as "forbidden".
+const MUTED: char = '🔕';
 /// Marks an archived chat.
 const ARCHIVED: char = '▤';
 
@@ -1423,17 +1424,34 @@ impl App {
                 rows,
             );
         }
-        // Only the pane with the keys fills its selection; the other keeps the bar (R5).
-        let filled = self.pane == Pane::Chats;
-        let list = List::new(items).highlight_style(if filled {
-            Style::default().bg(rgb(self.palette.surface_active()))
-        } else {
-            Style::default()
-        });
+        let list = List::new(items);
         // The list's state is the position on screen, not the model's index.
         let position = highlighted.and_then(|index| listed.iter().position(|&i| i == index));
         self.list.select(position);
         frame.render_stateful_widget(list, rows, &mut self.list);
+        // The pill is drawn again over the open chat's fill, which would take its background.
+        if let Some(position) = position
+            && position >= self.list.offset()
+        {
+            let row =
+                rows.y + u16::try_from(position - self.list.offset()).unwrap_or(0) * CHAT_ROWS + 1;
+            let chat = &self.chats()[listed[position]];
+            let pill = unread_pill(chat.unread);
+            if !pill.is_empty() && row < rows.bottom() {
+                let width = usize::from(area.width.saturating_sub(3));
+                let x =
+                    rows.x + u16::try_from(width.saturating_sub(display_width(&pill))).unwrap_or(0);
+                frame.buffer_mut().set_stringn(
+                    x,
+                    row,
+                    &pill,
+                    PILL,
+                    Style::default()
+                        .fg(rgb(self.palette.accent_on()))
+                        .bg(rgb(self.palette.accent())),
+                );
+            }
+        }
         self.map.chat_rows = rows;
         self.map.chat_offset = self.list.offset();
         self.map.chat_indices = listed;
@@ -2461,6 +2479,16 @@ fn fit(text: &str, width: usize) -> String {
     out
 }
 
+/// The unread count as the list's pill: ` 3 `, ` 12 ` or ` 99+ ` (it always fills [`PILL`]), or
+/// nothing when there is nothing unread.
+fn unread_pill(unread: u32) -> String {
+    match unread {
+        0 => String::new(),
+        n if n > 99 => " 99+ ".to_owned(),
+        n => format!(" {n} "),
+    }
+}
+
 /// Columns `text` takes, as ratatui lays it out (unicode-width).
 fn display_width(text: &str) -> usize {
     Span::raw(text).width()
@@ -2583,17 +2611,16 @@ fn local_hhmm(message: &Message, offset: time::UtcOffset) -> String {
 
 /// The fewest columns a chat's name keeps before the row gives up its time and markers.
 const NARROW_NAME: usize = 6;
-/// The badge's fixed width on a chat row's second line: `●3`, `●12`, `●99+`.
-const BADGE: usize = 4;
-/// The unread badge's dot.
-const BULLET: &str = "●";
+/// The unread pill's fixed slot on a chat row's second line: ` 3 `, ` 12 `, ` 99+ `.
+const PILL: usize = 5;
 
-/// A chat in the list, in two rows. Row one: the selection bar `▌` (both rows, when it is the
-/// highlighted chat), a space, the name in bold, the markers the chat has right after it, and the
-/// time in its own five-column slot at the right edge. Row two: two spaces, its last message cut
-/// to `width` columns with `…`, then the unread badge right-aligned in four columns. A narrow
-/// list gives up the time first, then the markers, and only then cuts the name below six
-/// columns. Only the bar and the badge are in the accent (plan §9.2, R4).
+/// A chat in the list, in three rows. Row one: the name, the markers the chat has right after
+/// it, and the time in its own five-column slot at the right edge. Row two: its last message cut
+/// to `width` columns with `…`, then the unread count as an accent pill at the right. Row three:
+/// a thin rule in the border role, the separator. A chat with unread messages has its name and
+/// time in bold, and the highlighted chat is filled across every row (`surface_active`), with the
+/// keys on it or not, so the list always says which chat is open. A narrow list gives up the time
+/// first, then the markers, and only then cuts the name below six columns.
 fn chat_item(
     chat: &Chat,
     palette: &Palette,
@@ -2601,22 +2628,18 @@ fn chat_item(
     offset: time::UtcOffset,
     selected: bool,
 ) -> ListItem<'static> {
-    let accent = Style::default().fg(rgb(palette.accent()));
     let text = Style::default().fg(rgb(palette.text()));
+    let unread = chat.unread > 0;
+    let ink = if unread {
+        text.add_modifier(Modifier::BOLD)
+    } else {
+        text
+    };
     let muted = Style::default().fg(rgb(palette.text_muted()));
-    let bar = || {
-        if selected {
-            Span::styled("▌", accent)
-        } else {
-            Span::raw(" ")
-        }
-    };
-    // The badge keeps four columns: `● 3`, `●12`, `●99+`, or blank.
-    let badge = match chat.unread {
-        0 => String::new(),
-        n if n > 99 => format!("{BULLET}99+"),
-        n => format!("{BULLET}{n}"),
-    };
+    let pill_style = Style::default()
+        .fg(rgb(palette.accent_on()))
+        .bg(rgb(palette.accent()));
+    let pill = unread_pill(chat.unread);
     // The markers follow the name, only the ones the chat has.
     let markers: String = [
         (chat.pinned, PINNED),
@@ -2654,11 +2677,7 @@ fn chat_item(
         named = width.saturating_sub(2);
     }
     let name = fit(&plain(&chat_title(chat)), named);
-    let mut title = vec![
-        bar(),
-        Span::raw(" "),
-        Span::styled(name.clone(), text.add_modifier(Modifier::BOLD)),
-    ];
+    let mut title = vec![Span::raw("  "), Span::styled(name.clone(), ink)];
     if !markers.is_empty() {
         title.push(Span::styled(markers.clone(), muted));
     }
@@ -2667,7 +2686,7 @@ fn chat_item(
         " ".repeat(width.saturating_sub(used + gap + time_width)),
     ));
     if time_width > 0 {
-        title.push(Span::styled(time, muted));
+        title.push(Span::styled(time, ink));
     }
 
     // A message with no text (a non-text kind) shows its kind instead of an empty row.
@@ -2678,23 +2697,33 @@ fn chat_item(
         }
         None => "(no messages)".to_owned(),
     };
-    let badge_width = BADGE;
-    let detail = fit(&detail, width.saturating_sub(3 + badge_width));
-    let pad = width.saturating_sub(3 + display_width(&detail) + badge_width);
+    let detail = fit(&detail, width.saturating_sub(3 + PILL));
+    let pad = width.saturating_sub(3 + display_width(&detail) + PILL);
     let mut second = vec![
-        bar(),
-        Span::raw("  "),
+        Span::raw("   "),
         Span::styled(detail, muted),
         Span::raw(" ".repeat(pad)),
     ];
-    if badge.is_empty() {
-        second.push(Span::raw(" ".repeat(badge_width)));
+    if pill.is_empty() {
+        second.push(Span::raw(" ".repeat(PILL)));
     } else {
-        second.push(Span::raw(" ".repeat(badge_width - display_width(&badge))));
-        second.push(Span::styled(badge, accent));
+        second.push(Span::raw(
+            " ".repeat(PILL.saturating_sub(display_width(&pill))),
+        ));
+        second.push(Span::styled(pill, pill_style));
     }
 
-    ListItem::new(vec![Line::from(title), Line::from(second)])
+    let rule = Line::from(Span::styled(
+        "─".repeat(width + 3),
+        Style::default().fg(rgb(palette.border())),
+    ));
+    let item = ListItem::new(vec![Line::from(title), Line::from(second), rule]);
+    // The fill goes under the rows, so the pill keeps its own background.
+    if selected {
+        item.style(Style::default().bg(rgb(palette.surface_active())))
+    } else {
+        item
+    }
 }
 
 #[cfg(test)]
@@ -2743,12 +2772,14 @@ mod tests {
     fn hit_test_maps_a_cell_to_the_chat_message_or_composer_under_it() {
         use super::{Target, hit_test};
         let map = map();
-        // Each chat takes two rows, counted from the list's scroll.
+        // Each chat takes three rows (name, last message, its rule), counted from the list's
+        // scroll.
         assert_eq!(hit_test(&map, 5, 2), Some(Target::Chats(Some(1))));
         assert_eq!(hit_test(&map, 30, 3), Some(Target::Chats(Some(1))));
-        assert_eq!(hit_test(&map, 5, 4), Some(Target::Chats(Some(2))));
+        assert_eq!(hit_test(&map, 5, 4), Some(Target::Chats(Some(1))));
+        assert_eq!(hit_test(&map, 5, 5), Some(Target::Chats(Some(2))));
         // Below the last chat, and on the border: the pane, no chat.
-        assert_eq!(hit_test(&map, 5, 6), Some(Target::Chats(None)));
+        assert_eq!(hit_test(&map, 5, 8), Some(Target::Chats(None)));
         assert_eq!(hit_test(&map, 0, 2), Some(Target::Chats(None)));
         assert_eq!(hit_test(&map, 31, 2), Some(Target::Chats(None)));
         // The conversation's rows name their message; an empty row, the border: none.

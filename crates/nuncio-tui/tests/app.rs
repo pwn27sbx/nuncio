@@ -190,7 +190,7 @@ fn a_conversation_renders_at_eighty_by_twenty_four_and_at_two_forty_by_sixty() {
         let screen = render(&mut app, width, height).text();
         for needle in [
             "Ada Lovelace",
-            "●2",
+            " 2 ",
             "Grace Hopper",
             "Are we still on?",
             "Yes, see you at 18:00",
@@ -229,7 +229,7 @@ fn chats_show_pin_mute_and_archive_markers_and_archived_chats_sit_last() {
             .unwrap_or_else(|| panic!("{needle:?}:\n{screen}"))
             .to_owned()
     };
-    assert!(row("Grace Hopper").contains('⊘'), "muted:\n{screen}");
+    assert!(row("Grace Hopper").contains('🔕'), "muted:\n{screen}");
     assert!(row("Ada Lovelace").contains('★'), "pinned:\n{screen}");
     assert!(row("Old group").contains('▤'), "archived:\n{screen}");
     assert!(!row("Grace Hopper").contains('★'));
@@ -523,7 +523,7 @@ fn unread_message_connection_and_focus_events_update_the_model() {
     assert_eq!(app.chats()[1].unread, 7);
     let screen = render(&mut app, 80, 24).text();
     assert!(screen.contains("Grace Hopper"), "{screen}");
-    assert!(screen.contains("●7"), "the unread badge: {screen}");
+    assert!(screen.contains(" 7 "), "the unread pill: {screen}");
     assert!(screen.contains("9 unread"), "{screen}");
 
     // A new message in the open chat appears at the bottom; one in another chat updates its
@@ -1529,8 +1529,8 @@ fn opening_an_unread_chat_sends_one_mark_read_and_marked_read_clears_the_counts(
         assert_eq!(app.chats()[1].unread, 3, "other chats keep theirs");
         let screen = render(&mut app, 80, 24).text();
         assert!(screen.contains("3 unread"), "{screen}");
-        assert!(!screen.contains("●2"), "{screen}");
-        assert!(screen.contains("●3"), "{screen}");
+        assert!(!screen.contains(" 2 "), "{screen}");
+        assert!(screen.contains(" 3 "), "{screen}");
     }
 }
 
@@ -1692,7 +1692,7 @@ fn event_chat_updates_the_chats_markers_and_resorts_the_list_keeping_the_selecti
         .find(|l| l.contains("Ada Lovelace"))
         .unwrap_or_else(|| panic!("{screen}"))
         .to_owned();
-    for marker in ['★', '⊘', '▤'] {
+    for marker in ['★', '🔕', '▤'] {
         assert!(ada_row.contains(marker), "{marker} in {ada_row:?}");
     }
 

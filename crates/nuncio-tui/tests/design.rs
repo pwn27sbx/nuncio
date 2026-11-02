@@ -249,8 +249,10 @@ fn one_single_line_separates_the_panes_from_the_header_rule_to_the_footer() {
 }
 
 #[test]
-fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hint() {
-    let accent = colour(Palette::default().accent());
+fn the_accent_marks_only_the_unread_pill_and_the_one_primary_hint() {
+    let palette = Palette::default();
+    let accent = colour(palette.accent());
+    let on_accent = colour(palette.accent_on());
     for (width, height) in SIZES {
         for (name, buffer) in screens(width, height) {
             let footer = height - 1;
@@ -271,20 +273,14 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
                         header.push_str(cell.symbol());
                         continue;
                     }
-                    // The chat row's badge is `●` plus its count, on the row below the name.
-                    if (cell.symbol().chars().all(|c| c.is_ascii_digit()) || cell.symbol() == "+")
-                        && x > 0
-                    {
-                        let left = &buffer[(x - 1, y)];
-                        let run = left.symbol() == "●"
-                            || (left.fg == accent
-                                && left.symbol().chars().all(|c| c.is_ascii_digit()));
-                        if run {
-                            continue;
-                        }
+                    // The composed rule's bar marks where the keys are (`▌`, accent text).
+                    if cell.symbol() == "▌" && cell.bg != accent {
+                        continue;
                     }
+                    // The unread count is a pill: the accent as its background, `accent_on` for
+                    // its text, never the accent as text on the row.
                     assert!(
-                        ["●", "▌"].contains(&cell.symbol()) && cell.bg != accent,
+                        cell.bg == accent && cell.fg == on_accent,
                         "{name} at {width}x{height}: {:?} at ({x}, {y}) is in the accent:\n{}",
                         cell.symbol(),
                         text(&buffer)
@@ -297,22 +293,16 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
             assert_eq!(header, "2 unread", "{name} at {width}x{height}");
         }
     }
-    // And they are drawn: one unread badge, and the bar down the selected chat's two rows.
+    // And the pill is drawn: two unread messages, one pill, on the second row of the chat.
     let buffer = draw(&mut two_chats(), 80, 24);
-    let split = separator(&buffer);
-    let count = |symbol: &str| {
-        let mut found = 0;
-        for y in 2..22 {
-            for x in 0..split {
-                if buffer[(x, y)].symbol() == symbol && buffer[(x, y)].fg == accent {
-                    found += 1;
-                }
-            }
-        }
-        found
-    };
-    assert_eq!(count("●"), 1, "one unread badge:\n{}", text(&buffer));
-    assert_eq!(count("▌"), 2, "the bar on both rows:\n{}", text(&buffer));
+    // Ada is the first chat: her name, her preview (where the pill is), her rule, then Grace.
+    let (_, grace) = find(&buffer, "Grace Hopper");
+    let preview = grace - 2;
+    let pill: String = (0..separator(&buffer))
+        .filter(|&x| buffer[(x, preview)].bg == accent)
+        .map(|x| buffer[(x, preview)].symbol())
+        .collect();
+    assert_eq!(pill, " 2 ", "the unread pill:\n{}", text(&buffer));
 }
 
 #[test]
@@ -326,26 +316,28 @@ fn the_tones_are_the_palette_roles() {
     let buffer = draw(&mut app, 80, 24);
     let sep = separator(&buffer);
     // The selected chat (Ada) on `surface_active`, the other on `surface_chrome`.
-    // Ada is the first chat, on the rows above Grace (her name is in the header rule too).
+    // Ada is the first chat, on the three rows above Grace (a chat takes name, preview and rule;
+    // Grace's name is in the header rule too).
     let (_, grace) = find(&buffer, "Grace Hopper");
-    let ada = grace - 2;
+    let ada = grace - 3;
     assert!(row(&buffer, ada).contains("Ada Lovelace"));
+    let active = colour(palette.surface_active());
+    let accent = colour(palette.accent());
     for x in 1..sep {
-        assert_eq!(
-            buffer[(x, ada)].bg,
-            colour(palette.surface_active()),
-            "x {x}"
-        );
-        assert_eq!(buffer[(x, ada + 1)].bg, colour(palette.surface_active()));
+        assert_eq!(buffer[(x, ada)].bg, active, "x {x}");
+        // The unread pill keeps its own background inside the fill.
+        let preview = buffer[(x, ada + 1)].bg;
+        assert!(preview == active || preview == accent, "x {x}");
+        assert_eq!(buffer[(x, ada + 2)].bg, active);
         assert_eq!(
             buffer[(x, grace)].bg,
             colour(palette.surface_chrome()),
             "x {x}"
         );
     }
-    // The bar runs down both rows of the selected chat.
-    assert_eq!(buffer[(0, ada)].symbol(), "▌");
-    assert_eq!(buffer[(0, ada + 1)].symbol(), "▌");
+    // The rule between chats is the border role, inside the highlight too.
+    assert_eq!(buffer[(2, ada + 2)].symbol(), "─");
+    assert_eq!(buffer[(2, ada + 2)].fg, colour(palette.border()));
     // The transcript is on `surface`, an incoming bubble on its neutral tone, the line between
     // the panes in `border`, and the free last column still `surface`.
     let (x, y) = find(&buffer, "good morning");
@@ -950,20 +942,66 @@ fn meta_is_the_muted_role_and_no_text_is_dimmed() {
     assert_eq!(buffer[(x, y)].fg, muted, "an empty state");
 }
 
+/// U5a: a chat with unread messages has its name and time in bold and its count in an accent
+/// pill; the muted marker is the bell with a slash.
 #[test]
-fn more_than_ninety_nine_unread_messages_show_the_capped_badge() {
+fn an_unread_chat_is_bold_with_a_pill_and_a_muted_one_wears_the_bell() {
+    let palette = Palette::default();
+    let accent = colour(palette.accent());
+    let on_accent = colour(palette.accent_on());
+    let mut muted = chat(GRACE, "Grace Hopper", 0);
+    muted.muted = true;
+    muted.last_message = Some(message("G1", "bye", false, "2026-10-25T16:02:00Z"));
+    let mut busy = chat(ADA, "Ada Lovelace", 4);
+    busy.last_message = Some(message("A1", "hello", false, "2026-10-25T17:55:00Z"));
+    let mut app = app_with(vec![busy, muted]);
+    let buffer = draw(&mut app, 80, 24);
+    // Ada is the first chat: name, preview (with the pill), rule.
+    let (_, grace) = find(&buffer, "Grace Hopper");
+    let name = grace - 3;
+    let x = (0..separator(&buffer))
+        .find(|&x| buffer[(x, name)].symbol() == "A")
+        .expect("her name");
+    assert!(
+        buffer[(x, name)].modifier.contains(Modifier::BOLD),
+        "her name:\n{}",
+        text(&buffer)
+    );
+    let (x, y) = find(&buffer, "17:55");
+    assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD), "her time");
+    let (x, y) = find(&buffer, "16:02");
+    assert!(!buffer[(x, y)].modifier.contains(Modifier::BOLD));
+    // The pill: ` 4 ` on the accent, its text in `accent_on`.
+    let preview = 3;
+    let pill: String = (0..separator(&buffer))
+        .filter(|&x| buffer[(x, preview)].bg == accent)
+        .map(|x| buffer[(x, preview)].symbol())
+        .collect();
+    assert_eq!(pill, " 4 ", "{}", text(&buffer));
+    let x = (0..separator(&buffer))
+        .find(|&x| buffer[(x, preview)].bg == accent && buffer[(x, preview)].symbol() == "4")
+        .expect("the count");
+    assert_eq!(buffer[(x, preview)].fg, on_accent);
+    assert!(!buffer[(x, preview)].modifier.contains(Modifier::BOLD));
+    // The muted chat says so with a bell, not the old `⊘`.
+    assert!(row(&buffer, grace).contains('🔕'), "{}", text(&buffer));
+    let _ = grace;
+    assert!(!text(&buffer).contains('⊘'), "{}", text(&buffer));
+}
+
+#[test]
+fn more_than_ninety_nine_unread_messages_show_the_capped_pill() {
     let busy = chat(ADA, "Ada Lovelace", 120);
     let mut app = app_with(vec![busy, chat(GRACE, "Grace Hopper", 9)]);
     let buffer = draw(&mut app, 80, 24);
     let shown = text(&buffer);
-    assert!(shown.contains("●99+"), "the capped badge:\n{shown}");
-    assert!(shown.contains("●9"), "a small count stays whole:\n{shown}");
+    assert!(shown.contains("99+"), "the capped pill:\n{shown}");
+    assert!(shown.contains(" 9 "), "a small count stays whole:\n{shown}");
 }
 
 #[test]
-fn only_the_pane_with_the_keys_paints_the_active_surface() {
+fn the_open_chat_is_filled_with_the_keys_or_without_them_and_the_message_only_with_them() {
     let palette = Palette::default();
-    let chrome = colour(palette.surface_chrome());
     let active = colour(palette.surface_active());
     // The chat pane is 32 columns at 80: the line at 32, the conversation from 33.
     let list_filled = |buffer: &Buffer| (1..32).any(|x| buffer[(x, 2)].bg == active);
@@ -976,14 +1014,12 @@ fn only_the_pane_with_the_keys_paints_the_active_surface() {
     app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.pane(), Pane::Messages);
     let buffer = draw(&mut app, 80, 24);
-    // The conversation has the keys: its selected message is filled, the list is not, and the
-    // bar still says which chat is selected.
+    // The conversation has the keys: its selected message is filled, and the list still says
+    // which chat is open.
     assert!(conversation_filled(&buffer), "{}", text(&buffer));
-    assert!(!list_filled(&buffer), "{}", text(&buffer));
-    assert_eq!(buffer[(0, 2)].symbol(), "▌");
-    assert_eq!(buffer[(1, 2)].bg, chrome);
+    assert!(list_filled(&buffer), "{}", text(&buffer));
 
-    // `Tab` moves the keys to the list: the fill moves with them.
+    // `Tab` moves the keys to the list: the message's fill goes, the chat's stays.
     app.handle_key(key(KeyCode::Tab));
     assert_eq!(app.pane(), Pane::Chats);
     let buffer = draw(&mut app, 80, 24);

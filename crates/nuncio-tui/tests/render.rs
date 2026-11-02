@@ -105,7 +105,7 @@ fn the_fixture_chat_list_renders_at_eighty_by_twenty_four() {
 
     // The chat list: name, unread badge, pinned and archived markers.
     assert!(screen.contains("Ada Lovelace"), "the chat name:\n{screen}");
-    assert!(screen.contains("●2"), "its unread badge:\n{screen}");
+    assert!(screen.contains(" 2 "), "its unread pill:\n{screen}");
     assert!(screen.contains('★'), "the pinned marker:\n{screen}");
     assert!(screen.contains('▤'), "the archived marker:\n{screen}");
     assert!(
@@ -114,8 +114,8 @@ fn the_fixture_chat_list_renders_at_eighty_by_twenty_four() {
     );
     assert!(screen.contains("Omarchy devs"), "the group chat:\n{screen}");
     assert!(
-        screen.contains("●17"),
-        "the group chat's unread badge:\n{screen}"
+        screen.contains(" 17 "),
+        "the group chat's unread pill:\n{screen}"
     );
 
     // The last-message snippet, and its time in the row above.

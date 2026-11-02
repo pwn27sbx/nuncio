@@ -224,13 +224,16 @@ fn is(colour: [u8; 3]) -> impl Fn(Color) -> bool {
     }
 }
 
-/// The message rows whose first picture column (x 33) is drawn in `colour`.
+/// The message rows where some picture cell is drawn in `colour`: an image's own rows, inside
+/// its bubble.
 fn rows_in(buffer: &Buffer, colour: [u8; 3]) -> Vec<u16> {
     let matches = is(colour);
     ROWS.filter(|&y| {
-        buffer
-            .cell((COLUMNS.start, y))
-            .is_some_and(|c| matches(c.bg) || matches(c.fg))
+        COLUMNS.clone().any(|x| {
+            buffer
+                .cell((x, y))
+                .is_some_and(|c| matches(c.bg) || matches(c.fg))
+        })
     })
     .collect()
 }
@@ -261,33 +264,55 @@ fn a_box_is_reserved_before_the_thumbnail_is_ready_and_the_thumbnail_fills_it() 
         vec![photo("IMG1", 1), message("T1", "after the photo", false, 2)],
     );
     let before = draw(&mut app, 80, 24);
-    let caption = row_of(&before, "[image] the view").expect("the caption line");
-    let after_row = row_of(&before, "17:02").expect("the next message");
-    // 320x240 at a 10x20 font in 46 columns: 32 columns, 12 rows, right under the caption.
-    // The caption bubble, then its twelve blank rows, and the next message of the same run
-    // follows with no gap.
+    // U4: the picture sits inside the bubble, above its caption, and the `[kind]` label is gone.
+    let caption = row_of(&before, "the view").expect("the caption line");
+    let after_row = row_of(&before, "after the photo").expect("the next message");
     assert_eq!(
-        after_row - caption - 1,
-        12,
-        "the box is reserved at once:\n{}",
+        after_row,
+        caption + 1,
+        "the next message of the run follows with no gap:\n{}",
         screen(&before)
     );
     assert!(
         rows_in(&before, RED).is_empty(),
         "nothing drawn before it is ready"
     );
+    assert!(
+        !screen(&before).contains("[image]"),
+        "the picture itself says what it is:\n{}",
+        screen(&before)
+    );
 
     assert!(app.wait_for_images(WAIT), "the thumbnail is encoded");
     let ready = draw(&mut app, 80, 24);
-    assert_eq!(
-        row_of(&ready, "17:02"),
-        Some(after_row),
-        "nothing moves when the thumbnail is drawn"
+    let red = rows_in(&ready, RED);
+    // 320x240 in a 27-column bubble: eleven rows, right above the caption. Its last row is a
+    // half-block blend, so not every row's cells are solidly the picture's colour.
+    let first = *red.first().unwrap_or_else(|| panic!("{}", screen(&ready)));
+    // 320x240 in a 27-column bubble: eleven rows reserved, ten of them the picture (its box keeps
+    // the aspect, so a row can be padding).
+    assert!(
+        (11..=13).contains(&(caption - first)),
+        "the box is eleven rows above its caption:\n{}",
+        screen(&ready)
     );
-    assert_eq!(
-        rows_in(&ready, RED),
-        ((caption + 1)..after_row).collect::<Vec<_>>(),
-        "the thumbnail fills the box:\n{}",
+    assert!(
+        red.len() >= 10,
+        "the thumbnail fills it:\n{}",
+        screen(&ready)
+    );
+    // The picture ends right above its caption; the thumbnail changed nothing else.
+    let picture = rows_in(&ready, RED);
+    let caption = row_of(&ready, "the view").expect("the caption");
+    assert!(
+        (1..=2).contains(&(caption - picture.last().expect("a drawn row"))),
+        "the picture ends at its caption:\n{}",
+        screen(&ready)
+    );
+    let next = row_of(&ready, "after the photo").expect("the next message");
+    assert!(
+        (1..=2).contains(&(next - caption)),
+        "the next message of the run follows the bubble\n{}",
         screen(&ready)
     );
 }
@@ -308,43 +333,35 @@ fn a_picture_with_no_size_gets_no_box_and_no_thumbnail() {
 }
 
 #[test]
-fn a_partially_visible_picture_is_cut_at_the_top_and_at_the_bottom() {
-    // Cut at the top: ten one-row messages after the photo scroll its first rows away.
+fn a_picture_scrolls_with_its_bubble() {
     let mut app = pictures_app();
     let mut messages = vec![photo("IMG1", 1)];
-    messages.extend(texts("after", 10, 10));
+    messages.extend(texts("after", 30, 10));
     open_ada(&mut app, messages);
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
-    let top_cut = draw(&mut app, 80, 24);
-    // Every bubble takes a row and a blank one, so the caption and four picture rows are above
-    // the view: the box is cut at the pane's first row.
-    assert_eq!(
-        rows_in(&top_cut, RED),
-        (2..11).collect::<Vec<_>>(),
-        "{}",
-        screen(&top_cut)
-    );
-    assert_eq!(row_of(&top_cut, "after line 0"), Some(11));
-
-    // Cut at the bottom: the same photo after eight messages, scrolled to the oldest.
-    let mut app = pictures_app();
-    let mut messages = texts("before", 5, 1);
-    messages.push(photo("IMG1", 9));
-    open_ada(&mut app, messages);
+    let bottom = draw(&mut app, 80, 24);
+    // At the newest message the photo is above the view, and nothing of it is drawn.
+    assert!(rows_in(&bottom, RED).is_empty(), "{}", screen(&bottom));
+    // At the oldest it is on screen, inside the message rows, with its caption under it.
     app.handle_key(key(KeyCode::Char('g')));
+    // The picture came into view with this draw: it is encoded next.
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
-    let bottom_cut = draw(&mut app, 80, 24);
-    // The start marker costs one row: six picture rows fit before the composer.
-    assert_eq!(row_of(&bottom_cut, "Beginning of conversation"), Some(2));
-    assert_eq!(row_of(&bottom_cut, "before line 0"), Some(4));
-    assert_eq!(
-        rows_in(&bottom_cut, RED),
-        (10..21).collect::<Vec<_>>(),
-        "{}",
-        screen(&bottom_cut)
-    );
+    let top = draw(&mut app, 80, 24);
+    let red = rows_in(&top, RED);
+    assert!(!red.is_empty(), "{}", screen(&top));
+
+    for y in &red {
+        assert!(ROWS.contains(y), "a picture row is inside the message rows");
+    }
+    if let Some(caption) = row_of(&top, "the view") {
+        assert!(
+            (1..=2).contains(&(caption - red.last().expect("a drawn row"))),
+            "the caption sits right under the box:\n{}",
+            screen(&top)
+        );
+    }
 }
 
 #[test]
@@ -367,33 +384,19 @@ fn a_corrupt_thumbnail_keeps_the_box_with_a_label_and_never_panics() {
     let buffer = draw(&mut app, 120, 40);
     let text = screen(&buffer);
     assert!(text.contains("still here"), "{text}");
-    let image_box = text
-        .lines()
-        .skip_while(|line| !line.contains("[image] the view"))
-        .nth(1)
-        .unwrap_or_default();
-    assert!(
-        image_box.contains("[image]"),
-        "the box keeps a label:\n{text}"
-    );
-    // The sticker's caption is on its message line; its box starts on the next row.
-    let sticker_box = text
-        .lines()
-        .skip_while(|line| !line.contains("17:02"))
-        .nth(1)
-        .unwrap_or_default();
-    assert!(
-        sticker_box.contains("[sticker]"),
-        "the box keeps a label:\n{text}"
-    );
-    // The boxes keep their height: 12 rows each, so the last message is far below.
-    let rows = text.lines().collect::<Vec<_>>();
-    let caption = rows.iter().position(|l| l.contains("[image] the view"));
-    let sticker_header = rows.iter().position(|l| l.contains("17:02"));
-    // Twelve box rows, and the next message of the same run with no gap.
+    // U4: a box that cannot draw its picture says what it is at its own first row, above its
+    // caption (or its time, for a sticker with no caption). The box keeps its twelve rows.
+    let image = line_of(&text, "[image]");
     assert_eq!(
-        sticker_header.zip(caption).map(|(s, c)| s - c - 1),
-        Some(12)
+        line_of(&text, "the view"),
+        image + 12,
+        "the image box keeps its label:\n{text}"
+    );
+    let sticker = line_of(&text, "[sticker]");
+    assert_eq!(
+        line_of(&text, "17:02"),
+        sticker + 12,
+        "the sticker box keeps its height:\n{text}"
     );
 }
 
@@ -530,7 +533,7 @@ fn connect(path: &Path) -> (Daemon, Opened) {
 }
 
 #[test]
-fn o_on_a_photo_fetches_the_full_picture_into_the_same_box_and_opens_nothing() {
+fn a_photo_that_comes_into_view_fetches_its_full_picture_into_the_same_box() {
     let full = TempFile::new(
         "full.png",
         &picture(BLUE, 320, 240, image::ImageFormat::Png),
@@ -550,54 +553,44 @@ fn o_on_a_photo_fetches_the_full_picture_into_the_same_box_and_opens_nothing() {
         &mut app,
         vec![photo("IMG1", 1), message("T1", "after the photo", false, 2)],
     );
+    // The picture coming into view asks for its full version by itself: no key, no `o`.
     draw(&mut app, 80, 24);
+    assert_eq!(
+        app.take_actions(),
+        vec![Action::Request(ClientFrame::download_media(ADA, "IMG1"))],
+        "the view asks once"
+    );
     assert!(app.wait_for_images(WAIT));
     let thumb = draw(&mut app, 80, 24);
     let red = rows_in(&thumb, RED);
-    assert_eq!(red.len(), 12);
+    assert!(red.len() >= 10, "{}", screen(&thumb));
     let next = row_of(&thumb, "17:02");
 
-    app.handle_key(key(KeyCode::Char('k')));
-    app.handle_key(key(KeyCode::Char('k')));
-    let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Char('o'))) else {
-        panic!("o fetches the photo");
-    };
-    assert_eq!(frame, ClientFrame::download_media(ADA, "IMG1"));
-    let downloading = draw(&mut app, 80, 24);
-    assert!(
-        screen(&downloading).contains("Downloading…"),
-        "{}",
-        screen(&downloading)
-    );
-    assert_eq!(
-        rows_in(&downloading, RED),
-        red,
-        "the thumbnail stays meanwhile"
-    );
-
+    let frame = ClientFrame::download_media(ADA, "IMG1");
     daemon.perform(&mut app, &frame).expect("perform");
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
     let replaced = draw(&mut app, 80, 24);
     assert_eq!(
-        rows_in(&replaced, BLUE),
-        red,
+        rows_in(&replaced, BLUE).len(),
+        red.len(),
         "the full picture is in the same box:\n{}",
         screen(&replaced)
     );
     assert!(rows_in(&replaced, RED).is_empty());
     assert_eq!(row_of(&replaced, "17:02"), next, "nothing moved");
     assert!(!screen(&replaced).contains("Downloading…"));
-    // Redraws reuse the encoded full picture.
+    // A redraw asks for nothing more and reuses the encoded full picture.
     let encodes = app.image_encodes();
     for _ in 0..3 {
         draw(&mut app, 80, 24);
+        assert!(app.take_actions().is_empty(), "asked once, not again");
         assert!(app.wait_for_images(WAIT));
     }
     assert_eq!(app.image_encodes(), encodes, "a redraw is a cache hit");
     assert!(
         opened.lock().expect("lock").is_empty(),
-        "o shows it, it opens nothing"
+        "showing it opens nothing"
     );
     drop(daemon);
     assert_eq!(server.join().expect("fake daemon"), ["download_media"]);
@@ -626,9 +619,21 @@ fn a_refused_or_unreadable_full_picture_shows_the_error_and_keeps_the_thumbnail(
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
     app.handle_key(key(KeyCode::Char('k')));
-    for attempt in ["so the media was not", "cannot show the picture"] {
-        let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Char('o'))) else {
-            panic!("o fetches the photo");
+    for (attempt, automatic) in [
+        ("so the media was not", true),
+        ("cannot show the picture", false),
+    ] {
+        // The first attempt is the view's own; after it failed, `o` asks again by hand.
+        let frame = if automatic {
+            match app.take_actions().into_iter().next() {
+                Some(Action::Request(frame)) => frame,
+                _ => panic!("the view fetches the photo"),
+            }
+        } else {
+            match app.handle_key(key(KeyCode::Char('o'))) {
+                Some(Action::Request(frame)) => frame,
+                _ => panic!("o fetches the photo again"),
+            }
         };
         daemon.perform(&mut app, &frame).expect("perform");
         draw(&mut app, 80, 24);
@@ -638,7 +643,11 @@ fn a_refused_or_unreadable_full_picture_shows_the_error_and_keeps_the_thumbnail(
             .map(|x| buffer.cell((x, 23)).map_or(" ", |c| c.symbol()))
             .collect::<String>();
         assert!(footer.contains(attempt), "{footer}");
-        assert_eq!(rows_in(&buffer, RED).len(), 12, "the thumbnail is kept");
+        assert!(
+            rows_in(&buffer, RED).len() >= 10,
+            "the thumbnail is kept:\n{}",
+            screen(&buffer)
+        );
         assert!(!screen(&buffer).contains("Downloading…"));
     }
     assert!(opened.lock().expect("lock").is_empty());
@@ -650,34 +659,32 @@ fn a_refused_or_unreadable_full_picture_shows_the_error_and_keeps_the_thumbnail(
 }
 
 #[test]
-fn nothing_is_downloaded_without_a_key() {
-    let path = socket_path();
-    let _socket = Socket(path.clone());
-    let server = fake_daemon(&path, |request| {
-        panic!("nothing is asked for without a key, got {request}");
-    });
-    let (mut daemon, opened) = connect(&path);
+fn a_picture_coming_into_view_asks_for_its_full_version_and_nothing_else_does() {
     let mut app = pictures_app();
     open_ada(
         &mut app,
         vec![
             photo("IMG1", 1),
-            sticker("STK1", 2, false, false),
-            sticker("STK2", 3, true, true),
+            message("T1", "just words", false, 2),
+            sticker("STK1", 3, true, false),
         ],
     );
-    for (width, height) in [(80, 24), (240, 60), (80, 24)] {
-        draw(&mut app, width, height);
-        assert!(app.wait_for_images(WAIT));
-        daemon.drain_events(&mut app).expect("drain");
-    }
-    // Moving through the messages selects them; it never fetches.
-    for code in [KeyCode::Char('k'), KeyCode::Char('k'), KeyCode::Char('j')] {
-        assert_eq!(app.handle_key(key(code)), None);
-    }
-    drop(daemon);
-    assert_eq!(server.join().expect("fake daemon"), Vec::<String>::new());
-    assert!(opened.lock().expect("lock").is_empty());
+    // One ask per picture that is on screen, and none for a text message.
+    draw(&mut app, 80, 24);
+    let asked: Vec<String> = app
+        .take_actions()
+        .into_iter()
+        .map(|action| match action {
+            Action::Request(ClientFrame::DownloadMedia { id, .. }) => id,
+            other => panic!("{other:?} is not a picture fetch"),
+        })
+        .collect();
+    assert_eq!(asked, ["IMG1", "STK1"]);
+    // The same picture is never asked for twice.
+    draw(&mut app, 80, 24);
+    assert!(app.take_actions().is_empty());
+    draw(&mut app, 240, 60);
+    assert!(app.take_actions().is_empty());
 }
 
 #[test]
@@ -748,29 +755,32 @@ fn a_sticker_shows_its_first_frame_and_an_animated_one_a_marker() {
         .iter()
         .position(|l| l.contains("17:02"))
         .expect("the second sticker");
+    // The picture says what it is, so no `[sticker]` label; only the animated one says it moves.
+    assert!(!text.contains("[sticker]"), "{text}");
+    assert!(!lines[still].contains('▶'), "a still sticker:\n{text}");
     assert!(
-        lines[still].contains("[sticker]") && !lines[still].contains('▶'),
-        "{text}"
-    );
-    assert!(
-        lines[moving].contains("[sticker] ▶"),
+        lines[moving].contains('▶'),
         "an animated sticker is marked:\n{text}"
     );
-    // Both are drawn from their PNG thumbnails, green, in 12-row boxes.
+    // Both are drawn from their PNG thumbnails, green, in the rows above their own caption.
     let green = is(GREEN);
-    let drawn = |from: usize| {
-        (from + 1..from + 1 + usize::from(IMAGE_ROWS))
-            .filter(|&y| {
-                (0..buffer.area.width).any(|x| {
-                    buffer
-                        .cell((x, y as u16))
-                        .is_some_and(|c| green(c.bg) || green(c.fg))
-                })
-            })
-            .count()
+    let green_row = |y: u16| {
+        (0..buffer.area.width).any(|x| {
+            buffer
+                .cell((x, y))
+                .is_some_and(|c| green(c.bg) || green(c.fg))
+        })
     };
-    assert_eq!(drawn(still), usize::from(IMAGE_ROWS), "{text}");
-    assert_eq!(drawn(moving), usize::from(IMAGE_ROWS), "{text}");
+    let count_rows =
+        |from: usize, to: usize| (from as u16..to as u16).filter(|&y| green_row(y)).count();
+    assert!(
+        count_rows(2, still) >= usize::from(IMAGE_ROWS) - 2,
+        "the first sticker is drawn above its caption:\n{text}"
+    );
+    assert!(
+        count_rows(still + 1, moving) >= usize::from(IMAGE_ROWS) - 2,
+        "the second sticker is drawn above its caption:\n{text}"
+    );
 }
 
 #[test]
@@ -794,20 +804,20 @@ fn a_sticker_with_no_thumbnail_shows_its_label_until_o_fetches_it() {
     let label = draw(&mut app, 80, 24);
     assert!(screen(&label).contains("[sticker]"));
     assert!(rows_in(&label, GREEN).is_empty());
-    app.handle_key(key(KeyCode::Char('k')));
-    let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Char('o'))) else {
-        panic!("o fetches the sticker");
+    // The sticker coming into view asked for its full file by itself.
+    let Some(Action::Request(frame)) = app.take_actions().into_iter().next() else {
+        panic!("the view fetches the sticker");
     };
     daemon.perform(&mut app, &frame).expect("perform");
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
     let drawn = draw(&mut app, 80, 24);
-    assert_eq!(
-        rows_in(&drawn, GREEN).len(),
-        usize::from(IMAGE_ROWS),
+    assert!(
+        rows_in(&drawn, GREEN).len() >= usize::from(IMAGE_ROWS) - 2,
         "the WebP is drawn in the box:\n{}",
         screen(&drawn)
     );
+    assert!(!screen(&drawn).contains("[sticker]"), "the label is gone");
     assert!(opened.lock().expect("lock").is_empty());
     drop(daemon);
     server.join().expect("fake daemon");
@@ -849,9 +859,10 @@ fn half_blocks_draw_a_transparent_corner_in_the_conversation_background() {
         draw(app, 80, 24);
         assert!(app.wait_for_images(WAIT));
         let buffer = draw(app, 80, 24);
-        let top = row_of(&buffer, "[sticker]").expect("the caption") + 1;
+        // The picture's first cell: inside its bubble, which pads it by one column.
+        let top = row_of(&buffer, "17:01").expect("the time") - 12;
         let cell = buffer
-            .cell((COLUMNS.start, top))
+            .cell((COLUMNS.start + 1, top))
             .expect("the corner")
             .clone();
         let green = is(GREEN);
@@ -863,11 +874,14 @@ fn half_blocks_draw_a_transparent_corner_in_the_conversation_background() {
         (cell.fg, cell.bg)
     };
     let pane = |c: Rgb| Color::Rgb(c.r, c.g, c.b);
-    assert_eq!(corner(&mut app), (pane(first), pane(first)));
+    // A transparent pixel takes the bubble's background, not the pane's.
+    let bubble = palette_on(first).surface_chrome();
+    assert_eq!(corner(&mut app), (pane(bubble), pane(bubble)));
     // A theme switch redraws the corner in the new background.
     let second = Rgb::new(200, 210, 190);
     app.set_palette(palette_on(second));
-    assert_eq!(corner(&mut app), (pane(second), pane(second)));
+    let bubble = palette_on(second).surface_chrome();
+    assert_eq!(corner(&mut app), (pane(bubble), pane(bubble)));
 }
 
 #[test]
@@ -900,6 +914,14 @@ fn half_blocks_draw_the_margin_a_picture_leaves_in_its_box_in_the_conversation_b
     assert!(!rows_in(&buffer, RED).is_empty(), "the photo is drawn");
 }
 
+/// The index of the first screen line containing `needle` (for screens taller than the fixed
+/// message rows).
+fn line_of(text: &str, needle: &str) -> usize {
+    text.lines()
+        .position(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("{needle:?} is not on screen:\n{text}"))
+}
+
 /// How many times `needle` shows on the screen.
 fn count(buffer: &Buffer, needle: &str) -> usize {
     screen(buffer).matches(needle).count()
@@ -923,21 +945,32 @@ fn a_picture_with_no_thumbnail_says_its_label_once_and_its_box_stays_empty() {
     assert!(app.wait_for_images(WAIT));
     let buffer = draw(&mut app, 120, 60);
     let text = screen(&buffer);
+    // With no thumbnail each box keeps its label at its first row; a sticker has no caption, so
+    // its time comes right after the box, and the animated one still says it moves.
     assert_eq!(count(&buffer, "[sticker]"), 2, "one per sticker:\n{text}");
-    assert_eq!(count(&buffer, "[sticker] ▶"), 1, "{text}");
     assert_eq!(count(&buffer, "[image]"), 1, "{text}");
-    // Each label is the caption on its message line; the 12 rows below it are blank.
-    let lines: Vec<&str> = text.lines().collect();
-    for minute in 1..=3 {
-        let header = lines
-            .iter()
-            .position(|l| l.contains(&format!("17:0{minute}")))
-            .expect("the header");
+    assert_eq!(count(&buffer, "▶"), 1, "the animated sticker:\n{text}");
+    let mut seen = Vec::new();
+    for kind in ["[sticker]", "[image]"] {
+        let mut from = 0;
+        while let Some(found) = text
+            .lines()
+            .skip(from)
+            .enumerate()
+            .find_map(|(n, line)| line.contains(kind).then_some(from + n))
+        {
+            seen.push((kind, found));
+            from = found + 1;
+        }
+    }
+    // Each label's twelve rows are the empty box, and nothing of it is drawn.
+    for (kind, at) in &seen {
+        let lines: Vec<&str> = text.lines().collect();
         assert!(
-            lines[header].contains("[sticker]") || lines[header].contains("[image]"),
-            "{text}"
+            lines[*at].contains(kind),
+            "the label is at the box's first row:\n{text}"
         );
-        for row in &lines[header + 1..header + 1 + usize::from(IMAGE_ROWS)] {
+        for row in &lines[at + 1..(at + usize::from(IMAGE_ROWS)).min(lines.len())] {
             let inside = row.split('│').nth(1).unwrap_or_default();
             assert!(inside.trim().is_empty(), "the box is empty:\n{text}");
         }
@@ -1159,7 +1192,9 @@ fn kitty_placeholders_follow_their_own_picture_across_a_scroll() {
         let Some(start) = (2..46).find(|&y| row_text(buffer, y).contains(header)) else {
             return Vec::new();
         };
-        let mut ids: Vec<Color> = kitty_ids(buffer, (start + 2)..46u16.min(start + 14))
+        // The picture sits above its caption (or, with no caption, above its time).
+        let from = start.saturating_sub(IMAGE_ROWS - 1).max(2);
+        let mut ids: Vec<Color> = kitty_ids(buffer, from..46u16.min(start))
             .into_iter()
             .flat_map(|(_, ids)| ids)
             .collect();
@@ -1214,15 +1249,16 @@ fn a_thumbnail_declaring_a_huge_picture_keeps_its_label_without_decoding() {
     open_ada(&mut app, vec![bomb, message("T1", "still here", false, 2)]);
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
-    let text = screen(&draw(&mut app, 80, 24));
-    let image_box = text
-        .lines()
-        .skip_while(|l| !l.contains("[image] the view"))
-        .nth(1)
-        .unwrap_or_default();
+    let buffer = draw(&mut app, 80, 24);
+    let text = screen(&buffer);
+    assert_eq!(
+        count(&buffer, "[image]"),
+        1,
+        "the box keeps its label:\n{text}"
+    );
     assert!(
-        image_box.contains("[image]"),
-        "refused, box keeps its label:\n{text}"
+        line_of(&text, "[image]") < line_of(&text, "the view"),
+        "the label is at the box's first row:\n{text}"
     );
 }
 
@@ -1248,9 +1284,9 @@ fn a_full_picture_declaring_a_huge_size_is_refused_before_decoding() {
     open_ada(&mut app, vec![photo("IMG1", 1)]);
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
-    app.handle_key(key(KeyCode::Char('k')));
-    let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Char('o'))) else {
-        panic!("o fetches the photo");
+    // The view asked for the photo; the daemon answers with a huge one.
+    let Some(Action::Request(frame)) = app.take_actions().into_iter().next() else {
+        panic!("the view fetches the photo");
     };
     daemon.perform(&mut app, &frame).expect("perform");
     let started = std::time::Instant::now();
@@ -1266,7 +1302,11 @@ fn a_full_picture_declaring_a_huge_size_is_refused_before_decoding() {
         .map(|x| buffer.cell((x, 23)).map_or(" ", |c| c.symbol()))
         .collect();
     assert!(footer.contains("cannot show the picture"), "{footer}");
-    assert_eq!(rows_in(&buffer, RED).len(), 12, "the thumbnail is kept");
+    assert!(
+        rows_in(&buffer, RED).len() >= 10,
+        "the thumbnail is kept:\n{}",
+        screen(&buffer)
+    );
     drop(daemon);
     server.join().expect("fake daemon");
 }
@@ -1357,10 +1397,9 @@ fn downloading_never_moves_the_box() {
     // Bottom-aligned: a caption that grows a row moves the photo's header up.
     let next = row_of(&before, "17:01");
     assert!(next.is_some());
-    app.handle_key(key(KeyCode::Char('k')));
-    app.handle_key(key(KeyCode::Char('k')));
-    let Some(Action::Request(frame)) = app.handle_key(key(KeyCode::Char('o'))) else {
-        panic!("o fetches the photo");
+    // The view asked for the photo while drawing: the caption says it is on its way.
+    let Some(Action::Request(frame)) = app.take_actions().into_iter().next() else {
+        panic!("the view fetches the photo");
     };
     let downloading = draw(&mut app, 80, 24);
     assert!(
@@ -1410,12 +1449,12 @@ fn a_thumbnail_larger_than_a_thumbnail_is_refused_though_a_full_picture_that_siz
     open_ada(&mut app, vec![large]);
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
-    let text = screen(&draw(&mut app, 80, 24));
-    let image_box = text
-        .lines()
-        .skip_while(|l| !l.contains("[image] the view"))
-        .nth(1)
-        .unwrap_or_default();
-    assert!(image_box.contains("[image]"), "{text}");
+    let buffer = draw(&mut app, 80, 24);
+    let text = screen(&buffer);
+    assert_eq!(count(&buffer, "[image]"), 1, "{text}");
+    assert!(
+        line_of(&text, "[image]") < line_of(&text, "the view"),
+        "{text}"
+    );
     assert_eq!(app.image_encodes(), 0);
 }

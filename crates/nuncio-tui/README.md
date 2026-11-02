@@ -24,9 +24,9 @@ key does not open the device. It goes away once the daemon's next frame has no r
 was unlocked and the device opened). A reason this build does not know shows as
 `WhatsApp stopped the session`.
 
-Pictures are drawn in the conversation (see [Pictures](#pictures)): from the thumbnail each image
-or sticker message carries, with the full picture only when you press `o`. Nothing is ever
-downloaded on its own.
+Pictures are drawn in the conversation (see [Pictures](#pictures)): inside their bubble, above
+the caption. The thumbnail shows first, and the full picture is fetched — once — the first time
+the picture comes into view, so a photo is sharp without pressing anything.
 
 One chat per contact (ADR 0001): the daemon names the phone-number chats it merged into a
 contact's LID chat (`…@lid`) in that chat's `aliases`, in the chat list and in the `event_chat` it
@@ -168,10 +168,13 @@ nuncio-tui [--image <png>]
 - **Search** (`/`): searches the open chat through the daemon; the results are listed newest
   first, and `Enter` on one closes the search and selects that message in the conversation
   (scrolled into view) when it is among the loaded messages; otherwise the footer says so.
-- **Media**: image, sticker, audio, video and document messages show `[kind]` before their
-  caption on the message line (`[sticker] ▶` for an animated sticker). Pictures are drawn under it (see
-  [Pictures](#pictures)). On audio, video and documents `o` asks the daemon to download the file
-  and opens it with `xdg-open` (`open` on macOS); `O` does the same for a picture.
+- **Media**: a picture message draws its picture inside the bubble, above its caption, as soon as
+  its message comes into view — the daemon is asked for the full file without a key, so what is
+  shown is the sharp picture and not the thumbnail WhatsApp embeds. Until the picture can be drawn
+  (no graphics protocol, no size stated, or nothing to draw yet) the bubble says `[kind]` before
+  its caption, and `[sticker] ▶` marks an animated one. On audio, video and documents `o` asks the
+  daemon to download the file and opens it with `xdg-open` (`open` on macOS); `O` does the same for
+  a picture, which keeps the thumbnail in the box meanwhile.
 - Live updates: new messages, a send's state changes, unread counts, the connection state, and a
   focus request (`nuncio focus <jid>`) selects and opens that chat.
 - **A newer daemon**: an event this TUI does not know is ignored (the event connection stays
@@ -228,25 +231,25 @@ does; `Esc` goes back one step: composer → conversation → chat list.
 
 ## Pictures
 
-An image or sticker message whose size the daemon states (`width`, `height`) gets a box under its
-caption as soon as the conversation is drawn, before anything is decoded: as wide as the picture
-in cells but no wider than the conversation, as tall as that keeps its shape, at most 12 rows.
-Nothing moves when the picture arrives in it.
+An image or sticker message whose size the daemon states (`width`, `height`) gets a box inside its
+bubble, above the caption, as soon as the conversation is drawn, before anything is decoded: as
+wide as the picture in cells but no wider than the bubble, as tall as that keeps its shape, at
+most 12 rows. Nothing moves when the picture arrives in it.
 
 - **Thumbnail first.** The box shows the thumbnail WhatsApp embeds in the message (the wire's
-  `thumb`: a JPEG for a photo, a PNG for a sticker), scaled to the box. It costs no network: the
-  daemon already has it.
-- **Full picture on demand.** `o` on the selected picture asks the daemon for it
-  (`download_media`); the caption says `Downloading…` until it is drawn, in the same box, over the
-  thumbnail. If the daemon refuses (offline, not linked) or the file does not decode, the footer
-  says why and the thumbnail stays; `o` tries again. **Nothing is downloaded without a key.** `O`
-  opens the picture with the desktop's viewer instead.
-- **Stickers** are drawn like photos, from their PNG thumbnail; for a sticker without one (or an
-  image without one) the caption's `[sticker]` (`[image]`) is the only label and the box stays
-  empty until `o` fetches it (a WebP; an animated one gives its first frame). An animated sticker
-  is marked `▶` and shows its first frame: no animation yet.
+  `thumb`: a JPEG for a photo, a PNG for a sticker). It costs no network: the daemon already has
+  it.
+- **The full picture follows.** The first time a picture comes into view the transcript asks the
+  daemon for its full file (`download_media`), once: the caption says `Downloading…` until it is
+  drawn, in the same box, over the thumbnail. If the daemon refuses (offline, not linked) or the
+  file does not decode, the footer says why and the thumbnail stays; nothing is retried by itself,
+  and `o` asks again by hand. `O` opens the picture with the desktop's viewer instead.
+- **Stickers** are drawn like photos, from their PNG thumbnail; a sticker without one (or an image
+  without one) keeps its `[sticker]` (`[image]`) label at the top of the empty box until the full
+  file arrives (a WebP; an animated one gives its first frame). An animated sticker is marked `▶`
+  and shows its first frame: no animation yet.
 - **Transparency.** With half blocks every cell is painted, so a transparent pixel (a sticker's
-  corners, the margin a picture leaves in its box) takes the theme's background colour, and a
+  corners, the margin a picture leaves in its box) takes the bubble's background colour, and a
   theme switch draws the pictures again on the new one. Kitty and sixel keep the transparency.
 - **Scrolling** draws a picture cut at the top or the bottom of the conversation when it is only
   partly in view.
@@ -257,7 +260,8 @@ Nothing moves when the picture arrives in it.
   `[sticker]` label (a full picture says why in the footer). A decoded picture is shrunk to its
   box before it is encoded.
 - A picture whose message states no size gets no box and no thumbnail; `o` draws the full picture
-  in a box sized from the file.
+  in a box sized from the file. With pictures off (`--image off`, `NUNCIO_IMAGE_PROTOCOL=off`) the
+  bubble keeps the `[image]`/`[sticker]` label and `o`/`O` open the media externally.
 - Encoded pictures are cached (48 of them, about 96 MiB) and encoded on two worker threads, so
   scrolling stays smooth; resizing the terminal encodes the visible ones again, and work queued
   for an earlier width is dropped unencoded. The caption's `Downloading…` is cut with `…` rather

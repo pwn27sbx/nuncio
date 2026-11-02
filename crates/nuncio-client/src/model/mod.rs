@@ -689,6 +689,19 @@ impl Model {
         Some(Download { jid, id, inline })
     }
 
+    /// Mark the picture message `id` in `jid` as being fetched, so the file the daemon answers
+    /// with is kept for the box that draws it: false when it was already being fetched or it has
+    /// no id. The UI uses it to fetch a picture that comes into view, with no key pressed.
+    pub fn show_picture(&mut self, jid: &str, id: &str) -> bool {
+        if id.is_empty() || !self.transcript.showing.insert(id.to_owned()) {
+            return false;
+        }
+        self.transcript
+            .full
+            .remove(&(jid.to_owned(), id.to_owned()));
+        true
+    }
+
     /// Open the in-chat search on the selected chat, its query being typed; false with no chat.
     pub fn open_search(&mut self) -> bool {
         if self.chats.selected_chat().is_none() {

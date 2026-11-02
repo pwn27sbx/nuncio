@@ -10,6 +10,7 @@
 //! an [`Action`] for the I/O loop. [`Daemon`] is that I/O: a request connection and a subscribed
 //! event connection to `nunciod`. The keys are listed in [`KEYS`] and in `README.md`.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use nuncio_client::model::{Effect, Filter, Model, chat_title, is_picture, quoted};
@@ -281,6 +282,11 @@ pub struct App {
     today: time::Date,
     /// Where things were on the last drawn screen, for the mouse.
     map: ScreenMap,
+    /// What the last draw asked the daemon for (a picture that came into view), drained by the
+    /// loop with [`App::take_actions`].
+    pending: Vec<Action>,
+    /// The pictures already asked for, so a fetch that failed is never retried by itself.
+    pictures_wanted: HashSet<(String, String)>,
 }
 
 impl From<Effect> for Action {
@@ -314,6 +320,8 @@ impl App {
             utc_offset: time::UtcOffset::UTC,
             today: time::OffsetDateTime::now_utc().date(),
             map: ScreenMap::default(),
+            pending: Vec::new(),
+            pictures_wanted: HashSet::new(),
         };
         app.sync();
         app
@@ -333,6 +341,12 @@ impl App {
         self.images = Some(images::Images::new(&graphics));
         self.protocol = Some(graphics.protocol_name());
         self
+    }
+
+    /// What the last draw asked the daemon for (the full picture of a picture that came into
+    /// view), for the loop to send before the next frame.
+    pub fn take_actions(&mut self) -> Vec<Action> {
+        std::mem::take(&mut self.pending)
     }
 
     /// Wait until every picture asked for by the last draw is encoded (the workers run off the UI
@@ -1594,8 +1608,6 @@ impl App {
         }
         if let Some(images) = self.images.as_mut() {
             images.resized(area.width);
-            let background = self.palette.surface();
-            images.backdrop([background.r, background.g, background.b]);
         }
         // Nothing to read is still a place: it says so and how to get out (R7).
         if self.model.selected_chat().is_none() {
@@ -1711,6 +1723,13 @@ impl App {
         let Some(jid) = self.model.selected_jid().map(str::to_owned) else {
             return;
         };
+        // The colours a picture's transparent pixels take, per side.
+        let incoming = self.palette.surface_chrome();
+        let outgoing = self.palette.bubble_outgoing();
+        let background = |from_me: bool| {
+            let colour = if from_me { outgoing } else { incoming };
+            [colour.r, colour.g, colour.b]
+        };
         let Some(images) = self.images.as_mut() else {
             return;
         };
@@ -1719,6 +1738,9 @@ impl App {
         // A full picture with no box yet (its message states no size) is decoded to learn its
         // size; one with a box is encoded only while the box is on screen (below).
         for (chat, id, path) in transcript.full_pictures() {
+            let Some(message) = messages.iter().find(|m| m.id == id) else {
+                continue;
+            };
             let boxed = boxes
                 .iter()
                 .any(|b| messages.get(b.index).is_some_and(|m| m.id == id));
@@ -1730,12 +1752,17 @@ impl App {
                 id: id.to_owned(),
                 variant: images::Variant::Full,
                 columns: area.width,
+                background: background(message.from_me),
             };
             if images.wants(&key) {
                 images.request(key, images::Origin::File(path.to_owned()), None);
             }
         }
         let visible = i64::from(area.height);
+        // A picture that comes into view is fetched once, unasked: the thumbnail in the box is
+        // WhatsApp's small copy, and only the full picture is sharp. A fetch that fails is not
+        // retried by itself (the manual `o` stays available); nothing is requested twice.
+        let mut wanted: Vec<String> = Vec::new();
         for picture in boxes {
             let Some(message) = messages.get(picture.index) else {
                 continue;
@@ -1744,18 +1771,29 @@ impl App {
             if y >= visible || y + i64::from(picture.size.height) <= 0 {
                 continue;
             }
+            let id = message.id.clone();
+            let seen = (jid.clone(), id.clone());
+            if transcript.full_picture(&jid, &id).is_none()
+                && !transcript.is_showing(&id)
+                && !self.pictures_wanted.contains(&seen)
+            {
+                self.pictures_wanted.insert(seen);
+                wanted.push(id);
+            }
             let Ok(position_y) = i16::try_from(y) else {
                 continue;
             };
             let position = SignedPosition {
-                x: 0,
+                x: i16::try_from(picture.x).unwrap_or(0),
                 y: position_y,
             };
+            let background = background(message.from_me);
             let key = |variant| images::Key {
                 chat: jid.clone(),
                 id: message.id.clone(),
                 variant,
                 columns: area.width,
+                background,
             };
             if let Some(protocol) = images.get(&key(images::Variant::Full)) {
                 frame.render_widget(SlicedImage::new(protocol, position), area);
@@ -1788,13 +1826,14 @@ impl App {
                 }
                 continue;
             }
-            // Without a thumbnail the box stays empty until `o` fetches the picture: the caption
-            // above already says `[sticker]` or `[image]`. One that does not decode keeps a label.
-            if message.thumb.is_some() && (0..visible).contains(&y) {
+            // Nothing to draw inside the box yet (no thumbnail, or one that does not decode):
+            // the box says what it is, at its own first row.
+            if (0..visible).contains(&y) {
                 let label = Rect {
+                    x: area.x + picture.x,
                     y: area.y + y as u16,
+                    width: picture.size.width,
                     height: 1,
-                    ..area
                 };
                 frame.render_widget(
                     Paragraph::new(format!("[{}]", plain(&message.kind))).style(label_style),
@@ -1802,6 +1841,26 @@ impl App {
                 );
             }
         }
+        for id in wanted {
+            // The model has to know, or the daemon's answer is not kept for the box.
+            if self.model.show_picture(&jid, &id) {
+                self.pending
+                    .push(Action::Request(ClientFrame::download_media(
+                        jid.clone(),
+                        id,
+                    )));
+            }
+        }
+    }
+
+    /// The background a message's bubble is drawn on: what a picture's transparent pixels take.
+    fn bubble_background(&self, message: &Message) -> [u8; 3] {
+        let colour = if message.from_me {
+            self.palette.bubble_outgoing()
+        } else {
+            self.palette.surface_chrome()
+        };
+        [colour.r, colour.g, colour.b]
     }
 
     /// The box a picture message gets in a transcript `columns` wide, when pictures are drawn: from
@@ -1837,6 +1896,7 @@ impl App {
                     id: message.id.clone(),
                     variant: images::Variant::Full,
                     columns,
+                    background: self.bubble_background(message),
                 })
             })
     }
@@ -1931,32 +1991,54 @@ impl App {
             if chosen {
                 selected = Some(rows.len());
             }
+            // The picture, when the terminal draws them and the message states a size (or its
+            // full picture gave one): it sits inside the bubble, above the caption, and the
+            // `[kind]` label is then not written at all.
+            let box_size = loaded
+                .is_some()
+                .then(|| self.picture_box(&chat.jid, message, inner_max as u16))
+                .flatten();
+            // An animated sticker shows its first frame; the marker says it moves. With the
+            // picture drawn it is the caption's own marker; without one the `[kind]` label
+            // carries it.
+            let marker = message.kind == "sticker" && message.animated;
             let text = if message.kind == "text" {
                 message.text.clone()
-            } else {
-                // An animated sticker shows its first frame; the marker says it moves.
-                let marker = if message.kind == "sticker" && message.animated {
-                    " ▶"
+            } else if box_size.is_some() {
+                if marker && message.text.is_empty() {
+                    "▶".to_owned()
+                } else if marker {
+                    format!("▶ {}", message.text)
                 } else {
-                    ""
-                };
-                format!("[{}]{marker} {}", message.kind, message.text)
+                    message.text.clone()
+                }
+            } else {
+                format!(
+                    "[{}]{} {}",
+                    message.kind,
+                    if marker { " ▶" } else { "" },
+                    message.text
+                )
             };
             // A caption being fetched says so on its last row, never wrapping it to more rows
-            // (the box under it never moves).
+            // (the picture above never moves).
             let text = if message.kind != "text" && self.fetching(&chat.jid, message, columns) {
                 downloading(&text, inner_max as u16)
             } else {
                 text
             };
             // The bubble's own rows: the sender's name on the first message of a run in a group,
-            // the quote where it replies to one, then the text.
+            // the quote where it replies to one, then the picture and the caption.
             let mut content: Vec<(String, Part)> = Vec::new();
             if first_of_run
                 && !message.from_me
                 && let Some(sender) = message.sender.as_deref()
             {
-                content.push((plain(sender), Part::Name));
+                content.extend(
+                    wrap_text(&plain(sender), inner_max)
+                        .into_iter()
+                        .map(|row| (row, Part::Name)),
+                );
             }
             if let Some(quote) = message.reply_to.as_ref().map(|quoted_id| {
                 match quoted(messages.iter().copied(), quoted_id) {
@@ -1964,35 +2046,45 @@ impl App {
                     None => "(a message not loaded)".to_owned(),
                 }
             }) {
+                // The bar takes two columns of every quoted row.
                 content.extend(
-                    wrap_text(&quote, inner_max)
+                    wrap_text(&quote, inner_max.saturating_sub(2))
                         .into_iter()
                         .map(|row| (row, Part::Quote)),
                 );
             }
-            content.extend(
+            // Where the picture goes: after the name and the quote, before the caption.
+            let picture_at = content.len();
+            // A caption that is only the picture's own kind has nothing left to say once the
+            // picture is there; a fallback label stays caption enough.
+            let caption = if box_size.is_some() && text.trim().is_empty() {
+                Vec::new()
+            } else {
                 text.lines()
                     .flat_map(|line| wrap_text(&plain(line), inner_max))
-                    .map(|row| (row, Part::Text)),
-            );
-            if content.iter().all(|(_, part)| *part != Part::Text) {
-                content.push((String::new(), Part::Text));
-            }
+                    .map(|row| (row, Part::Text))
+                    .collect()
+            };
+            content.extend(caption);
             let footer = self.bubble_footer(message);
             let footer_width: usize = footer.iter().map(Span::width).sum();
-            let widest = content
+            let caption_width = content
                 .iter()
                 .map(|(row, _)| display_width(row))
                 .max()
                 .unwrap_or(0);
+            let box_width = box_size.map_or(0, |size| usize::from(size.width));
+            let captioned = content.iter().any(|(_, part)| *part == Part::Text);
             // A short message keeps its time on its last row, as WhatsApp does; a longer one
             // gives the time a row of its own, so no word is ever cut to make it fit.
-            let inline = widest + 1 + footer_width <= inner_max;
+            let inline = captioned && caption_width + 1 + footer_width <= inner_max;
             let inner = if inline {
-                widest + 1 + footer_width
+                caption_width + 1 + footer_width
             } else {
-                widest.max(footer_width).min(inner_max)
-            };
+                caption_width.max(footer_width)
+            }
+            .max(box_width)
+            .min(inner_max);
             let width = u16::try_from(inner + 2).unwrap_or(usable).min(usable);
             let room = width.saturating_sub(2);
             let background = if message.from_me { outgoing } else { incoming };
@@ -2001,18 +2093,30 @@ impl App {
             } else {
                 0
             };
-            let mut lines: Vec<Line<'static>> = Vec::new();
-            let last = content.len().saturating_sub(1);
-            for (row, (text, part)) in content.iter().enumerate() {
-                let mut spans = match part {
-                    Part::Name => vec![Span::styled(text.clone(), sender)],
+            let line = |text: &str, part: Part| {
+                Line::from(match part {
+                    Part::Name => vec![Span::styled(text.to_owned(), sender)],
                     Part::Quote => vec![
                         Span::styled("▌ ", Style::default().fg(rgb(self.palette.accent()))),
-                        Span::styled(text.clone(), self.muted()),
+                        Span::styled(text.to_owned(), self.muted()),
                     ],
-                    Part::Text => vec![Span::styled(text.clone(), body)],
-                };
-                if inline && row == last {
+                    Part::Text => vec![Span::styled(text.to_owned(), body)],
+                })
+            };
+            let mut lines: Vec<Line<'static>> = Vec::new();
+            for (text, part) in &content[..picture_at] {
+                lines.push(line(text, *part));
+            }
+            // The picture's own rows: the bubble's background, ready for the image to be drawn
+            // over them once it is encoded.
+            let picture_line = rows.len() + lines.len();
+            if let Some(size) = box_size {
+                lines.extend((0..size.height).map(|_| Line::default()));
+            }
+            let last = content.len().saturating_sub(1);
+            for (index, (text, part)) in content.iter().enumerate().skip(picture_at) {
+                let mut spans = line(text, *part).spans;
+                if inline && index == last {
                     let pad = usize::from(room).saturating_sub(display_width(text) + footer_width);
                     spans.push(Span::raw(" ".repeat(pad)));
                     spans.extend(footer.iter().cloned());
@@ -2042,23 +2146,13 @@ impl App {
                     owner,
                 });
             }
-            if let Some(size) = loaded
-                .is_some()
-                .then(|| self.picture_box(&chat.jid, message, columns))
-                .flatten()
-            {
+            if let Some(size) = box_size {
                 boxes.push(PictureBox {
-                    line: rows.len(),
+                    line: picture_line,
                     size,
                     index,
+                    x: x.saturating_add(1),
                 });
-                rows.extend((0..size.height).map(|_| Row {
-                    line: Line::default(),
-                    x: 0,
-                    width: columns,
-                    bubble: None,
-                    owner,
-                }));
             }
         }
         ConversationLayout {
@@ -2159,9 +2253,12 @@ enum Part {
 /// A picture's box in the transcript: its first (blank) line, its size in cells, and the index of
 /// its loaded message.
 struct PictureBox {
+    /// The first of its rows, inside its bubble.
     line: usize,
     size: ratatui::layout::Size,
     index: usize,
+    /// Its first column, from the pane's left edge.
+    x: u16,
 }
 
 /// A picture's caption with ` · Downloading…` on its last line, cut with `…` where needed so it

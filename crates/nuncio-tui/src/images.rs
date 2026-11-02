@@ -270,6 +270,10 @@ pub(crate) struct Key {
     pub id: String,
     pub variant: Variant,
     pub columns: u16,
+    /// The colour the picture is drawn on: half blocks paint every pixel of their cells, so a
+    /// transparent pixel takes it and a picture encoded for one surface cannot be reused on
+    /// another (an incoming bubble and an outgoing one differ).
+    pub background: [u8; 3],
 }
 
 impl Key {
@@ -329,10 +333,6 @@ pub(crate) struct Images {
     pixels: HashMap<(String, String), (u32, u32)>,
     /// The transcript width the cache holds pictures for.
     columns: Option<u16>,
-    /// Half blocks paint every cell, so a transparent pixel is drawn in the conversation's
-    /// background colour, which the cache's pictures are encoded on; `None` for the protocols
-    /// that keep the alpha (kitty, sixel, iTerm2).
-    backdrop: Option<[u8; 3]>,
     halfblocks: bool,
     encodes: u64,
     /// Bumped by every resize; a worker skips a job queued before it.
@@ -377,7 +377,6 @@ impl Images {
             failed: HashMap::new(),
             pixels: HashMap::new(),
             columns: None,
-            backdrop: None,
             halfblocks: graphics.picker.protocol_type() == ProtocolType::Halfblocks,
             encodes: 0,
             generation,
@@ -409,19 +408,6 @@ impl Images {
         if self.columns != Some(columns) {
             self.columns = Some(columns);
             // Everything queued for the old width is dropped by the workers unencoded.
-            self.generation.fetch_add(1, Ordering::SeqCst);
-            self.cache.clear();
-            self.bytes = 0;
-            self.pending.clear();
-        }
-    }
-
-    /// The conversation's background is `colour` now. With half blocks a different one drops every
-    /// encoded picture, like a resize, since their transparent pixels were painted in the old one;
-    /// the other protocols keep the alpha and ignore it.
-    pub(crate) fn backdrop(&mut self, colour: [u8; 3]) {
-        if self.halfblocks && self.backdrop != Some(colour) {
-            self.backdrop = Some(colour);
             self.generation.fetch_add(1, Ordering::SeqCst);
             self.cache.clear();
             self.bytes = 0;
@@ -474,12 +460,14 @@ impl Images {
         }
         self.pending.insert(key.clone());
         let generation = self.generation.load(Ordering::SeqCst);
+        // Only half blocks paint their transparent pixels: the other protocols keep the alpha.
+        let backdrop = self.halfblocks.then_some(key.background);
         let job = Job {
             generation,
             key,
             origin,
             size,
-            backdrop: self.backdrop,
+            backdrop,
         };
         if self.jobs.send(job).is_err() {
             self.pending.clear();

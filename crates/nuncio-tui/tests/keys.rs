@@ -183,9 +183,10 @@ fn tab_switches_focus_and_only_the_focused_pane_has_the_bold_title() {
     let mut app = two_chats();
     let screen = render(&mut app, 80, 24);
     let right = split(&screen);
-    // The titles sit on the header rule: `─ Chats (2) ─…┬─ Ada Lovelace ─…`.
+    // The titles sit on the header rule: `─ Chats (2) ─…┬─ ▗A▖ Ada Lovelace ─…`, so the
+    // conversation's name starts after the rule, the space and the avatar chip.
     let chats_title = 2;
-    let conversation_title = right + 3;
+    let conversation_title = right + 7;
     assert_eq!(screen[(chats_title, 1)].symbol(), "C", "{}", text(&screen));
     assert_eq!(screen[(conversation_title, 1)].symbol(), "A");
     assert!(focused_title(&screen, chats_title), "the focused list");
@@ -212,7 +213,7 @@ fn the_composer_counts_as_the_conversation_pane_for_the_focus() {
     let screen = render(&mut app, 80, 24);
     let right = split(&screen);
     assert!(!focused_title(&screen, 2));
-    assert!(focused_title(&screen, right + 3));
+    assert!(focused_title(&screen, right + 7));
 }
 
 #[test]

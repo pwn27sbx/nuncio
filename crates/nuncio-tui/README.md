@@ -60,8 +60,11 @@ nuncio-tui [--image <png>]
   `sender` (her name, else her masked number, else `unknown`); without one (an older daemon, a
   message stored before senders were recorded) it shows the group's name as before.
 - **Look** (the design plan's §9, the desktop app's rules in a terminal): no boxes. The chat
-  list and the conversation are separated by one `│` line; each has its title on the header rule
-  under the status line, and the composer sits under its own rule. The tones are the palette's
+  list and the conversation are separated by one `│` line; the list has its title on the header
+  rule under the status line, the conversation puts the open chat there — its avatar chip
+  (`▗A▖`, the chat's initial on the same palette tint its list avatar wears), then the name, then
+  a subtitle the wire owns: the masked number and `contact` (`…0001 · contact`) or `group`. The
+  composer is closed by one hairline above it. The tones are the palette's
   roles: the list on `surface_chrome`, the conversation on `surface`, the open chat on
   `surface_active` (with the keys or without them, so the list always says which chat is open).
   The accent marks the unread count's pill and the one primary key in the footer (`Enter`, or
@@ -121,10 +124,11 @@ nuncio-tui [--image <png>]
   message arriving in the open chat is marked read the same way. The unread counts clear when the
   daemon answers; if it refuses (offline, not linked, ...) the footer shows why, the chat stays
   unread, and nothing retries on its own: opening the chat again does.
-- **Composer**: the last rows of the conversation, a field closed by a hairline above and another
-  below. With nothing to send and no keys on it the row says `i or Enter to write`; opened and
-  still empty it shows the placeholder `Write a message` with the caret where the first letter
-  goes, and while it has the keys its rule starts with the accent bar (and a reply's quote). The
+- **Composer**: the last rows of the conversation, a field closed by one hairline above it (the
+  footer follows it; there is no second rule). With nothing to send and no keys on it the row
+  says `i or Enter to write`; opened and still empty it shows the placeholder `Write a message`
+  with the caret where the first letter goes, after a `›` prompt; while it holds the keys the
+  hairline itself is drawn in the accent (and a reply puts its quote on the line above). The
   keys are said once, in the footer, never again on the rule. The selected message is marked by a
   single accent bar on the conversation's left margin, over the rows it owns: a full-row fill
   would erase its slab's tint and its ear. `Enter` sends; `Alt-Enter` or `Ctrl-J` starts a
@@ -147,7 +151,8 @@ nuncio-tui [--image <png>]
 - **Focus**: one pane has the keys at a time, the chat list or the conversation (the composer
   counts as the conversation); its title on the header rule is bold, the other's muted, and only
   the pane with the keys fills its selection on `surface_active` — the other keeps the `▌` bar,
-  so the screen never shows two "selected" things. `Tab` switches between them.
+  so the screen never shows two "selected" things (the conversation's message selection is always
+  that `▌` bar on the pane's left margin, never a fill). `Tab` switches between them.
 - **Widths**: at 100 columns and up the chat list takes 40 % of the screen; from 60 to 99 it is
   a fixed 32 columns; under 60 only the focused pane is drawn, filling the width, and its rule
   says `· Tab` so the other pane is one key away. The mouse map is rebuilt on every draw, so a

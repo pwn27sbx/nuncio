@@ -975,6 +975,72 @@ impl App {
         frame.render_widget(Paragraph::new(lines).style(self.line_style()), area);
     }
 
+    /// The conversation's header rule: the chat's avatar chip, its name and a subtitle the wire
+    /// owns (`…0001 · contact` or `group`). The focused pane's name is bold, the other's muted.
+    fn draw_conversation_header(&self, frame: &mut Frame, area: Rect) {
+        if area.is_empty() {
+            return;
+        }
+        let width = usize::from(area.width);
+        let focused = self.pane != Pane::Chats;
+        let name_style = if focused {
+            Style::default()
+                .fg(rgb(self.palette.text()))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            self.muted()
+        };
+        let mut spans = vec![Span::styled("─", self.line_style())];
+        let mut used = 1;
+        match self.model.selected_chat() {
+            Some(chat) => {
+                let title = plain(&chat_title(chat));
+                let seed = avatar_seed(&title) % AVATAR_TINTS;
+                let tint = rgb(self.palette.avatar_tint(seed));
+                let ink = rgb(self.palette.avatar_ink(seed));
+                let initial = avatar_initials(&title)[0];
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled("▗", Style::default().fg(tint)));
+                spans.push(Span::styled(
+                    initial.to_string(),
+                    Style::default().fg(ink).bg(tint),
+                ));
+                spans.push(Span::styled("▖", Style::default().fg(tint)));
+                used += 4;
+                let room = width.saturating_sub(used + 1);
+                let name = fit(&format!(" {title}"), room);
+                used += display_width(&name);
+                spans.push(Span::styled(name, name_style));
+                if let Some(subtitle) = chat_subtitle(chat) {
+                    let room = width.saturating_sub(used + 1);
+                    let subtitle = fit(&format!(" · {subtitle}"), room);
+                    used += display_width(&subtitle);
+                    spans.push(Span::styled(subtitle, self.muted()));
+                }
+            }
+            // With no chat the pane still has a title, so its focus shows.
+            None => {
+                let mut title = " Conversation".to_owned();
+                if self.narrow {
+                    title.push_str(" · Tab");
+                }
+                used += display_width(&title);
+                spans.push(Span::styled(title, name_style));
+            }
+        }
+        if self.narrow && self.model.selected_chat().is_some() {
+            let room = width.saturating_sub(used + 1);
+            let suffix = fit(" · Tab", room);
+            used += display_width(&suffix);
+            spans.push(Span::styled(suffix, self.muted()));
+        }
+        spans.push(Span::styled(
+            "─".repeat(width.saturating_sub(used)),
+            self.line_style(),
+        ));
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
     /// A pane's header: its title on the header rule. The focused pane's title is bold, the
     /// other's muted, so where the keys go shows without colour.
     fn draw_rule_title(&self, frame: &mut Frame, area: Rect, title: String, focused: bool) {
@@ -1544,18 +1610,9 @@ impl App {
     }
 
     fn draw_messages(&mut self, frame: &mut Frame, area: Rect) {
-        let mut title = self
-            .model
-            .selected_chat()
-            .map(|chat| plain(&chat_title(chat)))
-            // With no chat the pane still has a title, so its focus shows.
-            .unwrap_or_else(|| "Conversation".to_owned());
-        if self.narrow {
-            title.push_str(" · Tab");
-        }
         let [rule, body] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-        self.draw_rule_title(frame, rule, title, self.pane != Pane::Chats);
+        self.draw_conversation_header(frame, rule);
         // A free column on the right, as in the list.
         let inner = Rect {
             width: body.width.saturating_sub(1),
@@ -1589,11 +1646,10 @@ impl App {
         let height = draft
             .as_ref()
             .map_or(1, |(rows, _)| rows.len().min(COMPOSER_ROWS));
-        let [text_area, rule, composer, floor] = Layout::vertical([
+        let [text_area, rule, composer] = Layout::vertical([
             Constraint::Min(0),
             Constraint::Length(1),
             Constraint::Length(height as u16),
-            Constraint::Length(1),
         ])
         .areas(rest);
         self.draw_conversation(frame, text_area);
@@ -1610,14 +1666,12 @@ impl App {
             let width = usize::from(area.width);
             let mut spans = Vec::new();
             let mut used = 0;
-            // The pane with the keys marks the composer's rule with the accent bar.
-            if self.pane == Pane::Compose {
-                spans.push(Span::styled(
-                    "▌",
-                    Style::default().fg(rgb(self.palette.accent())),
-                ));
-                used += 1;
-            }
+            // The pane with the keys draws the composer's hairline in the accent.
+            let hint = if self.pane == Pane::Compose {
+                Style::default().fg(rgb(self.palette.accent()))
+            } else {
+                self.line_style()
+            };
             if let Some(quoted) = quoted {
                 spans.push(Span::styled("─ ", self.line_style()));
                 used += 2 + display_width(&quoted);
@@ -1625,10 +1679,7 @@ impl App {
             }
             // The keys under the composer are said once, in the footer: the rule only carries
             // the reply's quote.
-            spans.push(Span::styled(
-                "─".repeat(width.saturating_sub(used)),
-                self.line_style(),
-            ));
+            spans.push(Span::styled("─".repeat(width.saturating_sub(used)), hint));
             frame.render_widget(
                 Paragraph::new(Line::from(spans)),
                 Rect {
@@ -1644,17 +1695,7 @@ impl App {
                 cell.set_symbol("├");
             }
         }
-        // The floor rule closes the composer's field.
-        if !floor.is_empty() {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    "─".repeat(usize::from(floor.width)),
-                    self.line_style(),
-                ))),
-                floor,
-            );
-        }
-        self.map.composer = rule.union(composer).union(floor);
+        self.map.composer = rule.union(composer);
         self.draw_composer(frame, composer, draft);
     }
 
@@ -2961,6 +3002,22 @@ fn local_day(message: &Message, offset: time::UtcOffset) -> Option<time::Date> {
     let utc = time::PrimitiveDateTime::new(date, time::Time::from_hms(hours, minutes, 0).ok()?)
         .assume_utc();
     Some(utc.checked_to_offset(offset)?.date())
+}
+
+/// What a chat is, as the conversation header says it: its masked number when the daemon knows
+/// one, then `contact` or `group` (from the JID's domain).
+fn chat_subtitle(chat: &Chat) -> Option<String> {
+    let kind = if chat.jid.ends_with("@g.us") {
+        "group"
+    } else {
+        "contact"
+    };
+    Some(
+        match chat.phone.as_deref().filter(|phone| !phone.is_empty()) {
+            Some(phone) => format!("{phone} · {kind}"),
+            None => kind.to_owned(),
+        },
+    )
 }
 
 /// A day separator's label: `Today`, `Yesterday`, or the date in caps (`SUN 18 OCT 2026`).

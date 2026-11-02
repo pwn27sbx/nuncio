@@ -98,8 +98,21 @@ fn a_group_names_its_sender_once_per_run_and_a_chat_never_names_anyone() {
         buffer[(x, y)].modifier.contains(Modifier::BOLD),
         "the name is bold"
     );
+    // The header rule says `Climbing · group`; over the bubbles there is no author header. Only
+    // the conversation columns count.
+    let split = screen
+        .lines()
+        .nth(1)
+        .and_then(|line| line.chars().position(|symbol| symbol == '┬'))
+        .expect("the line between the panes");
+    let body: String = screen
+        .lines()
+        .skip(2)
+        .map(|line| line.chars().skip(split + 1).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(
-        !screen.contains("Climbing ·") && !screen.contains("you ·"),
+        !body.contains("Climbing") && !body.contains("you ·"),
         "no author header over a bubble:\n{screen}"
     );
 

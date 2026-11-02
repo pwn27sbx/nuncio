@@ -273,8 +273,16 @@ fn the_accent_marks_only_the_unread_pill_and_the_one_primary_hint() {
                         header.push_str(cell.symbol());
                         continue;
                     }
-                    // The composed rule's bar marks where the keys are (`▌`, accent text).
-                    if cell.symbol() == "▌" && cell.bg != accent {
+                    // A glyph line is never a colour mark: the slab ears (`▌`/`▐`), the
+                    // quote's bar and the selection bar.
+                    if ["▌", "▐"].contains(&cell.symbol()) && cell.bg != accent {
+                        continue;
+                    }
+                    // The composer's hairline takes the accent while the field holds the keys,
+                    // and only then.
+                    if cell.symbol() == "─"
+                        && (0..width).any(|x| buffer[(x, y + 1)].symbol() == "›")
+                    {
                         continue;
                     }
                     // The unread count is a pill: the accent as its background, `accent_on` for
@@ -730,6 +738,61 @@ fn a_quote_is_one_inset_row_and_reactions_sit_under_the_slab() {
         " ",
         "no ear under the slab"
     );
+}
+
+/// C6: the conversation's header rule carries the chat's avatar chip, its name and a subtitle the
+/// wire owns: `…0001 · contact` for a contact, `group` for a group.
+#[test]
+fn the_conversation_header_names_the_chat_and_what_it_is() {
+    let mut with_phone = chat(ADA, "Ada Lovelace", 0);
+    with_phone.phone = Some("…0001".to_owned());
+    let mut group = chat(GROUP, "Design team", 0);
+    group.phone = None;
+    let mut app = app_with(vec![with_phone, group]);
+    open(&mut app, ADA, conversation());
+    let buffer = draw(&mut app, 80, 24);
+    let sep = separator(&buffer);
+    let header = row(&buffer, 1);
+    assert!(
+        header.contains("Ada Lovelace · …0001 · contact"),
+        "{header}"
+    );
+    // The chip sits before the name and wears the chat's own tint: the same one the list gives
+    // that chat's avatar.
+    let (x, y) = find(&buffer, "▗");
+    assert_eq!(y, 1, "the chip is on the header rule");
+    let listed = (2..19)
+        .find(|&y| {
+            (0..sep)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("Ada Lovelace")
+        })
+        .map(|y| {
+            let x = (0..sep)
+                .find(|&x| buffer[(x, y)].symbol() == "▗")
+                .expect("the list's avatar");
+            (x, y)
+        })
+        .expect("the list shows the chat");
+    assert_eq!(
+        buffer[(x + 1, y)].bg,
+        buffer[(listed.0 + 1, listed.1)].bg,
+        "the chip wears the chat's tint:\n{}",
+        text(&buffer)
+    );
+    assert_eq!(buffer[(x, y)].fg, buffer[(x + 1, y)].bg, "the corner too");
+    // A group says so, and a chat with no phone shows only the kind.
+    // Two Escapes leave the composer and the conversation for the list, then `j` walks to the
+    // group and Enter opens it.
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('j')));
+    open(&mut app, GROUP, Vec::new());
+    let buffer = draw(&mut app, 80, 24);
+    let header = row(&buffer, 1);
+    assert!(header.contains("Design team · group"), "{header}");
+    assert!(!header.contains("contact"), "{header}");
 }
 
 #[test]
@@ -1233,12 +1296,16 @@ fn the_composer_has_a_field_with_a_placeholder_and_the_keys_are_said_once() {
     let (x, y) = find(&buffer, "Write a message");
     assert_eq!(buffer[(x, y)].fg, faint);
     assert_eq!(buffer[(x - 2, y)].symbol(), "›");
-    // The field is closed by a hairline under it, and the accent marks its rule while it holds
-    // the keys.
-    let floor = row_of(&buffer, "Write a message") + 1;
-    assert_eq!(buffer[(40, floor)].symbol(), "─");
-    assert_eq!(buffer[(33, y - 1)].symbol(), "▌");
-    assert_eq!(buffer[(33, y - 1)].fg, accent);
+    // The field is one hairline above the prompt, in the accent while it holds the keys, and
+    // nothing under it (the footer is the next row).
+    assert_eq!(buffer[(40, y - 1)].symbol(), "─");
+    assert_eq!(buffer[(40, y - 1)].fg, accent, "{}", text(&buffer));
+    assert_eq!(
+        y + 1,
+        23,
+        "the composer is the last body row: {}",
+        text(&buffer)
+    );
 
     // The keys are said once: the footer, never again on the rule.
     let shown = text(&buffer);

@@ -405,9 +405,9 @@ func TestCloseDoesNotWaitForARunningHistoryImport(t *testing.T) {
 	}
 
 	fake.emit(bigHistory(ada.String(), "B", historyBlobSize))
-	// A second blob arrives while the first is being stored: it is queued behind it (one blob at a
-	// time) and must be dropped, not imported after the close.
-	fake.emit(bigHistory(ada.String(), "Q", 5))
+	// The first blob has to be importing (holding the import turn) before the second one arrives:
+	// two blobs emitted together race for the turn, and the queued one may then be stored first,
+	// which is nothing this test is about.
 	waitFor(t, "the history import to store its first message", func() bool {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&n); err != nil {
@@ -415,6 +415,9 @@ func TestCloseDoesNotWaitForARunningHistoryImport(t *testing.T) {
 		}
 		return n > 0
 	})
+	// A second blob arrives while the first is being stored: it is queued behind it (one blob at a
+	// time) and must be dropped, not imported after the close.
+	fake.emit(bigHistory(ada.String(), "Q", 5))
 
 	closed := make(chan struct{})
 	go func() {

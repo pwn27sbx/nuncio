@@ -5,7 +5,7 @@
 //! A picture message (an `image` or a `sticker`) that states its size gets a box of fixed height in
 //! the transcript before anything is decoded, so nothing moves when the thumbnail, or later the full
 //! picture, is drawn in it. The thumbnail is the one WhatsApp embeds in the message (the wire's
-//! `thumb`); the full picture is fetched only when the user asks (`o`). Every byte decoded here is
+//! `thumb`); the full picture is fetched when its box first comes into view (and `o` asks again after a failure). Every byte decoded here is
 //! untrusted: a picture that is not a JPEG, PNG or WebP, is larger than its bounds, or does not
 //! decode keeps its box with a label, and nothing panics.
 

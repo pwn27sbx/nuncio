@@ -972,7 +972,7 @@ fn an_unread_chat_is_bold_with_a_pill_and_a_muted_one_wears_the_bell() {
     let (x, y) = find(&buffer, "16:02");
     assert!(!buffer[(x, y)].modifier.contains(Modifier::BOLD));
     // The pill: ` 4 ` on the accent, its text in `accent_on`.
-    let preview = 3;
+    let preview = name + 1;
     let pill: String = (0..separator(&buffer))
         .filter(|&x| buffer[(x, preview)].bg == accent)
         .map(|x| buffer[(x, preview)].symbol())
@@ -1004,7 +1004,8 @@ fn the_open_chat_is_filled_with_the_keys_or_without_them_and_the_message_only_wi
     let palette = Palette::default();
     let active = colour(palette.surface_active());
     // The chat pane is 32 columns at 80: the line at 32, the conversation from 33.
-    let list_filled = |buffer: &Buffer| (1..32).any(|x| buffer[(x, 2)].bg == active);
+    // The list's first row is the filter bar; the chats start under it.
+    let list_filled = |buffer: &Buffer| (1..32).any(|x| buffer[(x, 3)].bg == active);
     let conversation_filled =
         |buffer: &Buffer| (2..22).any(|y| (33..80).any(|x| buffer[(x, y)].bg == active));
 

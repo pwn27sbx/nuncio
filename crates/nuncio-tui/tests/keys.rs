@@ -593,6 +593,63 @@ fn chat_markers_follow_the_name_in_their_own_order() {
     }
 }
 
+/// U5b: `/` on the list searches it by text, the selection lands on a chat that matches, and
+/// Esc gives the whole list back.
+#[test]
+fn slash_on_the_list_searches_it_and_esc_gives_it_back_whole() {
+    let mut app = two_chats();
+    assert_eq!(app.handle_key(key(KeyCode::Char('/'))), None);
+    assert!(app.typing());
+    type_text(&mut app, "gra");
+    assert_eq!(app.query(), "gra");
+    assert_eq!(app.listed(), vec![1], "only the chat that matches");
+    assert_eq!(app.selected(), 1, "the selection lands on it");
+    let screen = render(&mut app, 80, 24);
+    let shown = text(&screen);
+    assert!(shown.contains("Grace Hopper"), "{shown}");
+    assert!(!shown.contains("Ada Lovelace"), "{shown}");
+    assert!(shown.contains("search: gra"), "the field:\n{shown}");
+    // Enter keeps it as a filter and gives the keys back.
+    assert_eq!(app.handle_key(key(KeyCode::Enter)), None);
+    assert!(!app.typing());
+    assert_eq!(app.query(), "gra");
+    // Esc clears it.
+    app.handle_key(key(KeyCode::Char('/')));
+    assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
+    assert!(!app.typing());
+    assert_eq!(app.query(), "");
+    assert_eq!(app.listed().len(), 2, "{}", text(&render(&mut app, 80, 24)));
+}
+
+#[test]
+fn the_filters_are_a_bar_and_the_one_in_force_is_filled() {
+    let palette = Palette::default();
+    let accent = {
+        let rgb = palette.accent();
+        Color::Rgb(rgb.r, rgb.g, rgb.b)
+    };
+    let mut app = two_chats();
+    let buffer = render(&mut app, 80, 24);
+    let shown = text(&buffer);
+    for name in ["All", "Unread", "Archived"] {
+        assert!(shown.contains(name), "{name} in the bar:\n{shown}");
+    }
+    // The one in force is a filled chip; `[`/`]` move it.
+    let filled = |buffer: &Buffer| -> String {
+        (0..80)
+            .filter(|&x| buffer[(x, 2)].bg == accent)
+            .map(|x| buffer[(x, 2)].symbol())
+            .collect()
+    };
+    assert_eq!(filled(&buffer), " All ");
+    app.handle_key(key(KeyCode::Char(']')));
+    let buffer = render(&mut app, 80, 24);
+    assert_eq!(filled(&buffer), " Unread ");
+    app.handle_key(key(KeyCode::Char('[')));
+    let buffer = render(&mut app, 80, 24);
+    assert_eq!(filled(&buffer), " All ");
+}
+
 #[test]
 fn the_conversation_scrolls_back_to_the_newest_after_a_send_or_another_chat() {
     let mut app = two_chats();

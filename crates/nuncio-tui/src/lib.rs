@@ -184,13 +184,14 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
             ("l →", "open it to read"),
             ("[ ]", "filter: All, Unread, Archived"),
             ("Tab", "focus the conversation"),
-            ("/", "search the selected chat"),
+            ("/", "search the list"),
             ("q Esc", "quit"),
         ],
     ),
     (
         "Conversation",
         &[
+            ("/", "search the chat"),
             ("j/k ↓/↑", "select a newer / older message"),
             ("r", "reply to it"),
             ("e", "react to it"),
@@ -243,12 +244,6 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
-/// The chat list from `proto/fixtures/chats_response.json`, for the render tests only: no
-/// production path loads it (a shipped app must never show chats nobody has).
-///
-/// Compiled in, so the client always renders when no daemon is reachable — which is what
-/// makes S9 checkable with no daemon and no linked device. The fixture is shared with the
-/// Go daemon and checked by `nuncio-client`'s contract tests.
 /// The terminal client: the shared view [`Model`] (chat list, transcript, composer and their
 /// rules) plus what only the terminal has: the focused pane, the overlays, the scroll, the
 /// pictures and the [`Palette`]. It changes only through [`App::handle_key`],
@@ -273,6 +268,10 @@ pub struct App {
     images: Option<images::Images>,
     /// Which chats the list shows (R6/Q3): All, Unread or Archived, cycled with `[`/`]`.
     filter: Filter,
+    /// What the list is searched for, typed there with `/` (never sent: it only filters).
+    query: String,
+    /// The list's search field has the keys.
+    typing: bool,
     /// True on the last draw when only one pane fits (under `NARROW` columns): the rule says
     /// so and `Tab` is the only way to the other one.
     narrow: bool,
@@ -316,6 +315,8 @@ impl App {
             search_list: ListState::default(),
             images: None,
             filter: Filter::All,
+            query: String::new(),
+            typing: false,
             narrow: false,
             protocol: None,
             utc_offset: time::UtcOffset::UTC,
@@ -510,14 +511,34 @@ impl App {
 
     /// The model indices of the chats the list shows, in its order, under the current filter.
     pub fn listed(&self) -> Vec<usize> {
+        let query = self.query.trim().to_lowercase();
         self.model
             .chat_list()
             .chats()
             .iter()
             .enumerate()
             .filter(|(_, chat)| self.filter.keeps(chat))
+            .filter(|(_, chat)| {
+                query.is_empty()
+                    || chat_title(chat).to_lowercase().contains(&query)
+                    || chat
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.to_lowercase().contains(&query))
+            })
             .map(|(index, _)| index)
             .collect()
+    }
+
+    /// What the list is searched for, and whether its field has the keys (for the tests and the
+    /// list's own bar).
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// Whether the list's search field has the keys.
+    pub fn typing(&self) -> bool {
+        self.typing
     }
 
     /// Cycle the chat list's filter with `[`/`]` and land the selection on a chat it shows.
@@ -539,8 +560,11 @@ impl App {
     /// last one before it. A filter that hides everything leaves the selection where it is and
     /// the pane says so, so no hidden chat is ever selected.
     fn ensure_selected_listed(&mut self) {
-        // Unfiltered, the model already keeps the selection on a chat; only a filter can hide it.
-        if self.filter == Filter::All || self.model.chat_list().chats().is_empty() {
+        // Unfiltered and unsearched, the model already keeps the selection on a chat; only a
+        // filter or a query can hide it.
+        if (self.filter == Filter::All && self.query.trim().is_empty())
+            || self.model.chat_list().chats().is_empty()
+        {
             return;
         }
         let listed = self.listed();
@@ -713,6 +737,23 @@ impl App {
             }
             return None;
         }
+        if self.typing {
+            match key.code {
+                // Esc gives the list back whole; Enter keeps the query as a filter.
+                KeyCode::Esc => {
+                    self.query.clear();
+                    self.typing = false;
+                }
+                KeyCode::Enter => self.typing = false,
+                KeyCode::Backspace => {
+                    self.query.pop();
+                }
+                KeyCode::Char(c) => self.query.push(c),
+                _ => return None,
+            }
+            self.ensure_selected_listed();
+            return None;
+        }
         let chosen = self.model.selected_chat().is_some();
         match (self.pane, key.code) {
             (_, KeyCode::Char('?')) => self.help = true,
@@ -722,6 +763,8 @@ impl App {
                 self.model.composer_mut().cancel_reply();
                 self.set_pane(Pane::Compose);
             }
+            // `/` searches the list when the keys are on it, the open chat otherwise.
+            (Pane::Chats, KeyCode::Char('/')) => self.typing = true,
             (_, KeyCode::Char('/')) if chosen => {
                 self.model.open_search();
                 self.search_list = ListState::default();
@@ -1377,8 +1420,12 @@ impl App {
             Block::new().style(Style::default().bg(rgb(self.palette.surface_chrome()))),
             area,
         );
-        let [rule, rows] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        let [rule, bar, rows] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(area);
         let listed = self.listed();
         let mut title = if self.filter == Filter::All {
             format!("Chats ({})", self.chats().len())
@@ -1389,6 +1436,7 @@ impl App {
             title.push_str(" · Tab");
         }
         self.draw_rule_title(frame, rule, title, self.pane == Pane::Chats);
+        self.draw_filter_bar(frame, bar);
         // Less the gutter: the bar, the dot and a space.
         let width = usize::from(area.width.saturating_sub(3));
         let highlighted = self.model.chat_list().highlighted();
@@ -1455,6 +1503,35 @@ impl App {
         self.map.chat_rows = rows;
         self.map.chat_offset = self.list.offset();
         self.map.chat_indices = listed;
+    }
+
+    /// The list's filter bar: All, Unread and Archived, the one in force a filled accent chip
+    /// and the others muted. While the list is searched the bar is the search field instead.
+    fn draw_filter_bar(&self, frame: &mut Frame, area: Rect) {
+        if area.is_empty() {
+            return;
+        }
+        let width = usize::from(area.width);
+        let mut spans = Vec::new();
+        if self.typing || !self.query.is_empty() {
+            let cursor = if self.typing { "▏" } else { "" };
+            let field = fit(&format!("search: {}{cursor}", self.query), width);
+            spans.push(Span::styled(field, self.muted()));
+        } else {
+            for filter in Filter::EACH {
+                // The filter in force is a filled chip, like the unread pill.
+                let style = if filter == self.filter {
+                    Style::default()
+                        .fg(rgb(self.palette.accent_on()))
+                        .bg(rgb(self.palette.accent()))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    self.muted()
+                };
+                spans.push(Span::styled(format!(" {} ", filter.name()), style));
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn draw_messages(&mut self, frame: &mut Frame, area: Rect) {

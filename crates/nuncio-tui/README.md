@@ -76,10 +76,14 @@ nuncio-tui [--image <png>]
   ` 3 `, ` 12 `, ` 99+ `, or nothing when it is read. A chat with unread messages has its name
   and time in bold. A narrow list gives up the time first, then the markers, before it cuts the
   name below six columns.
-  `[` and `]` cycle the list's filter — `All`, `Unread`, `Archived` — and the rule says which
-  one is on with its count (`Chats · Unread (3)`); clicking a row opens the chat it is drawn
-  for, whatever the filter. A filter that hides everything says `No chats under this filter`
-  instead of pretending the account is empty.
+  `[` and `]` cycle the list's filter — `All`, `Unread`, `Archived` — and the bar under the rule
+  shows the three, the one in force as a filled accent chip; the rule also carries its count
+  (`Chats · Unread (3)`). `/` on the list opens a search field in that bar (`search: …`, with
+  `▏` as the cursor): what is typed filters the list by the chat's name or one of its aliases as
+  you type, the selection lands on the first chat that still matches, `Enter` keeps the query as
+  a filter and `Esc` gives the whole list back. It never sends anything to the daemon. Clicking a
+  row opens the chat it is drawn for, whatever the filter. A filter that hides everything says
+  `No chats under this filter` instead of pretending the account is empty.
   Archived chats are kept in the list, sectioned after every other chat. A pin, archive or mute
   made on the phone (`event_chat`) updates the markers at once and sorts the list again as the
   daemon's `chats` lists it (newest message first, the same time by JID, archived last), keeping

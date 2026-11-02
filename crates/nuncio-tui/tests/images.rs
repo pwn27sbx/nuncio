@@ -1425,12 +1425,14 @@ fn the_help_says_what_o_does_with_pictures_on_and_off() {
         app.handle_key(key(KeyCode::Char('?')));
         screen(&draw(app, 80, 24))
     };
-    let on = help(&mut pictures_app());
+    // The help wraps its keys, so compare the words, not the lines.
+    let flat = |screen: &str| screen.split_whitespace().collect::<Vec<_>>().join(" ");
+    let on = flat(&help(&mut pictures_app()));
     assert!(on.contains("show the picture in full"), "{on}");
     let mut off = App::new(snapshot(), Source::Daemon, Palette::default());
-    let off = help(&mut off);
+    let off = flat(&help(&mut off));
     assert!(!off.contains("show the picture in full"), "{off}");
-    assert!(off.contains("o open its media externally"), "{off}");
+    assert!(off.contains("open its media externally"), "{off}");
 }
 
 #[test]

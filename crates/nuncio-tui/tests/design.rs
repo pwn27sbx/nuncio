@@ -840,7 +840,8 @@ fn a_reply_shows_its_quote_behind_a_coloured_bar_inside_the_bubble() {
         let next = row_of(&buffer, "afterwards");
         // The bar is the accent role and the quote is muted; the old `> ` is gone.
         let sep = separator(&buffer);
-        let bar = (sep + 1..width)
+        // Past the pane's margin, where the selection bar sits on a selected message.
+        let bar = (sep + 2..width)
             .find(|&x| buffer[(x, quote)].symbol() == "▌")
             .expect("the quote's bar");
         assert_eq!(buffer[(bar, quote)].fg, colour(palette.accent()));
@@ -859,12 +860,14 @@ fn a_reply_shows_its_quote_behind_a_coloured_bar_inside_the_bubble() {
         );
         assert_eq!(next, two + 1, "the same author's next message, no gap");
         assert!(!row(&buffer, quote).contains("line one"));
-        // The quote is part of the selected reply, not of the next message.
-        let active = colour(palette.surface_active());
+        // The quote is part of the selected reply, not of the next message: the selection is one
+        // accent bar on the pane's left margin, over the rows the message owns.
+        let pane = separator(&buffer) + 1;
         for y in [quote, one, two] {
-            assert_eq!(buffer[(width - 2, y)].bg, active, "row {y}");
+            assert_eq!(buffer[(pane, y)].symbol(), "▌", "row {y}");
+            assert_eq!(buffer[(pane, y)].fg, colour(palette.accent()));
         }
-        assert_ne!(buffer[(width - 2, next)].bg, active);
+        assert_ne!(buffer[(pane, next)].symbol(), "▌");
     }
 }
 
@@ -901,12 +904,10 @@ fn the_selected_messages_reactions_row_is_on_the_active_surface_too() {
     let buffer = draw(&mut app, 80, 24);
     let y = row_of(&buffer, "👍");
     assert_eq!(y, row_of(&buffer, "react to me") + 1);
-    assert_eq!(
-        buffer[(78, y)].bg,
-        colour(Palette::default().surface_active()),
-        "{}",
-        text(&buffer)
-    );
+    // The reactions row belongs to the message, so the selection bar runs over it too.
+    let pane = separator(&buffer) + 1;
+    assert_eq!(buffer[(pane, y)].symbol(), "▌", "{}", text(&buffer));
+    assert_eq!(buffer[(pane, y)].fg, colour(Palette::default().accent()));
 }
 
 /// WCAG 2.1 relative luminance: the same formula as `nuncio_client`'s `theme::roles`, private
@@ -1088,8 +1089,11 @@ fn the_open_chat_is_filled_with_the_keys_or_without_them_and_the_message_only_wi
     // The chat pane is 32 columns at 80: the line at 32, the conversation from 33.
     // The list's first row is the filter bar; the chats start under it.
     let list_filled = |buffer: &Buffer| (1..32).any(|x| buffer[(x, 3)].bg == active);
-    let conversation_filled =
-        |buffer: &Buffer| (2..22).any(|y| (33..80).any(|x| buffer[(x, y)].bg == active));
+    // The conversation marks its selected message with one accent bar on the pane's left margin.
+    let accent = colour(palette.accent());
+    let conversation_filled = |buffer: &Buffer| {
+        (2..22).any(|y| buffer[(33, y)].symbol() == "▌" && buffer[(33, y)].fg == accent)
+    };
 
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
@@ -1097,12 +1101,12 @@ fn the_open_chat_is_filled_with_the_keys_or_without_them_and_the_message_only_wi
     app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.pane(), Pane::Messages);
     let buffer = draw(&mut app, 80, 24);
-    // The conversation has the keys: its selected message is filled, and the list still says
+    // The conversation has the keys: its selected message wears the bar, and the list still says
     // which chat is open.
     assert!(conversation_filled(&buffer), "{}", text(&buffer));
     assert!(list_filled(&buffer), "{}", text(&buffer));
 
-    // `Tab` moves the keys to the list: the message's fill goes, the chat's stays.
+    // `Tab` moves the keys to the list: the message's bar goes, the chat's fill stays.
     app.handle_key(key(KeyCode::Tab));
     assert_eq!(app.pane(), Pane::Chats);
     let buffer = draw(&mut app, 80, 24);

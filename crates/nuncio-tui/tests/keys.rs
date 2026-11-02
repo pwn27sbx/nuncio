@@ -243,16 +243,19 @@ fn j_k_and_the_arrows_select_messages_in_the_conversation_and_shift_k_j_do_nothi
     open_ada(&mut app, three());
     assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
     assert_eq!(app.pane(), Pane::Messages);
-    // The conversation row of the selected message, on the active surface: its text.
-    let active = {
-        let rgb = Palette::default().surface_active();
+    // The conversation row of the selected message, marked by the accent bar on the pane's left
+    // margin: its text.
+    let accent = {
+        let rgb = Palette::default().accent();
         Color::Rgb(rgb.r, rgb.g, rgb.b)
     };
     let selected = |app: &mut App| -> Option<String> {
         let screen = render(app, 80, 24);
         let right = split(&screen);
         (2..screen.area.height - 1)
-            .find(|&y| screen[(right + 2, y)].bg == active)
+            .find(|&y| {
+                screen[(right + 1, y)].symbol() == "▌" && screen[(right + 1, y)].fg == accent
+            })
             .map(|y| {
                 (right + 1..screen.area.width)
                     .map(|x| screen[(x, y)].symbol())
@@ -449,16 +452,17 @@ fn a_click_in_the_conversation_focuses_it_and_selects_the_clicked_message() {
     assert_eq!(click(&mut app, at), None);
     assert_eq!(app.pane(), Pane::Messages);
     let after = render(&mut app, 80, 24);
-    let active = {
-        let rgb = Palette::default().surface_active();
+    let accent = {
+        let rgb = Palette::default().accent();
         Color::Rgb(rgb.r, rgb.g, rgb.b)
     };
     assert_eq!(
-        after[(at.0, at.1)].bg,
-        active,
+        after[(split(&after) + 1, at.1)].symbol(),
+        "▌",
         "the clicked message:\n{}",
         text(&after)
     );
+    assert_eq!(after[(split(&after) + 1, at.1)].fg, accent);
     // `r` now replies to it.
     app.handle_key(key(KeyCode::Char('r')));
     type_text(&mut app, "ok");
@@ -477,8 +481,8 @@ fn a_click_in_the_conversation_focuses_it_and_selects_the_clicked_message() {
     assert_eq!(app.pane(), Pane::Messages);
     let after = render(&mut app, 80, 24);
     assert_eq!(
-        after[(at.0, at.1)].bg,
-        active,
+        after[(split(&after) + 1, at.1)].symbol(),
+        "▌",
         "the clicked message:\n{}",
         text(&after)
     );

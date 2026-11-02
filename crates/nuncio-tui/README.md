@@ -125,7 +125,9 @@ nuncio-tui [--image <png>]
   below. With nothing to send and no keys on it the row says `i or Enter to write`; opened and
   still empty it shows the placeholder `Write a message` with the caret where the first letter
   goes, and while it has the keys its rule starts with the accent bar (and a reply's quote). The
-  keys are said once, in the footer, never again on the rule. `Enter` sends; `Alt-Enter` or `Ctrl-J` starts a
+  keys are said once, in the footer, never again on the rule. The selected message is marked by a
+  single accent bar on the conversation's left margin, over the rows it owns: a full-row fill
+  would erase its slab's tint and its ear. `Enter` sends; `Alt-Enter` or `Ctrl-J` starts a
   new line (use `Ctrl-J` where the terminal keeps `Alt-Enter`, as macOS terminals do unless
   Option is set to act as Alt), and the message is sent with its line breaks. `←`/`→` move the
   cursor one character (a whole emoji sequence or accented letter is one step), `Home`/`End` to

@@ -1795,24 +1795,19 @@ impl App {
                 buffer.set_line(area.x + row.x, y, &row.line, row.width);
             }
         }
-        // The selected message's rows, the whole width, on the active surface: its picture box
-        // and reactions included (a picture draws its own cells over the box after this).
+        // The selected message is marked by one accent bar on the pane's left margin, over the
+        // rows it owns: a fill would erase its slab's tint and its ear.
         if let Some(cursor) = self
             .model
             .transcript()
             .cursor()
             .filter(|_| self.pane != Pane::Chats)
         {
-            let active = Style::default().bg(rgb(self.palette.surface_active()));
+            let bar = Style::default().fg(rgb(self.palette.accent()));
             let buffer = frame.buffer_mut();
             for (y, owner) in self.map.message_rows.iter().enumerate() {
                 if *owner == Some(cursor) {
-                    let row = Rect {
-                        y: area.y + y as u16,
-                        height: 1,
-                        ..area
-                    };
-                    buffer.set_style(row, active);
+                    buffer.set_stringn(area.x, area.y + y as u16, "▌", 1, bar);
                 }
             }
         }
@@ -2101,6 +2096,8 @@ impl App {
         let share = (u32::from(band) * BUBBLE_SHARE / 100) as u16;
         let max_width = share.max(BUBBLE_MIN.min(band)).min(band);
         let inner_max = usize::from(max_width.saturating_sub(3));
+        // The text keeps the share; the time and the state may take a slab up to the band.
+        let ceiling = usize::from(band).saturating_sub(3).max(3);
         let incoming = rgb(self.palette.surface_chrome());
         let outgoing = rgb(self.palette.bubble_outgoing());
         let ear_incoming = rgb(self.palette.bubble_ear_incoming());
@@ -2195,7 +2192,9 @@ impl App {
             let picture_at = content.len();
             // A caption that is only the picture's own kind has nothing left to say once the
             // picture is there; a fallback label stays caption enough.
-            let caption = if box_size.is_some() && text.trim().is_empty() {
+            let footer = self.bubble_footer(message, chosen);
+            let footer_width: usize = footer.iter().map(Span::width).sum();
+            let mut caption: Vec<(String, Part)> = if box_size.is_some() && text.trim().is_empty() {
                 Vec::new()
             } else {
                 text.lines()
@@ -2203,26 +2202,52 @@ impl App {
                     .map(|row| (row, Part::Text))
                     .collect()
             };
+            // The time keeps a slot at the right of the last row. A last row with no room for it
+            // gives its last word a row of its own, so no word is ever cut and the time still sits
+            // inside the slab; a word too long for that leaves the time on a row of its own.
+            let mut inline = !caption.is_empty();
+            for _ in 0..4 {
+                if !inline {
+                    break;
+                }
+                let Some((last, part)) = caption.last() else {
+                    inline = false;
+                    break;
+                };
+                let width = display_width(last);
+                if width + 1 + footer_width <= ceiling {
+                    break;
+                }
+                let Some((head, tail)) = last.rsplit_once(' ') else {
+                    inline = false;
+                    break;
+                };
+                if head.is_empty() || display_width(tail) + 1 + footer_width > ceiling {
+                    inline = false;
+                    break;
+                }
+                let (head, tail, part) = (head.to_owned(), tail.to_owned(), *part);
+                *caption.last_mut().expect("a last row") = (head, part);
+                caption.push((tail, part));
+            }
             content.extend(caption);
-            let footer = self.bubble_footer(message);
-            let footer_width: usize = footer.iter().map(Span::width).sum();
             let caption_width = content
                 .iter()
                 .map(|(row, _)| display_width(row))
                 .max()
                 .unwrap_or(0);
+            let last_width = content
+                .iter()
+                .rev()
+                .find(|(_, part)| *part == Part::Text)
+                .map_or(0, |(row, _)| display_width(row));
             let box_width = box_size.map_or(0, |size| usize::from(size.width));
-            let captioned = content.iter().any(|(_, part)| *part == Part::Text);
-            // A short message keeps its time on its last row, as WhatsApp does; a longer one
-            // gives the time a row of its own, so no word is ever cut to make it fit.
-            let inline = captioned && caption_width + 1 + footer_width <= inner_max;
             let needs = if inline {
-                caption_width + 1 + footer_width
+                caption_width.max(last_width + 1 + footer_width)
             } else {
                 caption_width.max(footer_width)
             }
-            .max(box_width)
-            .min(inner_max);
+            .max(box_width);
             let reactions = message
                 .reactions
                 .iter()
@@ -2272,7 +2297,6 @@ impl App {
             let run = &prepared[start..end];
             // A run shares one width. The time and state may take a slab past the share it keeps
             // for its text (never past the band), so a state word is never cut in half.
-            let ceiling = usize::from(band).saturating_sub(3).max(3);
             let inner = run
                 .iter()
                 .map(|message| message.needs)
@@ -2400,8 +2424,13 @@ impl App {
     /// The time inside a bubble, in the faint role, carrying the state where the ticks would go:
     /// a small clock while the send is queued and a `danger` `!` when it was not sent. Delivery
     /// and read receipts are not in the protocol, so they are never invented.
-    fn bubble_footer(&self, message: &Message) -> Vec<Span<'static>> {
-        let faint = Style::default().fg(rgb(self.palette.text_faint()));
+    fn bubble_footer(&self, message: &Message, chosen: bool) -> Vec<Span<'static>> {
+        // The open message's time steps up from the faint role, so its row reads as selected.
+        let faint = if chosen {
+            Style::default().fg(rgb(self.palette.text()))
+        } else {
+            Style::default().fg(rgb(self.palette.text_faint()))
+        };
         let unconfirmed = self.model.transcript().is_unconfirmed(message);
         let mut meta = meta_of(message, self.utc_offset, unconfirmed);
         if self.model.transcript().is_sending(message) {

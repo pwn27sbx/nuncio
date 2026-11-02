@@ -115,8 +115,12 @@ nuncio-tui [--image <png>]
   ticks would go: a small clock `◷` while it is queued and a `!` in the danger role when it was
   not sent (delivered and read receipts are not in the protocol, so they are never invented). One
   blank row separates two runs; nothing repeats the author over a 1:1 chat, and in a group the
-  sender is named once at the top of its run. Each day starts with a centred separator in muted
-  text: `Today`, `Yesterday`, or the date (`17 OCT 2026`) for any older day. With no message it
+  sender is named once at the top of its run. Each day starts, after a blank row, with a
+  separator across the band — a hairline in the border role on each side of a muted, centred
+  label: `Today`, `Yesterday`, or the date (`17 OCT 2026`, no weekday) for any older day. When
+  the chat was opened with unread messages, the same shape says how many were new — `2 unread
+  messages` in the accent — above the oldest of them; the count is the one the chat had at open,
+  kept after the daemon marks it read. With no message it
   says `No messages yet · i writes the first one`, with no chats `No chats yet` (its title is then
   `Conversation`, so the focus still shows). The transcript opens with a muted `Beginning of
   conversation` line, which is what you see when the top is on screen; when there is more above or
@@ -161,7 +165,10 @@ nuncio-tui [--image <png>]
   that `▌` bar on the pane's left margin, never a fill). `Tab` switches between them.
 - **Widths**: at 100 columns and up the chat list takes 40 % of the screen; from 60 to 99 it is
   a fixed 32 columns; under 60 only the focused pane is drawn, filling the width, and its rule
-  says `· Tab` so the other pane is one key away. The mouse map is rebuilt on every draw, so a
+  says `· Tab` so the other pane is one key away. A narrow window keeps what matters: the
+  conversation's header drops the subtitle first (chip, name and the hint stay), and the list
+  drops each chat's time, then its markers, before it ever cuts into the name — the avatar always
+  stays. The mouse map is rebuilt on every draw, so a
   click can never land on a pane that is not on screen.
 - **Status line**: the header is only the app's name plus one right-aligned datum, the unread
   count in the accent when there is one (`3 unread`), or `NO DAEMON` with no daemon. The

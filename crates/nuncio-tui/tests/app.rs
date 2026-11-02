@@ -1612,8 +1612,10 @@ fn the_daemon_driver_marks_an_opened_chat_read_and_a_refusal_keeps_the_count() {
             );
         } else {
             assert_eq!(app.chats()[0].unread, 0);
+            // The status line says nothing about unread any more; the conversation keeps the
+            // divider of what was new when it was opened.
             assert!(
-                !screen.contains("unread"),
+                !screen.lines().next().unwrap_or_default().contains("unread"),
                 "a zero unread count is not printed at all:\n{screen}"
             );
             assert!(!footer.contains("not marked read"), "{footer}");

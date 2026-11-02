@@ -1022,7 +1022,11 @@ impl App {
                 let name = fit(&format!(" {title}"), room);
                 used += display_width(&name);
                 spans.push(Span::styled(name, name_style));
-                if let Some(subtitle) = chat_subtitle(chat) {
+                // A narrow window has no room to spare: the subtitle goes first, and the way
+                // back stays.
+                if !self.narrow
+                    && let Some(subtitle) = chat_subtitle(chat)
+                {
                     let room = width.saturating_sub(used + 1 + reserved);
                     let subtitle = fit(&format!(" · {subtitle}"), room);
                     used += display_width(&subtitle);
@@ -1528,6 +1532,7 @@ impl App {
                     width,
                     self.utc_offset,
                     highlighted == Some(index),
+                    self.narrow,
                 )
             })
             .collect();
@@ -2336,6 +2341,18 @@ impl App {
             });
         }
 
+        // The unread divider: how many messages were new when the chat was opened (the count
+        // the daemon reported then, not the list's now), and the message it goes above — the
+        // oldest of the newest `unread` received messages.
+        let unread = loaded.map_or(0, |_| self.model.transcript().unread_at_open(&chat.jid));
+        let received: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| !message.from_me)
+            .map(|(index, _)| index)
+            .collect();
+        let unread = unread.min(received.len() as u32);
+        let divider_at = (unread > 0).then(|| received[received.len() - unread as usize]);
         let mut rows = Vec::with_capacity(messages.len() * 3 + 1);
         // The top of the conversation is a place too: it says so when it is on screen, which
         // is where a short transcript leaves the eye with nothing to hold on to (R7).
@@ -2381,9 +2398,11 @@ impl App {
                     if started {
                         rows.push(Row::plain(Line::default(), columns));
                     }
-                    rows.push(Row::centred(
-                        Line::from(Span::styled(day_label(day, self.today), self.muted())),
+                    rows.push(separator_row(
                         columns,
+                        day_label(day, self.today),
+                        self.muted(),
+                        Style::default().fg(rgb(self.palette.border())),
                     ));
                     labelled = Some(day);
                 }
@@ -2394,6 +2413,21 @@ impl App {
             for message in run {
                 let source = messages[message.index];
                 let owner = loaded.is_some().then_some(message.index);
+                // The unread divider sits above the oldest new message, inside the run when the
+                // run is where the new messages start.
+                if divider_at == Some(message.index) {
+                    let count = unread;
+                    rows.push(separator_row(
+                        columns,
+                        if count == 1 {
+                            "1 unread message".to_owned()
+                        } else {
+                            format!("{count} unread messages")
+                        },
+                        Style::default().fg(rgb(self.palette.accent())),
+                        Style::default().fg(rgb(self.palette.border())),
+                    ));
+                }
                 if message.chosen {
                     selected = Some(rows.len());
                 }
@@ -2602,16 +2636,6 @@ impl Row {
             bubble: None,
             ear: None,
             owner: None,
-        }
-    }
-
-    /// A row of plain transcript centred in the pane: the day separators.
-    fn centred(line: Line<'static>, columns: u16) -> Self {
-        let width = u16::try_from(line.width()).unwrap_or(columns).min(columns);
-        Self {
-            x: columns.saturating_sub(width) / 2,
-            width,
-            ..Self::plain(line, columns)
         }
     }
 }
@@ -3049,7 +3073,8 @@ fn chat_subtitle(chat: &Chat) -> Option<String> {
     )
 }
 
-/// A day separator's label: `Today`, `Yesterday`, or the date in caps (`SUN 18 OCT 2026`).
+/// A day separator's label: `Today`, `Yesterday`, or the date in caps (`18 OCT 2026`); WhatsApp's
+/// own separators carry no weekday, and the date is what the eye needs.
 fn day_label(day: time::Date, today: time::Date) -> String {
     if day == today {
         return "Today".to_owned();
@@ -3059,13 +3084,34 @@ fn day_label(day: time::Date, today: time::Date) -> String {
     }
     let short = |name: String| name.chars().take(3).collect::<String>();
     format!(
-        "{} {} {} {}",
-        short(day.weekday().to_string()),
+        "{} {} {}",
         day.day(),
         short(day.month().to_string()),
         day.year()
     )
     .to_uppercase()
+}
+
+/// A separator across the band: a hairline on each side of a centred label, so a day or the
+/// unread messages read as a break between messages rather than as another message.
+fn separator_row(columns: u16, label: String, ink: Style, border: Style) -> Row {
+    let band = usize::from(columns.saturating_sub(3));
+    let text = format!("  {label}  ");
+    let free = band.saturating_sub(display_width(&text));
+    let left = free / 2;
+    let line = Line::from(vec![
+        Span::styled("─".repeat(left), border),
+        Span::styled(text, ink),
+        Span::styled("─".repeat(free - left), border),
+    ]);
+    Row {
+        line,
+        x: 1,
+        width: u16::try_from(band).unwrap_or(u16::MAX),
+        bubble: None,
+        ear: None,
+        owner: None,
+    }
 }
 
 /// The message's time as `HH:MM` at `offset` from UTC (the wire's timestamps are UTC), or
@@ -3099,6 +3145,7 @@ fn chat_item(
     width: usize,
     offset: time::UtcOffset,
     selected: bool,
+    narrow: bool,
 ) -> ListItem<'static> {
     let text = Style::default().fg(rgb(palette.text()));
     let unread = chat.unread > 0;
@@ -3135,6 +3182,11 @@ fn chat_item(
     // nothing: something of the chat's name has to stay readable.
     let mut time = time;
     let mut markers = markers;
+    // A narrow window draws one pane, so the name gets the row: the time steps aside first, and
+    // the avatar never does.
+    if narrow {
+        time.clear();
+    }
     let mut time_width = display_width(&time);
     let mut named = width.saturating_sub(AVATAR + display_width(&markers) + 1 + time_width);
     if named < NARROW_NAME {

@@ -259,6 +259,12 @@ fn the_accent_marks_only_the_unread_pill_and_the_one_primary_hint() {
             let mut hint = String::new();
             let mut header = String::new();
             for y in 0..height {
+                let row_text: String = (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                // The unread divider says its count in the accent (C8); its hairlines stay in
+                // the border role, which the divider's own test checks.
+                let divider = row_text.contains("unread message");
                 for x in 0..width {
                     let cell = &buffer[(x, y)];
                     if cell.fg != accent && cell.bg != accent {
@@ -283,6 +289,9 @@ fn the_accent_marks_only_the_unread_pill_and_the_one_primary_hint() {
                     if cell.symbol() == "─"
                         && (0..width).any(|x| buffer[(x, y + 1)].symbol() == "›")
                     {
+                        continue;
+                    }
+                    if divider && cell.symbol() != "─" {
                         continue;
                     }
                     // The unread count is a pill: the accent as its background, `accent_on` for
@@ -567,7 +576,8 @@ fn a_queued_bubble_shows_a_clock_and_a_not_sent_one_a_bang() {
 
 #[test]
 fn one_authors_run_has_no_gap_and_the_next_author_starts_after_a_blank_row() {
-    let mut app = two_chats();
+    // A read chat: the unread divider is a break of its own, tested on its own below.
+    let mut app = app_with(vec![chat(ADA, "Ada Lovelace", 0)]);
     open(&mut app, ADA, conversation());
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
@@ -622,20 +632,177 @@ fn a_day_separator_is_centred_and_says_today_and_yesterday() {
     }
 }
 
+/// C8: under 60 columns one pane fills the width. The list keeps the avatar and gives up the
+/// time first; the conversation's header keeps the chip, the name and the way back and drops the
+/// subtitle; and no slab reaches the free last column.
 #[test]
-fn each_day_starts_with_its_label_in_muted_caps_after_a_blank_line() {
+fn a_narrow_window_keeps_what_matters_at_forty_by_twenty() {
+    let palette = Palette::default();
+    let mut long = chat(ADA, "Alexandra Konstantinopoulos", 1);
+    long.last_message = Some(message(
+        "A1",
+        "the long way round",
+        false,
+        "2026-10-18T17:01:00Z",
+    ));
+    let mut app = app_with(vec![long]);
+    // The list, with the keys: the avatar survives, the time gives way to the name.
+    let buffer = draw(&mut app, 40, 20);
+    let listed = row_of(&buffer, "Alexandra");
+    let line = row(&buffer, listed);
+    assert!(line.contains("▗A▖"), "the avatar stays: {line:?}");
+    assert!(!line.contains("17:01"), "the time gives way: {line:?}");
+    assert!(!text(&buffer).contains("17:01"), "{}", text(&buffer));
+
+    // The conversation: Enter opens it (one pane, filling 40 columns).
+    app.handle_key(key(KeyCode::Enter));
+    let buffer = draw(&mut app, 40, 20);
+    let header = row(&buffer, 1);
+    assert!(header.contains("▗A▖"), "the chip stays: {header:?}");
+    assert!(header.contains("Alexandra"), "the name stays: {header:?}");
+    assert!(header.contains("· Tab"), "the way back stays: {header:?}");
+    assert!(
+        !header.contains("contact"),
+        "the subtitle goes first: {header:?}"
+    );
+    // No slab reaches the free last column, the ears included.
+    let surface = colour(palette.surface());
+    for y in 2..19 {
+        assert_eq!(
+            buffer[(39, y)].bg,
+            surface,
+            "the gutter stays free at row {y}:\n{}",
+            text(&buffer)
+        );
+    }
+}
+
+/// C8: the unread divider has the day separator's shape, says the count the chat had when it was
+/// opened (even after the daemon marked it read), and sits above the oldest of those messages.
+#[test]
+fn the_unread_divider_says_how_many_were_new_and_sits_above_them() {
+    let palette = Palette::default();
+    let accent = colour(palette.accent());
+    let border = colour(palette.border());
+    // Ada has two unread messages: `how are you` and `fine, thanks` are new, `hello there` is not.
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    // The daemon's mark_read answer zeroes the list's count; the divider must still remember.
+    app.apply(&DaemonFrame::MarkedRead {
+        v: 1,
+        jid: ADA.to_owned(),
+        unread: 0,
+    });
+    assert_eq!(app.chats()[0].unread, 0, "the list is read now");
+    let buffer = draw(&mut app, 80, 24);
+    let divider = row_of(&buffer, "2 unread messages");
+    assert_eq!(
+        divider + 1,
+        row_of(&buffer, "how are you"),
+        "above the oldest new message:\n{}",
+        text(&buffer)
+    );
+    assert!(
+        divider > row_of(&buffer, "hello there"),
+        "below the older read one:\n{}",
+        text(&buffer)
+    );
+    // The words are the accent's, and the hairlines beside them the border's.
+    let (x, _) = find(&buffer, "2 unread messages");
+    assert_eq!(buffer[(x, divider)].fg, accent);
+    let first = (0..x)
+        .find(|&c| buffer[(c, divider)].symbol() == "─")
+        .expect("a hairline before the count");
+    assert_eq!(buffer[(first, divider)].fg, border);
+    assert_ne!(
+        buffer[(80 - 1, divider)].symbol(),
+        "─",
+        "the gutter stays free"
+    );
+    // One unread message says it in the singular.
+    let mut app = app_with(vec![chat(ADA, "Ada Lovelace", 3)]);
+    open(
+        &mut app,
+        ADA,
+        vec![message(
+            "A1",
+            "only one is new",
+            false,
+            "2026-10-18T17:01:00Z",
+        )],
+    );
+    let buffer = draw(&mut app, 80, 24);
+    assert!(
+        text(&buffer).contains("1 unread message "),
+        "{}",
+        text(&buffer)
+    );
+}
+
+/// C8: a day starts with a separator across the band — hairlines in the border role on each
+/// side of the label, muted, centred — after a blank row, with no weekday in the label.
+#[test]
+fn each_day_starts_with_a_centred_separator_after_a_blank_line() {
     let palette = Palette::default();
     let muted = colour(palette.text_muted());
+    let border = colour(palette.border());
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
         let sep = separator(&buffer);
         let blank = |y: u16| (sep + 1..width).all(|x| buffer[(x, y)].symbol() == " ");
-        let (x, saturday) = find(&buffer, "SAT 17 OCT 2026");
+        let saturday = row_of(&buffer, "17 OCT 2026");
         assert_eq!(saturday + 1, row_of(&buffer, "hello there"));
+        assert!(
+            !text(&buffer).contains("SAT 17 OCT"),
+            "the weekday is gone:\n{}",
+            text(&buffer)
+        );
+        // The label is muted and the hairlines beside it are in the border role; the two
+        // margins and the gutter stay free, so the separator lives inside the band.
+        let pane = sep + 1;
+        let (x, _) = find(&buffer, "17 OCT 2026");
         assert_eq!(buffer[(x, saturday)].fg, muted);
-        let sunday = row_of(&buffer, "SUN 18 OCT 2026");
+        let first = (pane..x)
+            .find(|&c| buffer[(c, saturday)].symbol() == "─")
+            .expect("a hairline before the label");
+        let last = (x..width)
+            .rev()
+            .find(|&c| buffer[(c, saturday)].symbol() == "─")
+            .expect("a hairline after the label");
+        assert_eq!(buffer[(first, saturday)].fg, border);
+        assert_eq!(buffer[(last, saturday)].fg, border);
+        assert!(
+            first > pane,
+            "the left margin stays free:\n{}",
+            text(&buffer)
+        );
+        assert!(
+            last < width - 2,
+            "the gutter stays free:\n{}",
+            text(&buffer)
+        );
+        assert!(
+            (first..=last)
+                .all(|c| matches!(buffer[(c, saturday)].symbol(), "─" | " ")
+                    || (x..x + 12).contains(&c)),
+            "nothing but hairlines and the label:\n{}",
+            text(&buffer)
+        );
+        // Centred: as much hairline on one side as the other, give or take one column.
+        let left = (first..x)
+            .filter(|&c| buffer[(c, saturday)].symbol() == "─")
+            .count();
+        let right = (x..=last)
+            .filter(|&c| buffer[(c, saturday)].symbol() == "─")
+            .count();
+        assert!(
+            left.abs_diff(right) <= 1,
+            "the label is centred: {left} vs {right}\n{}",
+            text(&buffer)
+        );
+        let sunday = row_of(&buffer, "18 OCT 2026");
         assert!(
             blank(sunday - 1),
             "a blank line before the label:\n{}",
@@ -645,17 +812,15 @@ fn each_day_starts_with_its_label_in_muted_caps_after_a_blank_line() {
         assert_eq!(sunday + 1, row_of(&buffer, "good morning"));
     }
     // The day is the local one: 01:00 UTC is still Saturday three hours west of Greenwich.
-    let mut app = two_chats().with_utc_offset(time::UtcOffset::from_hms(-3, 0, 0).expect("-3h"));
+    let mut app = app_with(vec![chat(ADA, "Ada Lovelace", 0)])
+        .with_utc_offset(time::UtcOffset::from_hms(-3, 0, 0).expect("-3h"));
     open(
         &mut app,
         ADA,
         vec![message("L1", "late", false, "2026-10-18T01:00:00Z")],
     );
     let buffer = draw(&mut app, 80, 24);
-    assert_eq!(
-        row_of(&buffer, "SAT 17 OCT 2026") + 1,
-        row_of(&buffer, "late")
-    );
+    assert_eq!(row_of(&buffer, "17 OCT 2026") + 1, row_of(&buffer, "late"));
 }
 
 #[test]
@@ -1095,7 +1260,7 @@ fn meta_is_the_muted_role_and_no_text_is_dimmed() {
         colour(palette.text_faint()),
         "a message's time"
     );
-    let (x, y) = find(&buffer, "SAT 17 OCT 2026");
+    let (x, y) = find(&buffer, "17 OCT 2026");
     assert_eq!(buffer[(x, y)].fg, muted, "the day label");
     let (x, y) = find(&buffer, "? all keys");
     assert_eq!(buffer[(x, y)].fg, muted, "a footer key");
@@ -1402,7 +1567,7 @@ fn each_new_element_uses_its_exact_role() {
     assert_eq!(buffer[(x, y)].fg, role(palette.text_faint()));
     assert_eq!(buffer[(x - 2, y)].fg, role(palette.text_muted()));
     // The day separator muted.
-    let (x, y) = find(&buffer, "SAT 17 OCT 2026");
+    let (x, y) = find(&buffer, "17 OCT 2026");
     assert_eq!(buffer[(x, y)].fg, role(palette.text_muted()));
 }
 

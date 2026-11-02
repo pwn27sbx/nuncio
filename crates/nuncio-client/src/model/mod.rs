@@ -899,6 +899,10 @@ impl Model {
                     self.transcript.cursor = cursor;
                 }
                 self.transcript.conversations.insert(jid.clone(), loaded);
+                // The unread divider keeps the count the chat had when it was opened: the open
+                // marks it read below, and the divider still has to say how many were new.
+                let unread = self.chats.get(jid).map_or(0, |chat| chat.unread);
+                self.transcript.unread_at_open.insert(jid.clone(), unread);
                 // The chat the user opened is read once its messages are shown.
                 if self.transcript.opening.as_deref() == Some(jid.as_str()) {
                     self.transcript.opening = None;

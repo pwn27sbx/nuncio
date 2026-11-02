@@ -17,6 +17,7 @@ use nuncio_client::model::{Effect, Filter, Model, chat_title, is_picture, quoted
 use nuncio_client::wire::{MessageState, Session};
 use nuncio_client::{Chat, ClientFrame, DaemonFrame, Message, Palette, Rgb, Snapshot};
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -134,8 +135,8 @@ const WHEEL: usize = 3;
 
 /// Marks a pinned chat.
 const PINNED: char = '★';
-/// Marks a muted chat: a bell with a slash, not the old `⊘` that read as "forbidden".
-const MUTED: char = '🔕';
+/// Marks a muted chat: a quiet dotted circle, not the old `⊘` that read as "forbidden".
+const MUTED: char = '◌';
 /// Marks an archived chat.
 const ARCHIVED: char = '▤';
 
@@ -1477,13 +1478,22 @@ impl App {
         let position = highlighted.and_then(|index| listed.iter().position(|&i| i == index));
         self.list.select(position);
         frame.render_stateful_widget(list, rows, &mut self.list);
-        // The pill is drawn again over the open chat's fill, which would take its background.
+        // The avatar and the pill are drawn again over the open chat's fill, which would take
+        // their backgrounds.
         if let Some(position) = position
             && position >= self.list.offset()
         {
-            let row =
-                rows.y + u16::try_from(position - self.list.offset()).unwrap_or(0) * CHAT_ROWS + 1;
+            let first =
+                rows.y + u16::try_from(position - self.list.offset()).unwrap_or(0) * CHAT_ROWS;
+            let row = first + 1;
             let chat = &self.chats()[listed[position]];
+            paint_avatar(
+                frame.buffer_mut(),
+                rows.x + 1,
+                first,
+                &plain(&chat_title(chat)),
+                &self.palette,
+            );
             let pill = unread_pill(chat.unread);
             if !pill.is_empty() && row < rows.bottom() {
                 let width = usize::from(area.width.saturating_sub(3));
@@ -2605,6 +2615,91 @@ fn unread_pill(unread: u32) -> String {
     }
 }
 
+/// How many tints an avatar takes: one per palette hue the theme names.
+const AVATAR_TINTS: u8 = 4;
+/// The columns a chat's avatar takes at the left of its two content rows: one blank, its three
+/// cells, one blank.
+const AVATAR: usize = 5;
+
+/// A stable seed for a chat's avatar: the same title always gets the same tint.
+fn avatar_seed(title: &str) -> u8 {
+    title
+        .bytes()
+        .fold(0u8, |acc, byte| acc.wrapping_mul(31).wrapping_add(byte))
+}
+
+/// The two initials an avatar carries, one per row: the first letter of each of the first two
+/// words (its first two letters when the title is one word), uppercased when they are Latin.
+fn avatar_initials(title: &str) -> [char; 2] {
+    let upper = |c: char| {
+        if c.is_ascii_lowercase() {
+            c.to_ascii_uppercase()
+        } else {
+            c
+        }
+    };
+    let mut words = title
+        .split_whitespace()
+        .filter_map(|word| word.chars().find(|c| c.is_alphanumeric()));
+    let first = upper(words.next().unwrap_or('?'));
+    let second = match words.next() {
+        Some(letter) => upper(letter),
+        // One word: its second letter, when it has one.
+        None => upper(
+            title
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .nth(1)
+                .unwrap_or(' '),
+        ),
+    };
+    [first, second]
+}
+
+/// The six cells of a chat's avatar: a 3×2 rounded block whose corners are the tint on whatever is
+/// behind them (no background of their own) and whose middle cells are the tint with one initial
+/// on each.
+fn avatar_cells(title: &str, palette: &Palette) -> [(char, Style); 6] {
+    let seed = avatar_seed(title) % AVATAR_TINTS;
+    let tint = rgb(palette.avatar_tint(seed));
+    let ink = rgb(palette.avatar_ink(seed));
+    let corner = |glyph: char| (glyph, Style::default().fg(tint));
+    let letter = |glyph: char| (glyph, Style::default().fg(ink).bg(tint));
+    let [first, second] = avatar_initials(title);
+    [
+        corner('▗'),
+        letter(first),
+        corner('▖'),
+        corner('▝'),
+        letter(second),
+        corner('▘'),
+    ]
+}
+
+/// One row (0 or 1) of a chat's avatar as spans: a blank column, its three cells, a blank column.
+fn avatar_spans(title: &str, palette: &Palette, row: usize) -> Vec<Span<'static>> {
+    let cells = avatar_cells(title, palette);
+    let mut spans = vec![Span::raw(" ")];
+    for (glyph, style) in &cells[row * 3..row * 3 + 3] {
+        spans.push(Span::styled(glyph.to_string(), *style));
+    }
+    spans.push(Span::raw(" "));
+    spans
+}
+
+/// Draw a chat's avatar over `(x, y)`, two rows tall: what the open chat's row fill would
+/// otherwise erase.
+fn paint_avatar(buffer: &mut Buffer, x: u16, y: u16, title: &str, palette: &Palette) {
+    for (index, (glyph, style)) in avatar_cells(title, palette).iter().enumerate() {
+        let column = x + u16::try_from(index % 3).unwrap_or(0);
+        let row = y + u16::try_from(index / 3).unwrap_or(0);
+        // A list cut by a very small terminal would put the cells outside the buffer.
+        if column < buffer.area.width && row < buffer.area.height {
+            buffer.set_stringn(column, row, glyph.to_string(), 1, *style);
+        }
+    }
+}
+
 /// Columns `text` takes, as ratatui lays it out (unicode-width).
 fn display_width(text: &str) -> usize {
     Span::raw(text).width()
@@ -2730,10 +2825,10 @@ const NARROW_NAME: usize = 6;
 /// The unread pill's fixed slot on a chat row's second line: ` 3 `, ` 12 `, ` 99+ `.
 const PILL: usize = 5;
 
-/// A chat in the list, in three rows. Row one: the name, the markers the chat has right after
-/// it, and the time in its own five-column slot at the right edge. Row two: its last message cut
-/// to `width` columns with `…`, then the unread count as an accent pill at the right. Row three:
-/// a thin rule in the border role, the separator. A chat with unread messages has its name and
+/// A chat in the list, in three rows. Row one: the avatar (a 3×2 rounded block with its initials),
+/// the name, the markers the chat has right after it, and the time in its own five-column slot at
+/// the right edge. Row two: the avatar's second row, the last message cut with `…`, then the unread
+/// count as an accent pill at the right. Row three: a thin rule in the border role, the separator. A chat with unread messages has its name and
 /// time in bold, and the highlighted chat is filled across every row (`surface_active`), with the
 /// keys on it or not, so the list always says which chat is open. A narrow list gives up the time
 /// first, then the markers, and only then cuts the name below six columns.
@@ -2780,27 +2875,31 @@ fn chat_item(
     let mut time = time;
     let mut markers = markers;
     let mut time_width = display_width(&time);
-    let mut gap = usize::from(time_width != 0);
-    let mut named = width.saturating_sub(2 + display_width(&markers) + gap + time_width);
+    let mut named = width.saturating_sub(AVATAR + display_width(&markers) + 1 + time_width);
     if named < NARROW_NAME {
         time.clear();
         time_width = 0;
-        gap = 0;
-        named = width.saturating_sub(2 + display_width(&markers));
+        named = width.saturating_sub(AVATAR + display_width(&markers));
     }
     if named < NARROW_NAME {
         markers.clear();
-        named = width.saturating_sub(2);
+        named = width.saturating_sub(AVATAR);
     }
-    let name = fit(&plain(&chat_title(chat)), named);
-    let mut title = vec![Span::raw("  "), Span::styled(name.clone(), ink)];
+    let title_text = plain(&chat_title(chat));
+    let name = fit(&title_text, named);
+    let mut title = avatar_spans(&title_text, palette, 0);
+    title.push(Span::styled(name.clone(), ink));
     if !markers.is_empty() {
         title.push(Span::styled(markers.clone(), muted));
     }
-    let used = 2 + display_width(&name) + display_width(&markers);
-    title.push(Span::raw(
-        " ".repeat(width.saturating_sub(used + gap + time_width)),
-    ));
+    let used = AVATAR + display_width(&name) + display_width(&markers);
+    // The time is right-aligned in the row's last columns; the gap before it is the padding.
+    let room = width.saturating_sub(used);
+    if time_width > room {
+        time.clear();
+        time_width = 0;
+    }
+    title.push(Span::raw(" ".repeat(room.saturating_sub(time_width))));
     if time_width > 0 {
         title.push(Span::styled(time, ink));
     }
@@ -2813,13 +2912,11 @@ fn chat_item(
         }
         None => "(no messages)".to_owned(),
     };
-    let detail = fit(&detail, width.saturating_sub(3 + PILL));
-    let pad = width.saturating_sub(3 + display_width(&detail) + PILL);
-    let mut second = vec![
-        Span::raw("   "),
-        Span::styled(detail, muted),
-        Span::raw(" ".repeat(pad)),
-    ];
+    let detail = fit(&detail, width.saturating_sub(AVATAR + PILL));
+    let pad = width.saturating_sub(AVATAR + display_width(&detail) + PILL);
+    let mut second = avatar_spans(&title_text, palette, 1);
+    second.push(Span::styled(detail, muted));
+    second.push(Span::raw(" ".repeat(pad)));
     if pill.is_empty() {
         second.push(Span::raw(" ".repeat(PILL)));
     } else {

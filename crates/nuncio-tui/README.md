@@ -70,14 +70,17 @@ nuncio-tui [--image <png>]
   from a palette role, through the one `rgb()` helper (a test reads the sources to keep it so).
   The colours are sent as 24-bit RGB, as before.
 - **Chat list** (left): three fixed rows per chat — its name, its last message, and a thin `─`
-  rule in the border role that separates it from the next one. Row one: the name, then only the
-  markers it has — `★` pinned, `🔕` muted, `▤` archived, in that order, right after the name —
-  and the time in its own five-column slot at the right edge, so times line up down the list
-  whatever the names. Row two: the last message, cut with `…` (by display width, so wide
-  characters count as two columns), and the unread count as an accent pill right-aligned —
-  ` 3 `, ` 12 `, ` 99+ `, or nothing when it is read. A chat with unread messages has its name
-  and time in bold. A narrow list gives up the time first, then the markers, before it cuts the
-  name below six columns.
+  rule in the border role that separates it from the next one. Each chat opens with a 3×2 avatar:
+  a rounded block (`▗▖` over `▝▘`, the quadrant corners in the avatar's tint on the row's own
+  background) with one initial per row — the first letter of each of the title's first two words —
+  on four tints derived from the palette's hues, so a chat always wears the same one. Row one: the
+  avatar, the name, then only the markers it has — `★` pinned, `◌` muted, `▤` archived, in that
+  order — and the time right-aligned in the list's last five columns, so times line up whatever the
+  names. Row two: the avatar's second row, the last message cut with `…` (by display width, so wide
+  characters count as two columns), and the unread count as an accent pill in the same last five
+  columns — ` 3 `, ` 12 `, ` 99+ `, or nothing when it is read. A chat with unread messages has its
+  name and time in bold. A narrow list gives up the time first, then the markers, before it cuts
+  the name below six columns.
   `[` and `]` cycle the list's filter — `All`, `Unread`, `Archived` — and the bar under the rule
   shows the three, the one in force as a filled accent chip; the rule also carries its count
   (`Chats · Unread (3)`). `/` on the list opens a search field in that bar (`search: …`, with

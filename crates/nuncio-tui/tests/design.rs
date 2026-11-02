@@ -323,7 +323,18 @@ fn the_tones_are_the_palette_roles() {
     assert!(row(&buffer, ada).contains("Ada Lovelace"));
     let active = colour(palette.surface_active());
     let accent = colour(palette.accent());
-    for x in 1..sep {
+    // The avatar's middle cells keep their tint inside the fill (columns 1..3).
+    let seed = {
+        let mut seed = 0u8;
+        for byte in "Ada Lovelace".bytes() {
+            seed = seed.wrapping_mul(31).wrapping_add(byte);
+        }
+        seed % 4
+    };
+    let tint = colour(palette.avatar_tint(seed));
+    assert_eq!(buffer[(2, ada)].bg, tint, "the avatar's tint");
+    assert_eq!(buffer[(2, ada + 1)].bg, tint);
+    for x in 5..sep {
         assert_eq!(buffer[(x, ada)].bg, active, "x {x}");
         // The unread pill keeps its own background inside the fill.
         let preview = buffer[(x, ada + 1)].bg;
@@ -959,7 +970,7 @@ fn an_unread_chat_is_bold_with_a_pill_and_a_muted_one_wears_the_bell() {
     // Ada is the first chat: name, preview (with the pill), rule.
     let (_, grace) = find(&buffer, "Grace Hopper");
     let name = grace - 3;
-    let x = (0..separator(&buffer))
+    let x = (5..separator(&buffer))
         .find(|&x| buffer[(x, name)].symbol() == "A")
         .expect("her name");
     assert!(
@@ -983,10 +994,59 @@ fn an_unread_chat_is_bold_with_a_pill_and_a_muted_one_wears_the_bell() {
         .expect("the count");
     assert_eq!(buffer[(x, preview)].fg, on_accent);
     assert!(!buffer[(x, preview)].modifier.contains(Modifier::BOLD));
-    // The muted chat says so with a bell, not the old `⊘`.
-    assert!(row(&buffer, grace).contains('🔕'), "{}", text(&buffer));
+    // The muted chat says so with a quiet dot, not the old `⊘`.
+    assert!(row(&buffer, grace).contains('◌'), "{}", text(&buffer));
     let _ = grace;
     assert!(!text(&buffer).contains('⊘'), "{}", text(&buffer));
+}
+
+/// C3: every chat wears a 3×2 rounded avatar of its initials on a tint; the name starts after it,
+/// the time and the pill share the last five columns, and the open chat's fill does not eat the
+/// avatar (it is painted over it).
+#[test]
+fn each_chat_has_a_rounded_avatar_and_the_slots_line_up() {
+    let palette = Palette::default();
+    let mut busy = chat(ADA, "Ada Lovelace", 3);
+    busy.last_message = Some(message("A1", "hello", false, "2026-10-25T17:55:00Z"));
+    let mut app = app_with(vec![busy, chat(GRACE, "Grace Hopper", 0)]);
+    let buffer = draw(&mut app, 80, 24);
+    let seed = |title: &str| {
+        let mut seed = 0u8;
+        for byte in title.bytes() {
+            seed = seed.wrapping_mul(31).wrapping_add(byte);
+        }
+        seed % 4
+    };
+    let tint = colour(palette.avatar_tint(seed("Ada Lovelace")));
+    let ink = colour(palette.avatar_ink(seed("Ada Lovelace")));
+    let (_, grace) = find(&buffer, "Grace Hopper");
+    let name = grace - 3;
+    assert_eq!(buffer[(5, name)].symbol(), "A", "{}", text(&buffer));
+    // The avatar's cells: corners in the tint on the row's own background, middle cells tinted.
+    assert_eq!(buffer[(1, name)].symbol(), "▗");
+    assert_eq!(buffer[(1, name)].fg, tint);
+    assert_eq!(buffer[(3, name)].symbol(), "▖");
+    assert_eq!(buffer[(2, name)].symbol(), "A");
+    assert_eq!(buffer[(2, name)].bg, tint);
+    assert_eq!(buffer[(2, name)].fg, ink);
+    assert_eq!(buffer[(1, name + 1)].symbol(), "▝");
+    assert_eq!(buffer[(2, name + 1)].symbol(), "L");
+    assert_eq!(buffer[(2, name + 1)].bg, tint);
+    // The open chat's fill keeps its background behind the avatar's corners.
+    assert_eq!(buffer[(1, name)].bg, colour(palette.surface_active()));
+    // A chat without the keys keeps the list's chrome there.
+    let tint = colour(palette.avatar_tint(seed("Grace Hopper")));
+    assert_eq!(buffer[(1, grace)].symbol(), "▗");
+    assert_eq!(buffer[(1, grace)].bg, colour(palette.surface_chrome()));
+    assert_eq!(buffer[(1, grace)].fg, tint);
+    // Time and pill in the last five columns of the list's width (32 - 3 = 29 → 24..28).
+    let (x, y) = find(&buffer, "17:55");
+    assert_eq!((x, y), (24, name), "{}", text(&buffer));
+    let pill: String = (0..separator(&buffer))
+        .filter(|&x| buffer[(x, name + 1)].bg == colour(palette.accent()))
+        .map(|x| buffer[(x, name + 1)].symbol())
+        .collect();
+    assert_eq!(pill, " 3 ", "{}", text(&buffer));
 }
 
 #[test]

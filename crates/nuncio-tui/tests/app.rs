@@ -229,7 +229,7 @@ fn chats_show_pin_mute_and_archive_markers_and_archived_chats_sit_last() {
             .unwrap_or_else(|| panic!("{needle:?}:\n{screen}"))
             .to_owned()
     };
-    assert!(row("Grace Hopper").contains('🔕'), "muted:\n{screen}");
+    assert!(row("Grace Hopper").contains('◌'), "muted:\n{screen}");
     assert!(row("Ada Lovelace").contains('★'), "pinned:\n{screen}");
     assert!(row("Old group").contains('▤'), "archived:\n{screen}");
     assert!(!row("Grace Hopper").contains('★'));
@@ -1692,7 +1692,7 @@ fn event_chat_updates_the_chats_markers_and_resorts_the_list_keeping_the_selecti
         .find(|l| l.contains("Ada Lovelace"))
         .unwrap_or_else(|| panic!("{screen}"))
         .to_owned();
-    for marker in ['★', '🔕', '▤'] {
+    for marker in ['★', '◌', '▤'] {
         assert!(ada_row.contains(marker), "{marker} in {ada_row:?}");
     }
 

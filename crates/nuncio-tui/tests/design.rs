@@ -944,3 +944,11 @@ fn the_chat_list_takes_thirty_percent_within_its_bounds() {
         text(&buffer)
     );
 }
+
+/// A very wide body does not overflow the list's share: 30 % is computed in u32 and clamped.
+#[test]
+fn a_very_wide_body_does_not_overflow_the_list_width() {
+    let mut app = app_with(vec![chat("15551230001@s.whatsapp.net", "Ada", 0)]);
+    let buffer = draw(&mut app, 3000, 20);
+    assert_eq!(separator(&buffer), 48, "the list stays at its most width");
+}

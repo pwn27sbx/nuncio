@@ -146,7 +146,8 @@ const NARROW: u16 = 60;
 /// The chat list's share of the body: 30 % of it, never under [`LIST`] and never over
 /// [`LIST_MAX`]. The conversation takes everything else.
 fn list_width(width: u16) -> u16 {
-    (width * 30 / 100).clamp(LIST, LIST_MAX)
+    // u32 arithmetic: `width * 30` overflows a u16 past 2184 columns and panics in debug.
+    (u32::from(width) * 30 / 100).clamp(u32::from(LIST), u32::from(LIST_MAX)) as u16
 }
 
 /// How many lines PageUp/PageDown scroll.

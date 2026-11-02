@@ -1293,6 +1293,31 @@ fn message_times_are_shown_in_the_local_time_zone() {
     assert!(screen.contains("20:36"), "{screen}");
 }
 
+/// C7: a group's preview names who wrote the last message (`Dana: deck ready`); a one-to-one chat
+/// says it bare, and our own last message in a group needs no name either.
+#[test]
+fn a_group_preview_names_the_sender_and_a_one_to_one_does_not() {
+    const GROUP: &str = "120363000000000001@g.us";
+    let mut theirs = chat(GROUP, "Climbing", 0);
+    let mut said = message("G1", "deck ready", false, 5);
+    said.sender = Some("Dana Ramirez".to_owned());
+    theirs.last_message = Some(said);
+    let mut ours = chat(GROUP, "Design team", 0);
+    let mut mine = message("G2", "on my way", true, 6);
+    mine.sender = Some("Dana Ramirez".to_owned());
+    ours.last_message = Some(mine);
+    let mut direct = chat(ADA, "Ada Lovelace", 0);
+    direct.last_message = Some(message("A1", "see you", false, 7));
+    let mut app = app_with(vec![theirs, ours, direct]);
+    let screen = render(&mut app, 80, 24).chats();
+    // The first name only, then what was said.
+    assert!(screen.contains("Dana: deck ready"), "{screen}");
+    assert!(!screen.contains("Ramirez"), "{screen}");
+    // Ours carries no name, and a one-to-one chat says its last message bare.
+    assert!(!screen.contains("Dana: on my way"), "{screen}");
+    assert!(screen.contains(" see you"), "{screen}");
+}
+
 #[test]
 fn a_long_preview_is_cut_with_an_ellipsis_and_its_time_stays_whole() {
     for (width, height) in [(80u16, 24u16), (240, 60)] {

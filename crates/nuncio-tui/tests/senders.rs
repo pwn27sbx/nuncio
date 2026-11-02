@@ -73,17 +73,22 @@ fn a_group_names_its_sender_once_per_run_and_a_chat_never_names_anyone() {
         jid: GROUP.to_owned(),
         messages: vec![
             message("G3", "mine", true, 3, None),
-            message("G2", "take the red one", false, 2, Some("Ana")),
-            message("G1", "rope?", false, 1, Some("Ana")),
+            message("G2", "take the red one", false, 2, Some("Ana Ruiz")),
+            message("G1", "rope?", false, 1, Some("Ana Ruiz")),
         ],
     });
     let buffer = draw(&mut app);
     let screen = render(&mut app);
-    // One run of Ana names her once, at the top of its first bubble, in the accent and bold.
+    // One run of Ana names her once, at the top of its first bubble, in the accent and bold,
+    // and only by her first name: the surname would eat the slab's width.
     assert_eq!(
         screen.matches("Ana").count(),
         1,
         "one name per run:\n{screen}"
+    );
+    assert!(
+        !screen.contains("Ruiz"),
+        "the sender line is the first name only:\n{screen}"
     );
     let y = row_of(&buffer, "Ana");
     let (x, y) = (33..80)
@@ -91,7 +96,11 @@ fn a_group_names_its_sender_once_per_run_and_a_chat_never_names_anyone() {
         .map(|x| (x, y))
         .unwrap_or_else(|| panic!("the name:\n{screen}"));
     assert_eq!(buffer[(x, y)].symbol(), "A");
-    assert!(y < row_of(&buffer, "rope?"), "the name is above the text");
+    assert_eq!(
+        row_of(&buffer, "rope?"),
+        y + 1,
+        "the sender line is one row, and the text follows it:\n{screen}"
+    );
     let accent = Palette::default().accent();
     assert_eq!(buffer[(x, y)].fg, Color::Rgb(accent.r, accent.g, accent.b));
     assert!(
@@ -139,7 +148,8 @@ fn a_group_names_its_sender_once_per_run_and_a_chat_never_names_anyone() {
     app.apply(&DaemonFrame::Messages {
         v: 1,
         jid: "15551230001@s.whatsapp.net".to_owned(),
-        messages: vec![message("A1", "hello", false, 1, None)],
+        // The daemon may name the sender even here; a one-to-one chat still names nobody.
+        messages: vec![message("A1", "hello", false, 1, Some("Ada"))],
     });
     let screen = render(&mut app);
     // The body's conversation columns only: the chat list and the pane's rule also say `Ada`.
@@ -154,4 +164,69 @@ fn a_group_names_its_sender_once_per_run_and_a_chat_never_names_anyone() {
         !conversation.contains("Ada"),
         "no name in a chat:\n{screen}"
     );
+}
+
+fn reply(
+    id: &str,
+    text: &str,
+    from_me: bool,
+    minute: u32,
+    sender: Option<&str>,
+    to: &str,
+) -> Message {
+    serde_json::from_value(serde_json::json!({
+        "id": id, "kind": "text", "text": text, "from_me": from_me,
+        "timestamp": format!("2026-10-18T17:{minute:02}:00Z"), "sender": sender,
+        "reply_to": to,
+    }))
+    .expect("a message")
+}
+
+#[test]
+fn a_quotes_prefix_names_its_author_and_says_you_for_mine() {
+    let group = || -> App {
+        let chat: Chat = serde_json::from_value(serde_json::json!({
+            "jid": GROUP, "name": "Climbing", "unread": 0, "archived": false, "pinned": false,
+        }))
+        .expect("a chat");
+        let mut app = App::new(
+            Snapshot {
+                daemon: "nunciod/0.2.1".to_owned(),
+                linked: true,
+                session: Session::Linked,
+                unread: 0,
+                chats: vec![chat],
+                stop_reason: None,
+            },
+            Source::Daemon,
+            Palette::default(),
+        );
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        app
+    };
+    // One of mine, quoted by a member: the prefix says `you`.
+    let mut app = group();
+    app.apply(&DaemonFrame::Messages {
+        v: 1,
+        jid: GROUP.to_owned(),
+        messages: vec![
+            reply("G2", "mine", false, 2, Some("Ana Ruiz"), "G1"),
+            message("G1", "rope?", true, 1, None),
+        ],
+    });
+    let screen = render(&mut app);
+    assert!(screen.contains("▌ you: rope?"), "{screen}");
+    // One of hers, quoted by me: the prefix is her first name.
+    let mut app = group();
+    app.apply(&DaemonFrame::Messages {
+        v: 1,
+        jid: GROUP.to_owned(),
+        messages: vec![
+            reply("G2", "mine too", true, 2, None, "G1"),
+            message("G1", "rope?", false, 1, Some("Ana Ruiz")),
+        ],
+    });
+    let screen = render(&mut app);
+    assert!(screen.contains("▌ Ana: rope?"), "{screen}");
+    assert!(!screen.contains("Ruiz"), "{screen}");
 }

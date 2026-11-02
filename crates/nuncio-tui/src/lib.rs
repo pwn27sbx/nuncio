@@ -2221,10 +2221,11 @@ impl App {
             let mut content: Vec<(String, Part)> = Vec::new();
             if first_of_run
                 && !message.from_me
-                && let Some(sender) = message.sender.as_deref()
+                && is_group(&chat.jid)
+                && let Some(sender) = message.sender.as_deref().filter(|s| !s.is_empty())
             {
                 content.extend(
-                    wrap_text(&plain(sender), inner_max)
+                    wrap_text(&first_name(&plain(sender)), inner_max)
                         .into_iter()
                         .map(|row| (row, Part::Name)),
                 );
@@ -2234,7 +2235,7 @@ impl App {
             let quote = message.reply_to.as_ref().map(|quoted_id| {
                 match quoted(messages.iter().copied(), quoted_id) {
                     Some(original) => (
-                        (original.from_me || original.sender.is_some())
+                        (original.from_me || (is_group(&chat.jid) && original.sender.is_some()))
                             .then(|| author(Some(chat), original)),
                         snippet(original),
                     ),
@@ -2295,12 +2296,17 @@ impl App {
                 .find(|(_, part)| *part == Part::Text)
                 .map_or(0, |(row, _)| display_width(row));
             let box_width = box_size.map_or(0, |size| usize::from(size.width));
+            // The quote's inset row is part of the slab too: it may be the longest line.
+            let quote_width = quote.as_ref().map_or(0, |(who, said)| {
+                2 + who.as_ref().map_or(0, |who| display_width(who) + 2) + display_width(said)
+            });
             let needs = if inline {
                 caption_width.max(last_width + 1 + footer_width)
             } else {
                 caption_width.max(footer_width)
             }
-            .max(box_width);
+            .max(box_width)
+            .max(quote_width);
             let reactions = message
                 .reactions
                 .iter()
@@ -2960,12 +2966,24 @@ fn rgb(colour: Rgb) -> Color {
     Color::Rgb(colour.r, colour.g, colour.b)
 }
 
-/// Who sent the message: us, the group member the daemon names in `sender`, or the chat.
+/// Whether a chat is a group: the wire's JID domain says so.
+fn is_group(jid: &str) -> bool {
+    jid.ends_with("@g.us")
+}
+
+/// The first word of a name: what a group's sender line and a quote's prefix carry, so a long
+/// full name never eats a slab's width.
+fn first_name(name: &str) -> String {
+    name.split_whitespace().next().unwrap_or(name).to_owned()
+}
+
+/// Who sent the message: us, the group member the daemon names in `sender` (first name only),
+/// or the chat.
 fn author(chat: Option<&Chat>, message: &Message) -> String {
     let sender = message.sender.as_deref().filter(|s| !s.is_empty());
     match (message.from_me, sender, chat) {
         (true, _, _) => "you".to_owned(),
-        (false, Some(sender), _) => plain(sender),
+        (false, Some(sender), _) => first_name(&plain(sender)),
         (false, None, Some(chat)) => plain(&chat_title(chat)),
         (false, None, None) => "them".to_owned(),
     }
@@ -3018,7 +3036,7 @@ fn local_day(message: &Message, offset: time::UtcOffset) -> Option<time::Date> {
 /// What a chat is, as the conversation header says it: its masked number when the daemon knows
 /// one, then `contact` or `group` (from the JID's domain).
 fn chat_subtitle(chat: &Chat) -> Option<String> {
-    let kind = if chat.jid.ends_with("@g.us") {
+    let kind = if is_group(&chat.jid) {
         "group"
     } else {
         "contact"
@@ -3147,11 +3165,24 @@ fn chat_item(
         title.push(Span::styled(time, ink));
     }
 
+    // A group's preview says who wrote the last message (`Dana: deck ready`); a one-to-one chat
+    // says it bare, because the chat is the person, and our own message needs no name either.
+    let who = chat
+        .last_message
+        .as_ref()
+        .filter(|message| !message.from_me && is_group(&chat.jid))
+        .and_then(|message| message.sender.as_deref())
+        .filter(|sender| !sender.is_empty())
+        .map(|sender| first_name(&plain(sender)));
     // A message with no text (a non-text kind) shows its kind instead of an empty row.
     let detail = match chat.last_message.as_ref() {
         Some(message) => {
             let text = message.text.lines().next().unwrap_or_default();
-            plain(if text.is_empty() { &message.kind } else { text })
+            let said = plain(if text.is_empty() { &message.kind } else { text });
+            match &who {
+                Some(who) => format!("{who}: {said}"),
+                None => said,
+            }
         }
         None => "(no messages)".to_owned(),
     };

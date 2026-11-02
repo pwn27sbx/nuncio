@@ -56,9 +56,15 @@ nuncio-tui [--image <png>]
   same way (an older daemon sends no `phone`), else `unnamed group` for a group or `hidden number`
   for anyone else. A LID chat's digits are never shown: they are a hidden id, not a number (ADR
   0002).
-- **Group senders**: in a group, an incoming message's line names who wrote it, the daemon's
-  `sender` (her name, else her masked number, else `unknown`); without one (an older daemon, a
-  message stored before senders were recorded) it shows the group's name as before.
+- **Group senders**: in a group, the first message of a run names who wrote it on one row at the
+  top of its slab, in the accent and bold: the daemon's `sender`, first name only (a masked
+  number when that is all it has, the group's name when it has nothing, for an older daemon or a
+  message stored before senders were recorded). Every sender wears the same accent — nobody is
+  colour-coded. A one-to-one chat never names anyone, even when the daemon fills `sender`. A
+  quote's inset row names its author the same way (`Dana: deck ready`), or `you:` when the quoted
+  message is mine, and a one-to-one quote of theirs shows the bar and the text alone. A group's
+  list preview carries the last message's author the same way (`Dana: deck ready`); a one-to-one
+  preview and one of my own messages are bare.
 - **Look** (the design plan's §9, the desktop app's rules in a terminal): no boxes. The chat
   list and the conversation are separated by one `│` line; the list has its title on the header
   rule under the status line, the conversation puts the open chat there — its avatar chip

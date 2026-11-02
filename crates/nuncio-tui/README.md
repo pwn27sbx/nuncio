@@ -92,9 +92,11 @@ nuncio-tui [--image <png>]
   and the time sits in it, bottom right, in the faint role — with the send's state where the
   delivery ticks would go: a small clock `◷` while it is queued, a `!` in the danger role when it
   was not sent (delivered and read receipts are not in the protocol, so they are never invented).
-  Nothing repeats the author over a message: the side a bubble is on says whose it is. Each day
-  starts with its local date in muted caps (`SUN 18 OCT 2026`) after a blank line, and one blank
-  row separates two bubbles. With no
+  Consecutive messages from one author are one group: no gap between their bubbles and, in a
+  group chat, the sender's name once at the top of the run, in the accent and bold (a one-to-one
+  chat names nobody: the side a bubble is on says whose it is). One blank row separates two
+  groups. Each day starts with a centred separator in muted text: `Today`, `Yesterday`, or the
+  date in caps (`SUN 18 OCT 2026`) for any older day. With no
   message it says `No messages yet · i writes the first one`, with no chats `No chats yet`
   (its title is then `Conversation`, so the focus still shows). The transcript opens with a
   muted `Beginning of conversation` line, which is what you see when the top is on screen; when
@@ -158,9 +160,9 @@ nuncio-tui [--image <png>]
   that was sent) can be replied or reacted to: on one still `sending`, `queued` or `not sent`,
   `r`/`e` send nothing and the footer says `that message was not sent, so it cannot be replied
   to` (or `reacted to`).
-- **Quotes and reactions**: a reply shows `> ` and the start of the message it quotes (or
-  `(a message not loaded)`) between its author and time and its text, which then starts on the
-  next row; reactions show on the line under the message, mine in bold. The selected message's
+- **Quotes and reactions**: a reply opens its bubble with a coloured bar (`▌`) and the start of
+  the message it quotes (or `(a message not loaded)`), muted, and then its own text; reactions
+  show inside the bubble under the text, mine in bold. The selected message's
   rows (its picture box and reactions included) are on `surface_active`. A reaction the daemon refuses (offline, unknown sender, ...) shows its error in the
   footer and changes nothing. Reactions are never queued: react again once linked.
 - **Search** (`/`): searches the open chat through the daemon; the results are listed newest

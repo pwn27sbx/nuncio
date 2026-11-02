@@ -61,6 +61,12 @@ fn chat(jid: &str, name: &str, unread: u32) -> Chat {
     }
 }
 
+/// The day the design tests call today, so `Today`/`Yesterday` never depend on the machine's
+/// clock: the conversation fixture is October 2026's.
+fn today() -> time::Date {
+    time::Date::from_calendar_date(2026, time::Month::October, 25).expect("a date")
+}
+
 fn app_with(chats: Vec<Chat>) -> App {
     let unread = chats.iter().map(|chat| chat.unread).sum();
     let snapshot = Snapshot {
@@ -71,7 +77,7 @@ fn app_with(chats: Vec<Chat>) -> App {
         chats,
         stop_reason: None,
     };
-    App::new(snapshot, Source::Daemon, Palette::default())
+    App::new(snapshot, Source::Daemon, Palette::default()).with_today(today())
 }
 
 fn two_chats() -> App {
@@ -527,7 +533,7 @@ fn a_queued_bubble_shows_a_clock_and_a_not_sent_one_a_bang() {
 }
 
 #[test]
-fn one_blank_row_separates_two_bubbles() {
+fn one_authors_run_has_no_gap_and_the_next_author_starts_after_a_blank_row() {
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
     for (width, height) in SIZES {
@@ -539,13 +545,47 @@ fn one_blank_row_separates_two_bubbles() {
         let mine = row_of(&buffer, "fine, thanks");
         assert_eq!(
             second,
-            first + 2,
-            "one blank row between two bubbles:\n{}",
+            first + 1,
+            "one author's run has no gap:\n{}",
             text(&buffer)
         );
-        assert!(blank(first + 1), "{}", text(&buffer));
-        assert_eq!(mine, second + 2, "and after the next one");
+        assert_eq!(mine, second + 2, "the next author after one blank row");
         assert!(blank(second + 1), "{}", text(&buffer));
+    }
+}
+
+#[test]
+fn a_day_separator_is_centred_and_says_today_and_yesterday() {
+    let muted = colour(Palette::default().text_muted());
+    let mut app = app_with(vec![chat(ADA, "Ada Lovelace", 0)]).with_today(
+        time::Date::from_calendar_date(2026, time::Month::October, 18).expect("a date"),
+    );
+    open(
+        &mut app,
+        ADA,
+        vec![
+            message("A1", "yesterday's news", false, "2026-10-17T17:01:00Z"),
+            message("A2", "today's news", false, "2026-10-18T09:15:00Z"),
+        ],
+    );
+    let buffer = draw(&mut app, 80, 24);
+    let sep = separator(&buffer);
+    for (label, said) in [("Yesterday", "yesterday's news"), ("Today", "today's news")] {
+        let (x, y) = find(&buffer, label);
+        assert_eq!(
+            row_of(&buffer, said),
+            y + 1,
+            "the separator is above its day"
+        );
+        assert_eq!(buffer[(x, y)].fg, muted);
+        // Centred: the columns left and right of it are the same, within one.
+        let left = usize::from(x) - usize::from(sep + 1);
+        let right = (80 - 1) - (usize::from(x) + label.chars().count());
+        assert!(
+            left.abs_diff(right) <= 1,
+            "{label} sits {left} from the left and {right} from the right:\n{}",
+            text(&buffer)
+        );
     }
 }
 
@@ -749,7 +789,7 @@ fn empty_states_are_one_muted_line_with_the_key_hint() {
 }
 
 #[test]
-fn a_reply_shows_its_quote_inside_the_bubble_before_its_text() {
+fn a_reply_shows_its_quote_behind_a_coloured_bar_inside_the_bubble() {
     let mut app = two_chats();
     let mut reply = message("A2", "line one\nline two", false, "2026-10-17T17:02:00Z");
     reply.reply_to = Some("A1".to_owned());
@@ -769,17 +809,30 @@ fn a_reply_shows_its_quote_inside_the_bubble_before_its_text() {
     let palette = Palette::default();
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
-        let quote = row_of(&buffer, "> the question");
+        let quote = row_of(&buffer, "▌ the question");
         let one = row_of(&buffer, "line one");
         let two = row_of(&buffer, "line two");
         let next = row_of(&buffer, "afterwards");
+        // The bar is the accent role and the quote is muted; the old `> ` is gone.
+        let sep = separator(&buffer);
+        let bar = (sep + 1..width)
+            .find(|&x| buffer[(x, quote)].symbol() == "▌")
+            .expect("the quote's bar");
+        assert_eq!(buffer[(bar, quote)].fg, colour(palette.accent()));
+        assert_eq!(buffer[(bar + 2, quote)].symbol(), "t");
+        assert_eq!(buffer[(bar + 2, quote)].fg, colour(palette.text_muted()));
+        assert!(
+            !text(&buffer).contains("> the question"),
+            "{}",
+            text(&buffer)
+        );
         assert_eq!(
             (one, two),
             (quote + 1, quote + 2),
             "quote, then the text:\n{}",
             text(&buffer)
         );
-        assert_eq!(next, two + 2, "a blank row, then the next bubble");
+        assert_eq!(next, two + 1, "the same author's next message, no gap");
         assert!(!row(&buffer, quote).contains("line one"));
         // The quote is part of the selected reply, not of the next message.
         let active = colour(palette.surface_active());

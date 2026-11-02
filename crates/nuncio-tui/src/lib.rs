@@ -277,6 +277,8 @@ pub struct App {
     /// The pictures' protocol name, shown in `?`.
     protocol: Option<&'static str>,
     utc_offset: time::UtcOffset,
+    /// The local date the transcript calls today (`Today`/`Yesterday` on the day separators).
+    today: time::Date,
     /// Where things were on the last drawn screen, for the mouse.
     map: ScreenMap,
 }
@@ -310,6 +312,7 @@ impl App {
             narrow: false,
             protocol: None,
             utc_offset: time::UtcOffset::UTC,
+            today: time::OffsetDateTime::now_utc().date(),
             map: ScreenMap::default(),
         };
         app.sync();
@@ -379,6 +382,16 @@ impl App {
     /// until the next start). Without it, times are UTC.
     pub fn with_utc_offset(mut self, offset: time::UtcOffset) -> Self {
         self.utc_offset = offset;
+        // The day labels are local: a message at 01:00 UTC is yesterday three hours west.
+        self.today = time::OffsetDateTime::now_utc().to_offset(offset).date();
+        self
+    }
+
+    /// Treat `today` as the day the transcript calls `Today`: the day separators say `Yesterday`
+    /// for the day before it and the date for any other. Tests set it so the labels are fixed;
+    /// `main` leaves it to [`App::with_utc_offset`] and the clock.
+    pub fn with_today(mut self, today: time::Date) -> Self {
+        self.today = today;
         self
     }
 
@@ -1866,11 +1879,16 @@ impl App {
         }
         let body = Style::default().fg(rgb(self.palette.text()));
         let name = body.add_modifier(Modifier::BOLD);
+        // A group's sender on the first message of a run: the accent, bold, never a colour of
+        // its own (the palette has no per-person hues).
+        let sender = Style::default()
+            .fg(rgb(self.palette.accent()))
+            .add_modifier(Modifier::BOLD);
         // The last column is the scroll gutter; a bubble may use every column before it.
         let usable = columns.saturating_sub(1);
         let share = (u32::from(usable) * BUBBLE_SHARE / 100) as u16;
         let max_width = share.max(BUBBLE_MIN.min(usable)).min(usable);
-        let inner_max = max_width.saturating_sub(2);
+        let inner_max = usize::from(max_width.saturating_sub(2));
         let incoming = rgb(self.palette.surface_chrome());
         let outgoing = rgb(self.palette.bubble_outgoing());
         let mut rows = Vec::with_capacity(messages.len() * 3 + 1);
@@ -1882,29 +1900,34 @@ impl App {
         ));
         let mut selected = None;
         let mut boxes = Vec::new();
-        // The day whose label was drawn last, and whether a message was drawn already.
+        // The day whose separator was drawn last, the author of the message before, and whether
+        // a message was drawn already.
         let mut labelled: Option<time::Date> = None;
+        let mut previous: Option<String> = None;
         let mut started = false;
         for (index, message) in messages.iter().enumerate() {
             let owner = loaded.is_some().then_some(index);
             let chosen = loaded.is_some() && self.model.transcript().cursor() == Some(index);
-            // A message with no readable time (a send not answered yet) stays in its day.
+            let who = author(Some(chat), message);
+            let first_of_run = previous.as_ref() != Some(&who);
+            // A new day gets a centred separator, after a blank row; the next author after a
+            // blank row; one author's run follows itself with no gap at all.
             match local_day(message, self.utc_offset).filter(|day| labelled != Some(*day)) {
                 Some(day) => {
                     if started {
                         rows.push(Row::plain(Line::default(), columns));
                     }
-                    rows.push(Row::plain(
-                        Line::from(Span::styled(day_label(day), self.muted())),
+                    rows.push(Row::centred(
+                        Line::from(Span::styled(day_label(day, self.today), self.muted())),
                         columns,
                     ));
                     labelled = Some(day);
                 }
-                // One blank row between two bubbles, whatever their authors.
-                None if started => rows.push(Row::plain(Line::default(), columns)),
+                None if started && first_of_run => rows.push(Row::plain(Line::default(), columns)),
                 None => {}
             }
             started = true;
+            previous = Some(who);
             if chosen {
                 selected = Some(rows.len());
             }
@@ -1922,13 +1945,18 @@ impl App {
             // A caption being fetched says so on its last row, never wrapping it to more rows
             // (the box under it never moves).
             let text = if message.kind != "text" && self.fetching(&chat.jid, message, columns) {
-                downloading(&text, inner_max)
+                downloading(&text, inner_max as u16)
             } else {
                 text
             };
-            let mut content: Vec<String> = text.lines().map(plain).collect();
-            if content.is_empty() {
-                content.push(String::new());
+            // The bubble's own rows: the sender's name on the first message of a run in a group,
+            // the quote where it replies to one, then the text.
+            let mut content: Vec<(String, Part)> = Vec::new();
+            if first_of_run
+                && !message.from_me
+                && let Some(sender) = message.sender.as_deref()
+            {
+                content.push((plain(sender), Part::Name));
             }
             if let Some(quote) = message.reply_to.as_ref().map(|quoted_id| {
                 match quoted(messages.iter().copied(), quoted_id) {
@@ -1936,26 +1964,34 @@ impl App {
                     None => "(a message not loaded)".to_owned(),
                 }
             }) {
-                content.insert(0, format!("> {quote}"));
+                content.extend(
+                    wrap_text(&quote, inner_max)
+                        .into_iter()
+                        .map(|row| (row, Part::Quote)),
+                );
             }
-            let content: Vec<String> = content
-                .iter()
-                .flat_map(|line| wrap_text(line, usize::from(inner_max)))
-                .collect();
+            content.extend(
+                text.lines()
+                    .flat_map(|line| wrap_text(&plain(line), inner_max))
+                    .map(|row| (row, Part::Text)),
+            );
+            if content.iter().all(|(_, part)| *part != Part::Text) {
+                content.push((String::new(), Part::Text));
+            }
             let footer = self.bubble_footer(message);
             let footer_width: usize = footer.iter().map(Span::width).sum();
             let widest = content
                 .iter()
-                .map(|line| display_width(line))
+                .map(|(row, _)| display_width(row))
                 .max()
                 .unwrap_or(0);
             // A short message keeps its time on its last row, as WhatsApp does; a longer one
             // gives the time a row of its own, so no word is ever cut to make it fit.
-            let inline = widest + 1 + footer_width <= usize::from(inner_max);
+            let inline = widest + 1 + footer_width <= inner_max;
             let inner = if inline {
                 widest + 1 + footer_width
             } else {
-                widest.max(footer_width).min(usize::from(inner_max))
+                widest.max(footer_width).min(inner_max)
             };
             let width = u16::try_from(inner + 2).unwrap_or(usable).min(usable);
             let room = width.saturating_sub(2);
@@ -1967,8 +2003,15 @@ impl App {
             };
             let mut lines: Vec<Line<'static>> = Vec::new();
             let last = content.len().saturating_sub(1);
-            for (row, text) in content.iter().enumerate() {
-                let mut spans = vec![Span::styled(text.clone(), body)];
+            for (row, (text, part)) in content.iter().enumerate() {
+                let mut spans = match part {
+                    Part::Name => vec![Span::styled(text.clone(), sender)],
+                    Part::Quote => vec![
+                        Span::styled("▌ ", Style::default().fg(rgb(self.palette.accent()))),
+                        Span::styled(text.clone(), self.muted()),
+                    ],
+                    Part::Text => vec![Span::styled(text.clone(), body)],
+                };
                 if inline && row == last {
                     let pad = usize::from(room).saturating_sub(display_width(text) + footer_width);
                     spans.push(Span::raw(" ".repeat(pad)));
@@ -2092,6 +2135,25 @@ impl Row {
             owner: None,
         }
     }
+
+    /// A row of plain transcript centred in the pane: the day separators.
+    fn centred(line: Line<'static>, columns: u16) -> Self {
+        let width = u16::try_from(line.width()).unwrap_or(columns).min(columns);
+        Self {
+            x: columns.saturating_sub(width) / 2,
+            width,
+            ..Self::plain(line, columns)
+        }
+    }
+}
+
+/// What a row inside a bubble is: a group sender's name, the start of the message it quotes, or
+/// the message's own text.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Name,
+    Quote,
+    Text,
 }
 
 /// A picture's box in the transcript: its first (blank) line, its size in cells, and the index of
@@ -2390,8 +2452,14 @@ fn local_day(message: &Message, offset: time::UtcOffset) -> Option<time::Date> {
     Some(utc.checked_to_offset(offset)?.date())
 }
 
-/// A day label in caps: `SUN 18 OCT 2026`.
-fn day_label(day: time::Date) -> String {
+/// A day separator's label: `Today`, `Yesterday`, or the date in caps (`SUN 18 OCT 2026`).
+fn day_label(day: time::Date, today: time::Date) -> String {
+    if day == today {
+        return "Today".to_owned();
+    }
+    if today.previous_day() == Some(day) {
+        return "Yesterday".to_owned();
+    }
     let short = |name: String| name.chars().take(3).collect::<String>();
     format!(
         "{} {} {} {}",

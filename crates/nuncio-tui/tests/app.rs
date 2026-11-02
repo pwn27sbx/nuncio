@@ -288,7 +288,7 @@ fn emoji_zwj_cjk_and_rtl_text_keep_the_frame_intact() {
             assert!(text.contains("Family"), "{text}");
             // Drawn without their joiners and skin tones (see `plain` in lib.rs).
             assert!(text.contains("👋"), "{text}");
-            assert!(text.contains("> 👨"), "the quote of A1:\n{text}");
+            assert!(text.contains("▌ 👨"), "the quote of A1:\n{text}");
             assert!(text.contains('❤'), "the reaction:\n{text}");
         }
     }
@@ -818,14 +818,14 @@ fn a_reply_quotes_the_selected_message_and_the_transcript_shows_the_quote() {
     });
     let screen = render(&mut app, 80, 24).conversation();
     let row_of = |needle: &str| screen.lines().position(|l| l.contains(needle));
-    let quote = row_of("> Are we still on?").unwrap_or_else(|| panic!("the quote:\n{screen}"));
+    let quote = row_of("▌ Are we still on?").unwrap_or_else(|| panic!("the quote:\n{screen}"));
     let time = row_of("17:03").unwrap_or_else(|| panic!("the reply's time:\n{screen}"));
     assert!(
         quote < time,
         "the quote is inside the reply's bubble:\n{screen}"
     );
     assert_eq!(
-        screen.matches("> ").count(),
+        screen.matches("▌ ").count(),
         1,
         "only the reply quotes:\n{screen}"
     );
@@ -1401,7 +1401,7 @@ fn emoji_sequences_render_as_cells_every_terminal_draws_at_the_same_width() {
             }
         }
         let text = screen.text();
-        for needle in ["Family", "flag!", "🌈", "👨", "👋", "> Bring the", "❤"] {
+        for needle in ["Family", "flag!", "🌈", "👨", "👋", "▌ Bring the", "❤"] {
             assert!(
                 text.contains(needle),
                 "{needle:?} at {width}x{height}:\n{text}"

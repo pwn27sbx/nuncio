@@ -264,10 +264,11 @@ fn a_box_is_reserved_before_the_thumbnail_is_ready_and_the_thumbnail_fills_it() 
     let caption = row_of(&before, "[image] the view").expect("the caption line");
     let after_row = row_of(&before, "17:02").expect("the next message");
     // 320x240 at a 10x20 font in 46 columns: 32 columns, 12 rows, right under the caption.
-    // The caption bubble, its twelve blank rows, then one blank row before the next bubble.
+    // The caption bubble, then its twelve blank rows, and the next message of the same run
+    // follows with no gap.
     assert_eq!(
         after_row - caption - 1,
-        13,
+        12,
         "the box is reserved at once:\n{}",
         screen(&before)
     );
@@ -285,7 +286,7 @@ fn a_box_is_reserved_before_the_thumbnail_is_ready_and_the_thumbnail_fills_it() 
     );
     assert_eq!(
         rows_in(&ready, RED),
-        ((caption + 1)..(after_row - 1)).collect::<Vec<_>>(),
+        ((caption + 1)..after_row).collect::<Vec<_>>(),
         "the thumbnail fills the box:\n{}",
         screen(&ready)
     );
@@ -303,7 +304,7 @@ fn a_picture_with_no_size_gets_no_box_and_no_thumbnail() {
     );
     let buffer = draw(&mut app, 80, 24);
     let caption = row_of(&buffer, "[image] the view").expect("the caption line");
-    assert_eq!(row_of(&buffer, "17:02"), Some(caption + 2));
+    assert_eq!(row_of(&buffer, "17:02"), Some(caption + 1));
 }
 
 #[test]
@@ -311,7 +312,7 @@ fn a_partially_visible_picture_is_cut_at_the_top_and_at_the_bottom() {
     // Cut at the top: ten one-row messages after the photo scroll its first rows away.
     let mut app = pictures_app();
     let mut messages = vec![photo("IMG1", 1)];
-    messages.extend(texts("after", 5, 10));
+    messages.extend(texts("after", 10, 10));
     open_ada(&mut app, messages);
     draw(&mut app, 80, 24);
     assert!(app.wait_for_images(WAIT));
@@ -324,7 +325,7 @@ fn a_partially_visible_picture_is_cut_at_the_top_and_at_the_bottom() {
         "{}",
         screen(&top_cut)
     );
-    assert_eq!(row_of(&top_cut, "after line 0"), Some(12));
+    assert_eq!(row_of(&top_cut, "after line 0"), Some(11));
 
     // Cut at the bottom: the same photo after eight messages, scrolled to the oldest.
     let mut app = pictures_app();
@@ -340,7 +341,7 @@ fn a_partially_visible_picture_is_cut_at_the_top_and_at_the_bottom() {
     assert_eq!(row_of(&bottom_cut, "before line 0"), Some(4));
     assert_eq!(
         rows_in(&bottom_cut, RED),
-        (15..21).collect::<Vec<_>>(),
+        (10..21).collect::<Vec<_>>(),
         "{}",
         screen(&bottom_cut)
     );
@@ -389,10 +390,10 @@ fn a_corrupt_thumbnail_keeps_the_box_with_a_label_and_never_panics() {
     let rows = text.lines().collect::<Vec<_>>();
     let caption = rows.iter().position(|l| l.contains("[image] the view"));
     let sticker_header = rows.iter().position(|l| l.contains("17:02"));
-    // Twelve box rows and the blank row between two bubbles.
+    // Twelve box rows, and the next message of the same run with no gap.
     assert_eq!(
         sticker_header.zip(caption).map(|(s, c)| s - c - 1),
-        Some(13)
+        Some(12)
     );
 }
 

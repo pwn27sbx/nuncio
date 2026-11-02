@@ -262,7 +262,7 @@ fn tab_switches_panes_and_back() {
 #[test]
 fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
     let snapshot = Snapshot {
-        daemon: "nunciod/0.2.1".to_owned(),
+        daemon: "nunciod/0.3.0".to_owned(),
         linked: false,
         session: Session::Unlinked,
         unread: 2,
@@ -310,7 +310,7 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
     app.handle_key(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
     let screen = render(&mut app, 80, 24);
     assert!(
-        screen.contains("nunciod/0.2.1"),
+        screen.contains("nunciod/0.3.0"),
         "the daemon version in the help:\n{screen}"
     );
     assert!(
@@ -322,7 +322,7 @@ fn a_daemon_snapshot_does_not_claim_to_be_fixture_data() {
 #[test]
 fn an_empty_chat_list_renders_at_eighty_by_twenty_four() {
     let snapshot = Snapshot {
-        daemon: "nunciod/0.2.1".to_owned(),
+        daemon: "nunciod/0.3.0".to_owned(),
         linked: false,
         session: Session::Unlinked,
         unread: 0,
@@ -367,7 +367,7 @@ fn a_lid_chat_with_no_name_and_no_phone_never_shows_its_lid_digits() {
         last_message: None,
     };
     let snapshot = Snapshot {
-        daemon: "nunciod/0.2.1".to_owned(),
+        daemon: "nunciod/0.3.0".to_owned(),
         linked: true,
         session: Session::Linked,
         unread: 0,

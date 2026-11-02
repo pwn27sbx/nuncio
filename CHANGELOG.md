@@ -3,6 +3,47 @@
 One section per release; the tag equals the version (`v0.1.0` → `pkgver=0.1.0`), and the section
 becomes the release notes.
 
+## v0.3.0 — the conversation looks like the app
+
+The terminal client takes the app's own conversation look. Nothing on the wire changes: `v` stays
+`1`, the frames are the same, and the desktop app is untouched.
+
+- **Every message is a tinted slab with a full-height ear.** One column of margin from the pane
+  edges, a `▐` on theirs in the theme's cyan and a `▌` on ours in the accent on every row of the
+  message, one cell of padding, then the text. A run of one author shares one width, and the slab
+  keeps 66 % of the band for its text; the time and the send's state may take it up to the band,
+  so a state word is never cut in half.
+- **The time keeps its slot on the message's last row.** A last row with no room for it gives its
+  last word a row of its own instead of being cut; a message without a caption gives the time its
+  own row. `◷` while a send is queued, `!` in the danger role when it was not sent — never an
+  invented delivery tick.
+- **The chat list wears initials avatars.** A 3×2 avatar on one of four palette tints, the name at
+  a fixed column, the time and the unread pill in the list's last five columns, a quiet `◌` for a
+  muted chat.
+- **The conversation's header names the chat and what it is.** Its avatar chip, then the name,
+  then the masked number and `contact`, or `group`.
+- **The composer is a field, not a floor.** One hairline above it, drawn in the accent while it
+  holds the keys, a `›` prompt and the `Write a message` placeholder; the keys are said once, in
+  the footer.
+- **A reply quotes in one inset row.** A `▌` bar, the author when it is not obvious, the start of
+  what was said clamped with `…`, on a tone of its own inside the slab. Reactions are a chip row
+  under the slab.
+- **A group names its sender once per run, first name only,** in the accent and bold; a one-to-one
+  chat names nobody. A quote and the list preview carry the same name (`Dana: deck ready`), and
+  the quote's inset counts toward the slab's width, so a quoted line is no longer clamped by a
+  slab sized only for its caption.
+- **Days and unread messages are separators across the band.** A hairline on each side of a muted
+  centred label (`Today`, `Yesterday`, `18 OCT 2026`, no weekday), and, for a chat opened with
+  unread messages, `2 unread messages` in the accent above the oldest of them — the count the
+  chat had at open, kept after the daemon marks it read.
+- **Pictures are five rows inside the slab,** and a picture with no stated size is fetched when it
+  comes into view and sized from its file.
+- **A narrow window keeps what matters.** Under 60 columns the header drops the subtitle first
+  (chip, name and `· Tab` stay) and the list drops each chat's time, then its markers, before
+  cutting into the name; the avatar always stays, and no slab reaches the gutter.
+- **The selected message wears one accent bar, never a fill,** which would erase its slab's tint
+  and its ear.
+
 ## v0.2.1 — the message history, no demo chats, and a readable window
 
 - **The daemon never serves demo chats.** Without a linked device, `chats` answers an empty list

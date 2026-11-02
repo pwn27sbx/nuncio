@@ -48,7 +48,7 @@ import (
 )
 
 // daemonVersion is the value of the `daemon` field in every frame.
-const daemonVersion = "nunciod/0.2.1"
+const daemonVersion = "nunciod/0.3.0"
 
 func main() {
 	flag.Parse()

@@ -915,7 +915,7 @@ fn switching_chats_shows_each_chats_own_draft_in_the_widget() {
 fn status(session: nuncio_client::Session) -> DaemonFrame {
     DaemonFrame::Status {
         v: PROTOCOL_VERSION,
-        daemon: "nunciod/0.2.1".to_owned(),
+        daemon: "nunciod/0.3.0".to_owned(),
         linked: session == nuncio_client::Session::Linked,
         session,
         unread: 0,

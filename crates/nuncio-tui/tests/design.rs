@@ -70,7 +70,7 @@ fn today() -> time::Date {
 fn app_with(chats: Vec<Chat>) -> App {
     let unread = chats.iter().map(|chat| chat.unread).sum();
     let snapshot = Snapshot {
-        daemon: "nunciod/0.2.1".to_owned(),
+        daemon: "nunciod/0.3.0".to_owned(),
         linked: true,
         session: Session::Linked,
         unread,
@@ -1032,7 +1032,7 @@ fn the_help_sits_on_a_solid_surface_scrim_with_its_keys_right_aligned_and_muted(
 fn app_unlinked() -> App {
     App::new(
         Snapshot {
-            daemon: "nunciod/0.2.1".to_owned(),
+            daemon: "nunciod/0.3.0".to_owned(),
             linked: false,
             session: Session::Unlinked,
             unread: 0,

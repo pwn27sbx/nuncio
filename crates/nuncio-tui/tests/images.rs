@@ -1435,6 +1435,58 @@ fn the_help_says_what_o_does_with_pictures_on_and_off() {
     assert!(off.contains("open its media externally"), "{off}");
 }
 
+/// C1: a sticker often arrives with no stated size, so it has no box — and the label is all that
+/// is drawn. Its file is asked for anyway when it comes into view, and the decoded size gives it a
+/// box. Once, never after a failure.
+#[test]
+fn a_sticker_with_no_stated_size_is_fetched_and_sized_from_its_file() {
+    let file = TempFile::new(
+        "sticker.webp",
+        &picture(GREEN, 512, 512, image::ImageFormat::WebP),
+    );
+    let served = file.0.to_string_lossy().into_owned();
+    let path = socket_path();
+    let _socket = Socket(path.clone());
+    let server = fake_daemon(&path, move |request| {
+        assert_eq!(request["op"], "download_media");
+        assert_eq!(request["id"], "STK1");
+        serde_json::json!({"v":1,"op":"media_ready","jid":ADA,"id":"STK1",
+            "path":served,"mime":"image/webp"})
+    });
+    let (mut daemon, _opened) = connect(&path);
+    let mut app = pictures_app();
+    let mut bare = sticker("STK1", 1, true, true);
+    bare.width = None;
+    bare.height = None;
+    open_ada(&mut app, vec![bare]);
+    let first = draw(&mut app, 80, 24);
+    assert!(
+        screen(&first).contains("[sticker] ▶"),
+        "no size, no box: the label is drawn:\n{}",
+        screen(&first)
+    );
+    let Some(Action::Request(frame)) = app.take_actions().into_iter().next() else {
+        panic!("the sticker is fetched although it states no size");
+    };
+    daemon.perform(&mut app, &frame).expect("perform");
+    // Two frames: the file is decoded to learn its size, then encoded for the box.
+    draw(&mut app, 80, 24);
+    assert!(app.wait_for_images(WAIT));
+    draw(&mut app, 80, 24);
+    assert!(app.wait_for_images(WAIT));
+    let sized = draw(&mut app, 80, 24);
+    assert!(
+        !screen(&sized).contains("[sticker]"),
+        "the box is drawn:\n{}",
+        screen(&sized)
+    );
+    assert!(rows_in(&sized, GREEN).len() >= 3, "{}", screen(&sized));
+    // The box appearing must not ask for the file again.
+    assert!(app.take_actions().is_empty(), "asked once");
+    drop(daemon);
+    server.join().expect("fake daemon");
+}
+
 #[test]
 fn a_thumbnail_larger_than_a_thumbnail_is_refused_though_a_full_picture_that_size_is_not() {
     // 4000x3000 is a normal photo but no thumbnail: refused as one, from its header.

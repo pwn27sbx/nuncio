@@ -1949,6 +1949,32 @@ impl App {
                 );
             }
         }
+        // A picture message can arrive with no stated size (a sticker often does): it gets no box,
+        // so its file is asked for here and the decoded size gives it one. Only the messages on
+        // screen, once each, and never after a failure.
+        let mut shown: Vec<usize> = self.map.message_rows.iter().flatten().copied().collect();
+        shown.sort_unstable();
+        shown.dedup();
+        for index in shown {
+            if boxes.iter().any(|picture| picture.index == index) {
+                continue;
+            }
+            let Some(message) = messages.get(index) else {
+                continue;
+            };
+            if !is_picture(&message.kind) || message.id.is_empty() {
+                continue;
+            }
+            let id = message.id.clone();
+            let seen = (jid.clone(), id.clone());
+            if transcript.full_picture(&jid, &id).is_none()
+                && !transcript.is_showing(&id)
+                && !self.pictures_wanted.contains(&seen)
+            {
+                self.pictures_wanted.insert(seen);
+                wanted.push(id);
+            }
+        }
         for id in wanted {
             // The model has to know, or the daemon's answer is not kept for the box.
             if self.model.show_picture(&jid, &id) {

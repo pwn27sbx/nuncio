@@ -81,6 +81,9 @@ pub struct Transcript {
     pub(crate) cursor: Option<usize>,
     /// The chat opened whose `messages` reply has not come yet.
     pub(crate) opening: Option<String>,
+    /// How many messages each chat had unread when its conversation was loaded: the transcript's
+    /// unread divider keeps that count, taken before opening the chat marks it read.
+    pub(crate) unread_at_open: HashMap<String, u32>,
     /// The chat whose `messages` were asked for again after a reconnect: its reply keeps the
     /// selected message and the sends the daemon never stored.
     pub(crate) resyncing: Option<String>,
@@ -97,6 +100,12 @@ impl Transcript {
     /// The loaded conversation of chat `jid`, oldest first; `None` before it is loaded.
     pub fn conversation(&self, jid: &str) -> Option<&[Message]> {
         self.conversations.get(jid).map(Vec::as_slice)
+    }
+
+    /// How many messages of chat `jid` were unread when its conversation was loaded (0 when
+    /// none were, or before it was loaded).
+    pub fn unread_at_open(&self, jid: &str) -> u32 {
+        self.unread_at_open.get(jid).copied().unwrap_or(0)
     }
 
     /// The selected message's index in the open chat's loaded conversation.

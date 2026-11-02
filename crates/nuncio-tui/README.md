@@ -24,9 +24,9 @@ key does not open the device. It goes away once the daemon's next frame has no r
 was unlocked and the device opened). A reason this build does not know shows as
 `WhatsApp stopped the session`.
 
-Pictures are drawn in the conversation (see [Pictures](#pictures)): from the thumbnail each image
-or sticker message carries, with the full picture only when you press `o`. Nothing is ever
-downloaded on its own.
+Pictures are drawn in the conversation (see [Pictures](#pictures)): inside their bubble, above
+the caption. The thumbnail shows first, and the full picture is fetched — once — the first time
+the picture comes into view, so a photo is sharp without pressing anything.
 
 One chat per contact (ADR 0001): the daemon names the phone-number chats it merged into a
 contact's LID chat (`…@lid`) in that chat's `aliases`, in the chat list and in the `event_chat` it
@@ -56,28 +56,48 @@ nuncio-tui [--image <png>]
   same way (an older daemon sends no `phone`), else `unnamed group` for a group or `hidden number`
   for anyone else. A LID chat's digits are never shown: they are a hidden id, not a number (ADR
   0002).
-- **Group senders**: in a group, an incoming message's line names who wrote it, the daemon's
-  `sender` (her name, else her masked number, else `unknown`); without one (an older daemon, a
-  message stored before senders were recorded) it shows the group's name as before.
+- **Group senders**: in a group, the first message of a run names who wrote it on one row at the
+  top of its slab, in the accent and bold: the daemon's `sender`, first name only (a masked
+  number when that is all it has, the group's name when it has nothing, for an older daemon or a
+  message stored before senders were recorded). Every sender wears the same accent — nobody is
+  colour-coded. A one-to-one chat never names anyone, even when the daemon fills `sender`. A
+  quote's inset row names its author the same way (`Dana: deck ready`), or `you:` when the quoted
+  message is mine, and a one-to-one quote of theirs shows the bar and the text alone. A group's
+  list preview carries the last message's author the same way (`Dana: deck ready`); a one-to-one
+  preview and one of my own messages are bare.
 - **Look** (the design plan's §9, the desktop app's rules in a terminal): no boxes. The chat
-  list and the conversation are separated by one `│` line; each has its title on the header rule
-  under the status line, and the composer sits under its own rule. The tones are the palette's
-  roles: the list on `surface_chrome`, the conversation on `surface`, the selected chat on
-  `surface_active`. The accent marks only the unread dot `●`, the selection bar `▌` and the one
-  primary key in the footer (`Enter`, or `1-6` in the reaction picker); names are bold, times
-  and other meta use the `text_muted` role, and senders are never colour-coded. The colours are sent as 24-bit
-  RGB, as before.
-- **Chat list** (left): two fixed rows per chat, the selected one with the bar `▌` down both.
-  Row one: the name in bold, then only the markers it has — `★` pinned, `⊘` muted, `▤` archived,
-  in that order, right after the name — and the time in its own five-column slot at the right
-  edge, so times line up down the list whatever the names. Row two: the last message, cut with
-  `…` (by display width, so wide characters count as two columns), and the unread badge
-  right-aligned in four columns — `●3`, `●12`, `●99+`, or nothing when it is read. A narrow list
-  gives up the time first, then the markers, before it cuts the name below six columns.
-  `[` and `]` cycle the list's filter — `All`, `Unread`, `Archived` — and the rule says which
-  one is on with its count (`Chats · Unread (3)`); clicking a row opens the chat it is drawn
-  for, whatever the filter. A filter that hides everything says `No chats under this filter`
-  instead of pretending the account is empty.
+  list and the conversation are separated by one `│` line; the list has its title on the header
+  rule under the status line, the conversation puts the open chat there — its avatar chip
+  (`▗A▖`, the chat's initial on the same palette tint its list avatar wears), then the name, then
+  a subtitle the wire owns: the masked number and `contact` (`…0001 · contact`) or `group`. The
+  composer is closed by one hairline above it. The tones are the palette's
+  roles: the list on `surface_chrome`, the conversation on `surface`, the open chat on
+  `surface_active` (with the keys or without them, so the list always says which chat is open).
+  The accent marks the unread count's pill and the one primary key in the footer (`Enter`, or
+  `1-6` in the reaction picker); names are bold, times and other meta use the `text_muted` role,
+  and senders are never colour-coded. No colour is ever named in the crate: every tone comes
+  from a palette role, through the one `rgb()` helper (a test reads the sources to keep it so).
+  The colours are sent as 24-bit RGB, as before.
+- **Chat list** (left): three fixed rows per chat — its name, its last message, and a thin `─`
+  rule in the border role that separates it from the next one. Each chat opens with a 3×2 avatar:
+  a rounded block (`▗▖` over `▝▘`, the quadrant corners in the avatar's tint on the row's own
+  background) with one initial per row — the first letter of each of the title's first two words —
+  on four tints derived from the palette's hues, so a chat always wears the same one. Row one: the
+  avatar, the name, then only the markers it has — `★` pinned, `◌` muted, `▤` archived, in that
+  order — and the time right-aligned in the list's last five columns, so times line up whatever the
+  names. Row two: the avatar's second row, the last message cut with `…` (by display width, so wide
+  characters count as two columns), and the unread count as an accent pill in the same last five
+  columns — ` 3 `, ` 12 `, ` 99+ `, or nothing when it is read. A chat with unread messages has its
+  name and time in bold. A narrow list gives up the time first, then the markers, before it cuts
+  the name below six columns.
+  `[` and `]` cycle the list's filter — `All`, `Unread`, `Archived` — and the bar under the rule
+  shows the three, the one in force as a filled accent chip; the rule also carries its count
+  (`Chats · Unread (3)`). `/` on the list opens a search field in that bar (`search: …`, with
+  `▏` as the cursor): what is typed filters the list by the chat's name or one of its aliases as
+  you type, the selection lands on the first chat that still matches, `Enter` keeps the query as
+  a filter and `Esc` gives the whole list back. It never sends anything to the daemon. Clicking a
+  row opens the chat it is drawn for, whatever the filter. A filter that hides everything says
+  `No chats under this filter` instead of pretending the account is empty.
   Archived chats are kept in the list, sectioned after every other chat. A pin, archive or mute
   made on the phone (`event_chat`) updates the markers at once and sorts the list again as the
   daemon's `chats` lists it (newest message first, the same time by JID, archived last), keeping
@@ -86,26 +106,42 @@ nuncio-tui [--image <png>]
   side of a daylight-saving change shows an hour off until the next start). If the offset cannot
   be read, times are UTC and the footer says so.
 - **Conversation** (right): the selected chat, newest message at the bottom. Before a chat is
-  opened it shows the chat's last message only. One line per message: the author in bold and
-  the time muted, then the text (a message's further lines get rows of their own). Each day starts
-  with its local date in muted caps (`SUN 18 OCT 2026`) after a blank line; the messages of one
-  author follow each other with no blank line, and the next author starts after one. With no
-  message it says `No messages yet · i writes the first one`, with no chats `No chats yet`
-  (its title is then `Conversation`, so the focus still shows). The transcript opens with a
-  muted `Beginning of conversation` line, which is what you see when the top is on screen; when
-  there is more above or below, the free column on the right says so with `▲` or `▼`. With no
-  chat at all it says `No chat open · Tab switches panes`; an empty list says `No chats yet` on a
-  linked device and `No device linked · open nuncio to link it` when no device is linked, which
-  points at the app and never at a command line (S10).
+  opened it shows the chat's last message only. Every message is a tinted slab: one column of
+  margin from the pane edges, a **full-height ear** on the sender's side (`▐` theirs in the theme's
+  cyan, `▌` ours in the accent, on every row of the message), one cell of padding, then the text.
+  A run of one author shares one width — at most 66 % of the band for the slab, which the time and
+  the send's state may push up to the band, so a state word is never cut. The text wraps inside;
+  the time sits at the slab's right edge in the faint role, with the send's state where delivery
+  ticks would go: a small clock `◷` while it is queued and a `!` in the danger role when it was
+  not sent (delivered and read receipts are not in the protocol, so they are never invented). One
+  blank row separates two runs; nothing repeats the author over a 1:1 chat, and in a group the
+  sender is named once at the top of its run. Each day starts, after a blank row, with a
+  separator across the band — a hairline in the border role on each side of a muted, centred
+  label: `Today`, `Yesterday`, or the date (`17 OCT 2026`, no weekday) for any older day. When
+  the chat was opened with unread messages, the same shape says how many were new — `2 unread
+  messages` in the accent — above the oldest of them; the count is the one the chat had at open,
+  kept after the daemon marks it read. With no message it
+  says `No messages yet · i writes the first one`, with no chats `No chats yet` (its title is then
+  `Conversation`, so the focus still shows). The transcript opens with a muted `Beginning of
+  conversation` line, which is what you see when the top is on screen; when there is more above or
+  below, the free column on the right says so with `▲` or `▼`. With no chat at all it says `No chat
+  open · Tab switches panes`; an empty list says `No chats yet` on a linked device and `No device
+  linked · open nuncio to link it` when no device is linked, which points at the app and never at a
+  command line (S10).
 - **Read**: opening a chat that has unread messages marks it read, here and on WhatsApp too, as
   the official clients do: your other devices clear it and the sender sees blue ticks, unless read
   receipts are off in WhatsApp's privacy settings (then only your own devices clear it). A new
   message arriving in the open chat is marked read the same way. The unread counts clear when the
   daemon answers; if it refuses (offline, not linked, ...) the footer shows why, the chat stays
   unread, and nothing retries on its own: opening the chat again does.
-- **Composer**: the last rows of the conversation, under its own rule: with nothing to send the
-  rule is plain and the row says `i or Enter to write`; with the keys in it the rule starts with
-  the accent bar, and with a draft it ends with `Enter sends · Alt-Enter newline`. `Enter` sends; `Alt-Enter` or `Ctrl-J` starts a
+- **Composer**: the last rows of the conversation, a field closed by one hairline above it (the
+  footer follows it; there is no second rule). With nothing to send and no keys on it the row
+  says `i or Enter to write`; opened and still empty it shows the placeholder `Write a message`
+  with the caret where the first letter goes, after a `›` prompt; while it holds the keys the
+  hairline itself is drawn in the accent (and a reply puts its quote on the line above). The
+  keys are said once, in the footer, never again on the rule. The selected message is marked by a
+  single accent bar on the conversation's left margin, over the rows it owns: a full-row fill
+  would erase its slab's tint and its ear. `Enter` sends; `Alt-Enter` or `Ctrl-J` starts a
   new line (use `Ctrl-J` where the terminal keeps `Alt-Enter`, as macOS terminals do unless
   Option is set to act as Alt), and the message is sent with its line breaks. `←`/`→` move the
   cursor one character (a whole emoji sequence or accented letter is one step), `Home`/`End` to
@@ -125,10 +161,14 @@ nuncio-tui [--image <png>]
 - **Focus**: one pane has the keys at a time, the chat list or the conversation (the composer
   counts as the conversation); its title on the header rule is bold, the other's muted, and only
   the pane with the keys fills its selection on `surface_active` — the other keeps the `▌` bar,
-  so the screen never shows two "selected" things. `Tab` switches between them.
+  so the screen never shows two "selected" things (the conversation's message selection is always
+  that `▌` bar on the pane's left margin, never a fill). `Tab` switches between them.
 - **Widths**: at 100 columns and up the chat list takes 40 % of the screen; from 60 to 99 it is
   a fixed 32 columns; under 60 only the focused pane is drawn, filling the width, and its rule
-  says `· Tab` so the other pane is one key away. The mouse map is rebuilt on every draw, so a
+  says `· Tab` so the other pane is one key away. A narrow window keeps what matters: the
+  conversation's header drops the subtitle first (chip, name and the hint stay), and the list
+  drops each chat's time, then its markers, before it ever cuts into the name — the avatar always
+  stays. The mouse map is rebuilt on every draw, so a
   click can never land on a pane that is not on screen.
 - **Status line**: the header is only the app's name plus one right-aligned datum, the unread
   count in the accent when there is one (`3 unread`), or `NO DAEMON` with no daemon. The
@@ -153,18 +193,24 @@ nuncio-tui [--image <png>]
   that was sent) can be replied or reacted to: on one still `sending`, `queued` or `not sent`,
   `r`/`e` send nothing and the footer says `that message was not sent, so it cannot be replied
   to` (or `reacted to`).
-- **Quotes and reactions**: a reply shows `> ` and the start of the message it quotes (or
-  `(a message not loaded)`) between its author and time and its text, which then starts on the
-  next row; reactions show on the line under the message, mine in bold. The selected message's
-  rows (its picture box and reactions included) are on `surface_active`. A reaction the daemon refuses (offline, unknown sender, ...) shows its error in the
-  footer and changes nothing. Reactions are never queued: react again once linked.
+- **Quotes and reactions**: a reply opens its slab with one inset row — a `▌` bar in the accent, the
+  quoted author's name when it is not obvious (a group, or one of mine) and the start of what they
+  said, muted, clamped to the row with `…`, on the quote tone over the slab's — and then its own
+  text; a quote whose target is not loaded says `(a message not loaded)`. Reactions are a chip row
+  under the slab on the hover tone, mine in bold. The selected message is marked by one accent bar
+  on the conversation's left margin, over its rows (its picture and reactions included). A reaction
+  the daemon refuses (offline, unknown sender, ...) shows its error in the footer and changes
+  nothing. Reactions are never queued: react again once linked.
 - **Search** (`/`): searches the open chat through the daemon; the results are listed newest
   first, and `Enter` on one closes the search and selects that message in the conversation
   (scrolled into view) when it is among the loaded messages; otherwise the footer says so.
-- **Media**: image, sticker, audio, video and document messages show `[kind]` before their
-  caption on the message line (`[sticker] ▶` for an animated sticker). Pictures are drawn under it (see
-  [Pictures](#pictures)). On audio, video and documents `o` asks the daemon to download the file
-  and opens it with `xdg-open` (`open` on macOS); `O` does the same for a picture.
+- **Media**: a picture message draws its picture inside the bubble, above its caption, as soon as
+  its message comes into view — the daemon is asked for the full file without a key, so what is
+  shown is the sharp picture and not the thumbnail WhatsApp embeds. Until the picture can be drawn
+  (no graphics protocol, no size stated, or nothing to draw yet) the bubble says `[kind]` before
+  its caption, and `[sticker] ▶` marks an animated one. On audio, video and documents `o` asks the
+  daemon to download the file and opens it with `xdg-open` (`open` on macOS); `O` does the same for
+  a picture, which keeps the thumbnail in the box meanwhile.
 - Live updates: new messages, a send's state changes, unread counts, the connection state, and a
   focus request (`nuncio focus <jid>`) selects and opens that chat.
 - **A newer daemon**: an event this TUI does not know is ignored (the event connection stays
@@ -221,25 +267,25 @@ does; `Esc` goes back one step: composer → conversation → chat list.
 
 ## Pictures
 
-An image or sticker message whose size the daemon states (`width`, `height`) gets a box under its
-caption as soon as the conversation is drawn, before anything is decoded: as wide as the picture
-in cells but no wider than the conversation, as tall as that keeps its shape, at most 12 rows.
-Nothing moves when the picture arrives in it.
+An image or sticker message whose size the daemon states (`width`, `height`) gets a box inside its
+bubble, above the caption, as soon as the conversation is drawn, before anything is decoded: as
+wide as the picture in cells but no wider than the bubble, as tall as that keeps its shape, at
+most 12 rows. Nothing moves when the picture arrives in it.
 
 - **Thumbnail first.** The box shows the thumbnail WhatsApp embeds in the message (the wire's
-  `thumb`: a JPEG for a photo, a PNG for a sticker), scaled to the box. It costs no network: the
-  daemon already has it.
-- **Full picture on demand.** `o` on the selected picture asks the daemon for it
-  (`download_media`); the caption says `Downloading…` until it is drawn, in the same box, over the
-  thumbnail. If the daemon refuses (offline, not linked) or the file does not decode, the footer
-  says why and the thumbnail stays; `o` tries again. **Nothing is downloaded without a key.** `O`
-  opens the picture with the desktop's viewer instead.
-- **Stickers** are drawn like photos, from their PNG thumbnail; for a sticker without one (or an
-  image without one) the caption's `[sticker]` (`[image]`) is the only label and the box stays
-  empty until `o` fetches it (a WebP; an animated one gives its first frame). An animated sticker
-  is marked `▶` and shows its first frame: no animation yet.
+  `thumb`: a JPEG for a photo, a PNG for a sticker). It costs no network: the daemon already has
+  it.
+- **The full picture follows.** The first time a picture comes into view the transcript asks the
+  daemon for its full file (`download_media`), once: the caption says `Downloading…` until it is
+  drawn, in the same box, over the thumbnail. If the daemon refuses (offline, not linked) or the
+  file does not decode, the footer says why and the thumbnail stays; nothing is retried by itself,
+  and `o` asks again by hand. `O` opens the picture with the desktop's viewer instead.
+- **Stickers** are drawn like photos, from their PNG thumbnail; a sticker without one (or an image
+  without one) keeps its `[sticker]` (`[image]`) label at the top of the empty box until the full
+  file arrives (a WebP; an animated one gives its first frame). An animated sticker is marked `▶`
+  and shows its first frame: no animation yet.
 - **Transparency.** With half blocks every cell is painted, so a transparent pixel (a sticker's
-  corners, the margin a picture leaves in its box) takes the theme's background colour, and a
+  corners, the margin a picture leaves in its box) takes the bubble's background colour, and a
   theme switch draws the pictures again on the new one. Kitty and sixel keep the transparency.
 - **Scrolling** draws a picture cut at the top or the bottom of the conversation when it is only
   partly in view.
@@ -250,7 +296,8 @@ Nothing moves when the picture arrives in it.
   `[sticker]` label (a full picture says why in the footer). A decoded picture is shrunk to its
   box before it is encoded.
 - A picture whose message states no size gets no box and no thumbnail; `o` draws the full picture
-  in a box sized from the file.
+  in a box sized from the file. With pictures off (`--image off`, `NUNCIO_IMAGE_PROTOCOL=off`) the
+  bubble keeps the `[image]`/`[sticker]` label and `o`/`O` open the media externally.
 - Encoded pictures are cached (48 of them, about 96 MiB) and encoded on two worker threads, so
   scrolling stays smooth; resizing the terminal encodes the visible ones again, and work queued
   for an earlier width is dropped unencoded. The caption's `Downloading…` is cut with `…` rather

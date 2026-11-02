@@ -56,8 +56,9 @@ usage: nuncio-tui [--image <png>]
   Mouse: click a chat to open it, click a message to select it, the wheel scrolls the pane
   under the pointer; hold Shift to select text.
 
-  Pictures are drawn in the conversation from the thumbnail in each message; nothing is
-  downloaded until o. The protocol is asked from the terminal once at startup (kitty, sixel,
+  Pictures are drawn in the conversation, inside their bubble: the thumbnail first, and the full
+  file is fetched the first time a picture comes into view (o still asks to show it in full after
+  a failed fetch, and O opens it). The protocol is asked from the terminal once at startup (kitty, sixel,
   iTerm2, else half blocks; sixel or half blocks under zellij). NUNCIO_IMAGE_PROTOCOL=kitty,
   sixel, iterm2, halfblocks or off chooses it without asking, and so does image_protocol under
   [ui] in ~/.config/nuncio/config.toml (the variable wins; see docs/config.md).
@@ -259,6 +260,12 @@ fn event_loop(
     loop {
         io.tick(app);
         terminal.draw(|frame| app.draw(frame))?;
+        // A picture that came into view asked for its full version while drawing.
+        for action in app.take_actions() {
+            if !io.act(app, action) {
+                return Ok(());
+            }
+        }
         if !event::poll(TICK)? {
             continue;
         }

@@ -10,12 +10,14 @@
 //! an [`Action`] for the I/O loop. [`Daemon`] is that I/O: a request connection and a subscribed
 //! event connection to `nunciod`. The keys are listed in [`KEYS`] and in `README.md`.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use nuncio_client::model::{Effect, Filter, Model, chat_title, is_picture, quoted};
 use nuncio_client::wire::{MessageState, Session};
 use nuncio_client::{Chat, ClientFrame, DaemonFrame, Message, Palette, Rgb, Snapshot};
 use ratatui::Frame;
+use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -101,8 +103,9 @@ pub enum Target {
     Composer,
 }
 
-/// Rows one chat takes in the list: its name, then its last message.
-pub const CHAT_ROWS: u16 = 2;
+/// Rows one chat takes in the list: its name, its last message, then the thin rule that
+/// separates it from the next one.
+pub const CHAT_ROWS: u16 = 3;
 
 /// What is drawn at `(column, row)` on the screen `map` describes, if anything the mouse acts on.
 pub fn hit_test(map: &ScreenMap, column: u16, row: u16) -> Option<Target> {
@@ -132,19 +135,39 @@ const WHEEL: usize = 3;
 
 /// Marks a pinned chat.
 const PINNED: char = '★';
-/// Marks a muted chat.
-const MUTED: char = '⊘';
+/// Marks a muted chat: a quiet dotted circle, not the old `⊘` that read as "forbidden".
+const MUTED: char = '◌';
 /// Marks an archived chat.
 const ARCHIVED: char = '▤';
 
-/// At or above this width the chat list takes 40 % of the screen (R6).
-const WIDE: u16 = 100;
-/// Between this width and `WIDE` the chat list is a fixed 32 columns.
+/// The chat list's least width: 30 % of a narrow body would be unreadable.
 const LIST: u16 = 32;
+/// The chat list's most width: past this the conversation is the one that suffers.
+const LIST_MAX: u16 = 48;
 /// Below this width only the focused pane is drawn, and `Tab` swaps it (R6).
 const NARROW: u16 = 60;
+/// The chat list's share of the body: 30 % of it, never under [`LIST`] and never over
+/// [`LIST_MAX`]. The conversation takes everything else.
+fn list_width(width: u16) -> u16 {
+    // u32 arithmetic: `width * 30` overflows a u16 past 2184 columns and panics in debug.
+    (u32::from(width) * 30 / 100).clamp(u32::from(LIST), u32::from(LIST_MAX)) as u16
+}
+
 /// How many lines PageUp/PageDown scroll.
 const PAGE: usize = 10;
+/// A message's bubble takes at most this share of the conversation's columns; the rest is the
+/// gap that shows which side a message came from.
+const BUBBLE_SHARE: u32 = 66;
+
+/// What a narrow window's only visible pane says about returning to the other one. It is the
+/// first thing the header keeps: without it a narrow window has no way back but the keys.
+const NARROW_HINT: &str = " · Tab";
+/// The narrowest a bubble gets, so a one-word message still reads as a bubble around its time.
+const BUBBLE_MIN: u16 = 11;
+/// The clock on a queued outgoing bubble, where the delivery ticks would go.
+const CLOCK: char = '◷';
+/// The `!` on an outgoing bubble that was not sent.
+const NOT_SENT: char = '!';
 /// The reactions the picker offers (the shared set), on keys `1`..`6`; `x` removes mine.
 pub use nuncio_client::model::REACTIONS;
 /// How many characters of a quoted message are shown.
@@ -166,13 +189,14 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
             ("l →", "open it to read"),
             ("[ ]", "filter: All, Unread, Archived"),
             ("Tab", "focus the conversation"),
-            ("/", "search the selected chat"),
+            ("/", "search the list"),
             ("q Esc", "quit"),
         ],
     ),
     (
         "Conversation",
         &[
+            ("/", "search the chat"),
             ("j/k ↓/↑", "select a newer / older message"),
             ("r", "reply to it"),
             ("e", "react to it"),
@@ -225,12 +249,6 @@ pub const KEYS: &[(&str, &[(&str, &str)])] = &[
     ),
 ];
 
-/// The chat list from `proto/fixtures/chats_response.json`, for the render tests only: no
-/// production path loads it (a shipped app must never show chats nobody has).
-///
-/// Compiled in, so the client always renders when no daemon is reachable — which is what
-/// makes S9 checkable with no daemon and no linked device. The fixture is shared with the
-/// Go daemon and checked by `nuncio-client`'s contract tests.
 /// The terminal client: the shared view [`Model`] (chat list, transcript, composer and their
 /// rules) plus what only the terminal has: the focused pane, the overlays, the scroll, the
 /// pictures and the [`Palette`]. It changes only through [`App::handle_key`],
@@ -255,14 +273,25 @@ pub struct App {
     images: Option<images::Images>,
     /// Which chats the list shows (R6/Q3): All, Unread or Archived, cycled with `[`/`]`.
     filter: Filter,
+    /// What the list is searched for, typed there with `/` (never sent: it only filters).
+    query: String,
+    /// The list's search field has the keys.
+    typing: bool,
     /// True on the last draw when only one pane fits (under `NARROW` columns): the rule says
     /// so and `Tab` is the only way to the other one.
     narrow: bool,
     /// The pictures' protocol name, shown in `?`.
     protocol: Option<&'static str>,
     utc_offset: time::UtcOffset,
+    /// The local date the transcript calls today (`Today`/`Yesterday` on the day separators).
+    today: time::Date,
     /// Where things were on the last drawn screen, for the mouse.
     map: ScreenMap,
+    /// What the last draw asked the daemon for (a picture that came into view), drained by the
+    /// loop with [`App::take_actions`].
+    pending: Vec<Action>,
+    /// The pictures already asked for, so a fetch that failed is never retried by itself.
+    pictures_wanted: HashSet<(String, String)>,
 }
 
 impl From<Effect> for Action {
@@ -291,10 +320,15 @@ impl App {
             search_list: ListState::default(),
             images: None,
             filter: Filter::All,
+            query: String::new(),
+            typing: false,
             narrow: false,
             protocol: None,
             utc_offset: time::UtcOffset::UTC,
+            today: time::OffsetDateTime::now_utc().date(),
             map: ScreenMap::default(),
+            pending: Vec::new(),
+            pictures_wanted: HashSet::new(),
         };
         app.sync();
         app
@@ -314,6 +348,12 @@ impl App {
         self.images = Some(images::Images::new(&graphics));
         self.protocol = Some(graphics.protocol_name());
         self
+    }
+
+    /// What the last draw asked the daemon for (the full picture of a picture that came into
+    /// view), for the loop to send before the next frame.
+    pub fn take_actions(&mut self) -> Vec<Action> {
+        std::mem::take(&mut self.pending)
     }
 
     /// Wait until every picture asked for by the last draw is encoded (the workers run off the UI
@@ -363,6 +403,16 @@ impl App {
     /// until the next start). Without it, times are UTC.
     pub fn with_utc_offset(mut self, offset: time::UtcOffset) -> Self {
         self.utc_offset = offset;
+        // The day labels are local: a message at 01:00 UTC is yesterday three hours west.
+        self.today = time::OffsetDateTime::now_utc().to_offset(offset).date();
+        self
+    }
+
+    /// Treat `today` as the day the transcript calls `Today`: the day separators say `Yesterday`
+    /// for the day before it and the date for any other. Tests set it so the labels are fixed;
+    /// `main` leaves it to [`App::with_utc_offset`] and the clock.
+    pub fn with_today(mut self, today: time::Date) -> Self {
+        self.today = today;
         self
     }
 
@@ -466,14 +516,34 @@ impl App {
 
     /// The model indices of the chats the list shows, in its order, under the current filter.
     pub fn listed(&self) -> Vec<usize> {
+        let query = self.query.trim().to_lowercase();
         self.model
             .chat_list()
             .chats()
             .iter()
             .enumerate()
             .filter(|(_, chat)| self.filter.keeps(chat))
+            .filter(|(_, chat)| {
+                query.is_empty()
+                    || chat_title(chat).to_lowercase().contains(&query)
+                    || chat
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.to_lowercase().contains(&query))
+            })
             .map(|(index, _)| index)
             .collect()
+    }
+
+    /// What the list is searched for, and whether its field has the keys (for the tests and the
+    /// list's own bar).
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// Whether the list's search field has the keys.
+    pub fn typing(&self) -> bool {
+        self.typing
     }
 
     /// Cycle the chat list's filter with `[`/`]` and land the selection on a chat it shows.
@@ -495,8 +565,11 @@ impl App {
     /// last one before it. A filter that hides everything leaves the selection where it is and
     /// the pane says so, so no hidden chat is ever selected.
     fn ensure_selected_listed(&mut self) {
-        // Unfiltered, the model already keeps the selection on a chat; only a filter can hide it.
-        if self.filter == Filter::All || self.model.chat_list().chats().is_empty() {
+        // Unfiltered and unsearched, the model already keeps the selection on a chat; only a
+        // filter or a query can hide it.
+        if (self.filter == Filter::All && self.query.trim().is_empty())
+            || self.model.chat_list().chats().is_empty()
+        {
             return;
         }
         let listed = self.listed();
@@ -669,6 +742,23 @@ impl App {
             }
             return None;
         }
+        if self.typing {
+            match key.code {
+                // Esc gives the list back whole; Enter keeps the query as a filter.
+                KeyCode::Esc => {
+                    self.query.clear();
+                    self.typing = false;
+                }
+                KeyCode::Enter => self.typing = false,
+                KeyCode::Backspace => {
+                    self.query.pop();
+                }
+                KeyCode::Char(c) => self.query.push(c),
+                _ => return None,
+            }
+            self.ensure_selected_listed();
+            return None;
+        }
         let chosen = self.model.selected_chat().is_some();
         match (self.pane, key.code) {
             (_, KeyCode::Char('?')) => self.help = true,
@@ -678,6 +768,8 @@ impl App {
                 self.model.composer_mut().cancel_reply();
                 self.set_pane(Pane::Compose);
             }
+            // `/` searches the list when the keys are on it, the open chat otherwise.
+            (Pane::Chats, KeyCode::Char('/')) => self.typing = true,
             (_, KeyCode::Char('/')) if chosen => {
                 self.model.open_search();
                 self.search_list = ListState::default();
@@ -852,13 +944,12 @@ impl App {
                 self.draw_messages(frame, body);
             }
         } else {
-            let list = if body.width >= WIDE {
-                Constraint::Percentage(40)
-            } else {
-                Constraint::Length(LIST)
-            };
-            let [chats, line, messages] =
-                Layout::horizontal([list, Constraint::Length(1), Constraint::Min(0)]).areas(body);
+            let [chats, line, messages] = Layout::horizontal([
+                Constraint::Length(list_width(body.width)),
+                Constraint::Length(1),
+                Constraint::Min(0),
+            ])
+            .areas(body);
             self.draw_separator(frame, line);
             self.draw_chats(frame, chats);
             // The line between the panes is part of the chat pane for the mouse.
@@ -886,6 +977,83 @@ impl App {
             .map(|row| Line::from(if row == 0 { "┬" } else { "│" }))
             .collect();
         frame.render_widget(Paragraph::new(lines).style(self.line_style()), area);
+    }
+
+    /// The conversation's header rule: the chat's avatar chip, its name and a subtitle the wire
+    /// owns (`…0001 · contact` or `group`). The focused pane's name is bold, the other's muted.
+    fn draw_conversation_header(&self, frame: &mut Frame, area: Rect) {
+        if area.is_empty() {
+            return;
+        }
+        let width = usize::from(area.width);
+        let focused = self.pane != Pane::Chats;
+        let name_style = if focused {
+            Style::default()
+                .fg(rgb(self.palette.text()))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            self.muted()
+        };
+        let mut spans = vec![Span::styled("─", self.line_style())];
+        let mut used = 1;
+        // A narrow window draws one pane, so its header always ends with how to switch panes:
+        // the name and the subtitle leave that hint its columns.
+        let reserved = if self.narrow {
+            display_width(NARROW_HINT)
+        } else {
+            0
+        };
+        match self.model.selected_chat() {
+            Some(chat) => {
+                let title = plain(&chat_title(chat));
+                let seed = avatar_seed(&title) % AVATAR_TINTS;
+                let tint = rgb(self.palette.avatar_tint(seed));
+                let ink = rgb(self.palette.avatar_ink(seed));
+                let initial = avatar_initials(&title)[0];
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled("▗", Style::default().fg(tint)));
+                spans.push(Span::styled(
+                    initial.to_string(),
+                    Style::default().fg(ink).bg(tint),
+                ));
+                spans.push(Span::styled("▖", Style::default().fg(tint)));
+                used += 4;
+                let room = width.saturating_sub(used + 1 + reserved);
+                let name = fit(&format!(" {title}"), room);
+                used += display_width(&name);
+                spans.push(Span::styled(name, name_style));
+                // A narrow window has no room to spare: the subtitle goes first, and the way
+                // back stays.
+                if !self.narrow
+                    && let Some(subtitle) = chat_subtitle(chat)
+                {
+                    let room = width.saturating_sub(used + 1 + reserved);
+                    let subtitle = fit(&format!(" · {subtitle}"), room);
+                    used += display_width(&subtitle);
+                    spans.push(Span::styled(subtitle, self.muted()));
+                }
+            }
+            // With no chat the pane still has a title, so its focus shows.
+            None => {
+                let mut title = " Conversation".to_owned();
+                if self.narrow {
+                    title.push_str(NARROW_HINT);
+                }
+                used += display_width(&title);
+                spans.push(Span::styled(title, name_style));
+            }
+        }
+        if self.narrow && self.model.selected_chat().is_some() {
+            let room = width.saturating_sub(used + 1);
+            let suffix = fit(NARROW_HINT, room);
+            used += display_width(&suffix);
+            spans.push(Span::styled(suffix, self.muted()));
+        }
+        spans.push(Span::styled(
+            "─".repeat(width.saturating_sub(used)),
+            self.line_style(),
+        ));
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     /// A pane's header: its title on the header rule. The focused pane's title is bold, the
@@ -1334,8 +1502,12 @@ impl App {
             Block::new().style(Style::default().bg(rgb(self.palette.surface_chrome()))),
             area,
         );
-        let [rule, rows] =
-            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        let [rule, bar, rows] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(0),
+        ])
+        .areas(area);
         let listed = self.listed();
         let mut title = if self.filter == Filter::All {
             format!("Chats ({})", self.chats().len())
@@ -1346,6 +1518,7 @@ impl App {
             title.push_str(" · Tab");
         }
         self.draw_rule_title(frame, rule, title, self.pane == Pane::Chats);
+        self.draw_filter_bar(frame, bar);
         // Less the gutter: the bar, the dot and a space.
         let width = usize::from(area.width.saturating_sub(3));
         let highlighted = self.model.chat_list().highlighted();
@@ -1359,6 +1532,7 @@ impl App {
                     width,
                     self.utc_offset,
                     highlighted == Some(index),
+                    self.narrow,
                 )
             })
             .collect();
@@ -1381,35 +1555,80 @@ impl App {
                 rows,
             );
         }
-        // Only the pane with the keys fills its selection; the other keeps the bar (R5).
-        let filled = self.pane == Pane::Chats;
-        let list = List::new(items).highlight_style(if filled {
-            Style::default().bg(rgb(self.palette.surface_active()))
-        } else {
-            Style::default()
-        });
+        let list = List::new(items);
         // The list's state is the position on screen, not the model's index.
         let position = highlighted.and_then(|index| listed.iter().position(|&i| i == index));
         self.list.select(position);
         frame.render_stateful_widget(list, rows, &mut self.list);
+        // The avatar and the pill are drawn again over the open chat's fill, which would take
+        // their backgrounds.
+        if let Some(position) = position
+            && position >= self.list.offset()
+        {
+            let first =
+                rows.y + u16::try_from(position - self.list.offset()).unwrap_or(0) * CHAT_ROWS;
+            let row = first + 1;
+            let chat = &self.chats()[listed[position]];
+            paint_avatar(
+                frame.buffer_mut(),
+                Rect { y: first, ..rows },
+                &plain(&chat_title(chat)),
+                &self.palette,
+            );
+            let pill = unread_pill(chat.unread);
+            if !pill.is_empty() && row < rows.bottom() {
+                let width = usize::from(area.width.saturating_sub(3));
+                let x =
+                    rows.x + u16::try_from(width.saturating_sub(display_width(&pill))).unwrap_or(0);
+                frame.buffer_mut().set_stringn(
+                    x,
+                    row,
+                    &pill,
+                    PILL,
+                    Style::default()
+                        .fg(rgb(self.palette.accent_on()))
+                        .bg(rgb(self.palette.accent())),
+                );
+            }
+        }
         self.map.chat_rows = rows;
         self.map.chat_offset = self.list.offset();
         self.map.chat_indices = listed;
     }
 
-    fn draw_messages(&mut self, frame: &mut Frame, area: Rect) {
-        let mut title = self
-            .model
-            .selected_chat()
-            .map(|chat| plain(&chat_title(chat)))
-            // With no chat the pane still has a title, so its focus shows.
-            .unwrap_or_else(|| "Conversation".to_owned());
-        if self.narrow {
-            title.push_str(" · Tab");
+    /// The list's filter bar: All, Unread and Archived, the one in force a filled accent chip
+    /// and the others muted. While the list is searched the bar is the search field instead.
+    fn draw_filter_bar(&self, frame: &mut Frame, area: Rect) {
+        if area.is_empty() {
+            return;
         }
+        let width = usize::from(area.width);
+        let mut spans = Vec::new();
+        if self.typing || !self.query.is_empty() {
+            let cursor = if self.typing { "▏" } else { "" };
+            let field = fit(&format!("search: {}{cursor}", self.query), width);
+            spans.push(Span::styled(field, self.muted()));
+        } else {
+            for filter in Filter::EACH {
+                // The filter in force is a filled chip, like the unread pill.
+                let style = if filter == self.filter {
+                    Style::default()
+                        .fg(rgb(self.palette.accent_on()))
+                        .bg(rgb(self.palette.accent()))
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    self.muted()
+                };
+                spans.push(Span::styled(format!(" {} ", filter.name()), style));
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    fn draw_messages(&mut self, frame: &mut Frame, area: Rect) {
         let [rule, body] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-        self.draw_rule_title(frame, rule, title, self.pane != Pane::Chats);
+        self.draw_conversation_header(frame, rule);
         // A free column on the right, as in the list.
         let inner = Rect {
             width: body.width.saturating_sub(1),
@@ -1463,38 +1682,20 @@ impl App {
             let width = usize::from(area.width);
             let mut spans = Vec::new();
             let mut used = 0;
-            // The pane with the keys marks the composer's rule with the accent bar.
-            if self.pane == Pane::Compose {
-                spans.push(Span::styled(
-                    "▌",
-                    Style::default().fg(rgb(self.palette.accent())),
-                ));
-                used += 1;
-            }
+            // The pane with the keys draws the composer's hairline in the accent.
+            let hint = if self.pane == Pane::Compose {
+                Style::default().fg(rgb(self.palette.accent()))
+            } else {
+                self.line_style()
+            };
             if let Some(quoted) = quoted {
                 spans.push(Span::styled("─ ", self.line_style()));
                 used += 2 + display_width(&quoted);
                 spans.push(Span::styled(quoted, self.muted()));
             }
-            // What Enter does here, where it does it, while there is something to send and the
-            // room exists: a reply's quote can take the whole rule at a narrow width.
-            let candidate = "Enter sends · Alt-Enter newline ";
-            let sends = if draft.is_some()
-                && self.pane == Pane::Compose
-                && used + display_width(candidate) <= width
-            {
-                candidate
-            } else {
-                ""
-            };
-            let sends_width = display_width(sends);
-            spans.push(Span::styled(
-                "─".repeat(width.saturating_sub(used + sends_width)),
-                self.line_style(),
-            ));
-            if !sends.is_empty() {
-                spans.push(Span::styled(sends, self.muted()));
-            }
+            // The keys under the composer are said once, in the footer: the rule only carries
+            // the reply's quote.
+            spans.push(Span::styled("─".repeat(width.saturating_sub(used)), hint));
             frame.render_widget(
                 Paragraph::new(Line::from(spans)),
                 Rect {
@@ -1536,6 +1737,21 @@ impl App {
             frame.render_widget(Paragraph::new(hint), area);
             return;
         };
+        // Nothing written yet: the field says what to do (the keys are in the footer).
+        if self.pane == Pane::Compose && rows.len() == 1 && rows[0].is_empty() {
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("› ", self.muted()),
+                    Span::styled(
+                        "Write a message",
+                        Style::default().fg(rgb(self.palette.text_faint())),
+                    ),
+                ])),
+                area,
+            );
+            frame.set_cursor_position((area.x + 2, area.y));
+            return;
+        }
         // The rows shown: from the first, or scrolled so the cursor's row is the last one.
         let visible = usize::from(area.height);
         let top = (row + 1).saturating_sub(visible);
@@ -1566,8 +1782,6 @@ impl App {
         }
         if let Some(images) = self.images.as_mut() {
             images.resized(area.width);
-            let background = self.palette.surface();
-            images.backdrop([background.r, background.g, background.b]);
         }
         // Nothing to read is still a place: it says so and how to get out (R7).
         if self.model.selected_chat().is_none() {
@@ -1581,46 +1795,29 @@ impl App {
             self.map.message_area = area;
             return;
         }
-        let (lines, selected, owners, boxes) = self.conversation_lines(area.width);
+        let layout = self.conversation_layout(area.width);
+        let total = layout.rows.len();
         let visible = usize::from(area.height);
-        if let Some(start) = selected.filter(|_| self.reveal) {
-            // Scroll so the selected message's header is on screen.
-            let below = Paragraph::new(lines[start..].to_vec())
-                .wrap(Wrap { trim: false })
-                .line_count(area.width);
+        if let Some(start) = layout.selected.filter(|_| self.reveal) {
+            // Scroll so the selected message's first row is on screen.
+            let below = total.saturating_sub(start);
             self.scroll = self
                 .scroll
                 .clamp(below.saturating_sub(visible), below.saturating_sub(1));
         }
         self.reveal = false;
-        // How many rows each line wraps to, and which message each row belongs to (the mouse).
-        let heights: Vec<usize> = lines
-            .iter()
-            .map(|line| {
-                Paragraph::new(line.clone())
-                    .wrap(Wrap { trim: false })
-                    .line_count(area.width)
-            })
-            .collect();
-        let wrapped: Vec<Option<usize>> = heights
-            .iter()
-            .zip(&owners)
-            .flat_map(|(&rows, owner)| std::iter::repeat_n(*owner, rows))
-            .collect();
-        let paragraph = Paragraph::new(lines).wrap(Wrap { trim: false });
-        let total = paragraph.line_count(area.width);
         let top = total.saturating_sub(visible);
         self.scroll = self.scroll.min(top);
         self.map.message_area = area;
         self.map.message_rows = if total < visible {
             let mut rows = vec![None; visible - total];
-            rows.extend(wrapped);
+            rows.extend(layout.rows.iter().map(|row| row.owner));
             rows
         } else {
-            wrapped
-                .into_iter()
-                .skip(top - self.scroll)
+            layout.rows[top - self.scroll..]
+                .iter()
                 .take(visible)
+                .map(|row| row.owner)
                 .collect()
         };
         // The transcript row drawn on the area's first row (negative: a short one sits low).
@@ -1629,35 +1826,45 @@ impl App {
         } else {
             (top - self.scroll) as i64
         };
-        if total < visible {
-            // Newest at the bottom: a short conversation sits on the composer.
-            let area = Rect {
-                y: area.y + (visible - total) as u16,
-                height: total as u16,
-                ..area
-            };
-            frame.render_widget(paragraph, area);
-        } else {
-            let offset = u16::try_from(top - self.scroll).unwrap_or(u16::MAX);
-            frame.render_widget(paragraph.scroll((offset, 0)), area);
+        let first = first_row.max(0) as usize;
+        let last = (first_row + visible as i64).clamp(0, total as i64) as usize;
+        {
+            let buffer = frame.buffer_mut();
+            for (index, row) in layout.rows.iter().enumerate().take(last).skip(first) {
+                let y = area.y + (index as i64 - first_row) as u16;
+                // A bubble's background covers its whole block, padding included.
+                if let Some(background) = row.bubble {
+                    let block = Rect {
+                        x: area.x + row.x.saturating_sub(1),
+                        y,
+                        width: row.width + 2,
+                        height: 1,
+                    };
+                    buffer.set_style(block, Style::default().bg(background));
+                }
+                if let Some((ear_x, ear, colour)) = row.ear {
+                    let glyph = match ear {
+                        Ear::Incoming => "▐",
+                        Ear::Outgoing => "▌",
+                    };
+                    buffer.set_stringn(area.x + ear_x, y, glyph, 1, Style::default().fg(colour));
+                }
+                buffer.set_line(area.x + row.x, y, &row.line, row.width);
+            }
         }
-        // The selected message's rows, the whole width, on the active surface: its picture box
-        // and reactions included (a picture draws its own cells over the box after this).
+        // The selected message is marked by one accent bar on the pane's left margin, over the
+        // rows it owns: a fill would erase its slab's tint and its ear.
         if let Some(cursor) = self
             .model
             .transcript()
             .cursor()
             .filter(|_| self.pane != Pane::Chats)
         {
-            let active = Style::default().bg(rgb(self.palette.surface_active()));
+            let bar = Style::default().fg(rgb(self.palette.accent()));
+            let buffer = frame.buffer_mut();
             for (y, owner) in self.map.message_rows.iter().enumerate() {
                 if *owner == Some(cursor) {
-                    let row = Rect {
-                        y: area.y + y as u16,
-                        height: 1,
-                        ..area
-                    };
-                    frame.buffer_mut().set_style(row, active);
+                    buffer.set_stringn(area.x, area.y + y as u16, "▌", 1, bar);
                 }
             }
         }
@@ -1672,7 +1879,7 @@ impl App {
                 .buffer_mut()
                 .set_string(gutter, area.y + area.height - 1, "▼", muted);
         }
-        self.draw_pictures(frame, area, &boxes, &heights, first_row);
+        self.draw_pictures(frame, area, &layout.boxes, first_row);
     }
 
     /// Draw each picture box that is at least partly on screen, over the blank rows reserved for
@@ -1686,12 +1893,18 @@ impl App {
         frame: &mut Frame,
         area: Rect,
         boxes: &[PictureBox],
-        heights: &[usize],
         first_row: i64,
     ) {
         let label_style = self.muted();
         let Some(jid) = self.model.selected_jid().map(str::to_owned) else {
             return;
+        };
+        // The colours a picture's transparent pixels take, per side.
+        let incoming = self.palette.surface_chrome();
+        let outgoing = self.palette.bubble_outgoing();
+        let background = |from_me: bool| {
+            let colour = if from_me { outgoing } else { incoming };
+            [colour.r, colour.g, colour.b]
         };
         let Some(images) = self.images.as_mut() else {
             return;
@@ -1701,6 +1914,9 @@ impl App {
         // A full picture with no box yet (its message states no size) is decoded to learn its
         // size; one with a box is encoded only while the box is on screen (below).
         for (chat, id, path) in transcript.full_pictures() {
+            let Some(message) = messages.iter().find(|m| m.id == id) else {
+                continue;
+            };
             let boxed = boxes
                 .iter()
                 .any(|b| messages.get(b.index).is_some_and(|m| m.id == id));
@@ -1712,38 +1928,48 @@ impl App {
                 id: id.to_owned(),
                 variant: images::Variant::Full,
                 columns: area.width,
+                background: background(message.from_me),
             };
             if images.wants(&key) {
                 images.request(key, images::Origin::File(path.to_owned()), None);
             }
         }
-        let mut starts = Vec::with_capacity(heights.len());
-        let mut row = 0;
-        for height in heights {
-            starts.push(row);
-            row += height;
-        }
         let visible = i64::from(area.height);
+        // A picture that comes into view is fetched once, unasked: the thumbnail in the box is
+        // WhatsApp's small copy, and only the full picture is sharp. A fetch that fails is not
+        // retried by itself (the manual `o` stays available); nothing is requested twice.
+        let mut wanted: Vec<String> = Vec::new();
         for picture in boxes {
             let Some(message) = messages.get(picture.index) else {
                 continue;
             };
-            let y = starts.get(picture.line).map_or(0, |&s| s as i64) - first_row;
+            let y = picture.line as i64 - first_row;
             if y >= visible || y + i64::from(picture.size.height) <= 0 {
                 continue;
+            }
+            let id = message.id.clone();
+            let seen = (jid.clone(), id.clone());
+            if transcript.full_picture(&jid, &id).is_none()
+                && !transcript.is_showing(&id)
+                && !self.pictures_wanted.contains(&seen)
+            {
+                self.pictures_wanted.insert(seen);
+                wanted.push(id);
             }
             let Ok(position_y) = i16::try_from(y) else {
                 continue;
             };
             let position = SignedPosition {
-                x: 0,
+                x: i16::try_from(picture.x).unwrap_or(0),
                 y: position_y,
             };
+            let background = background(message.from_me);
             let key = |variant| images::Key {
                 chat: jid.clone(),
                 id: message.id.clone(),
                 variant,
                 columns: area.width,
+                background,
             };
             if let Some(protocol) = images.get(&key(images::Variant::Full)) {
                 frame.render_widget(SlicedImage::new(protocol, position), area);
@@ -1776,13 +2002,14 @@ impl App {
                 }
                 continue;
             }
-            // Without a thumbnail the box stays empty until `o` fetches the picture: the caption
-            // above already says `[sticker]` or `[image]`. One that does not decode keeps a label.
-            if message.thumb.is_some() && (0..visible).contains(&y) {
+            // Nothing to draw inside the box yet (no thumbnail, or one that does not decode):
+            // the box says what it is, at its own first row.
+            if (0..visible).contains(&y) {
                 let label = Rect {
+                    x: area.x + picture.x,
                     y: area.y + y as u16,
+                    width: picture.size.width,
                     height: 1,
-                    ..area
                 };
                 frame.render_widget(
                     Paragraph::new(format!("[{}]", plain(&message.kind))).style(label_style),
@@ -1790,6 +2017,52 @@ impl App {
                 );
             }
         }
+        // A picture message can arrive with no stated size (a sticker often does): it gets no box,
+        // so its file is asked for here and the decoded size gives it one. Only the messages on
+        // screen, once each, and never after a failure.
+        let mut shown: Vec<usize> = self.map.message_rows.iter().flatten().copied().collect();
+        shown.sort_unstable();
+        shown.dedup();
+        for index in shown {
+            if boxes.iter().any(|picture| picture.index == index) {
+                continue;
+            }
+            let Some(message) = messages.get(index) else {
+                continue;
+            };
+            if !is_picture(&message.kind) || message.id.is_empty() {
+                continue;
+            }
+            let id = message.id.clone();
+            let seen = (jid.clone(), id.clone());
+            if transcript.full_picture(&jid, &id).is_none()
+                && !transcript.is_showing(&id)
+                && !self.pictures_wanted.contains(&seen)
+            {
+                self.pictures_wanted.insert(seen);
+                wanted.push(id);
+            }
+        }
+        for id in wanted {
+            // The model has to know, or the daemon's answer is not kept for the box.
+            if self.model.show_picture(&jid, &id) {
+                self.pending
+                    .push(Action::Request(ClientFrame::download_media(
+                        jid.clone(),
+                        id,
+                    )));
+            }
+        }
+    }
+
+    /// The background a message's bubble is drawn on: what a picture's transparent pixels take.
+    fn bubble_background(&self, message: &Message) -> [u8; 3] {
+        let colour = if message.from_me {
+            self.palette.bubble_outgoing()
+        } else {
+            self.palette.surface_chrome()
+        };
+        [colour.r, colour.g, colour.b]
     }
 
     /// The box a picture message gets in a transcript `columns` wide, when pictures are drawn: from
@@ -1825,31 +2098,38 @@ impl App {
                     id: message.id.clone(),
                     variant: images::Variant::Full,
                     columns,
+                    background: self.bubble_background(message),
                 })
             })
     }
 
     /// The selected chat's conversation, oldest first, laid out `columns` wide; before it is
-    /// loaded, its last message. Also the index of the selected message's first line, for each
-    /// line the index of the loaded message it belongs to, and the picture boxes (blank lines the
-    /// pictures are drawn over).
+    /// loaded, its last message. Each message is a bubble: incoming ones start at the pane's
+    /// first column, outgoing ones end at its last usable one (the free last column is the scroll
+    /// gutter), and none is wider than [`BUBBLE_SHARE`] percent of the pane. The time sits inside,
+    /// bottom right, in `text_faint`; nothing repeats the author, because whose a message is the
+    /// side says.
     ///
-    /// One line per message (plan §9.4): the author in bold and the time muted, then the text. A
-    /// day starts with its label in muted caps, after a blank line; an author's run of messages has
-    /// no blank line in it, and the next author starts after one.
-    fn conversation_lines(&self, columns: u16) -> ConversationLines {
+    /// The rows are laid out here, one per screen row, so the scroll, the selection and the mouse
+    /// use the same geometry the bubbles are drawn with (no `Paragraph` wraps them a second time).
+    /// A day starts with its label in muted caps, after a blank row; every bubble after one ends
+    /// after a blank row of its own.
+    fn conversation_layout(&self, columns: u16) -> ConversationLayout {
+        let hint = |text: &str| ConversationLayout {
+            rows: vec![Row::plain(
+                Line::from(Span::styled(text.to_owned(), self.muted())),
+                columns,
+            )],
+            selected: None,
+            boxes: Vec::new(),
+        };
         let Some(chat) = self.model.selected_chat() else {
-            let hint = if self.chats().is_empty() {
+            let text = if self.chats().is_empty() {
                 "No chats yet"
             } else {
                 "No chat open · Enter opens the selected one"
             };
-            return (
-                vec![Line::from(Span::styled(hint, self.muted()))],
-                None,
-                vec![None],
-                Vec::new(),
-            );
+            return hint(text);
         };
         let loaded = self.model.transcript().conversation(&chat.jid);
         let messages: Vec<&Message> = match loaded {
@@ -1857,167 +2137,449 @@ impl App {
             None => chat.last_message.iter().collect(),
         };
         if messages.is_empty() {
-            return (
-                vec![Line::from(Span::styled(
-                    "No messages yet · i writes the first one",
-                    self.muted(),
-                ))],
-                None,
-                vec![None],
-                Vec::new(),
-            );
+            return hint("No messages yet · i writes the first one");
         }
         let body = Style::default().fg(rgb(self.palette.text()));
         let name = body.add_modifier(Modifier::BOLD);
-        let mut lines = Vec::with_capacity(messages.len() * 2 + 1);
-        // The top of the conversation is a place too: it says so when it is on screen, which
-        // is where a short transcript leaves the eye with nothing to hold on to (R7).
-        lines.push(Line::from(Span::styled(
-            "Beginning of conversation",
-            self.muted(),
-        )));
-        let mut owners = Vec::with_capacity(messages.len() * 2 + 1);
-        let mut selected = None;
-        let mut boxes = Vec::new();
-        // The day whose label was drawn last, and the author of the message before.
-        let mut labelled: Option<time::Date> = None;
-        let mut previous: Option<String> = None;
+        // A group's sender on the first message of a run: the accent, bold, never a colour of
+        // its own (the palette has no per-person hues).
+        let sender = Style::default()
+            .fg(rgb(self.palette.accent()))
+            .add_modifier(Modifier::BOLD);
+        // The last column is the scroll gutter, then one margin on each side: a slab uses the
+        // columns in between and its ear sits on the margin.
+        let usable = columns.saturating_sub(1);
+        let band = usable.saturating_sub(2);
+        let share = (u32::from(band) * BUBBLE_SHARE / 100) as u16;
+        let max_width = share.max(BUBBLE_MIN.min(band)).min(band);
+        let inner_max = usize::from(max_width.saturating_sub(3));
+        // The text keeps the share; the time and the state may take a slab up to the band.
+        let ceiling = usize::from(band).saturating_sub(3).max(3);
+        let incoming = rgb(self.palette.surface_chrome());
+        let outgoing = rgb(self.palette.bubble_outgoing());
+        let ear_incoming = rgb(self.palette.bubble_ear_incoming());
+        let ear_outgoing = rgb(self.palette.bubble_ear_outgoing());
+
+        // What a message needs, before the run it belongs to fixes the width they all share.
+        struct Prepared {
+            index: usize,
+            chosen: bool,
+            who: String,
+            day: Option<time::Date>,
+            content: Vec<(String, Part)>,
+            quote: Option<(Option<String>, String)>,
+            picture_at: usize,
+            footer: Vec<Span<'static>>,
+            footer_width: usize,
+            inline: bool,
+            needs: usize,
+            picture: Option<ratatui::layout::Size>,
+            reactions: Vec<Span<'static>>,
+        }
+        let mut prepared: Vec<Prepared> = Vec::with_capacity(messages.len());
         for (index, message) in messages.iter().enumerate() {
-            let owner = loaded.is_some().then_some(index);
             let chosen = loaded.is_some() && self.model.transcript().cursor() == Some(index);
             let who = author(Some(chat), message);
-            // A message with no readable time (a send not answered yet) stays in its day.
-            match local_day(message, self.utc_offset).filter(|day| labelled != Some(*day)) {
-                Some(day) => {
-                    // A blank line before a day, except right under the start marker.
-                    if lines.len() > 1 {
-                        lines.push(Line::default());
-                    }
-                    lines.push(Line::from(Span::styled(day_label(day), self.muted())));
-                    labelled = Some(day);
-                }
-                None if previous.as_ref().is_some_and(|before| *before != who) => {
-                    lines.push(Line::default());
-                }
-                None => {}
-            }
-            owners.resize(lines.len(), None);
-            previous = Some(who.clone());
-            let first = lines.len();
-            if chosen {
-                selected = Some(first);
-            }
-            let mut meta = format!(
-                " · {}",
-                meta_of(
-                    message,
-                    self.utc_offset,
-                    self.model.transcript().is_unconfirmed(message)
-                )
-            );
-            if self.model.transcript().is_sending(message) {
-                meta.push_str(" · sending");
-            }
+            let day = local_day(message, self.utc_offset);
+            // A run starts with a new author or a new day.
+            let first_of_run = prepared
+                .last()
+                .is_none_or(|before: &Prepared| before.who != who || before.day != day);
+            // The picture, when the terminal draws them and the message states a size (or its
+            // full picture gave one): it sits inside the slab, above the caption, and the
+            // `[kind]` label is then not written at all.
+            let box_size = loaded
+                .is_some()
+                .then(|| self.picture_box(&chat.jid, message, inner_max as u16))
+                .flatten();
+            // An animated sticker shows its first frame; the marker says it moves. With the
+            // picture drawn it is the caption's own marker; without one the `[kind]` label
+            // carries it.
+            let marker = message.kind == "sticker" && message.animated;
             let text = if message.kind == "text" {
                 message.text.clone()
-            } else {
-                // An animated sticker shows its first frame; the marker says it moves.
-                let marker = if message.kind == "sticker" && message.animated {
-                    " ▶"
+            } else if box_size.is_some() {
+                if marker && message.text.is_empty() {
+                    "▶".to_owned()
+                } else if marker {
+                    format!("▶ {}", message.text)
                 } else {
-                    ""
-                };
-                format!("[{}]{marker} {}", message.kind, message.text)
+                    message.text.clone()
+                }
+            } else {
+                format!(
+                    "[{}]{} {}",
+                    message.kind,
+                    if marker { " ▶" } else { "" },
+                    message.text
+                )
             };
-            let bar = if chosen { "▌ " } else { "" };
-            // A reply's quote goes between its author and time and its text, so the author and
-            // time get a row of their own there; otherwise the text's first line follows them.
+            // A caption being fetched says so on its last row, never wrapping it to more rows
+            // (the picture above never moves).
+            let text = if message.kind != "text" && self.fetching(&chat.jid, message, columns) {
+                downloading(&text, inner_max as u16)
+            } else {
+                text
+            };
+            // The slab's rows: the sender's name on the first message of a run in a group, the
+            // quote where it replies to one, then the picture and the caption.
+            let mut content: Vec<(String, Part)> = Vec::new();
+            if first_of_run
+                && !message.from_me
+                && is_group(&chat.jid)
+                && let Some(sender) = message.sender.as_deref().filter(|s| !s.is_empty())
+            {
+                content.extend(
+                    wrap_text(&first_name(&plain(sender)), inner_max)
+                        .into_iter()
+                        .map(|row| (row, Part::Name)),
+                );
+            }
+            // The quote is one inset row: the start of what was said, and who said it when that
+            // is not obvious (a group, or one of mine) — a 1:1 message needs no name.
             let quote = message.reply_to.as_ref().map(|quoted_id| {
                 match quoted(messages.iter().copied(), quoted_id) {
-                    Some(original) => snippet(original),
-                    None => "(a message not loaded)".to_owned(),
+                    Some(original) => (
+                        (original.from_me || (is_group(&chat.jid) && original.sender.is_some()))
+                            .then(|| author(Some(chat), original)),
+                        snippet(original),
+                    ),
+                    None => (None, "(a message not loaded)".to_owned()),
                 }
             });
-            let head = if quote.is_some() {
-                format!("{bar}{who}{meta}")
+            // Where the picture goes: after the name and the quote, before the caption.
+            let picture_at = content.len();
+            // A caption that is only the picture's own kind has nothing left to say once the
+            // picture is there; a fallback label stays caption enough.
+            let footer = self.bubble_footer(message, chosen);
+            let footer_width: usize = footer.iter().map(Span::width).sum();
+            let mut caption: Vec<(String, Part)> = if box_size.is_some() && text.trim().is_empty() {
+                Vec::new()
             } else {
-                format!("{bar}{who}{meta}  ")
+                text.lines()
+                    .flat_map(|line| wrap_text(&plain(line), inner_max))
+                    .map(|row| (row, Part::Text))
+                    .collect()
             };
-            // The text's further lines get rows of their own. A caption being fetched says so
-            // on its last row, never wrapping it to more rows (the box under it never moves).
-            let mut rows: Vec<String> = text.lines().map(plain).collect();
-            if rows.is_empty() {
-                rows.push(String::new());
-            }
-            if quote.is_some() {
-                rows.insert(0, head.clone());
-            } else {
-                rows[0].insert_str(0, &head);
-            }
-            if message.kind != "text" && self.fetching(&chat.jid, message, columns) {
-                let last = rows.len() - 1;
-                rows[last] = downloading(&rows[last], columns);
-            }
-            let meta_style = match message.state {
-                Some(MessageState::NotSent) => Style::default().fg(rgb(self.palette.warning())),
-                _ => self.muted(),
-            };
-            let mut rows = rows.into_iter();
-            let line = rows.next().unwrap_or_default();
-            let mut spans = Vec::new();
-            if chosen {
-                spans.push(Span::styled(
-                    "▌",
-                    Style::default().fg(rgb(self.palette.accent())),
-                ));
-                spans.push(Span::raw(" "));
-            }
-            match line.strip_prefix(head.as_str()) {
-                Some(shown) => {
-                    spans.push(Span::styled(who.clone(), name));
-                    spans.push(Span::styled(meta, meta_style));
-                    if quote.is_none() {
-                        spans.push(Span::raw("  "));
-                        spans.push(Span::styled(shown.to_owned(), body));
-                    }
+            // The time keeps a slot at the right of the last row. A last row with no room for it
+            // gives its last word a row of its own, so no word is ever cut and the time still sits
+            // inside the slab; a word too long for that leaves the time on a row of its own.
+            let mut inline = !caption.is_empty();
+            for _ in 0..4 {
+                if !inline {
+                    break;
                 }
-                // Cut into the author and time by a very narrow pane: drawn as one muted run.
-                None => spans.push(Span::styled(
-                    line.strip_prefix(bar).unwrap_or(&line).to_owned(),
-                    meta_style,
-                )),
+                let Some((last, part)) = caption.last() else {
+                    inline = false;
+                    break;
+                };
+                let width = display_width(last);
+                if width + 1 + footer_width <= ceiling {
+                    break;
+                }
+                let Some((head, tail)) = last.rsplit_once(' ') else {
+                    inline = false;
+                    break;
+                };
+                if head.is_empty() || display_width(tail) + 1 + footer_width > ceiling {
+                    inline = false;
+                    break;
+                }
+                let (head, tail, part) = (head.to_owned(), tail.to_owned(), *part);
+                *caption.last_mut().expect("a last row") = (head, part);
+                caption.push((tail, part));
             }
-            lines.push(Line::from(spans));
-            if let Some(quote) = quote {
-                lines.push(Line::from(Span::styled(format!("> {quote}"), self.muted())));
+            content.extend(caption);
+            let caption_width = content
+                .iter()
+                .map(|(row, _)| display_width(row))
+                .max()
+                .unwrap_or(0);
+            let last_width = content
+                .iter()
+                .rev()
+                .find(|(_, part)| *part == Part::Text)
+                .map_or(0, |(row, _)| display_width(row));
+            let box_width = box_size.map_or(0, |size| usize::from(size.width));
+            // The quote's inset row is part of the slab too: it may be the longest line.
+            let quote_width = quote.as_ref().map_or(0, |(who, said)| {
+                2 + who.as_ref().map_or(0, |who| display_width(who) + 2) + display_width(said)
+            });
+            let needs = if inline {
+                caption_width.max(last_width + 1 + footer_width)
+            } else {
+                caption_width.max(footer_width)
             }
-            lines.extend(rows.map(|row| Line::from(Span::styled(row, body))));
-            if let Some(size) = loaded
-                .is_some()
-                .then(|| self.picture_box(&chat.jid, message, columns))
-                .flatten()
-            {
-                boxes.push(PictureBox {
-                    line: lines.len(),
-                    size,
-                    index,
-                });
-                lines.extend(std::iter::repeat_n(
-                    Line::default(),
-                    usize::from(size.height),
-                ));
-            }
-            if !message.reactions.is_empty() {
-                let mut spans = vec![Span::raw("  ")];
-                for reaction in &message.reactions {
+            .max(box_width)
+            .max(quote_width);
+            let reactions = message
+                .reactions
+                .iter()
+                .map(|reaction| {
                     let style = if reaction.from_me { name } else { body };
-                    spans.push(Span::styled(format!("{} ", plain(&reaction.emoji)), style));
-                }
-                lines.push(Line::from(spans));
-            }
-            owners.resize(lines.len(), owner);
+                    // A chip: the hover tone behind the emoji, under the slab.
+                    Span::styled(
+                        format!("{} ", plain(&reaction.emoji)),
+                        style.bg(rgb(self.palette.surface_hover())),
+                    )
+                })
+                .collect();
+            prepared.push(Prepared {
+                index,
+                chosen,
+                who,
+                day,
+                content,
+                quote,
+                picture_at,
+                footer,
+                footer_width,
+                inline,
+                needs,
+                picture: box_size,
+                reactions,
+            });
         }
-        (lines, selected, owners, boxes)
+
+        // The unread divider: how many messages were new when the chat was opened (the count
+        // the daemon reported then, not the list's now), and the message it goes above — the
+        // oldest of the newest `unread` received messages.
+        let unread = loaded.map_or(0, |_| self.model.transcript().unread_at_open(&chat.jid));
+        let received: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| !message.from_me)
+            .map(|(index, _)| index)
+            .collect();
+        let unread = unread.min(received.len() as u32);
+        let divider_at = (unread > 0).then(|| received[received.len() - unread as usize]);
+        let mut rows = Vec::with_capacity(messages.len() * 3 + 1);
+        // The top of the conversation is a place too: it says so when it is on screen, which
+        // is where a short transcript leaves the eye with nothing to hold on to (R7).
+        rows.push(Row::plain(
+            Line::from(Span::styled("Beginning of conversation", self.muted())),
+            columns,
+        ));
+        let mut selected = None;
+        let mut boxes = Vec::new();
+        // The day whose separator was drawn last, and whether a run was drawn already.
+        let mut labelled: Option<time::Date> = None;
+        let mut started = false;
+        let mut start = 0;
+        while start < prepared.len() {
+            // A run: the messages of one author inside one day. They share one width.
+            let mut end = start + 1;
+            while end < prepared.len()
+                && prepared[end].who == prepared[start].who
+                && prepared[end].day == prepared[start].day
+            {
+                end += 1;
+            }
+            let run = &prepared[start..end];
+            // A run shares one width. The time and state may take a slab past the share it keeps
+            // for its text (never past the band), so a state word is never cut in half.
+            let inner = run
+                .iter()
+                .map(|message| message.needs)
+                .max()
+                .unwrap_or(0)
+                .max(
+                    run.iter()
+                        .map(|message| message.footer_width)
+                        .max()
+                        .unwrap_or(0),
+                )
+                .clamp(3, ceiling);
+            let room = u16::try_from(inner).unwrap_or(0);
+            // A new day gets a centred separator, after a blank row; the next author after a
+            // blank row; one author's run follows itself with no gap at all.
+            match run[0].day.filter(|day| labelled != Some(*day)) {
+                Some(day) => {
+                    if started {
+                        rows.push(Row::plain(Line::default(), columns));
+                    }
+                    rows.push(separator_row(
+                        columns,
+                        day_label(day, self.today),
+                        self.muted(),
+                        Style::default().fg(rgb(self.palette.border())),
+                    ));
+                    labelled = Some(day);
+                }
+                None if started => rows.push(Row::plain(Line::default(), columns)),
+                None => {}
+            }
+            started = true;
+            for message in run {
+                let source = messages[message.index];
+                let owner = loaded.is_some().then_some(message.index);
+                // The unread divider sits above the oldest new message, inside the run when the
+                // run is where the new messages start.
+                if divider_at == Some(message.index) {
+                    let count = unread;
+                    rows.push(separator_row(
+                        columns,
+                        if count == 1 {
+                            "1 unread message".to_owned()
+                        } else {
+                            format!("{count} unread messages")
+                        },
+                        Style::default().fg(rgb(self.palette.accent())),
+                        Style::default().fg(rgb(self.palette.border())),
+                    ));
+                }
+                if message.chosen {
+                    selected = Some(rows.len());
+                }
+                let background = if source.from_me { outgoing } else { incoming };
+                let tone = if source.from_me {
+                    self.palette.bubble_outgoing()
+                } else {
+                    self.palette.surface_chrome()
+                };
+                let (ear_side, ear_colour) = if source.from_me {
+                    (Ear::Outgoing, ear_outgoing)
+                } else {
+                    (Ear::Incoming, ear_incoming)
+                };
+                // The ear sits on the margin (the band's left for theirs, its right for ours) and
+                // runs the whole height of the message; the slab starts one cell inside it.
+                let ear_x = if source.from_me { band } else { 1 };
+                let text_x = if source.from_me {
+                    band.saturating_sub(room).saturating_sub(1)
+                } else {
+                    3
+                };
+                let line = |text: &str, part: Part| {
+                    Line::from(match part {
+                        Part::Name => vec![Span::styled(text.to_owned(), sender)],
+                        Part::Text => vec![Span::styled(text.to_owned(), body)],
+                    })
+                };
+                // Each row with its own background: the slab's tone, but the quote's inset.
+                let mut lines: Vec<(Line<'static>, Color)> = Vec::new();
+                for (text, part) in &message.content[..message.picture_at] {
+                    lines.push((line(text, *part), background));
+                }
+                // The quote: one inset row, a bar and the quoted author in the accent, then the
+                // start of what they said in the muted role, clamped with `…`.
+                if let Some((who, said)) = &message.quote {
+                    let accent = Style::default().fg(rgb(self.palette.accent()));
+                    let room_left = usize::from(room).saturating_sub(2);
+                    // A name never takes more than half the row: the quoted text matters more.
+                    let head = who
+                        .as_ref()
+                        .map(|who| fit(&format!("{who}:"), room_left / 2))
+                        .unwrap_or_default();
+                    let rest = room_left
+                        .saturating_sub(display_width(&head) + usize::from(!head.is_empty()));
+                    let body = fit(said, rest);
+                    let mut spans = vec![Span::styled("▌ ", accent)];
+                    if !head.is_empty() {
+                        spans.push(Span::styled(head, accent.add_modifier(Modifier::BOLD)));
+                        spans.push(Span::raw(" "));
+                    }
+                    spans.push(Span::styled(body, self.muted()));
+                    lines.push((Line::from(spans), rgb(self.palette.quote_inset(tone))));
+                }
+                // The picture's own rows, ready for the image to be drawn over them.
+                let picture_line = rows.len() + lines.len();
+                if let Some(size) = message.picture {
+                    lines.extend((0..size.height).map(|_| (Line::default(), background)));
+                }
+                let last = message.content.len().saturating_sub(1);
+                for (index, (text, part)) in
+                    message.content.iter().enumerate().skip(message.picture_at)
+                {
+                    let mut spans = line(text, *part).spans;
+                    if message.inline && index == last {
+                        let pad = usize::from(room)
+                            .saturating_sub(display_width(text) + message.footer_width);
+                        spans.push(Span::raw(" ".repeat(pad)));
+                        spans.extend(message.footer.iter().cloned());
+                    }
+                    lines.push((Line::from(spans), background));
+                }
+                if !message.inline {
+                    let pad = usize::from(room).saturating_sub(message.footer_width);
+                    let mut spans = vec![Span::raw(" ".repeat(pad))];
+                    spans.extend(message.footer.iter().cloned());
+                    lines.push((Line::from(spans), background));
+                }
+                for (line, tint) in lines {
+                    rows.push(Row {
+                        line,
+                        x: text_x,
+                        width: room,
+                        bubble: Some(tint),
+                        ear: Some((ear_x, ear_side, ear_colour)),
+                        owner,
+                    });
+                }
+                if let Some(size) = message.picture {
+                    boxes.push(PictureBox {
+                        line: picture_line,
+                        size,
+                        index: message.index,
+                        x: text_x,
+                    });
+                }
+                // Reactions sit under the slab, as a chip row of their own.
+                if !message.reactions.is_empty() {
+                    let width: usize = message.reactions.iter().map(Span::width).sum();
+                    let pad = usize::from(room).saturating_sub(width);
+                    let mut spans = Vec::new();
+                    if source.from_me {
+                        spans.push(Span::raw(" ".repeat(pad)));
+                    }
+                    spans.extend(message.reactions.iter().cloned());
+                    if !source.from_me {
+                        spans.push(Span::raw(" ".repeat(pad)));
+                    }
+                    rows.push(Row {
+                        line: Line::from(spans),
+                        x: text_x,
+                        width: room,
+                        bubble: None,
+                        ear: None,
+                        owner,
+                    });
+                }
+            }
+            start = end;
+        }
+        ConversationLayout {
+            rows,
+            selected,
+            boxes,
+        }
+    }
+
+    /// The time inside a bubble, in the faint role, carrying the state where the ticks would go:
+    /// a small clock while the send is queued and a `danger` `!` when it was not sent. Delivery
+    /// and read receipts are not in the protocol, so they are never invented.
+    fn bubble_footer(&self, message: &Message, chosen: bool) -> Vec<Span<'static>> {
+        // The open message's time steps up from the faint role, so its row reads as selected.
+        let faint = if chosen {
+            Style::default().fg(rgb(self.palette.text()))
+        } else {
+            Style::default().fg(rgb(self.palette.text_faint()))
+        };
+        let unconfirmed = self.model.transcript().is_unconfirmed(message);
+        let mut meta = meta_of(message, self.utc_offset, unconfirmed);
+        if self.model.transcript().is_sending(message) {
+            meta.push_str(" · sending");
+        }
+        let mut spans = vec![Span::styled(meta, faint)];
+        match message.state {
+            Some(MessageState::Queued) => spans.push(Span::styled(format!(" {CLOCK}"), faint)),
+            Some(MessageState::NotSent) if !unconfirmed => spans.push(Span::styled(
+                format!(" {NOT_SENT}"),
+                Style::default().fg(rgb(self.palette.danger())),
+            )),
+            _ => {}
+        }
+        spans
     }
 
     /// Meta text: the `text_muted` role, the only tone with a 4.5:1 floor on both surfaces.
@@ -2033,21 +2595,68 @@ impl App {
     }
 }
 
-/// The transcript as laid out: its lines, the selected message's header line, each line's
-/// message, and the picture boxes.
-type ConversationLines = (
-    Vec<Line<'static>>,
-    Option<usize>,
-    Vec<Option<usize>>,
-    Vec<PictureBox>,
-);
+/// The transcript as laid out: one [`Row`] per screen row, the selected message's first row, and
+/// the picture boxes.
+struct ConversationLayout {
+    rows: Vec<Row>,
+    selected: Option<usize>,
+    boxes: Vec<PictureBox>,
+}
+
+/// One row of the transcript: what it draws, where its bubble sits, and whose message it is.
+struct Row {
+    line: Line<'static>,
+    /// The text's first column, counted from the pane's left edge.
+    x: u16,
+    /// The columns the text may use; the slab is one column wider on each side, and its ear sits
+    /// one column further, on the margin.
+    width: u16,
+    /// The background of the slab this row is part of.
+    bubble: Option<Color>,
+    /// The slab's ear on this row: its column, side and tone. Full height, every row.
+    ear: Option<(u16, Ear, Color)>,
+    /// The loaded message the row belongs to (the selection and the mouse).
+    owner: Option<usize>,
+}
+
+/// Which side a slab's ear sits on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ear {
+    Incoming,
+    Outgoing,
+}
+
+impl Row {
+    /// A row of plain transcript: no bubble, the pane's whole width.
+    fn plain(line: Line<'static>, columns: u16) -> Self {
+        Self {
+            line,
+            x: 0,
+            width: columns,
+            bubble: None,
+            ear: None,
+            owner: None,
+        }
+    }
+}
+
+/// What a row inside a slab is: a group sender's name, or the message's own text. The quote has
+/// a row of its own (an inset) and is not a [`Part`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Name,
+    Text,
+}
 
 /// A picture's box in the transcript: its first (blank) line, its size in cells, and the index of
 /// its loaded message.
 struct PictureBox {
+    /// The first of its rows, inside its bubble.
     line: usize,
     size: ratatui::layout::Size,
     index: usize,
+    /// Its first column, from the pane's left edge.
+    x: u16,
 }
 
 /// A picture's caption with ` · Downloading…` on its last line, cut with `…` where needed so it
@@ -2074,6 +2683,47 @@ fn downloading(caption: &str, columns: u16) -> String {
         Some(head) => format!("{head}\n{line}"),
         None => line,
     }
+}
+
+/// `text` broken into rows of at most `width` terminal columns: at the last space that fits,
+/// or between graphemes when a single word is wider than the row. Every row keeps a column.
+///
+/// This is the transcript's own wrapping (bubbles are laid out by hand, not by a `Paragraph`),
+/// by the same widths ratatui draws with, so the geometry the scroll and the mouse use is the
+/// geometry on screen.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut rows = Vec::new();
+    for line in text.split('\n') {
+        let mut row = String::new();
+        let mut used = 0;
+        // Where the current row may break: the byte and column just after its last space.
+        let mut space: Option<(usize, usize)> = None;
+        for grapheme in line.graphemes(true) {
+            let w = display_width(grapheme);
+            if used > 0 && used + w > width {
+                match space.take().filter(|_| !grapheme.trim().is_empty()) {
+                    // Carry the word being written over to the next row.
+                    Some((byte, column)) => {
+                        let rest = row.split_off(byte);
+                        rows.push(std::mem::replace(&mut row, rest));
+                        used -= column;
+                    }
+                    None => {
+                        rows.push(std::mem::take(&mut row));
+                        used = 0;
+                    }
+                }
+            }
+            row.push_str(grapheme);
+            used += w;
+            if grapheme.trim().is_empty() {
+                space = Some((row.len(), used));
+            }
+        }
+        rows.push(row);
+    }
+    rows
 }
 
 /// A draft as drawn: its rows, and the cursor's row and column in them.
@@ -2209,6 +2859,104 @@ fn fit(text: &str, width: usize) -> String {
     out
 }
 
+/// The unread count as the list's pill: ` 3 `, ` 12 ` or ` 99+ ` (it always fills [`PILL`]), or
+/// nothing when there is nothing unread.
+fn unread_pill(unread: u32) -> String {
+    match unread {
+        0 => String::new(),
+        n if n > 99 => " 99+ ".to_owned(),
+        n => format!(" {n} "),
+    }
+}
+
+/// How many tints an avatar takes: one per palette hue the theme names.
+const AVATAR_TINTS: u8 = 4;
+/// The columns a chat's avatar takes at the left of its two content rows: one blank, its three
+/// cells, one blank.
+const AVATAR: usize = 5;
+
+/// A stable seed for a chat's avatar: the same title always gets the same tint.
+fn avatar_seed(title: &str) -> u8 {
+    title
+        .bytes()
+        .fold(0u8, |acc, byte| acc.wrapping_mul(31).wrapping_add(byte))
+}
+
+/// The two initials an avatar carries, one per row: the first letter of each of the first two
+/// words (its first two letters when the title is one word), uppercased when they are Latin.
+fn avatar_initials(title: &str) -> [char; 2] {
+    let upper = |c: char| {
+        if c.is_ascii_lowercase() {
+            c.to_ascii_uppercase()
+        } else {
+            c
+        }
+    };
+    // Only a narrow character: a wide one (a CJK ideograph) would push the columns after it.
+    let mut words = title.split_whitespace().filter_map(|word| {
+        word.chars()
+            .find(|c| c.is_alphanumeric() && char_width(*c) == 1)
+    });
+    let first = upper(words.next().unwrap_or('?'));
+    let second = match words.next() {
+        Some(letter) => upper(letter),
+        // One word: its second letter, when it has one.
+        None => upper(
+            title
+                .chars()
+                .filter(|c| c.is_alphanumeric() && char_width(*c) == 1)
+                .nth(1)
+                .unwrap_or(' '),
+        ),
+    };
+    [first, second]
+}
+
+/// The six cells of a chat's avatar: a 3×2 rounded block whose corners are the tint on whatever is
+/// behind them (no background of their own) and whose middle cells are the tint with one initial
+/// on each.
+fn avatar_cells(title: &str, palette: &Palette) -> [(char, Style); 6] {
+    let seed = avatar_seed(title) % AVATAR_TINTS;
+    let tint = rgb(palette.avatar_tint(seed));
+    let ink = rgb(palette.avatar_ink(seed));
+    let corner = |glyph: char| (glyph, Style::default().fg(tint));
+    let letter = |glyph: char| (glyph, Style::default().fg(ink).bg(tint));
+    let [first, second] = avatar_initials(title);
+    [
+        corner('▗'),
+        letter(first),
+        corner('▖'),
+        corner('▝'),
+        letter(second),
+        corner('▘'),
+    ]
+}
+
+/// One row (0 or 1) of a chat's avatar as spans: a blank column, its three cells, a blank column.
+fn avatar_spans(title: &str, palette: &Palette, row: usize) -> Vec<Span<'static>> {
+    let cells = avatar_cells(title, palette);
+    let mut spans = vec![Span::raw(" ")];
+    for (glyph, style) in &cells[row * 3..row * 3 + 3] {
+        spans.push(Span::styled(glyph.to_string(), *style));
+    }
+    spans.push(Span::raw(" "));
+    spans
+}
+
+/// Draw a chat's avatar over `(x, y)`, two rows tall: what the open chat's row fill would
+/// otherwise erase.
+fn paint_avatar(buffer: &mut Buffer, rows: Rect, title: &str, palette: &Palette) {
+    let (x, y) = (rows.x + 1, rows.y);
+    for (index, (glyph, style)) in avatar_cells(title, palette).iter().enumerate() {
+        let column = x + u16::try_from(index % 3).unwrap_or(0);
+        let row = y + u16::try_from(index / 3).unwrap_or(0);
+        // A list cut by a very small terminal would put the cells outside its own rectangle.
+        if column < rows.right() && row < rows.bottom() {
+            buffer.set_stringn(column, row, glyph.to_string(), 1, *style);
+        }
+    }
+}
+
 /// Columns `text` takes, as ratatui lays it out (unicode-width).
 fn display_width(text: &str) -> usize {
     Span::raw(text).width()
@@ -2242,12 +2990,24 @@ fn rgb(colour: Rgb) -> Color {
     Color::Rgb(colour.r, colour.g, colour.b)
 }
 
-/// Who sent the message: us, the group member the daemon names in `sender`, or the chat.
+/// Whether a chat is a group: the wire's JID domain says so.
+fn is_group(jid: &str) -> bool {
+    jid.ends_with("@g.us")
+}
+
+/// The first word of a name: what a group's sender line and a quote's prefix carry, so a long
+/// full name never eats a slab's width.
+fn first_name(name: &str) -> String {
+    name.split_whitespace().next().unwrap_or(name).to_owned()
+}
+
+/// Who sent the message: us, the group member the daemon names in `sender` (first name only),
+/// or the chat.
 fn author(chat: Option<&Chat>, message: &Message) -> String {
     let sender = message.sender.as_deref().filter(|s| !s.is_empty());
     match (message.from_me, sender, chat) {
         (true, _, _) => "you".to_owned(),
-        (false, Some(sender), _) => plain(sender),
+        (false, Some(sender), _) => first_name(&plain(sender)),
         (false, None, Some(chat)) => plain(&chat_title(chat)),
         (false, None, None) => "them".to_owned(),
     }
@@ -2297,17 +3057,61 @@ fn local_day(message: &Message, offset: time::UtcOffset) -> Option<time::Date> {
     Some(utc.checked_to_offset(offset)?.date())
 }
 
-/// A day label in caps: `SUN 18 OCT 2026`.
-fn day_label(day: time::Date) -> String {
+/// What a chat is, as the conversation header says it: its masked number when the daemon knows
+/// one, then `contact` or `group` (from the JID's domain).
+fn chat_subtitle(chat: &Chat) -> Option<String> {
+    let kind = if is_group(&chat.jid) {
+        "group"
+    } else {
+        "contact"
+    };
+    Some(
+        match chat.phone.as_deref().filter(|phone| !phone.is_empty()) {
+            Some(phone) => format!("{phone} · {kind}"),
+            None => kind.to_owned(),
+        },
+    )
+}
+
+/// A day separator's label: `Today`, `Yesterday`, or the date in caps (`18 OCT 2026`); WhatsApp's
+/// own separators carry no weekday, and the date is what the eye needs.
+fn day_label(day: time::Date, today: time::Date) -> String {
+    if day == today {
+        return "Today".to_owned();
+    }
+    if today.previous_day() == Some(day) {
+        return "Yesterday".to_owned();
+    }
     let short = |name: String| name.chars().take(3).collect::<String>();
     format!(
-        "{} {} {} {}",
-        short(day.weekday().to_string()),
+        "{} {} {}",
         day.day(),
         short(day.month().to_string()),
         day.year()
     )
     .to_uppercase()
+}
+
+/// A separator across the band: a hairline on each side of a centred label, so a day or the
+/// unread messages read as a break between messages rather than as another message.
+fn separator_row(columns: u16, label: String, ink: Style, border: Style) -> Row {
+    let band = usize::from(columns.saturating_sub(3));
+    let text = format!("  {label}  ");
+    let free = band.saturating_sub(display_width(&text));
+    let left = free / 2;
+    let line = Line::from(vec![
+        Span::styled("─".repeat(left), border),
+        Span::styled(text, ink),
+        Span::styled("─".repeat(free - left), border),
+    ]);
+    Row {
+        line,
+        x: 1,
+        width: u16::try_from(band).unwrap_or(u16::MAX),
+        bubble: None,
+        ear: None,
+        owner: None,
+    }
 }
 
 /// The message's time as `HH:MM` at `offset` from UTC (the wire's timestamps are UTC), or
@@ -2325,40 +3129,36 @@ fn local_hhmm(message: &Message, offset: time::UtcOffset) -> String {
 
 /// The fewest columns a chat's name keeps before the row gives up its time and markers.
 const NARROW_NAME: usize = 6;
-/// The badge's fixed width on a chat row's second line: `●3`, `●12`, `●99+`.
-const BADGE: usize = 4;
-/// The unread badge's dot.
-const BULLET: &str = "●";
+/// The unread pill's fixed slot on a chat row's second line: ` 3 `, ` 12 `, ` 99+ `.
+const PILL: usize = 5;
 
-/// A chat in the list, in two rows. Row one: the selection bar `▌` (both rows, when it is the
-/// highlighted chat), a space, the name in bold, the markers the chat has right after it, and the
-/// time in its own five-column slot at the right edge. Row two: two spaces, its last message cut
-/// to `width` columns with `…`, then the unread badge right-aligned in four columns. A narrow
-/// list gives up the time first, then the markers, and only then cuts the name below six
-/// columns. Only the bar and the badge are in the accent (plan §9.2, R4).
+/// A chat in the list, in three rows. Row one: the avatar (a 3×2 rounded block with its initials),
+/// the name, the markers the chat has right after it, and the time in its own five-column slot at
+/// the right edge. Row two: the avatar's second row, the last message cut with `…`, then the unread
+/// count as an accent pill at the right. Row three: a thin rule in the border role, the separator. A chat with unread messages has its name and
+/// time in bold, and the highlighted chat is filled across every row (`surface_active`), with the
+/// keys on it or not, so the list always says which chat is open. A narrow list gives up the time
+/// first, then the markers, and only then cuts the name below six columns.
 fn chat_item(
     chat: &Chat,
     palette: &Palette,
     width: usize,
     offset: time::UtcOffset,
     selected: bool,
+    narrow: bool,
 ) -> ListItem<'static> {
-    let accent = Style::default().fg(rgb(palette.accent()));
     let text = Style::default().fg(rgb(palette.text()));
+    let unread = chat.unread > 0;
+    let ink = if unread {
+        text.add_modifier(Modifier::BOLD)
+    } else {
+        text
+    };
     let muted = Style::default().fg(rgb(palette.text_muted()));
-    let bar = || {
-        if selected {
-            Span::styled("▌", accent)
-        } else {
-            Span::raw(" ")
-        }
-    };
-    // The badge keeps four columns: `● 3`, `●12`, `●99+`, or blank.
-    let badge = match chat.unread {
-        0 => String::new(),
-        n if n > 99 => format!("{BULLET}99+"),
-        n => format!("{BULLET}{n}"),
-    };
+    let pill_style = Style::default()
+        .fg(rgb(palette.accent_on()))
+        .bg(rgb(palette.accent()));
+    let pill = unread_pill(chat.unread);
     // The markers follow the name, only the ones the chat has.
     let markers: String = [
         (chat.pinned, PINNED),
@@ -2382,61 +3182,87 @@ fn chat_item(
     // nothing: something of the chat's name has to stay readable.
     let mut time = time;
     let mut markers = markers;
+    // A narrow window draws one pane, so the name gets the row: the time steps aside first, and
+    // the avatar never does.
+    if narrow {
+        time.clear();
+    }
     let mut time_width = display_width(&time);
-    let mut gap = usize::from(time_width != 0);
-    let mut named = width.saturating_sub(2 + display_width(&markers) + gap + time_width);
+    let mut named = width.saturating_sub(AVATAR + display_width(&markers) + 1 + time_width);
     if named < NARROW_NAME {
         time.clear();
         time_width = 0;
-        gap = 0;
-        named = width.saturating_sub(2 + display_width(&markers));
+        named = width.saturating_sub(AVATAR + display_width(&markers));
     }
     if named < NARROW_NAME {
         markers.clear();
-        named = width.saturating_sub(2);
+        named = width.saturating_sub(AVATAR);
     }
-    let name = fit(&plain(&chat_title(chat)), named);
-    let mut title = vec![
-        bar(),
-        Span::raw(" "),
-        Span::styled(name.clone(), text.add_modifier(Modifier::BOLD)),
-    ];
+    let title_text = plain(&chat_title(chat));
+    let name = fit(&title_text, named);
+    let mut title = avatar_spans(&title_text, palette, 0);
+    title.push(Span::styled(name.clone(), ink));
     if !markers.is_empty() {
         title.push(Span::styled(markers.clone(), muted));
     }
-    let used = 2 + display_width(&name) + display_width(&markers);
-    title.push(Span::raw(
-        " ".repeat(width.saturating_sub(used + gap + time_width)),
-    ));
+    let used = AVATAR + display_width(&name) + display_width(&markers);
+    // The time is right-aligned in the row's last columns; the gap before it is the padding.
+    let room = width.saturating_sub(used);
+    if time_width > room {
+        time.clear();
+        time_width = 0;
+    }
+    title.push(Span::raw(" ".repeat(room.saturating_sub(time_width))));
     if time_width > 0 {
-        title.push(Span::styled(time, muted));
+        title.push(Span::styled(time, ink));
     }
 
+    // A group's preview says who wrote the last message (`Dana: deck ready`); a one-to-one chat
+    // says it bare, because the chat is the person, and our own message needs no name either.
+    let who = chat
+        .last_message
+        .as_ref()
+        .filter(|message| !message.from_me && is_group(&chat.jid))
+        .and_then(|message| message.sender.as_deref())
+        .filter(|sender| !sender.is_empty())
+        .map(|sender| first_name(&plain(sender)));
     // A message with no text (a non-text kind) shows its kind instead of an empty row.
     let detail = match chat.last_message.as_ref() {
         Some(message) => {
             let text = message.text.lines().next().unwrap_or_default();
-            plain(if text.is_empty() { &message.kind } else { text })
+            let said = plain(if text.is_empty() { &message.kind } else { text });
+            match &who {
+                Some(who) => format!("{who}: {said}"),
+                None => said,
+            }
         }
         None => "(no messages)".to_owned(),
     };
-    let badge_width = BADGE;
-    let detail = fit(&detail, width.saturating_sub(3 + badge_width));
-    let pad = width.saturating_sub(3 + display_width(&detail) + badge_width);
-    let mut second = vec![
-        bar(),
-        Span::raw("  "),
-        Span::styled(detail, muted),
-        Span::raw(" ".repeat(pad)),
-    ];
-    if badge.is_empty() {
-        second.push(Span::raw(" ".repeat(badge_width)));
+    let detail = fit(&detail, width.saturating_sub(AVATAR + PILL));
+    let pad = width.saturating_sub(AVATAR + display_width(&detail) + PILL);
+    let mut second = avatar_spans(&title_text, palette, 1);
+    second.push(Span::styled(detail, muted));
+    second.push(Span::raw(" ".repeat(pad)));
+    if pill.is_empty() {
+        second.push(Span::raw(" ".repeat(PILL)));
     } else {
-        second.push(Span::raw(" ".repeat(badge_width - display_width(&badge))));
-        second.push(Span::styled(badge, accent));
+        second.push(Span::raw(
+            " ".repeat(PILL.saturating_sub(display_width(&pill))),
+        ));
+        second.push(Span::styled(pill, pill_style));
     }
 
-    ListItem::new(vec![Line::from(title), Line::from(second)])
+    let rule = Line::from(Span::styled(
+        "─".repeat(width + 3),
+        Style::default().fg(rgb(palette.border())),
+    ));
+    let item = ListItem::new(vec![Line::from(title), Line::from(second), rule]);
+    // The fill goes under the rows, so the pill keeps its own background.
+    if selected {
+        item.style(Style::default().bg(rgb(palette.surface_active())))
+    } else {
+        item
+    }
 }
 
 #[cfg(test)]
@@ -2485,12 +3311,14 @@ mod tests {
     fn hit_test_maps_a_cell_to_the_chat_message_or_composer_under_it() {
         use super::{Target, hit_test};
         let map = map();
-        // Each chat takes two rows, counted from the list's scroll.
+        // Each chat takes three rows (name, last message, its rule), counted from the list's
+        // scroll.
         assert_eq!(hit_test(&map, 5, 2), Some(Target::Chats(Some(1))));
         assert_eq!(hit_test(&map, 30, 3), Some(Target::Chats(Some(1))));
-        assert_eq!(hit_test(&map, 5, 4), Some(Target::Chats(Some(2))));
+        assert_eq!(hit_test(&map, 5, 4), Some(Target::Chats(Some(1))));
+        assert_eq!(hit_test(&map, 5, 5), Some(Target::Chats(Some(2))));
         // Below the last chat, and on the border: the pane, no chat.
-        assert_eq!(hit_test(&map, 5, 6), Some(Target::Chats(None)));
+        assert_eq!(hit_test(&map, 5, 8), Some(Target::Chats(None)));
         assert_eq!(hit_test(&map, 0, 2), Some(Target::Chats(None)));
         assert_eq!(hit_test(&map, 31, 2), Some(Target::Chats(None)));
         // The conversation's rows name their message; an empty row, the border: none.

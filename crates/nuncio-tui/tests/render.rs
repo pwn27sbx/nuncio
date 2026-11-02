@@ -105,7 +105,7 @@ fn the_fixture_chat_list_renders_at_eighty_by_twenty_four() {
 
     // The chat list: name, unread badge, pinned and archived markers.
     assert!(screen.contains("Ada Lovelace"), "the chat name:\n{screen}");
-    assert!(screen.contains("●2"), "its unread badge:\n{screen}");
+    assert!(screen.contains(" 2 "), "its unread pill:\n{screen}");
     assert!(screen.contains('★'), "the pinned marker:\n{screen}");
     assert!(screen.contains('▤'), "the archived marker:\n{screen}");
     assert!(
@@ -114,8 +114,8 @@ fn the_fixture_chat_list_renders_at_eighty_by_twenty_four() {
     );
     assert!(screen.contains("Omarchy devs"), "the group chat:\n{screen}");
     assert!(
-        screen.contains("●17"),
-        "the group chat's unread badge:\n{screen}"
+        screen.contains(" 17 "),
+        "the group chat's unread pill:\n{screen}"
     );
 
     // The last-message snippet, and its time in the row above.
@@ -131,10 +131,10 @@ fn the_fixture_chat_list_renders_at_eighty_by_twenty_four() {
         "no source notice on a daemon screen:\n{screen}"
     );
 
-    // The message pane shows the selected chat's last message.
+    // The message pane shows the selected chat's last message, its time inside the bubble.
     assert!(
-        screen.contains("Ada Lovelace · 17:55"),
-        "the message pane header:\n{screen}"
+        screen.contains("17:55"),
+        "the message pane follows the selection:\n{screen}"
     );
 
     // The footer: the primary key, the way to every other key, and the session state.
@@ -158,17 +158,18 @@ fn the_layout_survives_an_odd_size() {
     assert!(screen.contains("Chats (3) · Tab"), "{screen}");
     assert!(line_with(&screen, "★").contains("Ada"), "{screen}");
     assert!(
-        !screen.contains("Ada Lovelace · 17:55"),
+        !screen.contains("Beginning of conversation"),
         "the conversation is not drawn here:\n{screen}"
     );
     // `Tab` swaps it in, filling the width.
     app.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
     let screen = render(&mut app, 37, 11);
-    assert!(screen.contains("Ada Lovelace · 17:55"), "{screen}");
+    assert!(screen.contains("Beginning of conversation"), "{screen}");
+    assert!(screen.contains("17:55"), "{screen}");
 }
 
 #[test]
-fn the_chat_list_breaks_at_sixty_and_one_hundred_columns() {
+fn the_chat_list_takes_thirty_percent_between_thirty_two_and_forty_eight_columns() {
     let mut app = fixture_app();
     let split = |screen: &str| -> Option<usize> {
         screen
@@ -176,11 +177,11 @@ fn the_chat_list_breaks_at_sixty_and_one_hundred_columns() {
             .nth(1)
             .and_then(|row| row.chars().position(|symbol| symbol == '┬'))
     };
-    // Wide: 40 % of 120 columns, and exactly at the breakpoint too.
-    assert_eq!(split(&render(&mut app, 120, 20)), Some(48));
-    assert_eq!(split(&render(&mut app, 100, 20)), Some(40));
-    // Middle: a fixed 32 columns, whatever the width, the breakpoint included.
-    assert_eq!(split(&render(&mut app, 99, 20)), Some(32));
+    // 30 % of the body, never under 32 columns and never over 48.
+    assert_eq!(split(&render(&mut app, 240, 20)), Some(48));
+    assert_eq!(split(&render(&mut app, 160, 20)), Some(48));
+    assert_eq!(split(&render(&mut app, 120, 20)), Some(36));
+    assert_eq!(split(&render(&mut app, 100, 20)), Some(32));
     assert_eq!(split(&render(&mut app, 80, 20)), Some(32));
     assert_eq!(split(&render(&mut app, 60, 20)), Some(32));
     // Narrow: no split at all, one pane on the whole width.
@@ -210,7 +211,7 @@ fn navigation_moves_the_selection_and_the_message_pane_follows() {
     assert_eq!(app.selected(), 1);
     let screen = render(&mut app, 80, 24);
     assert!(
-        screen.contains("you · 16:02"),
+        screen.contains("16:02"),
         "the message pane followed the selection:\n{screen}"
     );
     assert!(

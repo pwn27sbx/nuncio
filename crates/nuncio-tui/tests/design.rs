@@ -3,6 +3,7 @@
 //! one primary hint, one line per message with day labels, a one-line footer, a scrim behind the
 //! overlays, and one-line empty states. Checked on `TestBackend` buffers at 80x24 and 240x60.
 
+use nuncio_client::wire::MessageState;
 use nuncio_client::{Chat, DaemonFrame, Message, Palette, Session, Snapshot};
 use nuncio_tui::images::Graphics;
 use nuncio_tui::{App, Pane, Source};
@@ -60,6 +61,12 @@ fn chat(jid: &str, name: &str, unread: u32) -> Chat {
     }
 }
 
+/// The day the design tests call today, so `Today`/`Yesterday` never depend on the machine's
+/// clock: the conversation fixture is October 2026's.
+fn today() -> time::Date {
+    time::Date::from_calendar_date(2026, time::Month::October, 25).expect("a date")
+}
+
 fn app_with(chats: Vec<Chat>) -> App {
     let unread = chats.iter().map(|chat| chat.unread).sum();
     let snapshot = Snapshot {
@@ -70,7 +77,7 @@ fn app_with(chats: Vec<Chat>) -> App {
         chats,
         stop_reason: None,
     };
-    App::new(snapshot, Source::Daemon, Palette::default())
+    App::new(snapshot, Source::Daemon, Palette::default()).with_today(today())
 }
 
 fn two_chats() -> App {
@@ -242,14 +249,22 @@ fn one_single_line_separates_the_panes_from_the_header_rule_to_the_footer() {
 }
 
 #[test]
-fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hint() {
-    let accent = colour(Palette::default().accent());
+fn the_accent_marks_only_the_unread_pill_and_the_one_primary_hint() {
+    let palette = Palette::default();
+    let accent = colour(palette.accent());
+    let on_accent = colour(palette.accent_on());
     for (width, height) in SIZES {
         for (name, buffer) in screens(width, height) {
             let footer = height - 1;
             let mut hint = String::new();
             let mut header = String::new();
             for y in 0..height {
+                let row_text: String = (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>();
+                // The unread divider says its count in the accent (C8); its hairlines stay in
+                // the border role, which the divider's own test checks.
+                let divider = row_text.contains("unread message");
                 for x in 0..width {
                     let cell = &buffer[(x, y)];
                     if cell.fg != accent && cell.bg != accent {
@@ -264,20 +279,25 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
                         header.push_str(cell.symbol());
                         continue;
                     }
-                    // The chat row's badge is `●` plus its count, on the row below the name.
-                    if (cell.symbol().chars().all(|c| c.is_ascii_digit()) || cell.symbol() == "+")
-                        && x > 0
-                    {
-                        let left = &buffer[(x - 1, y)];
-                        let run = left.symbol() == "●"
-                            || (left.fg == accent
-                                && left.symbol().chars().all(|c| c.is_ascii_digit()));
-                        if run {
-                            continue;
-                        }
+                    // A glyph line is never a colour mark: the slab ears (`▌`/`▐`), the
+                    // quote's bar and the selection bar.
+                    if ["▌", "▐"].contains(&cell.symbol()) && cell.bg != accent {
+                        continue;
                     }
+                    // The composer's hairline takes the accent while the field holds the keys,
+                    // and only then.
+                    if cell.symbol() == "─"
+                        && (0..width).any(|x| buffer[(x, y + 1)].symbol() == "›")
+                    {
+                        continue;
+                    }
+                    if divider && cell.symbol() != "─" {
+                        continue;
+                    }
+                    // The unread count is a pill: the accent as its background, `accent_on` for
+                    // its text, never the accent as text on the row.
                     assert!(
-                        ["●", "▌"].contains(&cell.symbol()) && cell.bg != accent,
+                        cell.bg == accent && cell.fg == on_accent,
                         "{name} at {width}x{height}: {:?} at ({x}, {y}) is in the accent:\n{}",
                         cell.symbol(),
                         text(&buffer)
@@ -290,22 +310,16 @@ fn the_accent_marks_only_the_unread_dot_the_selection_bar_and_the_one_primary_hi
             assert_eq!(header, "2 unread", "{name} at {width}x{height}");
         }
     }
-    // And they are drawn: one unread badge, and the bar down the selected chat's two rows.
+    // And the pill is drawn: two unread messages, one pill, on the second row of the chat.
     let buffer = draw(&mut two_chats(), 80, 24);
-    let split = separator(&buffer);
-    let count = |symbol: &str| {
-        let mut found = 0;
-        for y in 2..22 {
-            for x in 0..split {
-                if buffer[(x, y)].symbol() == symbol && buffer[(x, y)].fg == accent {
-                    found += 1;
-                }
-            }
-        }
-        found
-    };
-    assert_eq!(count("●"), 1, "one unread badge:\n{}", text(&buffer));
-    assert_eq!(count("▌"), 2, "the bar on both rows:\n{}", text(&buffer));
+    // Ada is the first chat: her name, her preview (where the pill is), her rule, then Grace.
+    let (_, grace) = find(&buffer, "Grace Hopper");
+    let preview = grace - 2;
+    let pill: String = (0..separator(&buffer))
+        .filter(|&x| buffer[(x, preview)].bg == accent)
+        .map(|x| buffer[(x, preview)].symbol())
+        .collect();
+    assert_eq!(pill, " 2 ", "the unread pill:\n{}", text(&buffer));
 }
 
 #[test]
@@ -319,29 +333,47 @@ fn the_tones_are_the_palette_roles() {
     let buffer = draw(&mut app, 80, 24);
     let sep = separator(&buffer);
     // The selected chat (Ada) on `surface_active`, the other on `surface_chrome`.
-    // Ada is the first chat, on the rows above Grace (her name is in the header rule too).
+    // Ada is the first chat, on the three rows above Grace (a chat takes name, preview and rule;
+    // Grace's name is in the header rule too).
     let (_, grace) = find(&buffer, "Grace Hopper");
-    let ada = grace - 2;
+    let ada = grace - 3;
     assert!(row(&buffer, ada).contains("Ada Lovelace"));
-    for x in 1..sep {
-        assert_eq!(
-            buffer[(x, ada)].bg,
-            colour(palette.surface_active()),
-            "x {x}"
-        );
-        assert_eq!(buffer[(x, ada + 1)].bg, colour(palette.surface_active()));
+    let active = colour(palette.surface_active());
+    let accent = colour(palette.accent());
+    // The avatar's middle cells keep their tint inside the fill (columns 1..3).
+    let seed = {
+        let mut seed = 0u8;
+        for byte in "Ada Lovelace".bytes() {
+            seed = seed.wrapping_mul(31).wrapping_add(byte);
+        }
+        seed % 4
+    };
+    let tint = colour(palette.avatar_tint(seed));
+    assert_eq!(buffer[(2, ada)].bg, tint, "the avatar's tint");
+    assert_eq!(buffer[(2, ada + 1)].bg, tint);
+    for x in 5..sep {
+        assert_eq!(buffer[(x, ada)].bg, active, "x {x}");
+        // The unread pill keeps its own background inside the fill.
+        let preview = buffer[(x, ada + 1)].bg;
+        assert!(preview == active || preview == accent, "x {x}");
+        assert_eq!(buffer[(x, ada + 2)].bg, active);
         assert_eq!(
             buffer[(x, grace)].bg,
             colour(palette.surface_chrome()),
             "x {x}"
         );
     }
-    // The bar runs down both rows of the selected chat.
-    assert_eq!(buffer[(0, ada)].symbol(), "▌");
-    assert_eq!(buffer[(0, ada + 1)].symbol(), "▌");
-    // The transcript is on `surface`, the line between the panes in `border`.
+    // The rule between chats is the border role, inside the highlight too.
+    assert_eq!(buffer[(2, ada + 2)].symbol(), "─");
+    assert_eq!(buffer[(2, ada + 2)].fg, colour(palette.border()));
+    // The transcript is on `surface`, an incoming bubble on its neutral tone, the line between
+    // the panes in `border`, and the free last column still `surface`.
     let (x, y) = find(&buffer, "good morning");
-    assert_eq!(buffer[(x, y)].bg, colour(palette.surface()));
+    assert_eq!(
+        buffer[(x, y)].bg,
+        colour(palette.surface_chrome()),
+        "an incoming bubble"
+    );
     assert_eq!(
         buffer[(width_of(&buffer) - 2, y)].bg,
         colour(palette.surface())
@@ -353,45 +385,199 @@ fn width_of(buffer: &Buffer) -> u16 {
     buffer.area.width
 }
 
+/// U2: each message is a bubble with its text and, inside it, its time in the faint role. No
+/// author header is drawn: the side a bubble sits on says whose it is.
 #[test]
-fn each_message_is_one_line_with_its_author_and_time_muted_then_its_text() {
+fn a_bubble_carries_its_text_and_its_time_inside_it() {
     let palette = Palette::default();
-    let muted = colour(palette.text_muted());
+    let faint = colour(palette.text_faint());
+    let body = colour(palette.text());
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
-        for (meta, said) in [
-            ("Ada Lovelace · 17:01", "hello there"),
-            ("Ada Lovelace · 17:02", "how are you"),
-            ("you · 17:03", "fine, thanks"),
-            ("Ada Lovelace · 09:15", "good morning"),
+        for (said, time) in [
+            ("hello there", "17:01"),
+            ("how are you", "17:02"),
+            ("fine, thanks", "17:03"),
+            ("good morning", "09:15"),
         ] {
-            let (x, y) = find(&buffer, meta);
             let (text_x, text_y) = find(&buffer, said);
-            assert_eq!(
-                text_y,
-                y,
-                "{meta} and {said} share a row:\n{}",
+            let (x, y) = find(&buffer, time);
+            assert_eq!(text_y, y, "the time is inside the {said:?} row");
+            assert!(x > text_x, "{said:?} then its time:\n{}", text(&buffer));
+            assert_eq!(buffer[(text_x, text_y)].fg, body, "{said:?}");
+            assert_eq!(buffer[(x, y)].fg, faint, "the time of {said:?}");
+            // The time is on the bubble, not on the pane behind it.
+            assert_ne!(
+                buffer[(x, y)].bg,
+                colour(palette.surface()),
+                "the time of {said:?} is outside its bubble:\n{}",
                 text(&buffer)
             );
-            assert!(text_x > x);
-            // The name in bold, the time dim, the text neither.
-            assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD), "{meta}");
-            let time = find(&buffer, meta).0 + meta.find('·').expect("a dot") as u16;
-            let time = (time..x + meta.chars().count() as u16)
-                .find(|&x| buffer[(x, y)].symbol().chars().all(|c| c.is_ascii_digit()))
-                .expect("the time");
-            assert_eq!(buffer[(time, y)].fg, muted, "{meta}");
-            assert_eq!(buffer[(text_x, y)].fg, colour(palette.text()));
-            assert!(!buffer[(text_x, y)].modifier.contains(Modifier::BOLD));
         }
     }
 }
 
+/// C: an incoming slab's ear sits on the band's left edge and its tinted block one cell inside it;
+/// an outgoing one puts its ear on the band's right edge. A slab keeps at most 66 % of the band for
+/// its block (the ear is outside it), and the gutter column stays free.
 #[test]
-fn an_authors_run_has_no_blank_line_and_the_next_author_starts_after_one() {
+fn a_slab_lives_on_its_side_within_its_share() {
+    let palette = Palette::default();
     let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    for (width, _height) in SIZES {
+        let buffer = draw(&mut app, width, 24);
+        let surface = colour(palette.surface());
+        let sep = separator(&buffer);
+        let left = sep + 1; // the conversation area's first column
+        let usable = width - 2 - left; // the area minus the free last column, gutter included
+        let band = usable - 2; // one margin on each side
+        let most = (band as u32 * 66 / 100) as u16;
+        // Incoming: the ear is the band's first column, the tinted block starts one cell later.
+        let (_, incoming) = find(&buffer, "hello there");
+        assert_eq!(buffer[(left + 1, incoming)].symbol(), "▐");
+        assert_eq!(
+            buffer[(left + 1, incoming)].fg,
+            colour(palette.bubble_ear_incoming()),
+            "{}",
+            text(&buffer)
+        );
+        assert_eq!(
+            buffer[(left, incoming)].bg,
+            surface,
+            "the margin stays free"
+        );
+        assert_ne!(
+            buffer[(left + 2, incoming)].bg,
+            surface,
+            "the block is tinted"
+        );
+        let run = (left + 2..left + 1 + band)
+            .take_while(|&x| buffer[(x, incoming)].bg != surface)
+            .count();
+        // The ear takes one column of the share; the block is the rest.
+        assert!(run >= 3 && run < usize::from(most), "{run} < {most}");
+        // Outgoing: the ear is the band's last column, the block ends one cell before it.
+        let (_, mine) = find(&buffer, "fine, thanks");
+        let ear = left + band;
+        assert_eq!(buffer[(ear, mine)].symbol(), "▌");
+        assert_eq!(buffer[(ear, mine)].fg, colour(palette.accent()));
+        assert_eq!(buffer[(ear + 1, mine)].bg, surface, "the margin stays free");
+        assert_eq!(buffer[(ear + 2, mine)].bg, surface, "the gutter stays free");
+        let run = (left + 2..ear)
+            .rev()
+            .take_while(|&x| buffer[(x, mine)].bg == colour(palette.bubble_outgoing()))
+            .count();
+        assert!(run >= 3 && run < usize::from(most), "{run} < {most}");
+    }
+}
+
+/// C: a message longer than its share wraps inside the slab, whose block never passes 66 % of the
+/// band; the ear runs its whole height.
+#[test]
+fn a_long_message_wraps_inside_its_slab() {
+    let long = "the quick brown fox jumps over the lazy dog and keeps running ".repeat(4);
+    let mut app = two_chats();
+    open(
+        &mut app,
+        ADA,
+        vec![message("L1", long.trim(), false, "2026-10-17T17:01:00Z")],
+    );
+    let buffer = draw(&mut app, 80, 24);
+    let surface = colour(Palette::default().surface());
+    let sep = separator(&buffer);
+    let left = sep + 1;
+    let band = 80 - 2 - left - 2;
+    let most = (band as u32 * 66 / 100) as u16;
+    let (_, first) = find(&buffer, "the quick brown");
+    let mut rows = 0;
+    for y in first..24 {
+        if (left..80).all(|x| buffer[(x, y)].bg == surface) {
+            break;
+        }
+        rows += 1;
+        assert_eq!(
+            buffer[(left + 1, y)].symbol(),
+            "▐",
+            "the ear runs the whole height:\n{}",
+            text(&buffer)
+        );
+    }
+    assert!(rows > 1, "the long message wraps:\n{}", text(&buffer));
+    assert!(
+        text(&buffer).contains("keeps running"),
+        "the last words are still drawn:\n{}",
+        text(&buffer)
+    );
+    let run = (left + 2..left + 1 + band)
+        .take_while(|&x| buffer[(x, first)].bg != surface)
+        .count();
+    // The ear takes one column of the share, so the block keeps one less.
+    assert!(
+        run < usize::from(most),
+        "a {band}-column band gives the slab at most {most}: {run} + the ear"
+    );
+    assert_eq!(
+        run + 1,
+        usize::from(most),
+        "the long message takes the share"
+    );
+}
+
+/// U2: no author header is repeated over the messages: the conversation never says `you`, `them`
+/// or the chat's name again.
+#[test]
+fn the_author_is_never_repeated_over_the_bubbles() {
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    for (width, height) in SIZES {
+        let buffer = draw(&mut app, width, height);
+        let sep = separator(&buffer);
+        let conversation = (3..height - 1)
+            .map(|y| {
+                (sep + 1..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for gone in ["you ·", "them ·", "Ada Lovelace ·", "Ada Lovelace"] {
+            assert!(
+                !conversation.contains(gone),
+                "{gone:?} over a bubble:\n{conversation}"
+            );
+        }
+    }
+}
+
+/// U2, correction §8.2: the outgoing state the protocol does have is drawn where the ticks would
+/// go — a small clock while a send is queued, a `danger` `!` when it was not sent.
+#[test]
+fn a_queued_bubble_shows_a_clock_and_a_not_sent_one_a_bang() {
+    let palette = Palette::default();
+    let danger = colour(palette.danger());
+    let mut app = two_chats();
+    let mut queued = message("M1", "on my way", true, "2026-10-17T17:01:00Z");
+    queued.state = Some(MessageState::Queued);
+    let mut lost = message("M2", "did you get this", true, "2026-10-17T17:02:00Z");
+    lost.state = Some(MessageState::NotSent);
+    open(&mut app, ADA, vec![queued, lost]);
+    let buffer = draw(&mut app, 80, 24);
+    let (x, y) = find(&buffer, "◷");
+    assert_eq!(buffer[(x, y)].fg, colour(palette.text_faint()));
+    // The queued bubble says it in words too, so the clock is never the only cue.
+    assert_eq!(row_of(&buffer, "queued"), y, "{}", text(&buffer));
+    let (x, y) = find(&buffer, "!");
+    assert_eq!(buffer[(x, y)].fg, danger, "{}", text(&buffer));
+    assert_eq!(row_of(&buffer, "not sent"), y, "{}", text(&buffer));
+}
+
+#[test]
+fn one_authors_run_has_no_gap_and_the_next_author_starts_after_a_blank_row() {
+    // A read chat: the unread divider is a break of its own, tested on its own below.
+    let mut app = app_with(vec![chat(ADA, "Ada Lovelace", 0)]);
     open(&mut app, ADA, conversation());
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
@@ -403,28 +589,220 @@ fn an_authors_run_has_no_blank_line_and_the_next_author_starts_after_one() {
         assert_eq!(
             second,
             first + 1,
-            "one author, no blank line:\n{}",
+            "one author's run has no gap:\n{}",
             text(&buffer)
         );
-        assert_eq!(mine, second + 2, "a new author after one blank line");
+        assert_eq!(mine, second + 2, "the next author after one blank row");
         assert!(blank(second + 1), "{}", text(&buffer));
     }
 }
 
 #[test]
-fn each_day_starts_with_its_label_in_muted_caps_after_a_blank_line() {
+fn a_day_separator_is_centred_and_says_today_and_yesterday() {
+    let muted = colour(Palette::default().text_muted());
+    let mut app = app_with(vec![chat(ADA, "Ada Lovelace", 0)]).with_today(
+        time::Date::from_calendar_date(2026, time::Month::October, 18).expect("a date"),
+    );
+    open(
+        &mut app,
+        ADA,
+        vec![
+            message("A1", "yesterday's news", false, "2026-10-17T17:01:00Z"),
+            message("A2", "today's news", false, "2026-10-18T09:15:00Z"),
+        ],
+    );
+    let buffer = draw(&mut app, 80, 24);
+    let sep = separator(&buffer);
+    for (label, said) in [("Yesterday", "yesterday's news"), ("Today", "today's news")] {
+        let (x, y) = find(&buffer, label);
+        assert_eq!(
+            row_of(&buffer, said),
+            y + 1,
+            "the separator is above its day"
+        );
+        assert_eq!(buffer[(x, y)].fg, muted);
+        // Centred: the columns left and right of it are the same, within one.
+        let left = usize::from(x) - usize::from(sep + 1);
+        let right = (80 - 1) - (usize::from(x) + label.chars().count());
+        assert!(
+            left.abs_diff(right) <= 1,
+            "{label} sits {left} from the left and {right} from the right:\n{}",
+            text(&buffer)
+        );
+    }
+}
+
+/// C8: under 60 columns one pane fills the width. The list keeps the avatar and gives up the
+/// time first; the conversation's header keeps the chip, the name and the way back and drops the
+/// subtitle; and no slab reaches the free last column.
+#[test]
+fn a_narrow_window_keeps_what_matters_at_forty_by_twenty() {
+    let palette = Palette::default();
+    let mut long = chat(ADA, "Alexandra Konstantinopoulos", 1);
+    long.last_message = Some(message(
+        "A1",
+        "the long way round",
+        false,
+        "2026-10-18T17:01:00Z",
+    ));
+    let mut app = app_with(vec![long]);
+    // The list, with the keys: the avatar survives, the time gives way to the name.
+    let buffer = draw(&mut app, 40, 20);
+    let listed = row_of(&buffer, "Alexandra");
+    let line = row(&buffer, listed);
+    assert!(line.contains("▗A▖"), "the avatar stays: {line:?}");
+    assert!(!line.contains("17:01"), "the time gives way: {line:?}");
+    assert!(!text(&buffer).contains("17:01"), "{}", text(&buffer));
+
+    // The conversation: Enter opens it (one pane, filling 40 columns).
+    app.handle_key(key(KeyCode::Enter));
+    let buffer = draw(&mut app, 40, 20);
+    let header = row(&buffer, 1);
+    assert!(header.contains("▗A▖"), "the chip stays: {header:?}");
+    assert!(header.contains("Alexandra"), "the name stays: {header:?}");
+    assert!(header.contains("· Tab"), "the way back stays: {header:?}");
+    assert!(
+        !header.contains("contact"),
+        "the subtitle goes first: {header:?}"
+    );
+    // No slab reaches the free last column, the ears included.
+    let surface = colour(palette.surface());
+    for y in 2..19 {
+        assert_eq!(
+            buffer[(39, y)].bg,
+            surface,
+            "the gutter stays free at row {y}:\n{}",
+            text(&buffer)
+        );
+    }
+}
+
+/// C8: the unread divider has the day separator's shape, says the count the chat had when it was
+/// opened (even after the daemon marked it read), and sits above the oldest of those messages.
+#[test]
+fn the_unread_divider_says_how_many_were_new_and_sits_above_them() {
+    let palette = Palette::default();
+    let accent = colour(palette.accent());
+    let border = colour(palette.border());
+    // Ada has two unread messages: `how are you` and `fine, thanks` are new, `hello there` is not.
+    let mut app = two_chats();
+    open(&mut app, ADA, conversation());
+    // The daemon's mark_read answer zeroes the list's count; the divider must still remember.
+    app.apply(&DaemonFrame::MarkedRead {
+        v: 1,
+        jid: ADA.to_owned(),
+        unread: 0,
+    });
+    assert_eq!(app.chats()[0].unread, 0, "the list is read now");
+    let buffer = draw(&mut app, 80, 24);
+    let divider = row_of(&buffer, "2 unread messages");
+    assert_eq!(
+        divider + 1,
+        row_of(&buffer, "how are you"),
+        "above the oldest new message:\n{}",
+        text(&buffer)
+    );
+    assert!(
+        divider > row_of(&buffer, "hello there"),
+        "below the older read one:\n{}",
+        text(&buffer)
+    );
+    // The words are the accent's, and the hairlines beside them the border's.
+    let (x, _) = find(&buffer, "2 unread messages");
+    assert_eq!(buffer[(x, divider)].fg, accent);
+    let first = (0..x)
+        .find(|&c| buffer[(c, divider)].symbol() == "─")
+        .expect("a hairline before the count");
+    assert_eq!(buffer[(first, divider)].fg, border);
+    assert_ne!(
+        buffer[(80 - 1, divider)].symbol(),
+        "─",
+        "the gutter stays free"
+    );
+    // One unread message says it in the singular.
+    let mut app = app_with(vec![chat(ADA, "Ada Lovelace", 3)]);
+    open(
+        &mut app,
+        ADA,
+        vec![message(
+            "A1",
+            "only one is new",
+            false,
+            "2026-10-18T17:01:00Z",
+        )],
+    );
+    let buffer = draw(&mut app, 80, 24);
+    assert!(
+        text(&buffer).contains("1 unread message "),
+        "{}",
+        text(&buffer)
+    );
+}
+
+/// C8: a day starts with a separator across the band — hairlines in the border role on each
+/// side of the label, muted, centred — after a blank row, with no weekday in the label.
+#[test]
+fn each_day_starts_with_a_centred_separator_after_a_blank_line() {
     let palette = Palette::default();
     let muted = colour(palette.text_muted());
+    let border = colour(palette.border());
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
         let sep = separator(&buffer);
         let blank = |y: u16| (sep + 1..width).all(|x| buffer[(x, y)].symbol() == " ");
-        let (x, saturday) = find(&buffer, "SAT 17 OCT 2026");
+        let saturday = row_of(&buffer, "17 OCT 2026");
         assert_eq!(saturday + 1, row_of(&buffer, "hello there"));
+        assert!(
+            !text(&buffer).contains("SAT 17 OCT"),
+            "the weekday is gone:\n{}",
+            text(&buffer)
+        );
+        // The label is muted and the hairlines beside it are in the border role; the two
+        // margins and the gutter stay free, so the separator lives inside the band.
+        let pane = sep + 1;
+        let (x, _) = find(&buffer, "17 OCT 2026");
         assert_eq!(buffer[(x, saturday)].fg, muted);
-        let sunday = row_of(&buffer, "SUN 18 OCT 2026");
+        let first = (pane..x)
+            .find(|&c| buffer[(c, saturday)].symbol() == "─")
+            .expect("a hairline before the label");
+        let last = (x..width)
+            .rev()
+            .find(|&c| buffer[(c, saturday)].symbol() == "─")
+            .expect("a hairline after the label");
+        assert_eq!(buffer[(first, saturday)].fg, border);
+        assert_eq!(buffer[(last, saturday)].fg, border);
+        assert!(
+            first > pane,
+            "the left margin stays free:\n{}",
+            text(&buffer)
+        );
+        assert!(
+            last < width - 2,
+            "the gutter stays free:\n{}",
+            text(&buffer)
+        );
+        assert!(
+            (first..=last)
+                .all(|c| matches!(buffer[(c, saturday)].symbol(), "─" | " ")
+                    || (x..x + 12).contains(&c)),
+            "nothing but hairlines and the label:\n{}",
+            text(&buffer)
+        );
+        // Centred: as much hairline on one side as the other, give or take one column.
+        let left = (first..x)
+            .filter(|&c| buffer[(c, saturday)].symbol() == "─")
+            .count();
+        let right = (x..=last)
+            .filter(|&c| buffer[(c, saturday)].symbol() == "─")
+            .count();
+        assert!(
+            left.abs_diff(right) <= 1,
+            "the label is centred: {left} vs {right}\n{}",
+            text(&buffer)
+        );
+        let sunday = row_of(&buffer, "18 OCT 2026");
         assert!(
             blank(sunday - 1),
             "a blank line before the label:\n{}",
@@ -434,17 +812,15 @@ fn each_day_starts_with_its_label_in_muted_caps_after_a_blank_line() {
         assert_eq!(sunday + 1, row_of(&buffer, "good morning"));
     }
     // The day is the local one: 01:00 UTC is still Saturday three hours west of Greenwich.
-    let mut app = two_chats().with_utc_offset(time::UtcOffset::from_hms(-3, 0, 0).expect("-3h"));
+    let mut app = app_with(vec![chat(ADA, "Ada Lovelace", 0)])
+        .with_utc_offset(time::UtcOffset::from_hms(-3, 0, 0).expect("-3h"));
     open(
         &mut app,
         ADA,
         vec![message("L1", "late", false, "2026-10-18T01:00:00Z")],
     );
     let buffer = draw(&mut app, 80, 24);
-    assert_eq!(
-        row_of(&buffer, "SAT 17 OCT 2026") + 1,
-        row_of(&buffer, "late")
-    );
+    assert_eq!(row_of(&buffer, "17 OCT 2026") + 1, row_of(&buffer, "late"));
 }
 
 #[test]
@@ -457,12 +833,140 @@ fn senders_are_not_colour_coded() {
     let mine = message("G3", "third", true, "2026-10-18T17:03:00Z");
     open(&mut app, GROUP, vec![one, two, mine]);
     let buffer = draw(&mut app, 80, 24);
-    let fg = |needle: &str| {
+    // Two members of one group, and one of mine: the side says whose, never a colour.
+    let ink = |needle: &str| {
         let (x, y) = find(&buffer, needle);
         (buffer[(x, y)].fg, buffer[(x, y)].modifier)
     };
-    assert_eq!(fg("Ada ·"), fg("Grace ·"), "{}", text(&buffer));
-    assert_eq!(fg("Ada ·"), fg("you ·"));
+    assert_eq!(ink("first"), ink("second"), "{}", text(&buffer));
+    assert_eq!(ink("first"), ink("third"), "{}", text(&buffer));
+    // Both members' bubbles share the one incoming tone.
+    let incoming = colour(Palette::default().surface_chrome());
+    for who in ["first", "second"] {
+        let (x, y) = find(&buffer, who);
+        assert_eq!(buffer[(x, y)].bg, incoming, "no sender gets its own tone");
+    }
+}
+
+/// C5: the quote is one inset row inside the slab — a bar, the quoted text clamped with `…`, on
+/// `quote_inset` — the reply's text follows, and the reactions are a chip row under the slab.
+#[test]
+fn a_quote_is_one_inset_row_and_reactions_sit_under_the_slab() {
+    let palette = Palette::default();
+    let mut app = two_chats();
+    let mut reply = message("A2", "thanks", false, "2026-10-17T17:02:00Z");
+    reply.reply_to = Some("A1".to_owned());
+    reply.reactions = vec![nuncio_client::Reaction {
+        emoji: "👍".to_owned(),
+        from_me: false,
+    }];
+    open(
+        &mut app,
+        ADA,
+        vec![
+            message(
+                "A1",
+                "the question, long enough to be clamped with an ellipsis and then some more",
+                false,
+                "2026-10-17T17:01:00Z",
+            ),
+            reply,
+        ],
+    );
+    let buffer = draw(&mut app, 80, 24);
+    let sep = separator(&buffer);
+    let (x, quote) = (sep + 2..80)
+        .find(|&x| buffer[(x, row_of(&buffer, "▌ the question"))].symbol() == "▌")
+        .map(|x| (x, row_of(&buffer, "▌ the question")))
+        .expect("the quote's bar");
+    // The inset: the accent bar, the muted quote, on the quote tone over the slab's own.
+    assert_eq!(buffer[(x, quote)].fg, colour(palette.accent()));
+    assert_eq!(buffer[(x + 2, quote)].fg, colour(palette.text_muted()));
+    let inset = palette.quote_inset(palette.surface_chrome());
+    assert_eq!(buffer[(x + 2, quote)].bg, colour(inset));
+    assert!(row(&buffer, quote).contains('…'), "{}", text(&buffer));
+    // The reply's own text follows on the next row, on the slab's tone.
+    let (_, said) = find(&buffer, "thanks");
+    assert_eq!(said, quote + 1);
+    assert_eq!(
+        buffer[(x + 2, said)].bg,
+        colour(palette.surface_chrome()),
+        "{}",
+        text(&buffer)
+    );
+    // The reactions are a chip row under the slab, on the hover tone, with no ear.
+    let chip = row_of(&buffer, "👍");
+    assert_eq!(chip, said + 1, "{}", text(&buffer));
+    assert_eq!(buffer[(x, chip)].bg, colour(palette.surface_hover()));
+    assert_eq!(
+        buffer[(sep + 1, chip)].symbol(),
+        " ",
+        "no ear under the slab"
+    );
+}
+
+/// C6: the conversation's header rule carries the chat's avatar chip, its name and a subtitle the
+/// wire owns: `…0001 · contact` for a contact, `group` for a group.
+#[test]
+fn the_conversation_header_names_the_chat_and_what_it_is() {
+    let mut with_phone = chat(ADA, "Ada Lovelace", 0);
+    with_phone.phone = Some("…0001".to_owned());
+    let mut group = chat(GROUP, "Design team", 0);
+    group.phone = None;
+    let mut app = app_with(vec![with_phone, group]);
+    open(&mut app, ADA, conversation());
+    let buffer = draw(&mut app, 80, 24);
+    let sep = separator(&buffer);
+    let header = row(&buffer, 1);
+    assert!(
+        header.contains("Ada Lovelace · …0001 · contact"),
+        "{header}"
+    );
+    // The chip sits before the name and wears the chat's own tint: the same one the list gives
+    // that chat's avatar.
+    let (x, y) = find(&buffer, "▗");
+    assert_eq!(y, 1, "the chip is on the header rule");
+    let listed = (2..19)
+        .find(|&y| {
+            (0..sep)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+                .contains("Ada Lovelace")
+        })
+        .map(|y| {
+            let x = (0..sep)
+                .find(|&x| buffer[(x, y)].symbol() == "▗")
+                .expect("the list's avatar");
+            (x, y)
+        })
+        .expect("the list shows the chat");
+    assert_eq!(
+        buffer[(x + 1, y)].bg,
+        buffer[(listed.0 + 1, listed.1)].bg,
+        "the chip wears the chat's tint:\n{}",
+        text(&buffer)
+    );
+    assert_eq!(buffer[(x, y)].fg, buffer[(x + 1, y)].bg, "the corner too");
+    // A group says so, and a chat with no phone shows only the kind.
+    // Two Escapes leave the composer and the conversation for the list, then `j` walks to the
+    // group and Enter opens it.
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Esc));
+    app.handle_key(key(KeyCode::Char('j')));
+    open(&mut app, GROUP, Vec::new());
+    let buffer = draw(&mut app, 80, 24);
+    let header = row(&buffer, 1);
+    assert!(header.contains("Design team · group"), "{header}");
+    assert!(!header.contains("contact"), "{header}");
+    // A narrow window draws one pane, so the header keeps the way back even when the subtitle
+    // has to give way: the name and the subtitle never push `· Tab` off the rule.
+    let buffer = draw(&mut app, 28, 20);
+    let header = row(&buffer, 1);
+    assert!(header.contains("Design team"), "{header}");
+    assert!(
+        header.contains("· Tab"),
+        "the way back survives: {header:?}"
+    );
 }
 
 #[test]
@@ -604,7 +1108,7 @@ fn empty_states_are_one_muted_line_with_the_key_hint() {
 }
 
 #[test]
-fn a_reply_shows_its_quote_between_its_header_and_its_text_inside_an_authors_run() {
+fn a_reply_shows_its_quote_behind_a_coloured_bar_inside_the_bubble() {
     let mut app = two_chats();
     let mut reply = message("A2", "line one\nline two", false, "2026-10-17T17:02:00Z");
     reply.reply_to = Some("A1".to_owned());
@@ -624,26 +1128,40 @@ fn a_reply_shows_its_quote_between_its_header_and_its_text_inside_an_authors_run
     let palette = Palette::default();
     for (width, height) in SIZES {
         let buffer = draw(&mut app, width, height);
-        let header = row_of(&buffer, "Ada Lovelace · 17:02");
-        let quote = row_of(&buffer, "> the question");
+        let quote = row_of(&buffer, "▌ the question");
         let one = row_of(&buffer, "line one");
         let two = row_of(&buffer, "line two");
-        let next = row_of(&buffer, "Ada Lovelace · 17:03");
-        assert_eq!(
-            (quote, one, two, next),
-            (header + 1, header + 2, header + 3, header + 4),
-            "header, quote, text, then the next message of the run:\n{}",
+        let next = row_of(&buffer, "afterwards");
+        // The bar is the accent role and the quote is muted; the old `> ` is gone.
+        let sep = separator(&buffer);
+        // Past the pane's margin, where the selection bar sits on a selected message.
+        let bar = (sep + 2..width)
+            .find(|&x| buffer[(x, quote)].symbol() == "▌")
+            .expect("the quote's bar");
+        assert_eq!(buffer[(bar, quote)].fg, colour(palette.accent()));
+        assert_eq!(buffer[(bar + 2, quote)].symbol(), "t");
+        assert_eq!(buffer[(bar + 2, quote)].fg, colour(palette.text_muted()));
+        assert!(
+            !text(&buffer).contains("> the question"),
+            "{}",
             text(&buffer)
         );
-        assert!(!row(&buffer, header).contains("line one"));
-        // The quote is part of the selected reply, not of the next message.
-        let sep = separator(&buffer);
-        let active = colour(palette.surface_active());
-        for y in [header, quote, one, two] {
-            assert_eq!(buffer[(width - 2, y)].bg, active, "row {y}");
+        assert_eq!(
+            (one, two),
+            (quote + 1, quote + 2),
+            "quote, then the text:\n{}",
+            text(&buffer)
+        );
+        assert_eq!(next, two + 1, "the same author's next message, no gap");
+        assert!(!row(&buffer, quote).contains("line one"));
+        // The quote is part of the selected reply, not of the next message: the selection is one
+        // accent bar on the pane's left margin, over the rows the message owns.
+        let pane = separator(&buffer) + 1;
+        for y in [quote, one, two] {
+            assert_eq!(buffer[(pane, y)].symbol(), "▌", "row {y}");
+            assert_eq!(buffer[(pane, y)].fg, colour(palette.accent()));
         }
-        assert_ne!(buffer[(width - 2, next)].bg, active);
-        assert!(sep < width);
+        assert_ne!(buffer[(pane, next)].symbol(), "▌");
     }
 }
 
@@ -680,12 +1198,10 @@ fn the_selected_messages_reactions_row_is_on_the_active_surface_too() {
     let buffer = draw(&mut app, 80, 24);
     let y = row_of(&buffer, "👍");
     assert_eq!(y, row_of(&buffer, "react to me") + 1);
-    assert_eq!(
-        buffer[(78, y)].bg,
-        colour(Palette::default().surface_active()),
-        "{}",
-        text(&buffer)
-    );
+    // The reactions row belongs to the message, so the selection bar runs over it too.
+    let pane = separator(&buffer) + 1;
+    assert_eq!(buffer[(pane, y)].symbol(), "▌", "{}", text(&buffer));
+    assert_eq!(buffer[(pane, y)].fg, colour(Palette::default().accent()));
 }
 
 /// WCAG 2.1 relative luminance: the same formula as `nuncio_client`'s `theme::roles`, private
@@ -732,14 +1248,19 @@ fn meta_is_the_muted_role_and_no_text_is_dimmed() {
             }
         }
     }
-    // Meta is that role: a message's time, the day label, a footer key and an empty state.
+    // Meta is that role: the day label, a footer key and an empty state; a bubble's time is the
+    // faint role (U2), which is a decoration inside the bubble, never body text.
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
     app.handle_key(key(KeyCode::Esc));
     let buffer = draw(&mut app, 80, 24);
     let (x, y) = find(&buffer, "17:01");
-    assert_eq!(buffer[(x, y)].fg, muted, "a message's time");
-    let (x, y) = find(&buffer, "SAT 17 OCT 2026");
+    assert_eq!(
+        buffer[(x, y)].fg,
+        colour(palette.text_faint()),
+        "a message's time"
+    );
+    let (x, y) = find(&buffer, "17 OCT 2026");
     assert_eq!(buffer[(x, y)].fg, muted, "the day label");
     let (x, y) = find(&buffer, "? all keys");
     assert_eq!(buffer[(x, y)].fg, muted, "a footer key");
@@ -749,25 +1270,124 @@ fn meta_is_the_muted_role_and_no_text_is_dimmed() {
     assert_eq!(buffer[(x, y)].fg, muted, "an empty state");
 }
 
+/// U5a: a chat with unread messages has its name and time in bold and its count in an accent
+/// pill; the muted marker is the bell with a slash.
 #[test]
-fn more_than_ninety_nine_unread_messages_show_the_capped_badge() {
+fn an_unread_chat_is_bold_with_a_pill_and_a_muted_one_wears_the_bell() {
+    let palette = Palette::default();
+    let accent = colour(palette.accent());
+    let on_accent = colour(palette.accent_on());
+    let mut muted = chat(GRACE, "Grace Hopper", 0);
+    muted.muted = true;
+    muted.last_message = Some(message("G1", "bye", false, "2026-10-25T16:02:00Z"));
+    let mut busy = chat(ADA, "Ada Lovelace", 4);
+    busy.last_message = Some(message("A1", "hello", false, "2026-10-25T17:55:00Z"));
+    let mut app = app_with(vec![busy, muted]);
+    let buffer = draw(&mut app, 80, 24);
+    // Ada is the first chat: name, preview (with the pill), rule.
+    let (_, grace) = find(&buffer, "Grace Hopper");
+    let name = grace - 3;
+    let x = (5..separator(&buffer))
+        .find(|&x| buffer[(x, name)].symbol() == "A")
+        .expect("her name");
+    assert!(
+        buffer[(x, name)].modifier.contains(Modifier::BOLD),
+        "her name:\n{}",
+        text(&buffer)
+    );
+    let (x, y) = find(&buffer, "17:55");
+    assert!(buffer[(x, y)].modifier.contains(Modifier::BOLD), "her time");
+    let (x, y) = find(&buffer, "16:02");
+    assert!(!buffer[(x, y)].modifier.contains(Modifier::BOLD));
+    // The pill: ` 4 ` on the accent, its text in `accent_on`.
+    let preview = name + 1;
+    let pill: String = (0..separator(&buffer))
+        .filter(|&x| buffer[(x, preview)].bg == accent)
+        .map(|x| buffer[(x, preview)].symbol())
+        .collect();
+    assert_eq!(pill, " 4 ", "{}", text(&buffer));
+    let x = (0..separator(&buffer))
+        .find(|&x| buffer[(x, preview)].bg == accent && buffer[(x, preview)].symbol() == "4")
+        .expect("the count");
+    assert_eq!(buffer[(x, preview)].fg, on_accent);
+    assert!(!buffer[(x, preview)].modifier.contains(Modifier::BOLD));
+    // The muted chat says so with a quiet dot, not the old `⊘`.
+    assert!(row(&buffer, grace).contains('◌'), "{}", text(&buffer));
+    let _ = grace;
+    assert!(!text(&buffer).contains('⊘'), "{}", text(&buffer));
+}
+
+/// C3: every chat wears a 3×2 rounded avatar of its initials on a tint; the name starts after it,
+/// the time and the pill share the last five columns, and the open chat's fill does not eat the
+/// avatar (it is painted over it).
+#[test]
+fn each_chat_has_a_rounded_avatar_and_the_slots_line_up() {
+    let palette = Palette::default();
+    let mut busy = chat(ADA, "Ada Lovelace", 3);
+    busy.last_message = Some(message("A1", "hello", false, "2026-10-25T17:55:00Z"));
+    let mut app = app_with(vec![busy, chat(GRACE, "Grace Hopper", 0)]);
+    let buffer = draw(&mut app, 80, 24);
+    let seed = |title: &str| {
+        let mut seed = 0u8;
+        for byte in title.bytes() {
+            seed = seed.wrapping_mul(31).wrapping_add(byte);
+        }
+        seed % 4
+    };
+    let tint = colour(palette.avatar_tint(seed("Ada Lovelace")));
+    let ink = colour(palette.avatar_ink(seed("Ada Lovelace")));
+    let (_, grace) = find(&buffer, "Grace Hopper");
+    let name = grace - 3;
+    assert_eq!(buffer[(5, name)].symbol(), "A", "{}", text(&buffer));
+    // The avatar's cells: corners in the tint on the row's own background, middle cells tinted.
+    assert_eq!(buffer[(1, name)].symbol(), "▗");
+    assert_eq!(buffer[(1, name)].fg, tint);
+    assert_eq!(buffer[(3, name)].symbol(), "▖");
+    assert_eq!(buffer[(2, name)].symbol(), "A");
+    assert_eq!(buffer[(2, name)].bg, tint);
+    assert_eq!(buffer[(2, name)].fg, ink);
+    assert_eq!(buffer[(1, name + 1)].symbol(), "▝");
+    assert_eq!(buffer[(2, name + 1)].symbol(), "L");
+    assert_eq!(buffer[(2, name + 1)].bg, tint);
+    // The open chat's fill keeps its background behind the avatar's corners.
+    assert_eq!(buffer[(1, name)].bg, colour(palette.surface_active()));
+    // A chat without the keys keeps the list's chrome there.
+    let tint = colour(palette.avatar_tint(seed("Grace Hopper")));
+    assert_eq!(buffer[(1, grace)].symbol(), "▗");
+    assert_eq!(buffer[(1, grace)].bg, colour(palette.surface_chrome()));
+    assert_eq!(buffer[(1, grace)].fg, tint);
+    // Time and pill in the last five columns of the list's width (32 - 3 = 29 → 24..28).
+    let (x, y) = find(&buffer, "17:55");
+    assert_eq!((x, y), (24, name), "{}", text(&buffer));
+    let pill: String = (0..separator(&buffer))
+        .filter(|&x| buffer[(x, name + 1)].bg == colour(palette.accent()))
+        .map(|x| buffer[(x, name + 1)].symbol())
+        .collect();
+    assert_eq!(pill, " 3 ", "{}", text(&buffer));
+}
+
+#[test]
+fn more_than_ninety_nine_unread_messages_show_the_capped_pill() {
     let busy = chat(ADA, "Ada Lovelace", 120);
     let mut app = app_with(vec![busy, chat(GRACE, "Grace Hopper", 9)]);
     let buffer = draw(&mut app, 80, 24);
     let shown = text(&buffer);
-    assert!(shown.contains("●99+"), "the capped badge:\n{shown}");
-    assert!(shown.contains("●9"), "a small count stays whole:\n{shown}");
+    assert!(shown.contains("99+"), "the capped pill:\n{shown}");
+    assert!(shown.contains(" 9 "), "a small count stays whole:\n{shown}");
 }
 
 #[test]
-fn only_the_pane_with_the_keys_paints_the_active_surface() {
+fn the_open_chat_is_filled_with_the_keys_or_without_them_and_the_message_only_with_them() {
     let palette = Palette::default();
-    let chrome = colour(palette.surface_chrome());
     let active = colour(palette.surface_active());
     // The chat pane is 32 columns at 80: the line at 32, the conversation from 33.
-    let list_filled = |buffer: &Buffer| (1..32).any(|x| buffer[(x, 2)].bg == active);
-    let conversation_filled =
-        |buffer: &Buffer| (2..22).any(|y| (33..80).any(|x| buffer[(x, y)].bg == active));
+    // The list's first row is the filter bar; the chats start under it.
+    let list_filled = |buffer: &Buffer| (1..32).any(|x| buffer[(x, 3)].bg == active);
+    // The conversation marks its selected message with one accent bar on the pane's left margin.
+    let accent = colour(palette.accent());
+    let conversation_filled = |buffer: &Buffer| {
+        (2..22).any(|y| buffer[(33, y)].symbol() == "▌" && buffer[(33, y)].fg == accent)
+    };
 
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
@@ -775,14 +1395,12 @@ fn only_the_pane_with_the_keys_paints_the_active_surface() {
     app.handle_key(key(KeyCode::Char('k')));
     assert_eq!(app.pane(), Pane::Messages);
     let buffer = draw(&mut app, 80, 24);
-    // The conversation has the keys: its selected message is filled, the list is not, and the
-    // bar still says which chat is selected.
+    // The conversation has the keys: its selected message wears the bar, and the list still says
+    // which chat is open.
     assert!(conversation_filled(&buffer), "{}", text(&buffer));
-    assert!(!list_filled(&buffer), "{}", text(&buffer));
-    assert_eq!(buffer[(0, 2)].symbol(), "▌");
-    assert_eq!(buffer[(1, 2)].bg, chrome);
+    assert!(list_filled(&buffer), "{}", text(&buffer));
 
-    // `Tab` moves the keys to the list: the fill moves with them.
+    // `Tab` moves the keys to the list: the message's bar goes, the chat's fill stays.
     app.handle_key(key(KeyCode::Tab));
     assert_eq!(app.pane(), Pane::Chats);
     let buffer = draw(&mut app, 80, 24);
@@ -833,52 +1451,175 @@ fn the_scroll_gutter_says_what_is_hidden() {
 }
 
 #[test]
-fn the_composer_says_what_enter_does_and_marks_its_rule_when_focused() {
+fn the_composer_has_a_field_with_a_placeholder_and_the_keys_are_said_once() {
     let palette = Palette::default();
     let muted = colour(palette.text_muted());
+    let faint = colour(palette.text_faint());
     let accent = colour(palette.accent());
     let mut app = two_chats();
-    // With nothing to send, the placeholder says how to write at all.
+    // With nothing to send and no keys on it, the composer says how to write at all.
     let buffer = draw(&mut app, 80, 24);
     let (x, y) = find(&buffer, "i or Enter to write");
     assert_eq!(buffer[(x, y)].fg, muted);
-    assert!(!text(&buffer).contains("Enter sends"));
+    assert!(!text(&buffer).contains("Write a message"));
 
-    // With a draft, the rule says what Enter does and starts with the accent bar.
+    // Opened, the field is empty and says so with a placeholder, in the faint role, with the
+    // caret where the first letter goes.
     open(&mut app, ADA, conversation());
+    let buffer = draw(&mut app, 80, 24);
+    let (x, y) = find(&buffer, "Write a message");
+    assert_eq!(buffer[(x, y)].fg, faint);
+    assert_eq!(buffer[(x - 2, y)].symbol(), "›");
+    // The field is one hairline above the prompt, in the accent while it holds the keys, and
+    // nothing under it (the footer is the next row).
+    assert_eq!(buffer[(40, y - 1)].symbol(), "─");
+    assert_eq!(buffer[(40, y - 1)].fg, accent, "{}", text(&buffer));
+    assert_eq!(
+        y + 1,
+        23,
+        "the composer is the last body row: {}",
+        text(&buffer)
+    );
+
+    // The keys are said once: the footer, never again on the rule.
+    let shown = text(&buffer);
+    assert_eq!(shown.matches("Enter send").count(), 1, "once:\n{shown}");
+    assert_eq!(shown.matches("Alt-Enter").count(), 1, "once:\n{shown}");
+    assert!(!shown.contains("Enter sends"), "{shown}");
+
+    // A draft replaces the placeholder, and the rule still reaches the last column.
     app.handle_key(key(KeyCode::Char('h')));
     app.handle_key(key(KeyCode::Char('i')));
     let buffer = draw(&mut app, 80, 24);
     let shown = text(&buffer);
-    assert!(shown.contains("Enter sends · Alt-Enter newline"), "{shown}");
-    let rule = row_of(&buffer, "Enter sends");
-    assert_eq!(buffer[(33, rule)].symbol(), "▌");
-    assert_eq!(buffer[(33, rule)].fg, accent);
-    // The hint ends in the pane's last column: the fill reached it, not a column short.
-    let hint = "Enter sends · Alt-Enter newline ";
-    let (x, _) = find(&buffer, hint.trim_end());
-    assert_eq!(usize::from(x) + hint.chars().count(), 80);
+    assert!(!shown.contains("Write a message"), "{shown}");
+    let rule = row_of(&buffer, "hi") - 1;
+    assert_eq!(buffer[(79, rule)].symbol(), "─", "{shown}");
 
-    // The same rule with a reply's quote: the fill still reaches the hint.
+    // With a reply's quote the rule carries it and still reaches the last column.
     app.handle_key(key(KeyCode::Esc));
     app.handle_key(key(KeyCode::Char('k')));
     app.handle_key(key(KeyCode::Char('r')));
-    // Wide enough for the quote and the hint: the rule still reaches the last column.
-    let buffer = draw(&mut app, 240, 24);
-    let rule = row_of(&buffer, "Enter sends");
-    assert!(
-        row(&buffer, rule).contains("replying to:"),
-        "{}",
-        text(&buffer)
-    );
-    let (x, _) = find(&buffer, hint.trim_end());
-    assert_eq!(usize::from(x) + hint.chars().count(), 240);
+    for width in [80, 240] {
+        let buffer = draw(&mut app, width, 24);
+        let rule = row_of(&buffer, "replying to:");
+        assert!(
+            row(&buffer, rule).contains("replying to:"),
+            "{}",
+            text(&buffer)
+        );
+        assert_eq!(
+            buffer[(width - 1, rule)].symbol(),
+            "─",
+            "the rule reaches the last column:\n{}",
+            text(&buffer)
+        );
+    }
+}
 
-    // At a narrow width the quote takes the rule, so the hint gives way instead of overflowing.
-    let buffer = draw(&mut app, 40, 20);
-    let shown = text(&buffer);
-    assert!(shown.contains("replying to:"), "{shown}");
-    assert!(!shown.contains("Enter sends"), "{shown}");
+/// U7: every element the redesign added takes its colour from the theme's roles — checked cell by
+/// cell, since a literal and a role can be the same colour in one buffer.
+#[test]
+fn each_new_element_uses_its_exact_role() {
+    let palette = Palette::default();
+    let role = colour;
+    let mut app = two_chats();
+    let mut lost = message("M2", "did you get this", true, "2026-10-17T17:02:00Z");
+    lost.state = Some(MessageState::NotSent);
+    open(
+        &mut app,
+        ADA,
+        vec![
+            message("A1", "hello there", false, "2026-10-17T17:01:00Z"),
+            lost,
+        ],
+    );
+    let buffer = draw(&mut app, 80, 24);
+    // An incoming bubble on the chrome, its time and the `!` where the ticks would go.
+    let (x, y) = find(&buffer, "hello there");
+    assert_eq!(buffer[(x, y)].bg, role(palette.surface_chrome()));
+    assert_eq!(buffer[(x, y)].fg, role(palette.text()));
+    let (x, y) = find(&buffer, "17:01");
+    assert_eq!(buffer[(x, y)].fg, role(palette.text_faint()));
+    assert_eq!(buffer[(x, y)].bg, role(palette.surface_chrome()));
+    let (x, y) = find(&buffer, "did you get this");
+    assert_eq!(buffer[(x, y)].bg, role(palette.bubble_outgoing()));
+    let (x, y) = find(&buffer, "!");
+    assert_eq!(buffer[(x, y)].fg, role(palette.danger()));
+    // The unread pill: the accent as its background, `accent_on` as its text.
+    let sep = separator(&buffer);
+    let (_, grace) = find(&buffer, "Grace Hopper");
+    let preview = grace - 2;
+    let pill = (0..sep)
+        .find(|&x| buffer[(x, preview)].bg == role(palette.accent()))
+        .expect("the pill");
+    assert_eq!(buffer[(pill + 1, preview)].fg, role(palette.accent_on()));
+    // The filter chip in force: the same pair.
+    let chip = (0..sep)
+        .find(|&x| buffer[(x, 2)].bg == role(palette.accent()))
+        .expect("the chip");
+    assert_eq!(buffer[(chip + 1, 2)].fg, role(palette.accent_on()));
+    // The selected chat's rows on the active surface, the rule between chats in the border role.
+    assert_eq!(buffer[(1, grace - 3)].bg, role(palette.surface_active()));
+    assert_eq!(buffer[(2, grace - 1)].fg, role(palette.border()));
+    // The placeholder in the faint role, the prompt before it muted.
+    let (x, y) = find(&buffer, "Write a message");
+    assert_eq!(buffer[(x, y)].fg, role(palette.text_faint()));
+    assert_eq!(buffer[(x - 2, y)].fg, role(palette.text_muted()));
+    // The day separator muted.
+    let (x, y) = find(&buffer, "17 OCT 2026");
+    assert_eq!(buffer[(x, y)].fg, role(palette.text_muted()));
+}
+
+/// U7: the crate never names a colour itself. The one legitimate `Color::Rgb(` is the palette
+/// helper's body; a literal (hex or digits) anywhere else fails, and so does losing the helper.
+#[test]
+fn the_only_colour_the_crate_names_is_the_palette_helper() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    let mut pending = vec![root];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).expect("the crate's sources") {
+            let path = entry.expect("a source file").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                files.push(path);
+            }
+        }
+    }
+    assert!(!files.is_empty(), "the crate has sources");
+    let helper = "Color::Rgb(colour.r, colour.g, colour.b)";
+    let mut helpers = 0;
+    let mut offenders = Vec::new();
+    for file in files {
+        let text = std::fs::read_to_string(&file).expect("read a source file");
+        for (number, line) in text.lines().enumerate() {
+            let Some(at) = line.find("Color::Rgb(") else {
+                continue;
+            };
+            let before = &line[..at];
+            // A comment may name it; code may not.
+            if before.trim_start().starts_with("//") {
+                continue;
+            }
+            if line.trim() == helper {
+                helpers += 1;
+                continue;
+            }
+            offenders.push(format!(
+                "{}:{}: {}",
+                file.display(),
+                number + 1,
+                line.trim()
+            ));
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "a colour is named outside the palette helper: {offenders:?}"
+    );
+    assert_eq!(helpers, 1, "the palette helper is the one site");
 }
 
 #[test]
@@ -920,4 +1661,35 @@ fn the_reaction_picker_stacks_its_keys_when_it_is_narrow() {
         "one reaction per row:\n{}",
         text(&buffer)
     );
+}
+
+/// U1: the chat list takes 30 % of the body, never under `LIST` and never over `LIST_MAX`; the
+/// conversation gets the rest. Below `NARROW` only the focused pane is drawn, as before.
+#[test]
+fn the_chat_list_takes_thirty_percent_within_its_bounds() {
+    for (width, height, want) in [(240u16, 60u16, 48u16), (80, 24, 32)] {
+        let mut app = app_with(vec![chat("15551230001@s.whatsapp.net", "Ada", 0)]);
+        let buffer = draw(&mut app, width, height);
+        let got = separator(&buffer);
+        assert_eq!(
+            got, want,
+            "at {width}x{height} the list is {got} columns, want {want}"
+        );
+    }
+    // 40 columns is under NARROW: one pane, so no separator at all.
+    let mut app = app_with(vec![chat("15551230001@s.whatsapp.net", "Ada", 0)]);
+    let buffer = draw(&mut app, 40, 20);
+    assert!(
+        !text(&buffer).contains('│'),
+        "narrow mode draws a single pane:\n{}",
+        text(&buffer)
+    );
+}
+
+/// A very wide body does not overflow the list's share: 30 % is computed in u32 and clamped.
+#[test]
+fn a_very_wide_body_does_not_overflow_the_list_width() {
+    let mut app = app_with(vec![chat("15551230001@s.whatsapp.net", "Ada", 0)]);
+    let buffer = draw(&mut app, 3000, 20);
+    assert_eq!(separator(&buffer), 48, "the list stays at its most width");
 }

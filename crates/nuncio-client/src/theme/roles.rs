@@ -7,6 +7,11 @@ use super::{Palette, Rgb};
 
 /// The lowest contrast `text_muted` may have on either surface (WCAG AA, plan §4.1).
 const MUTED_MIN_CONTRAST: f64 = 4.5;
+/// The lowest contrast an incoming message's ear may have on the chrome: below it the ear is a
+/// graphic nobody would see, and the accent takes its place.
+const EAR_MIN_CONTRAST: f64 = 1.5;
+/// The number of palette hues an avatar's tint can come from.
+const AVATAR_TINTS: u8 = 4;
 
 impl Palette {
     /// The content pane (transcript, reader): `background`.
@@ -35,6 +40,57 @@ impl Palette {
     /// A hovered row: `surface_chrome` 6 % toward `text`.
     pub fn surface_hover(&self) -> Rgb {
         mix(self.surface_chrome(), self.text(), 0.06)
+    }
+
+    /// An outgoing message's bubble: `surface` 18 % toward `accent`, the faint accent tint that
+    /// tells our messages from theirs without a second accent-coloured surface.
+    pub fn bubble_outgoing(&self) -> Rgb {
+        mix(self.surface(), self.accent(), 0.18)
+    }
+
+    /// The ear of an incoming message's slab: the theme's cyan, the one hue that says "them".
+    /// When cyan sits too close to the chrome to read as a graphic (under 1.5:1), the accent is
+    /// used instead, so the ear is never invisible.
+    pub fn bubble_ear_incoming(&self) -> Rgb {
+        if contrast(self.cyan, self.surface_chrome()) >= EAR_MIN_CONTRAST {
+            self.cyan
+        } else {
+            self.accent()
+        }
+    }
+
+    /// The ear of an outgoing message's slab: the accent, the same mark the focus uses.
+    pub fn bubble_ear_outgoing(&self) -> Rgb {
+        self.accent()
+    }
+
+    /// A quote's inset inside a bubble of `tint`: 30 % of the way toward the surface behind it, so
+    /// it reads as a recess on a dark theme and as a lighter panel on a light one.
+    pub fn quote_inset(&self, tint: Rgb) -> Rgb {
+        mix(tint, self.surface(), 0.30)
+    }
+
+    /// An avatar's tint for `seed`: 35 % of one of four palette hues into the chrome, so every
+    /// chat gets a stable colour and no tone is invented.
+    pub fn avatar_tint(&self, seed: u8) -> Rgb {
+        let hue = match seed % AVATAR_TINTS {
+            0 => self.accent,
+            1 => self.cyan,
+            2 => self.green,
+            _ => self.yellow,
+        };
+        mix(self.surface_chrome(), hue, 0.35)
+    }
+
+    /// The letter on [`Palette::avatar_tint`]: whichever of `text` and `surface` contrasts more
+    /// with it, so an avatar stays readable on every theme.
+    pub fn avatar_ink(&self, seed: u8) -> Rgb {
+        let tint = self.avatar_tint(seed);
+        if contrast(tint, self.text()) >= contrast(tint, self.surface()) {
+            self.text()
+        } else {
+            self.surface()
+        }
     }
 
     /// The selected row and the active tab: `surface_chrome` 10 % toward `text`.
@@ -145,7 +201,7 @@ fn contrast(a: Rgb, b: Rgb) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Palette, Rgb, contrast, luminance};
+    use super::{AVATAR_TINTS, EAR_MIN_CONTRAST, Palette, Rgb, contrast, luminance};
 
     /// Omarchy's Gruvbox (dark) `colors.toml`, verbatim (basecamp/omarchy, themes/gruvbox).
     const GRUVBOX: &str = r##"
@@ -322,6 +378,11 @@ light_foreground = "#5c5f77"
         let active = luminance(palette.surface_active());
         let text = luminance(palette.text());
         assert!(chrome < hover && hover < active && active < text);
+        // The outgoing bubble is a tint of the accent, on the surface's side of the text.
+        let outgoing = palette.bubble_outgoing();
+        assert_ne!(outgoing, palette.surface());
+        assert_ne!(outgoing, palette.surface_chrome());
+        assert!(outgoing.b > outgoing.r, "the accent is the cooler hue");
     }
 
     #[test]
@@ -430,6 +491,53 @@ light_foreground = "#5c5f77"
         // Moved toward the text, and the text itself is untouched.
         assert!(contrast(muted, palette.text()) < contrast(given, palette.text()));
         assert_eq!(palette.text(), hex("#c2c2b0"));
+    }
+
+    /// Direction C's roles keep their recipes on both themes, and the text that sits on them
+    /// stays readable.
+    #[test]
+    fn the_direction_c_roles_hold_on_dark_and_light_themes() {
+        for fixture in [GRUVBOX, FLEXOKI_LIGHT] {
+            let palette = parse(fixture);
+            // The incoming ear is a graphic: it reads against the chrome it sits on.
+            let ear = palette.bubble_ear_incoming();
+            let ear_on_chrome = contrast(ear, palette.surface_chrome());
+            assert!(
+                ear_on_chrome >= EAR_MIN_CONTRAST,
+                "the ear reads on the chrome: {ear_on_chrome:.2}"
+            );
+            // The outgoing ear is the accent, the same mark the focus uses.
+            assert_eq!(palette.bubble_ear_outgoing(), palette.accent());
+            // A quote stays readable inside a bubble of either tone.
+            for tint in [palette.surface_chrome(), palette.bubble_outgoing()] {
+                let inset = palette.quote_inset(tint);
+                assert_ne!(inset, tint, "the inset is its own tone");
+                let on_inset = contrast(palette.text(), inset);
+                assert!(on_inset >= 4.5, "text on the quote inset: {on_inset:.2}");
+            }
+            // Four distinct, stable avatar tints, each with an ink that reads on it.
+            let mut tints = Vec::new();
+            for seed in 0..AVATAR_TINTS {
+                let tint = palette.avatar_tint(seed);
+                assert!(!tints.contains(&tint), "distinct for the four seeds");
+                let ink = contrast(palette.avatar_ink(seed), tint);
+                assert!(ink >= 3.0, "the initials read on the tint: {ink:.2}");
+                tints.push(tint);
+            }
+        }
+    }
+
+    /// A theme whose cyan is the chrome itself gets the accent for its ear: the ear is never an
+    /// invisible graphic.
+    #[test]
+    fn an_invisible_cyan_falls_back_to_the_accent() {
+        let palette = parse(
+            "background = \"#282828\"\nforeground = \"#d4be98\"\naccent = \"#7daea3\"\n\
+             cyan = \"#3c3836\"\nlighter_background = \"#3c3836\"\n",
+        );
+        assert_eq!(palette.surface_chrome(), hex("#3c3836"));
+        assert!(contrast(palette.cyan, palette.surface_chrome()) < EAR_MIN_CONTRAST);
+        assert_eq!(palette.bubble_ear_incoming(), palette.accent());
     }
 
     #[test]

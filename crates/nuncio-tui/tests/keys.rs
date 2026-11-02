@@ -183,9 +183,10 @@ fn tab_switches_focus_and_only_the_focused_pane_has_the_bold_title() {
     let mut app = two_chats();
     let screen = render(&mut app, 80, 24);
     let right = split(&screen);
-    // The titles sit on the header rule: `─ Chats (2) ─…┬─ Ada Lovelace ─…`.
+    // The titles sit on the header rule: `─ Chats (2) ─…┬─ ▗A▖ Ada Lovelace ─…`, so the
+    // conversation's name starts after the rule, the space and the avatar chip.
     let chats_title = 2;
-    let conversation_title = right + 3;
+    let conversation_title = right + 7;
     assert_eq!(screen[(chats_title, 1)].symbol(), "C", "{}", text(&screen));
     assert_eq!(screen[(conversation_title, 1)].symbol(), "A");
     assert!(focused_title(&screen, chats_title), "the focused list");
@@ -212,7 +213,7 @@ fn the_composer_counts_as_the_conversation_pane_for_the_focus() {
     let screen = render(&mut app, 80, 24);
     let right = split(&screen);
     assert!(!focused_title(&screen, 2));
-    assert!(focused_title(&screen, right + 3));
+    assert!(focused_title(&screen, right + 7));
 }
 
 #[test]
@@ -243,18 +244,24 @@ fn j_k_and_the_arrows_select_messages_in_the_conversation_and_shift_k_j_do_nothi
     open_ada(&mut app, three());
     assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
     assert_eq!(app.pane(), Pane::Messages);
-    // The conversation row of the selected message, marked by the `▌` bar: its text.
+    // The conversation row of the selected message, marked by the accent bar on the pane's left
+    // margin: its text.
+    let accent = {
+        let rgb = Palette::default().accent();
+        Color::Rgb(rgb.r, rgb.g, rgb.b)
+    };
     let selected = |app: &mut App| -> Option<String> {
         let screen = render(app, 80, 24);
         let right = split(&screen);
-        let conversation = |y: u16| -> String {
-            (right + 1..screen.area.width)
-                .map(|x| screen[(x, y)].symbol())
-                .collect()
-        };
-        (0..screen.area.height)
-            .find(|&y| conversation(y).starts_with("▌ "))
-            .map(conversation)
+        (2..screen.area.height - 1)
+            .find(|&y| {
+                screen[(right + 1, y)].symbol() == "▌" && screen[(right + 1, y)].fg == accent
+            })
+            .map(|y| {
+                (right + 1..screen.area.width)
+                    .map(|x| screen[(x, y)].symbol())
+                    .collect()
+            })
     };
 
     // Shift-K / Shift-J are gone: they select nothing.
@@ -445,11 +452,18 @@ fn a_click_in_the_conversation_focuses_it_and_selects_the_clicked_message() {
     let at = find(&screen, "second words");
     assert_eq!(click(&mut app, at), None);
     assert_eq!(app.pane(), Pane::Messages);
-    let shown = text(&render(&mut app, 80, 24));
-    assert!(
-        shown.contains("▌ you · 17:02"),
-        "the clicked message:\n{shown}"
+    let after = render(&mut app, 80, 24);
+    let accent = {
+        let rgb = Palette::default().accent();
+        Color::Rgb(rgb.r, rgb.g, rgb.b)
+    };
+    assert_eq!(
+        after[(split(&after) + 1, at.1)].symbol(),
+        "▌",
+        "the clicked message:\n{}",
+        text(&after)
     );
+    assert_eq!(after[(split(&after) + 1, at.1)].fg, accent);
     // `r` now replies to it.
     app.handle_key(key(KeyCode::Char('r')));
     type_text(&mut app, "ok");
@@ -460,14 +474,19 @@ fn a_click_in_the_conversation_focuses_it_and_selects_the_clicked_message() {
     };
     assert_eq!(reply_to.as_deref(), Some("A2"));
 
-    // A click on a header row selects that message too.
+    // A click on another message's own row selects that message too.
     app.handle_key(key(KeyCode::Tab));
     let screen = render(&mut app, 80, 24);
-    let at = find(&screen, "Ada Lovelace · 17:01");
+    let at = find(&screen, "first words");
     click(&mut app, at);
     assert_eq!(app.pane(), Pane::Messages);
-    let shown = text(&render(&mut app, 80, 24));
-    assert!(shown.contains("▌ Ada Lovelace · 17:01"), "{shown}");
+    let after = render(&mut app, 80, 24);
+    assert_eq!(
+        after[(split(&after) + 1, at.1)].symbol(),
+        "▌",
+        "the clicked message:\n{}",
+        text(&after)
+    );
 }
 
 #[test]
@@ -562,20 +581,78 @@ fn chat_markers_follow_the_name_in_their_own_order() {
                 .unwrap_or_else(|| panic!("no {needle:?} row at {width}x{height}:\n{shown}"))
                 .clone()
         };
-        // Only the markers the chat has, right after its name.
+        // Only the markers the chat has, right after its name, in the pinned, muted, archived
+        // order (the muted one is the quiet dot).
         let run =
-            |row: &str| -> String { row.chars().filter(|c| "★⊘▤".contains(*c)).collect() };
+            |row: &str| -> String { row.chars().filter(|c| "★◌▤".contains(*c)).collect() };
         assert_eq!(run(&row("Family")), "★", "{width}x{height}:\n{shown}");
-        assert_eq!(run(&row("Bo")), "★⊘▤", "{width}x{height}:\n{shown}");
-        // The muted chat is the only row with a ⊘ and nothing else.
+        assert_eq!(run(&row("Bo")), "★◌▤", "{width}x{height}:\n{shown}");
+        // The muted chat is the only row with the quiet dot and nothing else.
         let muted = rows
             .iter()
-            .find(|row| row.contains('⊘'))
+            .find(|row| row.contains('◌'))
             .unwrap_or_else(|| panic!("no muted row:\n{shown}"));
-        assert_eq!(run(muted), "⊘", "{width}x{height}:\n{shown}");
+        assert_eq!(run(muted), "◌", "{width}x{height}:\n{shown}");
         // On the name row, never on the preview row.
         assert!(!row("(no messages)").contains('★'), "{width}x{height}");
     }
+}
+
+/// U5b: `/` on the list searches it by text, the selection lands on a chat that matches, and
+/// Esc gives the whole list back.
+#[test]
+fn slash_on_the_list_searches_it_and_esc_gives_it_back_whole() {
+    let mut app = two_chats();
+    assert_eq!(app.handle_key(key(KeyCode::Char('/'))), None);
+    assert!(app.typing());
+    type_text(&mut app, "gra");
+    assert_eq!(app.query(), "gra");
+    assert_eq!(app.listed(), vec![1], "only the chat that matches");
+    assert_eq!(app.selected(), 1, "the selection lands on it");
+    let screen = render(&mut app, 80, 24);
+    let shown = text(&screen);
+    assert!(shown.contains("Grace Hopper"), "{shown}");
+    assert!(!shown.contains("Ada Lovelace"), "{shown}");
+    assert!(shown.contains("search: gra"), "the field:\n{shown}");
+    // Enter keeps it as a filter and gives the keys back.
+    assert_eq!(app.handle_key(key(KeyCode::Enter)), None);
+    assert!(!app.typing());
+    assert_eq!(app.query(), "gra");
+    // Esc clears it.
+    app.handle_key(key(KeyCode::Char('/')));
+    assert_eq!(app.handle_key(key(KeyCode::Esc)), None);
+    assert!(!app.typing());
+    assert_eq!(app.query(), "");
+    assert_eq!(app.listed().len(), 2, "{}", text(&render(&mut app, 80, 24)));
+}
+
+#[test]
+fn the_filters_are_a_bar_and_the_one_in_force_is_filled() {
+    let palette = Palette::default();
+    let accent = {
+        let rgb = palette.accent();
+        Color::Rgb(rgb.r, rgb.g, rgb.b)
+    };
+    let mut app = two_chats();
+    let buffer = render(&mut app, 80, 24);
+    let shown = text(&buffer);
+    for name in ["All", "Unread", "Archived"] {
+        assert!(shown.contains(name), "{name} in the bar:\n{shown}");
+    }
+    // The one in force is a filled chip; `[`/`]` move it.
+    let filled = |buffer: &Buffer| -> String {
+        (0..80)
+            .filter(|&x| buffer[(x, 2)].bg == accent)
+            .map(|x| buffer[(x, 2)].symbol())
+            .collect()
+    };
+    assert_eq!(filled(&buffer), " All ");
+    app.handle_key(key(KeyCode::Char(']')));
+    let buffer = render(&mut app, 80, 24);
+    assert_eq!(filled(&buffer), " Unread ");
+    app.handle_key(key(KeyCode::Char('[')));
+    let buffer = render(&mut app, 80, 24);
+    assert_eq!(filled(&buffer), " All ");
 }
 
 #[test]

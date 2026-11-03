@@ -738,7 +738,13 @@ cyan = "#83c092"
         "the two ears are two colours, not one drawn twice"
     );
     assert!(right > ours_x, "ours wears its ear on the right");
-    assert!(ear < sep + 3, "theirs wears its ear on the left");
+    // Theirs sits on the band's left edge, with the pane's margin empty before it.
+    assert_eq!(ear, sep + 2, "the band's first column");
+    assert_eq!(
+        buffer[(sep + 1, theirs)].symbol(),
+        " ",
+        "the margin stays free"
+    );
 }
 
 /// C8: the unread divider has the day separator's shape, says the count the chat had when it was

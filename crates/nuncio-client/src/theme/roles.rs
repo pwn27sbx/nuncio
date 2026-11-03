@@ -628,8 +628,8 @@ bright_magenta = "#d699b6"
         assert!(gap >= EAR_MIN_DISTANCE, "ΔE {gap:.1} on Flexoki Light");
     }
 
-    /// A theme whose cyan is the chrome itself gets the accent for its ear: the ear is never an
-    /// invisible graphic.
+    /// A theme whose cyan has no contrast on the pane gets the accent for its ear: the ear is
+    /// never an invisible graphic.
     #[test]
     fn an_invisible_cyan_falls_back_to_the_accent() {
         let palette = parse(
@@ -638,6 +638,19 @@ bright_magenta = "#d699b6"
         );
         assert_eq!(palette.surface_chrome(), hex("#3c3836"));
         assert!(contrast(palette.cyan, palette.surface()) < EAR_MIN_CONTRAST);
+        assert_eq!(palette.bubble_ear_incoming(), palette.accent());
+    }
+
+    /// A theme whose cyan reads on the pane but is the accent's own tone gets the accent for its
+    /// ear too: two ears that look alike are worse than one honest accent.
+    #[test]
+    fn a_cyan_too_close_to_the_accent_falls_back_to_the_accent() {
+        let palette = parse(
+            "background = \"#282828\"\nforeground = \"#d4be98\"\naccent = \"#7daea3\"\n\
+             cyan = \"#7aaba1\"\n",
+        );
+        assert!(contrast(palette.cyan, palette.surface()) >= EAR_MIN_CONTRAST);
+        assert!(distance(palette.cyan, palette.accent()) < EAR_MIN_DISTANCE);
         assert_eq!(palette.bubble_ear_incoming(), palette.accent());
     }
 

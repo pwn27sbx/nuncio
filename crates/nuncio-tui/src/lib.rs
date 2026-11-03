@@ -2192,27 +2192,15 @@ impl App {
                 .is_some()
                 .then(|| self.picture_box(&chat.jid, message, inner_max as u16))
                 .flatten();
-            // An animated sticker shows its first frame; the marker says it moves. With the
-            // picture drawn it is the caption's own marker; without one the `[kind]` label
-            // carries it.
-            let marker = message.kind == "sticker" && message.animated;
-            let text = if message.kind == "text" {
+            // An animated sticker shows its first frame, like a still one: the terminal cannot
+            // play it, so nothing claims it moves (a marker on the caption's row read as a stray
+            // glyph under every picture). A drawn picture carries its caption and nothing else.
+            let text = if message.kind == "text" || box_size.is_some() {
                 message.text.clone()
-            } else if box_size.is_some() {
-                if marker && message.text.is_empty() {
-                    "▶".to_owned()
-                } else if marker {
-                    format!("▶ {}", message.text)
-                } else {
-                    message.text.clone()
-                }
+            } else if message.text.is_empty() {
+                format!("[{}]", message.kind)
             } else {
-                format!(
-                    "[{}]{} {}",
-                    message.kind,
-                    if marker { " ▶" } else { "" },
-                    message.text
-                )
+                format!("[{}] {}", message.kind, message.text)
             };
             // A caption being fetched says so on its last row, never wrapping it to more rows
             // (the picture above never moves).

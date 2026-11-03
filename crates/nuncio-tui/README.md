@@ -208,7 +208,7 @@ nuncio-tui [--image <png>]
   its message comes into view — the daemon is asked for the full file without a key, so what is
   shown is the sharp picture and not the thumbnail WhatsApp embeds. Until the picture can be drawn
   (no graphics protocol, no size stated, or nothing to draw yet) the bubble says `[kind]` before
-  its caption, and `[sticker] ▶` marks an animated one. On audio, video and documents `o` asks the
+  its caption. On audio, video and documents `o` asks the
   daemon to download the file and opens it with `xdg-open` (`open` on macOS); `O` does the same for
   a picture, which keeps the thumbnail in the box meanwhile.
 - Live updates: new messages, a send's state changes, unread counts, the connection state, and a
@@ -282,8 +282,9 @@ most 12 rows. Nothing moves when the picture arrives in it.
   and `o` asks again by hand. `O` opens the picture with the desktop's viewer instead.
 - **Stickers** are drawn like photos, from their PNG thumbnail; a sticker without one (or an image
   without one) keeps its `[sticker]` (`[image]`) label at the top of the empty box until the full
-  file arrives (a WebP; an animated one gives its first frame). An animated sticker is marked `▶`
-  and shows its first frame: no animation yet.
+  file arrives (a WebP; an animated one gives its first frame). An animated sticker shows that
+  first frame like a still one and carries no marker: the terminal cannot play it, and a marker on
+  its own row under the picture only read as a stray glyph.
 - **Transparency.** With half blocks every cell is painted, so a transparent pixel (a sticker's
   corners, the margin a picture leaves in its box) takes the bubble's background colour, and a
   theme switch draws the pictures again on the new one. Kitty and sixel keep the transparency.
@@ -374,7 +375,7 @@ What it gives you to try:
 - In "Travel group (demo)" each incoming message names its invented author (`Lena (demo)`,
   `Marco (demo)`, `…0042`), and so does the live reply.
 - Pictures, in "Travel group (demo)": a photo with its JPEG thumbnail (`o` fetches a 480x320
-  gradient into its box), a sticker and an animated sticker (`▶`) with PNG thumbnails, and a
+  gradient into its box), a sticker and an animated sticker with PNG thumbnails, and a
   sticker with none (an empty box until `o` fetches its WebP). Each sticker's WebP is a disc of its
   own colour (yellow, pink, and blue for the one without a thumbnail), so `o` on a sticker draws
   that sticker. On the document in "Shop bot

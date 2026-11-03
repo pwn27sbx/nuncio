@@ -733,7 +733,7 @@ fn shift_o_opens_a_picture_externally_and_o_still_opens_a_document() {
 // --- stickers --------------------------------------------------------------------------------
 
 #[test]
-fn a_sticker_shows_its_first_frame_and_an_animated_one_a_marker() {
+fn a_sticker_shows_its_first_frame_and_never_an_extra_marker() {
     let mut app = pictures_app();
     open_ada(
         &mut app,
@@ -755,12 +755,14 @@ fn a_sticker_shows_its_first_frame_and_an_animated_one_a_marker() {
         .iter()
         .position(|l| l.contains("17:02"))
         .expect("the second sticker");
-    // The picture says what it is, so no `[sticker]` label; only the animated one says it moves.
+    // The picture says what it is, so no `[sticker]` label — and no marker on its own row
+    // under the picture either (the owner's live report: a stray `▶` under every moving sticker).
     assert!(!text.contains("[sticker]"), "{text}");
-    assert!(!lines[still].contains('▶'), "a still sticker:\n{text}");
+    assert!(!text.contains('▶'), "no marker glyph anywhere:\n{text}");
+    // What a drawn sticker keeps is its time, on the row under its picture, and nothing else.
     assert!(
-        lines[moving].contains('▶'),
-        "an animated sticker is marked:\n{text}"
+        lines[moving].contains("17:02"),
+        "the animated sticker's time:\n{text}"
     );
     // Both are drawn from their PNG thumbnails, green, in the rows above their own caption.
     let green = is(GREEN);
@@ -946,10 +948,10 @@ fn a_picture_with_no_thumbnail_says_its_label_once_and_its_box_stays_empty() {
     let buffer = draw(&mut app, 120, 60);
     let text = screen(&buffer);
     // With no thumbnail each box keeps its label at its first row; a sticker has no caption, so
-    // its time comes right after the box, and the animated one still says it moves.
+    // its time comes right after the box. No marker follows the label either.
     assert_eq!(count(&buffer, "[sticker]"), 2, "one per sticker:\n{text}");
     assert_eq!(count(&buffer, "[image]"), 1, "{text}");
-    assert_eq!(count(&buffer, "▶"), 1, "the animated sticker:\n{text}");
+    assert_eq!(count(&buffer, "▶"), 0, "no marker glyph:\n{text}");
     let mut seen = Vec::new();
     for kind in ["[sticker]", "[image]"] {
         let mut from = 0;
@@ -1466,8 +1468,13 @@ fn a_sticker_with_no_stated_size_is_fetched_and_sized_from_its_file() {
     open_ada(&mut app, vec![bare]);
     let first = draw(&mut app, 80, 24);
     assert!(
-        screen(&first).contains("[sticker] ▶"),
+        screen(&first).contains("[sticker]"),
         "no size, no box: the label is drawn:\n{}",
+        screen(&first)
+    );
+    assert!(
+        !screen(&first).contains('▶'),
+        "and no marker after it:\n{}",
         screen(&first)
     );
     let Some(Action::Request(frame)) = app.take_actions().into_iter().next() else {

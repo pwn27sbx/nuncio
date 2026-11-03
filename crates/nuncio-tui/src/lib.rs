@@ -105,7 +105,7 @@ pub enum Target {
 
 /// Rows one chat takes in the list: its name, its last message, then the thin rule that
 /// separates it from the next one.
-pub const CHAT_ROWS: u16 = 3;
+pub const CHAT_ROWS: u16 = 2;
 
 /// What is drawn at `(column, row)` on the screen `map` describes, if anything the mouse acts on.
 pub fn hit_test(map: &ScreenMap, column: u16, row: u16) -> Option<Target> {
@@ -3114,13 +3114,14 @@ const NARROW_NAME: usize = 6;
 /// The unread pill's fixed slot on a chat row's second line: ` 3 `, ` 12 `, ` 99+ `.
 const PILL: usize = 5;
 
-/// A chat in the list, in three rows. Row one: the avatar (a 3×2 rounded block with its initials),
-/// the name, the markers the chat has right after it, and the time in its own five-column slot at
-/// the right edge. Row two: the avatar's second row, the last message cut with `…`, then the unread
-/// count as an accent pill at the right. Row three: a thin rule in the border role, the separator. A chat with unread messages has its name and
-/// time in bold, and the highlighted chat is filled across every row (`surface_active`), with the
-/// keys on it or not, so the list always says which chat is open. A narrow list gives up the time
-/// first, then the markers, and only then cuts the name below six columns.
+/// A chat in the list, in two rows. Row one: the avatar (one chip with both initials), the name,
+/// the markers the chat has right after it, and the time in its own five-column slot at the right
+/// edge. Row two: the last message cut with `…`, then the unread count as an accent pill at the
+/// right. No third rule row: the list's height is its content's. A chat with unread messages has
+/// its name and time in bold, and the open chat is filled on `surface_active` with an accent `▌`
+/// edge on the left of both rows, with the keys on it or not, so the list always says which chat is
+/// open. A narrow list gives up the time first, then the markers, and only then cuts the name
+/// below six columns.
 fn chat_item(
     chat: &Chat,
     palette: &Palette,
@@ -3182,7 +3183,16 @@ fn chat_item(
     }
     let title_text = plain(&chat_title(chat));
     let name = fit(&title_text, named);
-    let mut title = avatar_spans(&title_text, palette);
+    // The open chat wears an accent edge on the left of both its rows, over the fill.
+    let edge = |selected: bool| {
+        if selected {
+            Span::styled("▌", Style::default().fg(rgb(palette.accent())))
+        } else {
+            Span::raw(" ")
+        }
+    };
+    let mut title = vec![edge(selected)];
+    title.extend(avatar_spans(&title_text, palette).into_iter().skip(1));
     title.push(Span::styled(name.clone(), ink));
     if !markers.is_empty() {
         title.push(Span::styled(markers.clone(), muted));
@@ -3222,7 +3232,7 @@ fn chat_item(
     };
     let detail = fit(&detail, width.saturating_sub(AVATAR + PILL));
     let pad = width.saturating_sub(AVATAR + display_width(&detail) + PILL);
-    let mut second = vec![Span::raw(" ".repeat(AVATAR))];
+    let mut second = vec![edge(selected), Span::raw(" ".repeat(AVATAR - 1))];
     second.push(Span::styled(detail, muted));
     second.push(Span::raw(" ".repeat(pad)));
     if pill.is_empty() {
@@ -3234,11 +3244,10 @@ fn chat_item(
         second.push(Span::styled(pill, pill_style));
     }
 
-    let rule = Line::from(Span::styled(
-        "─".repeat(width + 3),
-        Style::default().fg(rgb(palette.border())),
-    ));
-    let item = ListItem::new(vec![Line::from(title), Line::from(second), rule]);
+    // Two rows: the name (with its chip, markers and time) and the preview (with its pill). No
+    // third rule row: the list's height is its content's, and a divider row made every chat a
+    // third taller than the app's own list.
+    let item = ListItem::new(vec![Line::from(title), Line::from(second)]);
     // The fill goes under the rows, so the pill keeps its own background.
     if selected {
         item.style(Style::default().bg(rgb(palette.surface_active())))
@@ -3293,14 +3302,13 @@ mod tests {
     fn hit_test_maps_a_cell_to_the_chat_message_or_composer_under_it() {
         use super::{Target, hit_test};
         let map = map();
-        // Each chat takes three rows (name, last message, its rule), counted from the list's
-        // scroll.
+        // Each chat takes two rows (name, last message), counted from the list's scroll.
         assert_eq!(hit_test(&map, 5, 2), Some(Target::Chats(Some(1))));
         assert_eq!(hit_test(&map, 30, 3), Some(Target::Chats(Some(1))));
-        assert_eq!(hit_test(&map, 5, 4), Some(Target::Chats(Some(1))));
-        assert_eq!(hit_test(&map, 5, 5), Some(Target::Chats(Some(2))));
+        assert_eq!(hit_test(&map, 5, 4), Some(Target::Chats(Some(2))));
+        assert_eq!(hit_test(&map, 30, 5), Some(Target::Chats(Some(2))));
         // Below the last chat, and on the border: the pane, no chat.
-        assert_eq!(hit_test(&map, 5, 8), Some(Target::Chats(None)));
+        assert_eq!(hit_test(&map, 5, 6), Some(Target::Chats(None)));
         assert_eq!(hit_test(&map, 0, 2), Some(Target::Chats(None)));
         assert_eq!(hit_test(&map, 31, 2), Some(Target::Chats(None)));
         // The conversation's rows name their message; an empty row, the border: none.

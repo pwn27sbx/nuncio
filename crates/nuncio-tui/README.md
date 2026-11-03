@@ -78,18 +78,20 @@ nuncio-tui [--image <png>]
   and senders are never colour-coded. No colour is ever named in the crate: every tone comes
   from a palette role, through the one `rgb()` helper (a test reads the sources to keep it so).
   The colours are sent as 24-bit RGB, as before.
-- **Chat list** (left): three fixed rows per chat — its name, its last message, and a thin `─`
-  rule in the border role that separates it from the next one. Each chat opens with a 3×2 avatar:
-  a rounded block (`▗▖` over `▝▘`, the quadrant corners in the avatar's tint on the row's own
-  background) with one initial per row — the first letter of each of the title's first two words —
-  on four tints derived from the palette's hues, so a chat always wears the same one. Row one: the
-  avatar, the name, then only the markers it has — `★` pinned, `◌` muted, `▤` archived, in that
-  order — and the time right-aligned in the list's last five columns, so times line up whatever the
-  names. Row two: the avatar's second row, the last message cut with `…` (by display width, so wide
-  characters count as two columns), and the unread count as an accent pill in the same last five
-  columns — ` 3 `, ` 12 `, ` 99+ `, or nothing when it is read. A chat with unread messages has its
-  name and time in bold. A narrow list gives up the time first, then the markers, before it cuts
-  the name below six columns.
+- **Chat list** (left): two fixed rows per chat — its name and its last message — so the list is
+  as dense as the app's own (ten chats at 24 rows), with no rule row between them. Each chat wears
+  its two initials on one rounded chip, `▗AL▖`: the corners in the avatar's tint on the row's own
+  background, both letters on the tint, the initials being the first letter of each of the title's
+  first two words, on four tints derived from the palette's hues, so a chat always wears the same
+  one (and the conversation's header chip wears it too). Row one: the chip, the name, then only the
+  markers it has — `★` pinned, `◌` muted, `▤` archived, in that order — and the time right-aligned
+  in the list's last five columns, so times line up whatever the names. Row two: the last message
+  cut with `…` (by display width, so wide characters count as two columns), and the unread count as
+  an accent pill in the same last five columns — ` 3 `, ` 12 `, ` 99+ `, or nothing when it is
+  read. A chat with unread messages has its name and time in bold. The open chat is filled on
+  `surface_active` with an accent `▌` edge on the left of both its rows, so it is unmistakable
+  even with the keys on the conversation. A narrow list gives up the time first, then the
+  markers, before it cuts the name below six columns.
   `[` and `]` cycle the list's filter — `All`, `Unread`, `Archived` — and the bar under the rule
   shows the three, the one in force as a filled accent chip; the rule also carries its count
   (`Chats · Unread (3)`). `/` on the list opens a search field in that bar (`search: …`, with

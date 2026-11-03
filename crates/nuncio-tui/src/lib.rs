@@ -103,8 +103,8 @@ pub enum Target {
     Composer,
 }
 
-/// Rows one chat takes in the list: its name, its last message, then the thin rule that
-/// separates it from the next one.
+/// Rows one chat takes in the list: its name and its last message, with no rule row between one
+/// chat and the next.
 pub const CHAT_ROWS: u16 = 2;
 
 /// What is drawn at `(column, row)` on the screen `map` describes, if anything the mouse acts on.
@@ -2915,17 +2915,6 @@ fn avatar_cells(title: &str, palette: &Palette) -> [(char, Style); 4] {
     [corner('▗'), letter(first), letter(second), corner('▖')]
 }
 
-/// A chat's avatar as one row of spans: a blank column, its four cells, a blank column before
-/// the name. Both initials share the row, so a chat's two list rows keep their height.
-fn avatar_spans(title: &str, palette: &Palette) -> Vec<Span<'static>> {
-    let mut spans = vec![Span::raw(" ")];
-    for (glyph, style) in avatar_cells(title, palette) {
-        spans.push(Span::styled(glyph.to_string(), style));
-    }
-    spans.push(Span::raw(" "));
-    spans
-}
-
 /// Draw a chat's avatar chip over its name row: what the open chat's row fill would otherwise
 /// erase under it.
 fn paint_avatar(buffer: &mut Buffer, rows: Rect, title: &str, palette: &Palette) {
@@ -3191,8 +3180,15 @@ fn chat_item(
             Span::raw(" ")
         }
     };
+    // The left gutter is one column: the open chat's accent edge, a blank elsewhere. The chip's
+    // four cells and one blank follow, so the name starts at [`AVATAR`] on both rows.
     let mut title = vec![edge(selected)];
-    title.extend(avatar_spans(&title_text, palette).into_iter().skip(1));
+    title.extend(
+        avatar_cells(&title_text, palette)
+            .into_iter()
+            .map(|(glyph, style)| Span::styled(glyph.to_string(), style)),
+    );
+    title.push(Span::raw(" "));
     title.push(Span::styled(name.clone(), ink));
     if !markers.is_empty() {
         title.push(Span::styled(markers.clone(), muted));
@@ -3244,9 +3240,7 @@ fn chat_item(
         second.push(Span::styled(pill, pill_style));
     }
 
-    // Two rows: the name (with its chip, markers and time) and the preview (with its pill). No
-    // third rule row: the list's height is its content's, and a divider row made every chat a
-    // third taller than the app's own list.
+    // Two rows, and no third rule row: the chat height is [`CHAT_ROWS`].
     let item = ListItem::new(vec![Line::from(title), Line::from(second)]);
     // The fill goes under the rows, so the pill keeps its own background.
     if selected {

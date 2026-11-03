@@ -7,9 +7,14 @@ use super::{Palette, Rgb};
 
 /// The lowest contrast `text_muted` may have on either surface (WCAG AA, plan §4.1).
 const MUTED_MIN_CONTRAST: f64 = 4.5;
-/// The lowest contrast an incoming message's ear may have on the chrome: below it the ear is a
-/// graphic nobody would see, and the accent takes its place.
+/// The lowest contrast an incoming message's ear may have on the pane behind it: below it the ear
+/// is a graphic nobody would see, and the accent takes its place.
 const EAR_MIN_CONTRAST: f64 = 1.5;
+/// The lowest colour distance (CIELAB ΔE76) the two ears may have. A cell of `▐` and a cell of
+/// `▌` are a few pixels wide: under this the two tones read as one hue (Everforest's accent is a
+/// soft teal, its cyan a soft green — ΔE 21), so the accent takes both, the design's own fallback,
+/// rather than showing two "different" ears that look the same.
+const EAR_MIN_DISTANCE: f64 = 15.0;
 /// The number of palette hues an avatar's tint can come from.
 const AVATAR_TINTS: u8 = 4;
 
@@ -49,10 +54,13 @@ impl Palette {
     }
 
     /// The ear of an incoming message's slab: the theme's cyan, the one hue that says "them".
-    /// When cyan sits too close to the chrome to read as a graphic (under 1.5:1), the accent is
-    /// used instead, so the ear is never invisible.
+    /// When cyan sits too close to the pane to read as a graphic (under 1.5:1), or too close to
+    /// the accent's own tone to read as a second colour (under [`EAR_MIN_DISTANCE`]), the accent
+    /// is used instead: the ear is never invisible and never a false second colour.
     pub fn bubble_ear_incoming(&self) -> Rgb {
-        if contrast(self.cyan, self.surface_chrome()) >= EAR_MIN_CONTRAST {
+        if contrast(self.cyan, self.surface()) >= EAR_MIN_CONTRAST
+            && distance(self.cyan, self.accent()) >= EAR_MIN_DISTANCE
+        {
             self.cyan
         } else {
             self.accent()
@@ -199,9 +207,43 @@ fn contrast(a: Rgb, b: Rgb) -> f64 {
     (a.max(b) + 0.05) / (a.min(b) + 0.05)
 }
 
+/// CIELAB (D65) of an sRGB colour, for a perceptual distance.
+fn lab(colour: Rgb) -> [f64; 3] {
+    let linear = |value: u8| {
+        let c = f64::from(value) / 255.0;
+        if c <= 0.040_45 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let (r, g, b) = (linear(colour.r), linear(colour.g), linear(colour.b));
+    let x = (r * 0.4124 + g * 0.3576 + b * 0.1805) / 0.950_47;
+    let y = r * 0.2126 + g * 0.7152 + b * 0.0722;
+    let z = (r * 0.0193 + g * 0.1192 + b * 0.9505) / 1.088_83;
+    let f = |t: f64| {
+        if t > 0.008_856 {
+            t.cbrt()
+        } else {
+            7.787 * t + 16.0 / 116.0
+        }
+    };
+    let (fx, fy, fz) = (f(x), f(y), f(z));
+    [116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)]
+}
+
+/// CIELAB ΔE76 between two colours: the perceptual distance the ear pair is judged by.
+fn distance(a: Rgb, b: Rgb) -> f64 {
+    let (a, b) = (lab(a), lab(b));
+    (0..3).map(|i| (a[i] - b[i]).powi(2)).sum::<f64>().sqrt()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{AVATAR_TINTS, EAR_MIN_CONTRAST, Palette, Rgb, contrast, luminance};
+    use super::{
+        AVATAR_TINTS, EAR_MIN_CONTRAST, EAR_MIN_DISTANCE, Palette, Rgb, contrast, distance,
+        luminance,
+    };
 
     /// Omarchy's Gruvbox (dark) `colors.toml`, verbatim (basecamp/omarchy, themes/gruvbox).
     const GRUVBOX: &str = r##"
@@ -320,6 +362,43 @@ lighter_background = "#dce0e8"
 foreground = "#4c4f69"
 dark_foreground = "#9ca0b0"
 light_foreground = "#5c5f77"
+"##;
+
+    /// The owner's live Omarchy theme when the finish was reported (Everforest), verbatim from
+    /// `~/.local/state/omarchy/current/theme/colors.toml`: the palette the ears and the times are
+    /// judged on, so a role is never verified only against the fixtures.
+    const EVERFOREST: &str = r##"
+mode = "dark"
+
+accent = "#7fbbb3"
+selection = "#3d484d"
+muted = "#475258"
+
+background = "#2d353b"
+dark_background = "#21272c"
+darker_background = "#181d20"
+lighter_background = "#343f44"
+
+foreground = "#d3c6aa"
+dark_foreground = "#4f585e"
+light_foreground = "#9da9a0"
+bright_foreground = "#d3c6aa"
+
+red = "#e67e80"
+yellow = "#dbbc7f"
+orange = "#e09d7f"
+green = "#a7c080"
+cyan = "#83c092"
+blue = "#7fbbb3"
+magenta = "#d699b6"
+brown = "#704e3f"
+
+bright_red = "#e67e80"
+bright_yellow = "#dbbc7f"
+bright_green = "#a7c080"
+bright_cyan = "#83c092"
+bright_blue = "#7fbbb3"
+bright_magenta = "#d699b6"
 "##;
 
     fn parse(text: &str) -> Palette {
@@ -499,12 +578,12 @@ light_foreground = "#5c5f77"
     fn the_direction_c_roles_hold_on_dark_and_light_themes() {
         for fixture in [GRUVBOX, FLEXOKI_LIGHT] {
             let palette = parse(fixture);
-            // The incoming ear is a graphic: it reads against the chrome it sits on.
+            // The incoming ear is a graphic: it reads against the pane it sits on.
             let ear = palette.bubble_ear_incoming();
-            let ear_on_chrome = contrast(ear, palette.surface_chrome());
+            let ear_on_pane = contrast(ear, palette.surface());
             assert!(
-                ear_on_chrome >= EAR_MIN_CONTRAST,
-                "the ear reads on the chrome: {ear_on_chrome:.2}"
+                ear_on_pane >= EAR_MIN_CONTRAST,
+                "the ear reads on the pane: {ear_on_pane:.2}"
             );
             // The outgoing ear is the accent, the same mark the focus uses.
             assert_eq!(palette.bubble_ear_outgoing(), palette.accent());
@@ -527,6 +606,28 @@ light_foreground = "#5c5f77"
         }
     }
 
+    /// The owner's own theme: the two ears are two different roles, not one colour drawn twice.
+    /// Everforest's accent is itself a soft teal, so the assertion is a measured distance, not
+    /// "they are not the same string": at a cell's width a pair under [`EAR_MIN_DISTANCE`] reads
+    /// as one hue, which is exactly what the owner saw.
+    #[test]
+    fn the_two_ears_are_different_colours_on_the_owners_theme() {
+        let palette = parse(EVERFOREST);
+        assert_eq!(palette.cyan, hex("#83c092"));
+        assert_eq!(palette.accent, hex("#7fbbb3"));
+        assert_eq!(palette.bubble_ear_incoming(), palette.cyan);
+        assert_eq!(palette.bubble_ear_outgoing(), palette.accent);
+        let gap = distance(palette.bubble_ear_incoming(), palette.bubble_ear_outgoing());
+        assert!(
+            gap >= EAR_MIN_DISTANCE,
+            "the incoming and outgoing ears read as one hue on Everforest: ΔE {gap:.1}"
+        );
+        // The light fixture keeps its own pair apart too.
+        let light = parse(FLEXOKI_LIGHT);
+        let gap = distance(light.bubble_ear_incoming(), light.bubble_ear_outgoing());
+        assert!(gap >= EAR_MIN_DISTANCE, "ΔE {gap:.1} on Flexoki Light");
+    }
+
     /// A theme whose cyan is the chrome itself gets the accent for its ear: the ear is never an
     /// invisible graphic.
     #[test]
@@ -536,7 +637,7 @@ light_foreground = "#5c5f77"
              cyan = \"#3c3836\"\nlighter_background = \"#3c3836\"\n",
         );
         assert_eq!(palette.surface_chrome(), hex("#3c3836"));
-        assert!(contrast(palette.cyan, palette.surface_chrome()) < EAR_MIN_CONTRAST);
+        assert!(contrast(palette.cyan, palette.surface()) < EAR_MIN_CONTRAST);
         assert_eq!(palette.bubble_ear_incoming(), palette.accent());
     }
 

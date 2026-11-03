@@ -68,6 +68,10 @@ fn today() -> time::Date {
 }
 
 fn app_with(chats: Vec<Chat>) -> App {
+    app_with_palette(chats, Palette::default())
+}
+
+fn app_with_palette(chats: Vec<Chat>, palette: Palette) -> App {
     let unread = chats.iter().map(|chat| chat.unread).sum();
     let snapshot = Snapshot {
         daemon: "nunciod/0.3.0".to_owned(),
@@ -77,7 +81,7 @@ fn app_with(chats: Vec<Chat>) -> App {
         chats,
         stop_reason: None,
     };
-    App::new(snapshot, Source::Daemon, Palette::default()).with_today(today())
+    App::new(snapshot, Source::Daemon, palette).with_today(today())
 }
 
 fn two_chats() -> App {
@@ -675,6 +679,66 @@ fn a_narrow_window_keeps_what_matters_at_forty_by_twenty() {
             text(&buffer)
         );
     }
+}
+
+/// The owner's finish: the two ears are the theme's two roles — cyan on the left for theirs, the
+/// accent on the right for ours — verified on the owner's live Omarchy theme (Everforest), where
+/// the accent is itself a soft teal, not only on the built-in default.
+#[test]
+fn the_two_ears_take_the_themes_cyan_and_accent_on_the_owners_theme() {
+    fn hex(text: &str) -> nuncio_client::Rgb {
+        nuncio_client::Rgb::from_hex(text).expect("a colour")
+    }
+    // The owner's ~/.local/state/omarchy/current/theme/colors.toml, the keys the roles read.
+    let palette = Palette::from_toml_str(
+        r##"
+mode = "dark"
+accent = "#7fbbb3"
+background = "#2d353b"
+darker_background = "#181d20"
+lighter_background = "#343f44"
+foreground = "#d3c6aa"
+dark_foreground = "#4f585e"
+light_foreground = "#9da9a0"
+cyan = "#83c092"
+"##,
+    )
+    .expect("the owner's palette");
+    let expected = palette.clone();
+    let mut app = app_with_palette(vec![chat(ADA, "Ada Lovelace", 0)], palette);
+    open(
+        &mut app,
+        ADA,
+        vec![
+            message("A1", "theirs", false, "2026-10-18T17:01:00Z"),
+            message("A2", "ours", true, "2026-10-18T17:02:00Z"),
+        ],
+    );
+    let buffer = draw(&mut app, 80, 24);
+    let sep = separator(&buffer);
+    let left = sep + 1;
+    let pane = colour(expected.surface());
+    // Theirs: the half block on the band's left, in the theme's cyan, on the pane's background.
+    let (_, theirs) = find(&buffer, "theirs");
+    let ear = left + 1;
+    assert_eq!(buffer[(ear, theirs)].symbol(), "▐");
+    assert_eq!(buffer[(ear, theirs)].fg, colour(hex("#83c092")));
+    assert_eq!(buffer[(ear, theirs)].bg, pane);
+    // Ours: the half block on the band's right, in the theme's accent — a different colour, not
+    // the cyan again.
+    let (ours_x, ours) = find(&buffer, "ours");
+    let right = (ours_x..80)
+        .rev()
+        .find(|&x| buffer[(x, ours)].symbol() == "▌")
+        .expect("the outgoing ear");
+    assert_eq!(buffer[(right, ours)].fg, colour(hex("#7fbbb3")));
+    assert_ne!(
+        buffer[(right, ours)].fg,
+        buffer[(ear, theirs)].fg,
+        "the two ears are two colours, not one drawn twice"
+    );
+    assert!(right > ours_x, "ours wears its ear on the right");
+    assert!(ear < sep + 3, "theirs wears its ear on the left");
 }
 
 /// C8: the unread divider has the day separator's shape, says the count the chat had when it was

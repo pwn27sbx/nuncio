@@ -2107,7 +2107,7 @@ impl App {
     /// loaded, its last message. Each message is a bubble: incoming ones start at the pane's
     /// first column, outgoing ones end at its last usable one (the free last column is the scroll
     /// gutter), and none is wider than [`BUBBLE_SHARE`] percent of the pane. The time sits inside,
-    /// bottom right, in `text_faint`; nothing repeats the author, because whose a message is the
+    /// bottom right, in `text_muted`; nothing repeats the author, because whose a message is the
     /// side says.
     ///
     /// The rows are laid out here, one per screen row, so the scroll, the selection and the mouse
@@ -2555,15 +2555,17 @@ impl App {
         }
     }
 
-    /// The time inside a bubble, in the faint role, carrying the state where the ticks would go:
-    /// a small clock while the send is queued and a `danger` `!` when it was not sent. Delivery
-    /// and read receipts are not in the protocol, so they are never invented.
+    /// The time inside a bubble, in the readable dim role, carrying the state where the ticks
+    /// would go: a small clock while the send is queued and a `danger` `!` when it was not sent.
+    /// Delivery and read receipts are not in the protocol, so they are never invented. The faint
+    /// role belongs to placeholders: a time is text the eye is meant to read, and on a real theme
+    /// the faint tone sat near the bubble's own background.
     fn bubble_footer(&self, message: &Message, chosen: bool) -> Vec<Span<'static>> {
-        // The open message's time steps up from the faint role, so its row reads as selected.
+        // The open message's time steps up from the dim role, so its row reads as selected.
         let faint = if chosen {
             Style::default().fg(rgb(self.palette.text()))
         } else {
-            Style::default().fg(rgb(self.palette.text_faint()))
+            self.muted()
         };
         let unconfirmed = self.model.transcript().is_unconfirmed(message);
         let mut meta = meta_of(message, self.utc_offset, unconfirmed);

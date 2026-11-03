@@ -111,9 +111,9 @@ nuncio-tui [--image <png>]
   cyan, `▌` ours in the accent, on every row of the message), one cell of padding, then the text.
   A run of one author shares one width — at most 66 % of the band for the slab, which the time and
   the send's state may push up to the band, so a state word is never cut. The text wraps inside;
-  the time sits at the slab's right edge in the faint role, with the send's state where delivery
-  ticks would go: a small clock `◷` while it is queued and a `!` in the danger role when it was
-  not sent (delivered and read receipts are not in the protocol, so they are never invented). One
+  the time sits at the slab's right edge in the readable dim role (`text_muted`), with the send's
+  state where delivery ticks would go: a small clock `◷` while it is queued and a `!` in the
+  danger role when it was not sent (delivered and read receipts are not in the protocol, so they are never invented). One
   blank row separates two runs; nothing repeats the author over a 1:1 chat, and in a group the
   sender is named once at the top of its run. Each day starts, after a blank row, with a
   separator across the band — a hairline in the border role on each side of a muted, centred

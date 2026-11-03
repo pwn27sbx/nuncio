@@ -389,12 +389,13 @@ fn width_of(buffer: &Buffer) -> u16 {
     buffer.area.width
 }
 
-/// U2: each message is a bubble with its text and, inside it, its time in the faint role. No
-/// author header is drawn: the side a bubble sits on says whose it is.
+/// U2: each message is a bubble with its text and, inside it, its time in the readable dim role
+/// (the faint one is for placeholders). No author header is drawn: the side a bubble sits on says
+/// whose it is.
 #[test]
 fn a_bubble_carries_its_text_and_its_time_inside_it() {
     let palette = Palette::default();
-    let faint = colour(palette.text_faint());
+    let dim = colour(palette.text_muted());
     let body = colour(palette.text());
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
@@ -411,7 +412,7 @@ fn a_bubble_carries_its_text_and_its_time_inside_it() {
             assert_eq!(text_y, y, "the time is inside the {said:?} row");
             assert!(x > text_x, "{said:?} then its time:\n{}", text(&buffer));
             assert_eq!(buffer[(text_x, text_y)].fg, body, "{said:?}");
-            assert_eq!(buffer[(x, y)].fg, faint, "the time of {said:?}");
+            assert_eq!(buffer[(x, y)].fg, dim, "the time of {said:?}");
             // The time is on the bubble, not on the pane behind it.
             assert_ne!(
                 buffer[(x, y)].bg,
@@ -570,7 +571,7 @@ fn a_queued_bubble_shows_a_clock_and_a_not_sent_one_a_bang() {
     open(&mut app, ADA, vec![queued, lost]);
     let buffer = draw(&mut app, 80, 24);
     let (x, y) = find(&buffer, "◷");
-    assert_eq!(buffer[(x, y)].fg, colour(palette.text_faint()));
+    assert_eq!(buffer[(x, y)].fg, colour(palette.text_muted()));
     // The queued bubble says it in words too, so the clock is never the only cue.
     assert_eq!(row_of(&buffer, "queued"), y, "{}", text(&buffer));
     let (x, y) = find(&buffer, "!");
@@ -1324,11 +1325,18 @@ fn meta_is_the_muted_role_and_no_text_is_dimmed() {
     open(&mut app, ADA, conversation());
     app.handle_key(key(KeyCode::Esc));
     let buffer = draw(&mut app, 80, 24);
+    // A message's time is the readable dim role, not the faint one: it is text the eye is meant
+    // to read (the owner's live report: the times were nearly invisible).
     let (x, y) = find(&buffer, "17:01");
     assert_eq!(
         buffer[(x, y)].fg,
-        colour(palette.text_faint()),
+        colour(palette.text_muted()),
         "a message's time"
+    );
+    assert_ne!(
+        buffer[(x, y)].fg,
+        colour(palette.text_faint()),
+        "the faint role is for placeholders, never for a time"
     );
     let (x, y) = find(&buffer, "17 OCT 2026");
     assert_eq!(buffer[(x, y)].fg, muted, "the day label");
@@ -1630,7 +1638,7 @@ fn each_new_element_uses_its_exact_role() {
     assert_eq!(buffer[(x, y)].bg, role(palette.surface_chrome()));
     assert_eq!(buffer[(x, y)].fg, role(palette.text()));
     let (x, y) = find(&buffer, "17:01");
-    assert_eq!(buffer[(x, y)].fg, role(palette.text_faint()));
+    assert_eq!(buffer[(x, y)].fg, role(palette.text_muted()));
     assert_eq!(buffer[(x, y)].bg, role(palette.surface_chrome()));
     let (x, y) = find(&buffer, "did you get this");
     assert_eq!(buffer[(x, y)].bg, role(palette.bubble_outgoing()));

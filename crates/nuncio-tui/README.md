@@ -78,18 +78,20 @@ nuncio-tui [--image <png>]
   and senders are never colour-coded. No colour is ever named in the crate: every tone comes
   from a palette role, through the one `rgb()` helper (a test reads the sources to keep it so).
   The colours are sent as 24-bit RGB, as before.
-- **Chat list** (left): three fixed rows per chat — its name, its last message, and a thin `─`
-  rule in the border role that separates it from the next one. Each chat opens with a 3×2 avatar:
-  a rounded block (`▗▖` over `▝▘`, the quadrant corners in the avatar's tint on the row's own
-  background) with one initial per row — the first letter of each of the title's first two words —
-  on four tints derived from the palette's hues, so a chat always wears the same one. Row one: the
-  avatar, the name, then only the markers it has — `★` pinned, `◌` muted, `▤` archived, in that
-  order — and the time right-aligned in the list's last five columns, so times line up whatever the
-  names. Row two: the avatar's second row, the last message cut with `…` (by display width, so wide
-  characters count as two columns), and the unread count as an accent pill in the same last five
-  columns — ` 3 `, ` 12 `, ` 99+ `, or nothing when it is read. A chat with unread messages has its
-  name and time in bold. A narrow list gives up the time first, then the markers, before it cuts
-  the name below six columns.
+- **Chat list** (left): two fixed rows per chat — its name and its last message — so the list is
+  as dense as the app's own (ten chats at 24 rows), with no rule row between them. Each chat wears
+  its two initials on one rounded chip, `▗AL▖`: the corners in the avatar's tint on the row's own
+  background, both letters on the tint, the initials being the first letter of each of the title's
+  first two words, on four tints derived from the palette's hues, so a chat always wears the same
+  one (and the conversation's header chip wears it too). Row one: the chip, the name, then only the
+  markers it has — `★` pinned, `◌` muted, `▤` archived, in that order — and the time right-aligned
+  in the list's last five columns, so times line up whatever the names. Row two: the last message
+  cut with `…` (by display width, so wide characters count as two columns), and the unread count as
+  an accent pill in the same last five columns — ` 3 `, ` 12 `, ` 99+ `, or nothing when it is
+  read. A chat with unread messages has its name and time in bold. The open chat is filled on
+  `surface_active` with an accent `▌` edge on the left of both its rows, so it is unmistakable
+  even with the keys on the conversation. A narrow list gives up the time first, then the
+  markers, before it cuts the name below six columns.
   `[` and `]` cycle the list's filter — `All`, `Unread`, `Archived` — and the bar under the rule
   shows the three, the one in force as a filled accent chip; the rule also carries its count
   (`Chats · Unread (3)`). `/` on the list opens a search field in that bar (`search: …`, with
@@ -111,9 +113,9 @@ nuncio-tui [--image <png>]
   cyan, `▌` ours in the accent, on every row of the message), one cell of padding, then the text.
   A run of one author shares one width — at most 66 % of the band for the slab, which the time and
   the send's state may push up to the band, so a state word is never cut. The text wraps inside;
-  the time sits at the slab's right edge in the faint role, with the send's state where delivery
-  ticks would go: a small clock `◷` while it is queued and a `!` in the danger role when it was
-  not sent (delivered and read receipts are not in the protocol, so they are never invented). One
+  the time sits at the slab's right edge in the readable dim role (`text_muted`), with the send's
+  state where delivery ticks would go: a small clock `◷` while it is queued and a `!` in the
+  danger role when it was not sent (delivered and read receipts are not in the protocol, so they are never invented). One
   blank row separates two runs; nothing repeats the author over a 1:1 chat, and in a group the
   sender is named once at the top of its run. Each day starts, after a blank row, with a
   separator across the band — a hairline in the border role on each side of a muted, centred
@@ -208,7 +210,7 @@ nuncio-tui [--image <png>]
   its message comes into view — the daemon is asked for the full file without a key, so what is
   shown is the sharp picture and not the thumbnail WhatsApp embeds. Until the picture can be drawn
   (no graphics protocol, no size stated, or nothing to draw yet) the bubble says `[kind]` before
-  its caption, and `[sticker] ▶` marks an animated one. On audio, video and documents `o` asks the
+  its caption. On audio, video and documents `o` asks the
   daemon to download the file and opens it with `xdg-open` (`open` on macOS); `O` does the same for
   a picture, which keeps the thumbnail in the box meanwhile.
 - Live updates: new messages, a send's state changes, unread counts, the connection state, and a
@@ -282,8 +284,9 @@ most 12 rows. Nothing moves when the picture arrives in it.
   and `o` asks again by hand. `O` opens the picture with the desktop's viewer instead.
 - **Stickers** are drawn like photos, from their PNG thumbnail; a sticker without one (or an image
   without one) keeps its `[sticker]` (`[image]`) label at the top of the empty box until the full
-  file arrives (a WebP; an animated one gives its first frame). An animated sticker is marked `▶`
-  and shows its first frame: no animation yet.
+  file arrives (a WebP; an animated one gives its first frame). An animated sticker shows that
+  first frame like a still one and carries no marker: the terminal cannot play it, and a marker on
+  its own row under the picture only read as a stray glyph.
 - **Transparency.** With half blocks every cell is painted, so a transparent pixel (a sticker's
   corners, the margin a picture leaves in its box) takes the bubble's background colour, and a
   theme switch draws the pictures again on the new one. Kitty and sixel keep the transparency.
@@ -374,7 +377,7 @@ What it gives you to try:
 - In "Travel group (demo)" each incoming message names its invented author (`Lena (demo)`,
   `Marco (demo)`, `…0042`), and so does the live reply.
 - Pictures, in "Travel group (demo)": a photo with its JPEG thumbnail (`o` fetches a 480x320
-  gradient into its box), a sticker and an animated sticker (`▶`) with PNG thumbnails, and a
+  gradient into its box), a sticker and an animated sticker with PNG thumbnails, and a
   sticker with none (an empty box until `o` fetches its WebP). Each sticker's WebP is a disc of its
   own colour (yellow, pink, and blue for the one without a thumbnail), so `o` on a sticker draws
   that sticker. On the document in "Shop bot

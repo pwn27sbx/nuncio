@@ -68,6 +68,10 @@ fn today() -> time::Date {
 }
 
 fn app_with(chats: Vec<Chat>) -> App {
+    app_with_palette(chats, Palette::default())
+}
+
+fn app_with_palette(chats: Vec<Chat>, palette: Palette) -> App {
     let unread = chats.iter().map(|chat| chat.unread).sum();
     let snapshot = Snapshot {
         daemon: "nunciod/0.3.0".to_owned(),
@@ -77,7 +81,7 @@ fn app_with(chats: Vec<Chat>) -> App {
         chats,
         stop_reason: None,
     };
-    App::new(snapshot, Source::Daemon, Palette::default()).with_today(today())
+    App::new(snapshot, Source::Daemon, palette).with_today(today())
 }
 
 fn two_chats() -> App {
@@ -312,9 +316,9 @@ fn the_accent_marks_only_the_unread_pill_and_the_one_primary_hint() {
     }
     // And the pill is drawn: two unread messages, one pill, on the second row of the chat.
     let buffer = draw(&mut two_chats(), 80, 24);
-    // Ada is the first chat: her name, her preview (where the pill is), her rule, then Grace.
+    // Ada is the first chat: her name, her preview (where the pill is), then Grace.
     let (_, grace) = find(&buffer, "Grace Hopper");
-    let preview = grace - 2;
+    let preview = grace - 1;
     let pill: String = (0..separator(&buffer))
         .filter(|&x| buffer[(x, preview)].bg == accent)
         .map(|x| buffer[(x, preview)].symbol())
@@ -333,10 +337,10 @@ fn the_tones_are_the_palette_roles() {
     let buffer = draw(&mut app, 80, 24);
     let sep = separator(&buffer);
     // The selected chat (Ada) on `surface_active`, the other on `surface_chrome`.
-    // Ada is the first chat, on the three rows above Grace (a chat takes name, preview and rule;
-    // Grace's name is in the header rule too).
+    // Ada is the first chat, on the two rows above Grace (a chat takes name and preview; Grace's
+    // name is in the header rule too).
     let (_, grace) = find(&buffer, "Grace Hopper");
-    let ada = grace - 3;
+    let ada = grace - 2;
     assert!(row(&buffer, ada).contains("Ada Lovelace"));
     let active = colour(palette.surface_active());
     let accent = colour(palette.accent());
@@ -350,22 +354,26 @@ fn the_tones_are_the_palette_roles() {
     };
     let tint = colour(palette.avatar_tint(seed));
     assert_eq!(buffer[(2, ada)].bg, tint, "the avatar's tint");
-    assert_eq!(buffer[(2, ada + 1)].bg, tint);
+    assert_eq!(buffer[(3, ada)].bg, tint, "both initials share the row");
+    // The open chat's edge: one accent `▌` on the left of each of its two rows.
+    assert_eq!(buffer[(0, ada)].symbol(), "▌");
+    assert_eq!(buffer[(0, ada)].fg, accent);
+    assert_eq!(buffer[(0, ada + 1)].symbol(), "▌");
+    assert_eq!(buffer[(0, ada + 1)].fg, accent);
+    assert_eq!(buffer[(0, grace)].symbol(), " ", "no edge on another chat");
     for x in 5..sep {
         assert_eq!(buffer[(x, ada)].bg, active, "x {x}");
         // The unread pill keeps its own background inside the fill.
         let preview = buffer[(x, ada + 1)].bg;
         assert!(preview == active || preview == accent, "x {x}");
-        assert_eq!(buffer[(x, ada + 2)].bg, active);
         assert_eq!(
             buffer[(x, grace)].bg,
             colour(palette.surface_chrome()),
             "x {x}"
         );
     }
-    // The rule between chats is the border role, inside the highlight too.
-    assert_eq!(buffer[(2, ada + 2)].symbol(), "─");
-    assert_eq!(buffer[(2, ada + 2)].fg, colour(palette.border()));
+    // Nothing between the chats: the row under one preview is the next chat's name.
+    assert_eq!(row(&buffer, ada + 2), row(&buffer, grace));
     // The transcript is on `surface`, an incoming bubble on its neutral tone, the line between
     // the panes in `border`, and the free last column still `surface`.
     let (x, y) = find(&buffer, "good morning");
@@ -385,12 +393,13 @@ fn width_of(buffer: &Buffer) -> u16 {
     buffer.area.width
 }
 
-/// U2: each message is a bubble with its text and, inside it, its time in the faint role. No
-/// author header is drawn: the side a bubble sits on says whose it is.
+/// U2: each message is a bubble with its text and, inside it, its time in the readable dim role
+/// (the faint one is for placeholders). No author header is drawn: the side a bubble sits on says
+/// whose it is.
 #[test]
 fn a_bubble_carries_its_text_and_its_time_inside_it() {
     let palette = Palette::default();
-    let faint = colour(palette.text_faint());
+    let dim = colour(palette.text_muted());
     let body = colour(palette.text());
     let mut app = two_chats();
     open(&mut app, ADA, conversation());
@@ -407,7 +416,7 @@ fn a_bubble_carries_its_text_and_its_time_inside_it() {
             assert_eq!(text_y, y, "the time is inside the {said:?} row");
             assert!(x > text_x, "{said:?} then its time:\n{}", text(&buffer));
             assert_eq!(buffer[(text_x, text_y)].fg, body, "{said:?}");
-            assert_eq!(buffer[(x, y)].fg, faint, "the time of {said:?}");
+            assert_eq!(buffer[(x, y)].fg, dim, "the time of {said:?}");
             // The time is on the bubble, not on the pane behind it.
             assert_ne!(
                 buffer[(x, y)].bg,
@@ -566,7 +575,7 @@ fn a_queued_bubble_shows_a_clock_and_a_not_sent_one_a_bang() {
     open(&mut app, ADA, vec![queued, lost]);
     let buffer = draw(&mut app, 80, 24);
     let (x, y) = find(&buffer, "◷");
-    assert_eq!(buffer[(x, y)].fg, colour(palette.text_faint()));
+    assert_eq!(buffer[(x, y)].fg, colour(palette.text_muted()));
     // The queued bubble says it in words too, so the clock is never the only cue.
     assert_eq!(row_of(&buffer, "queued"), y, "{}", text(&buffer));
     let (x, y) = find(&buffer, "!");
@@ -650,7 +659,7 @@ fn a_narrow_window_keeps_what_matters_at_forty_by_twenty() {
     let buffer = draw(&mut app, 40, 20);
     let listed = row_of(&buffer, "Alexandra");
     let line = row(&buffer, listed);
-    assert!(line.contains("▗A▖"), "the avatar stays: {line:?}");
+    assert!(line.contains("▗AK▖"), "the avatar stays: {line:?}");
     assert!(!line.contains("17:01"), "the time gives way: {line:?}");
     assert!(!text(&buffer).contains("17:01"), "{}", text(&buffer));
 
@@ -675,6 +684,72 @@ fn a_narrow_window_keeps_what_matters_at_forty_by_twenty() {
             text(&buffer)
         );
     }
+}
+
+/// The owner's finish: the two ears are the theme's two roles — cyan on the left for theirs, the
+/// accent on the right for ours — verified on the owner's live Omarchy theme (Everforest), where
+/// the accent is itself a soft teal, not only on the built-in default.
+#[test]
+fn the_two_ears_take_the_themes_cyan_and_accent_on_the_owners_theme() {
+    fn hex(text: &str) -> nuncio_client::Rgb {
+        nuncio_client::Rgb::from_hex(text).expect("a colour")
+    }
+    // The owner's ~/.local/state/omarchy/current/theme/colors.toml, the keys the roles read.
+    let palette = Palette::from_toml_str(
+        r##"
+mode = "dark"
+accent = "#7fbbb3"
+background = "#2d353b"
+darker_background = "#181d20"
+lighter_background = "#343f44"
+foreground = "#d3c6aa"
+dark_foreground = "#4f585e"
+light_foreground = "#9da9a0"
+cyan = "#83c092"
+"##,
+    )
+    .expect("the owner's palette");
+    let expected = palette.clone();
+    let mut app = app_with_palette(vec![chat(ADA, "Ada Lovelace", 0)], palette);
+    open(
+        &mut app,
+        ADA,
+        vec![
+            message("A1", "theirs", false, "2026-10-18T17:01:00Z"),
+            message("A2", "ours", true, "2026-10-18T17:02:00Z"),
+        ],
+    );
+    let buffer = draw(&mut app, 80, 24);
+    let sep = separator(&buffer);
+    let left = sep + 1;
+    let pane = colour(expected.surface());
+    // Theirs: the half block on the band's left, in the theme's cyan, on the pane's background.
+    let (_, theirs) = find(&buffer, "theirs");
+    let ear = left + 1;
+    assert_eq!(buffer[(ear, theirs)].symbol(), "▐");
+    assert_eq!(buffer[(ear, theirs)].fg, colour(hex("#83c092")));
+    assert_eq!(buffer[(ear, theirs)].bg, pane);
+    // Ours: the half block on the band's right, in the theme's accent — a different colour, not
+    // the cyan again.
+    let (ours_x, ours) = find(&buffer, "ours");
+    let right = (ours_x..80)
+        .rev()
+        .find(|&x| buffer[(x, ours)].symbol() == "▌")
+        .expect("the outgoing ear");
+    assert_eq!(buffer[(right, ours)].fg, colour(hex("#7fbbb3")));
+    assert_ne!(
+        buffer[(right, ours)].fg,
+        buffer[(ear, theirs)].fg,
+        "the two ears are two colours, not one drawn twice"
+    );
+    assert!(right > ours_x, "ours wears its ear on the right");
+    // Theirs sits on the band's left edge, with the pane's margin empty before it.
+    assert_eq!(ear, sep + 2, "the band's first column");
+    assert_eq!(
+        buffer[(sep + 1, theirs)].symbol(),
+        " ",
+        "the margin stays free"
+    );
 }
 
 /// C8: the unread divider has the day separator's shape, says the count the chat had when it was
@@ -1254,11 +1329,18 @@ fn meta_is_the_muted_role_and_no_text_is_dimmed() {
     open(&mut app, ADA, conversation());
     app.handle_key(key(KeyCode::Esc));
     let buffer = draw(&mut app, 80, 24);
+    // A message's time is the readable dim role, not the faint one: it is text the eye is meant
+    // to read (the owner's live report: the times were nearly invisible).
     let (x, y) = find(&buffer, "17:01");
     assert_eq!(
         buffer[(x, y)].fg,
-        colour(palette.text_faint()),
+        colour(palette.text_muted()),
         "a message's time"
+    );
+    assert_ne!(
+        buffer[(x, y)].fg,
+        colour(palette.text_faint()),
+        "the faint role is for placeholders, never for a time"
     );
     let (x, y) = find(&buffer, "17 OCT 2026");
     assert_eq!(buffer[(x, y)].fg, muted, "the day label");
@@ -1284,9 +1366,9 @@ fn an_unread_chat_is_bold_with_a_pill_and_a_muted_one_wears_the_bell() {
     busy.last_message = Some(message("A1", "hello", false, "2026-10-25T17:55:00Z"));
     let mut app = app_with(vec![busy, muted]);
     let buffer = draw(&mut app, 80, 24);
-    // Ada is the first chat: name, preview (with the pill), rule.
+    // Ada is the first chat: name, preview (with the pill).
     let (_, grace) = find(&buffer, "Grace Hopper");
-    let name = grace - 3;
+    let name = grace - 2;
     let x = (5..separator(&buffer))
         .find(|&x| buffer[(x, name)].symbol() == "A")
         .expect("her name");
@@ -1317,11 +1399,12 @@ fn an_unread_chat_is_bold_with_a_pill_and_a_muted_one_wears_the_bell() {
     assert!(!text(&buffer).contains('⊘'), "{}", text(&buffer));
 }
 
-/// C3: every chat wears a 3×2 rounded avatar of its initials on a tint; the name starts after it,
-/// the time and the pill share the last five columns, and the open chat's fill does not eat the
-/// avatar (it is painted over it).
+/// C3 + the owner's finish: every chat wears its two initials on one row — `▗AL▖`, a rounded chip
+/// with both letters side by side, never stacked — the name starts after it, and the chat takes
+/// two rows (name, preview), never a third for a rule. The open chat is filled on `surface_active`
+/// with an accent `▌` edge, and its chip is painted over that fill.
 #[test]
-fn each_chat_has_a_rounded_avatar_and_the_slots_line_up() {
+fn each_chat_takes_two_rows_with_its_initials_on_one_chip() {
     let palette = Palette::default();
     let mut busy = chat(ADA, "Ada Lovelace", 3);
     busy.last_message = Some(message("A1", "hello", false, "2026-10-25T17:55:00Z"));
@@ -1337,25 +1420,56 @@ fn each_chat_has_a_rounded_avatar_and_the_slots_line_up() {
     let tint = colour(palette.avatar_tint(seed("Ada Lovelace")));
     let ink = colour(palette.avatar_ink(seed("Ada Lovelace")));
     let (_, grace) = find(&buffer, "Grace Hopper");
-    let name = grace - 3;
-    assert_eq!(buffer[(5, name)].symbol(), "A", "{}", text(&buffer));
-    // The avatar's cells: corners in the tint on the row's own background, middle cells tinted.
+    let name = grace - 2;
+    assert_eq!(buffer[(6, name)].symbol(), "A", "{}", text(&buffer));
+    // One row: a corner, both initials on the tint, a corner — the whole chip on the name row.
     assert_eq!(buffer[(1, name)].symbol(), "▗");
     assert_eq!(buffer[(1, name)].fg, tint);
-    assert_eq!(buffer[(3, name)].symbol(), "▖");
     assert_eq!(buffer[(2, name)].symbol(), "A");
     assert_eq!(buffer[(2, name)].bg, tint);
     assert_eq!(buffer[(2, name)].fg, ink);
-    assert_eq!(buffer[(1, name + 1)].symbol(), "▝");
-    assert_eq!(buffer[(2, name + 1)].symbol(), "L");
-    assert_eq!(buffer[(2, name + 1)].bg, tint);
-    // The open chat's fill keeps its background behind the avatar's corners.
-    assert_eq!(buffer[(1, name)].bg, colour(palette.surface_active()));
+    assert_eq!(
+        buffer[(3, name)].symbol(),
+        "L",
+        "the second initial shares the row"
+    );
+    assert_eq!(buffer[(3, name)].bg, tint);
+    assert_eq!(buffer[(4, name)].symbol(), "▖");
+    assert_eq!(buffer[(4, name)].fg, tint);
+    // Two rows per chat and nothing between them: the next chat's name starts right under the
+    // preview, with no rule row in between.
+    assert_eq!(find(&buffer, "Grace Hopper").1, name + 2);
+    // Nothing of the chip is drawn on the preview row.
+    let preview = name + 1;
+    for x in 1..6 {
+        assert!(
+            !matches!(
+                buffer[(x, preview)].symbol(),
+                "▗" | "▖" | "▝" | "▘" | "A" | "L" | "H"
+            ),
+            "the chip is one row, not two: {:?} at ({x}, {preview})\n{}",
+            buffer[(x, preview)].symbol(),
+            text(&buffer)
+        );
+    }
+    // The open chat: `surface_active` behind both rows, an accent `▌` on the left edge of each,
+    // and the chip painted over the fill's first cells.
+    let active = colour(palette.surface_active());
+    let accent = colour(palette.accent());
+    for y in [name, preview] {
+        assert_eq!(buffer[(0, y)].symbol(), "▌", "the accent edge at {y}");
+        assert_eq!(buffer[(0, y)].fg, accent);
+        assert_eq!(buffer[(5, y)].bg, active, "the fill at {y}");
+    }
+    assert_eq!(buffer[(2, name)].bg, tint, "the chip keeps its tint");
     // A chat without the keys keeps the list's chrome there.
     let tint = colour(palette.avatar_tint(seed("Grace Hopper")));
     assert_eq!(buffer[(1, grace)].symbol(), "▗");
+    assert_eq!(buffer[(3, grace)].symbol(), "H");
+    assert_eq!(buffer[(3, grace)].bg, tint);
     assert_eq!(buffer[(1, grace)].bg, colour(palette.surface_chrome()));
     assert_eq!(buffer[(1, grace)].fg, tint);
+    assert_eq!(buffer[(0, grace)].symbol(), " ", "no edge on another chat");
     // Time and pill in the last five columns of the list's width (32 - 3 = 29 → 24..28).
     let (x, y) = find(&buffer, "17:55");
     assert_eq!((x, y), (24, name), "{}", text(&buffer));
@@ -1540,7 +1654,7 @@ fn each_new_element_uses_its_exact_role() {
     assert_eq!(buffer[(x, y)].bg, role(palette.surface_chrome()));
     assert_eq!(buffer[(x, y)].fg, role(palette.text()));
     let (x, y) = find(&buffer, "17:01");
-    assert_eq!(buffer[(x, y)].fg, role(palette.text_faint()));
+    assert_eq!(buffer[(x, y)].fg, role(palette.text_muted()));
     assert_eq!(buffer[(x, y)].bg, role(palette.surface_chrome()));
     let (x, y) = find(&buffer, "did you get this");
     assert_eq!(buffer[(x, y)].bg, role(palette.bubble_outgoing()));
@@ -1549,7 +1663,7 @@ fn each_new_element_uses_its_exact_role() {
     // The unread pill: the accent as its background, `accent_on` as its text.
     let sep = separator(&buffer);
     let (_, grace) = find(&buffer, "Grace Hopper");
-    let preview = grace - 2;
+    let preview = grace - 1;
     let pill = (0..sep)
         .find(|&x| buffer[(x, preview)].bg == role(palette.accent()))
         .expect("the pill");
@@ -1559,9 +1673,9 @@ fn each_new_element_uses_its_exact_role() {
         .find(|&x| buffer[(x, 2)].bg == role(palette.accent()))
         .expect("the chip");
     assert_eq!(buffer[(chip + 1, 2)].fg, role(palette.accent_on()));
-    // The selected chat's rows on the active surface, the rule between chats in the border role.
-    assert_eq!(buffer[(1, grace - 3)].bg, role(palette.surface_active()));
-    assert_eq!(buffer[(2, grace - 1)].fg, role(palette.border()));
+    // The selected chat's rows on the active surface, its edge in the accent.
+    assert_eq!(buffer[(1, grace - 2)].bg, role(palette.surface_active()));
+    assert_eq!(buffer[(0, grace - 2)].fg, role(palette.accent()));
     // The placeholder in the faint role, the prompt before it muted.
     let (x, y) = find(&buffer, "Write a message");
     assert_eq!(buffer[(x, y)].fg, role(palette.text_faint()));

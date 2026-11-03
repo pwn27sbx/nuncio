@@ -103,9 +103,9 @@ pub enum Target {
     Composer,
 }
 
-/// Rows one chat takes in the list: its name, its last message, then the thin rule that
-/// separates it from the next one.
-pub const CHAT_ROWS: u16 = 3;
+/// Rows one chat takes in the list: its name and its last message, with no rule row between one
+/// chat and the next.
+pub const CHAT_ROWS: u16 = 2;
 
 /// What is drawn at `(column, row)` on the screen `map` describes, if anything the mouse acts on.
 pub fn hit_test(map: &ScreenMap, column: u16, row: u16) -> Option<Target> {
@@ -2107,7 +2107,7 @@ impl App {
     /// loaded, its last message. Each message is a bubble: incoming ones start at the pane's
     /// first column, outgoing ones end at its last usable one (the free last column is the scroll
     /// gutter), and none is wider than [`BUBBLE_SHARE`] percent of the pane. The time sits inside,
-    /// bottom right, in `text_faint`; nothing repeats the author, because whose a message is the
+    /// bottom right, in `text_muted`; nothing repeats the author, because whose a message is the
     /// side says.
     ///
     /// The rows are laid out here, one per screen row, so the scroll, the selection and the mouse
@@ -2192,27 +2192,15 @@ impl App {
                 .is_some()
                 .then(|| self.picture_box(&chat.jid, message, inner_max as u16))
                 .flatten();
-            // An animated sticker shows its first frame; the marker says it moves. With the
-            // picture drawn it is the caption's own marker; without one the `[kind]` label
-            // carries it.
-            let marker = message.kind == "sticker" && message.animated;
-            let text = if message.kind == "text" {
+            // An animated sticker shows its first frame, like a still one: the terminal cannot
+            // play it, so nothing claims it moves (a marker on the caption's row read as a stray
+            // glyph under every picture). A drawn picture carries its caption and nothing else.
+            let text = if message.kind == "text" || box_size.is_some() {
                 message.text.clone()
-            } else if box_size.is_some() {
-                if marker && message.text.is_empty() {
-                    "▶".to_owned()
-                } else if marker {
-                    format!("▶ {}", message.text)
-                } else {
-                    message.text.clone()
-                }
+            } else if message.text.is_empty() {
+                format!("[{}]", message.kind)
             } else {
-                format!(
-                    "[{}]{} {}",
-                    message.kind,
-                    if marker { " ▶" } else { "" },
-                    message.text
-                )
+                format!("[{}] {}", message.kind, message.text)
             };
             // A caption being fetched says so on its last row, never wrapping it to more rows
             // (the picture above never moves).
@@ -2555,15 +2543,17 @@ impl App {
         }
     }
 
-    /// The time inside a bubble, in the faint role, carrying the state where the ticks would go:
-    /// a small clock while the send is queued and a `danger` `!` when it was not sent. Delivery
-    /// and read receipts are not in the protocol, so they are never invented.
+    /// The time inside a bubble, in the readable dim role, carrying the state where the ticks
+    /// would go: a small clock while the send is queued and a `danger` `!` when it was not sent.
+    /// Delivery and read receipts are not in the protocol, so they are never invented. The faint
+    /// role belongs to placeholders: a time is text the eye is meant to read, and on a real theme
+    /// the faint tone sat near the bubble's own background.
     fn bubble_footer(&self, message: &Message, chosen: bool) -> Vec<Span<'static>> {
-        // The open message's time steps up from the faint role, so its row reads as selected.
+        // The open message's time steps up from the dim role, so its row reads as selected.
         let faint = if chosen {
             Style::default().fg(rgb(self.palette.text()))
         } else {
-            Style::default().fg(rgb(self.palette.text_faint()))
+            self.muted()
         };
         let unconfirmed = self.model.transcript().is_unconfirmed(message);
         let mut meta = meta_of(message, self.utc_offset, unconfirmed);
@@ -2873,7 +2863,7 @@ fn unread_pill(unread: u32) -> String {
 const AVATAR_TINTS: u8 = 4;
 /// The columns a chat's avatar takes at the left of its two content rows: one blank, its three
 /// cells, one blank.
-const AVATAR: usize = 5;
+const AVATAR: usize = 6;
 
 /// A stable seed for a chat's avatar: the same title always gets the same tint.
 fn avatar_seed(title: &str) -> u8 {
@@ -2915,44 +2905,25 @@ fn avatar_initials(title: &str) -> [char; 2] {
 /// The six cells of a chat's avatar: a 3×2 rounded block whose corners are the tint on whatever is
 /// behind them (no background of their own) and whose middle cells are the tint with one initial
 /// on each.
-fn avatar_cells(title: &str, palette: &Palette) -> [(char, Style); 6] {
+fn avatar_cells(title: &str, palette: &Palette) -> [(char, Style); 4] {
     let seed = avatar_seed(title) % AVATAR_TINTS;
     let tint = rgb(palette.avatar_tint(seed));
     let ink = rgb(palette.avatar_ink(seed));
     let corner = |glyph: char| (glyph, Style::default().fg(tint));
     let letter = |glyph: char| (glyph, Style::default().fg(ink).bg(tint));
     let [first, second] = avatar_initials(title);
-    [
-        corner('▗'),
-        letter(first),
-        corner('▖'),
-        corner('▝'),
-        letter(second),
-        corner('▘'),
-    ]
+    [corner('▗'), letter(first), letter(second), corner('▖')]
 }
 
-/// One row (0 or 1) of a chat's avatar as spans: a blank column, its three cells, a blank column.
-fn avatar_spans(title: &str, palette: &Palette, row: usize) -> Vec<Span<'static>> {
-    let cells = avatar_cells(title, palette);
-    let mut spans = vec![Span::raw(" ")];
-    for (glyph, style) in &cells[row * 3..row * 3 + 3] {
-        spans.push(Span::styled(glyph.to_string(), *style));
-    }
-    spans.push(Span::raw(" "));
-    spans
-}
-
-/// Draw a chat's avatar over `(x, y)`, two rows tall: what the open chat's row fill would
-/// otherwise erase.
+/// Draw a chat's avatar chip over its name row: what the open chat's row fill would otherwise
+/// erase under it.
 fn paint_avatar(buffer: &mut Buffer, rows: Rect, title: &str, palette: &Palette) {
-    let (x, y) = (rows.x + 1, rows.y);
+    let x = rows.x + 1;
     for (index, (glyph, style)) in avatar_cells(title, palette).iter().enumerate() {
-        let column = x + u16::try_from(index % 3).unwrap_or(0);
-        let row = y + u16::try_from(index / 3).unwrap_or(0);
         // A list cut by a very small terminal would put the cells outside its own rectangle.
-        if column < rows.right() && row < rows.bottom() {
-            buffer.set_stringn(column, row, glyph.to_string(), 1, *style);
+        let column = x + u16::try_from(index).unwrap_or(0);
+        if column < rows.right() {
+            buffer.set_stringn(column, rows.y, glyph.to_string(), 1, *style);
         }
     }
 }
@@ -3132,13 +3103,14 @@ const NARROW_NAME: usize = 6;
 /// The unread pill's fixed slot on a chat row's second line: ` 3 `, ` 12 `, ` 99+ `.
 const PILL: usize = 5;
 
-/// A chat in the list, in three rows. Row one: the avatar (a 3×2 rounded block with its initials),
-/// the name, the markers the chat has right after it, and the time in its own five-column slot at
-/// the right edge. Row two: the avatar's second row, the last message cut with `…`, then the unread
-/// count as an accent pill at the right. Row three: a thin rule in the border role, the separator. A chat with unread messages has its name and
-/// time in bold, and the highlighted chat is filled across every row (`surface_active`), with the
-/// keys on it or not, so the list always says which chat is open. A narrow list gives up the time
-/// first, then the markers, and only then cuts the name below six columns.
+/// A chat in the list, in two rows. Row one: the avatar (one chip with both initials), the name,
+/// the markers the chat has right after it, and the time in its own five-column slot at the right
+/// edge. Row two: the last message cut with `…`, then the unread count as an accent pill at the
+/// right. No third rule row: the list's height is its content's. A chat with unread messages has
+/// its name and time in bold, and the open chat is filled on `surface_active` with an accent `▌`
+/// edge on the left of both rows, with the keys on it or not, so the list always says which chat is
+/// open. A narrow list gives up the time first, then the markers, and only then cuts the name
+/// below six columns.
 fn chat_item(
     chat: &Chat,
     palette: &Palette,
@@ -3200,7 +3172,23 @@ fn chat_item(
     }
     let title_text = plain(&chat_title(chat));
     let name = fit(&title_text, named);
-    let mut title = avatar_spans(&title_text, palette, 0);
+    // The open chat wears an accent edge on the left of both its rows, over the fill.
+    let edge = |selected: bool| {
+        if selected {
+            Span::styled("▌", Style::default().fg(rgb(palette.accent())))
+        } else {
+            Span::raw(" ")
+        }
+    };
+    // The left gutter is one column: the open chat's accent edge, a blank elsewhere. The chip's
+    // four cells and one blank follow, so the name starts at [`AVATAR`] on both rows.
+    let mut title = vec![edge(selected)];
+    title.extend(
+        avatar_cells(&title_text, palette)
+            .into_iter()
+            .map(|(glyph, style)| Span::styled(glyph.to_string(), style)),
+    );
+    title.push(Span::raw(" "));
     title.push(Span::styled(name.clone(), ink));
     if !markers.is_empty() {
         title.push(Span::styled(markers.clone(), muted));
@@ -3240,7 +3228,7 @@ fn chat_item(
     };
     let detail = fit(&detail, width.saturating_sub(AVATAR + PILL));
     let pad = width.saturating_sub(AVATAR + display_width(&detail) + PILL);
-    let mut second = avatar_spans(&title_text, palette, 1);
+    let mut second = vec![edge(selected), Span::raw(" ".repeat(AVATAR - 1))];
     second.push(Span::styled(detail, muted));
     second.push(Span::raw(" ".repeat(pad)));
     if pill.is_empty() {
@@ -3252,11 +3240,8 @@ fn chat_item(
         second.push(Span::styled(pill, pill_style));
     }
 
-    let rule = Line::from(Span::styled(
-        "─".repeat(width + 3),
-        Style::default().fg(rgb(palette.border())),
-    ));
-    let item = ListItem::new(vec![Line::from(title), Line::from(second), rule]);
+    // Two rows, and no third rule row: the chat height is [`CHAT_ROWS`].
+    let item = ListItem::new(vec![Line::from(title), Line::from(second)]);
     // The fill goes under the rows, so the pill keeps its own background.
     if selected {
         item.style(Style::default().bg(rgb(palette.surface_active())))
@@ -3311,14 +3296,13 @@ mod tests {
     fn hit_test_maps_a_cell_to_the_chat_message_or_composer_under_it() {
         use super::{Target, hit_test};
         let map = map();
-        // Each chat takes three rows (name, last message, its rule), counted from the list's
-        // scroll.
+        // Each chat takes two rows (name, last message), counted from the list's scroll.
         assert_eq!(hit_test(&map, 5, 2), Some(Target::Chats(Some(1))));
         assert_eq!(hit_test(&map, 30, 3), Some(Target::Chats(Some(1))));
-        assert_eq!(hit_test(&map, 5, 4), Some(Target::Chats(Some(1))));
-        assert_eq!(hit_test(&map, 5, 5), Some(Target::Chats(Some(2))));
+        assert_eq!(hit_test(&map, 5, 4), Some(Target::Chats(Some(2))));
+        assert_eq!(hit_test(&map, 30, 5), Some(Target::Chats(Some(2))));
         // Below the last chat, and on the border: the pane, no chat.
-        assert_eq!(hit_test(&map, 5, 8), Some(Target::Chats(None)));
+        assert_eq!(hit_test(&map, 5, 6), Some(Target::Chats(None)));
         assert_eq!(hit_test(&map, 0, 2), Some(Target::Chats(None)));
         assert_eq!(hit_test(&map, 31, 2), Some(Target::Chats(None)));
         // The conversation's rows name their message; an empty row, the border: none.

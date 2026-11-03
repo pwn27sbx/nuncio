@@ -2873,7 +2873,7 @@ fn unread_pill(unread: u32) -> String {
 const AVATAR_TINTS: u8 = 4;
 /// The columns a chat's avatar takes at the left of its two content rows: one blank, its three
 /// cells, one blank.
-const AVATAR: usize = 5;
+const AVATAR: usize = 6;
 
 /// A stable seed for a chat's avatar: the same title always gets the same tint.
 fn avatar_seed(title: &str) -> u8 {
@@ -2915,44 +2915,36 @@ fn avatar_initials(title: &str) -> [char; 2] {
 /// The six cells of a chat's avatar: a 3×2 rounded block whose corners are the tint on whatever is
 /// behind them (no background of their own) and whose middle cells are the tint with one initial
 /// on each.
-fn avatar_cells(title: &str, palette: &Palette) -> [(char, Style); 6] {
+fn avatar_cells(title: &str, palette: &Palette) -> [(char, Style); 4] {
     let seed = avatar_seed(title) % AVATAR_TINTS;
     let tint = rgb(palette.avatar_tint(seed));
     let ink = rgb(palette.avatar_ink(seed));
     let corner = |glyph: char| (glyph, Style::default().fg(tint));
     let letter = |glyph: char| (glyph, Style::default().fg(ink).bg(tint));
     let [first, second] = avatar_initials(title);
-    [
-        corner('▗'),
-        letter(first),
-        corner('▖'),
-        corner('▝'),
-        letter(second),
-        corner('▘'),
-    ]
+    [corner('▗'), letter(first), letter(second), corner('▖')]
 }
 
-/// One row (0 or 1) of a chat's avatar as spans: a blank column, its three cells, a blank column.
-fn avatar_spans(title: &str, palette: &Palette, row: usize) -> Vec<Span<'static>> {
-    let cells = avatar_cells(title, palette);
+/// A chat's avatar as one row of spans: a blank column, its four cells, a blank column before
+/// the name. Both initials share the row, so a chat's two list rows keep their height.
+fn avatar_spans(title: &str, palette: &Palette) -> Vec<Span<'static>> {
     let mut spans = vec![Span::raw(" ")];
-    for (glyph, style) in &cells[row * 3..row * 3 + 3] {
-        spans.push(Span::styled(glyph.to_string(), *style));
+    for (glyph, style) in avatar_cells(title, palette) {
+        spans.push(Span::styled(glyph.to_string(), style));
     }
     spans.push(Span::raw(" "));
     spans
 }
 
-/// Draw a chat's avatar over `(x, y)`, two rows tall: what the open chat's row fill would
-/// otherwise erase.
+/// Draw a chat's avatar chip over its name row: what the open chat's row fill would otherwise
+/// erase under it.
 fn paint_avatar(buffer: &mut Buffer, rows: Rect, title: &str, palette: &Palette) {
-    let (x, y) = (rows.x + 1, rows.y);
+    let x = rows.x + 1;
     for (index, (glyph, style)) in avatar_cells(title, palette).iter().enumerate() {
-        let column = x + u16::try_from(index % 3).unwrap_or(0);
-        let row = y + u16::try_from(index / 3).unwrap_or(0);
         // A list cut by a very small terminal would put the cells outside its own rectangle.
-        if column < rows.right() && row < rows.bottom() {
-            buffer.set_stringn(column, row, glyph.to_string(), 1, *style);
+        let column = x + u16::try_from(index).unwrap_or(0);
+        if column < rows.right() {
+            buffer.set_stringn(column, rows.y, glyph.to_string(), 1, *style);
         }
     }
 }
@@ -3200,7 +3192,7 @@ fn chat_item(
     }
     let title_text = plain(&chat_title(chat));
     let name = fit(&title_text, named);
-    let mut title = avatar_spans(&title_text, palette, 0);
+    let mut title = avatar_spans(&title_text, palette);
     title.push(Span::styled(name.clone(), ink));
     if !markers.is_empty() {
         title.push(Span::styled(markers.clone(), muted));
@@ -3240,7 +3232,7 @@ fn chat_item(
     };
     let detail = fit(&detail, width.saturating_sub(AVATAR + PILL));
     let pad = width.saturating_sub(AVATAR + display_width(&detail) + PILL);
-    let mut second = avatar_spans(&title_text, palette, 1);
+    let mut second = vec![Span::raw(" ".repeat(AVATAR))];
     second.push(Span::styled(detail, muted));
     second.push(Span::raw(" ".repeat(pad)));
     if pill.is_empty() {

@@ -350,7 +350,7 @@ fn the_tones_are_the_palette_roles() {
     };
     let tint = colour(palette.avatar_tint(seed));
     assert_eq!(buffer[(2, ada)].bg, tint, "the avatar's tint");
-    assert_eq!(buffer[(2, ada + 1)].bg, tint);
+    assert_eq!(buffer[(3, ada)].bg, tint, "both initials share the row");
     for x in 5..sep {
         assert_eq!(buffer[(x, ada)].bg, active, "x {x}");
         // The unread pill keeps its own background inside the fill.
@@ -650,7 +650,7 @@ fn a_narrow_window_keeps_what_matters_at_forty_by_twenty() {
     let buffer = draw(&mut app, 40, 20);
     let listed = row_of(&buffer, "Alexandra");
     let line = row(&buffer, listed);
-    assert!(line.contains("▗A▖"), "the avatar stays: {line:?}");
+    assert!(line.contains("▗AK▖"), "the avatar stays: {line:?}");
     assert!(!line.contains("17:01"), "the time gives way: {line:?}");
     assert!(!text(&buffer).contains("17:01"), "{}", text(&buffer));
 
@@ -1317,11 +1317,11 @@ fn an_unread_chat_is_bold_with_a_pill_and_a_muted_one_wears_the_bell() {
     assert!(!text(&buffer).contains('⊘'), "{}", text(&buffer));
 }
 
-/// C3: every chat wears a 3×2 rounded avatar of its initials on a tint; the name starts after it,
-/// the time and the pill share the last five columns, and the open chat's fill does not eat the
-/// avatar (it is painted over it).
+/// C3 + the owner's finish: every chat wears its two initials on one row — `▗AL▖`, a rounded chip
+/// with both letters side by side, never stacked; the name starts after it, the time and the pill
+/// share the last five columns, and the open chat's fill does not eat the avatar (painted over it).
 #[test]
-fn each_chat_has_a_rounded_avatar_and_the_slots_line_up() {
+fn each_chat_wears_its_two_initials_on_one_rounded_chip() {
     let palette = Palette::default();
     let mut busy = chat(ADA, "Ada Lovelace", 3);
     busy.last_message = Some(message("A1", "hello", false, "2026-10-25T17:55:00Z"));
@@ -1338,22 +1338,42 @@ fn each_chat_has_a_rounded_avatar_and_the_slots_line_up() {
     let ink = colour(palette.avatar_ink(seed("Ada Lovelace")));
     let (_, grace) = find(&buffer, "Grace Hopper");
     let name = grace - 3;
-    assert_eq!(buffer[(5, name)].symbol(), "A", "{}", text(&buffer));
-    // The avatar's cells: corners in the tint on the row's own background, middle cells tinted.
+    assert_eq!(buffer[(6, name)].symbol(), "A", "{}", text(&buffer));
+    // One row: a corner, both initials on the tint, a corner — the whole chip on the name row.
     assert_eq!(buffer[(1, name)].symbol(), "▗");
     assert_eq!(buffer[(1, name)].fg, tint);
-    assert_eq!(buffer[(3, name)].symbol(), "▖");
     assert_eq!(buffer[(2, name)].symbol(), "A");
     assert_eq!(buffer[(2, name)].bg, tint);
     assert_eq!(buffer[(2, name)].fg, ink);
-    assert_eq!(buffer[(1, name + 1)].symbol(), "▝");
-    assert_eq!(buffer[(2, name + 1)].symbol(), "L");
-    assert_eq!(buffer[(2, name + 1)].bg, tint);
-    // The open chat's fill keeps its background behind the avatar's corners.
+    assert_eq!(
+        buffer[(3, name)].symbol(),
+        "L",
+        "the second initial shares the row"
+    );
+    assert_eq!(buffer[(3, name)].bg, tint);
+    assert_eq!(buffer[(4, name)].symbol(), "▖");
+    assert_eq!(buffer[(4, name)].fg, tint);
+    // Nothing of the avatar is drawn on the preview row.
+    let preview = name + 1;
+    for x in 1..6 {
+        assert!(
+            !matches!(
+                buffer[(x, preview)].symbol(),
+                "▗" | "▖" | "▝" | "▘" | "A" | "L"
+            ),
+            "the chip is one row, not two: {:?} at ({x}, {preview})\n{}",
+            buffer[(x, preview)].symbol(),
+            text(&buffer)
+        );
+    }
+    // The open chat's fill keeps its background behind the chip's corners.
     assert_eq!(buffer[(1, name)].bg, colour(palette.surface_active()));
+    assert_eq!(buffer[(4, name)].bg, colour(palette.surface_active()));
     // A chat without the keys keeps the list's chrome there.
     let tint = colour(palette.avatar_tint(seed("Grace Hopper")));
     assert_eq!(buffer[(1, grace)].symbol(), "▗");
+    assert_eq!(buffer[(3, grace)].symbol(), "H");
+    assert_eq!(buffer[(3, grace)].bg, tint);
     assert_eq!(buffer[(1, grace)].bg, colour(palette.surface_chrome()));
     assert_eq!(buffer[(1, grace)].fg, tint);
     // Time and pill in the last five columns of the list's width (32 - 3 = 29 → 24..28).

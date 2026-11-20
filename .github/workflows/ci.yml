@@ -26,7 +26,7 @@ jobs:
         with:
           persist-credentials: false
       # The oldest Go the project supports: the `go` line of go.mod.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
       # The D-Bus tests in cmd/nunciod start a private dbus-daemon of their own and skip without it.
@@ -49,7 +49,7 @@ jobs:
       # the standard library of the Go that runs it. It runs on the current stable Go, the one a
       # package is built with (Arch ships the latest), not on go.mod's minimum, whose old standard
       # library would fail on fixes every newer Go already has.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version: stable
           cache: false
